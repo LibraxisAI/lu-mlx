@@ -233,6 +233,8 @@ it('never says how many tokens a euro or a pack buys, on any page', () => {
     for (const hit of flat.matchAll(TOKENS)) {
       if (/\bper\b/i.test(hit[0])) continue
       const from = hit.index, to = from + hit[0].length
+      // "1M token context" is a model's context window, not what money buys.
+      if (/^\s*(?:context|window)\b/i.test(flat.slice(to, to + 12))) continue
       if (money.some((i) => i > from - 60 && i < to + 60)) {
         throw new Error(`${path} converts money into tokens: ${flat.slice(Math.max(0, from - 90), to + 60)}`)
       }
