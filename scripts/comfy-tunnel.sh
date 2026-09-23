@@ -50,6 +50,10 @@ split_spec() {
   printf '%s %s\n' "$remote" "$local_"
 }
 
+http_code() {
+  curl -s -m 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$1/" 2>/dev/null || true
+}
+
 xml_escape() {
   printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
 }
@@ -127,11 +131,12 @@ agent_status() {
   else
     echo "$LABEL is not installed."
   fi
-  specs="$(sed -n 's:.*<string>\([0-9][0-9:]*\)</string>.*:\1:p' "$AGENT_PLIST" 2>/dev/null)"
+  specs="$(sed -n 's:.*<string>\([0-9][0-9:]*\)</string>.*:\1:p' "$AGENT_PLIST" 2>/dev/null || true)"
   for spec in ${specs:-8188}; do
     set -- $(split_spec "$spec")
-    if nc -z -G 3 127.0.0.1 "$2" >/dev/null 2>&1; then
-      echo "127.0.0.1:$2 answers (→ remote $1)"
+    code="$(http_code "$2")"
+    if [ "$code" != "000" ]; then
+      echo "127.0.0.1:$2 answers HTTP $code (→ remote $1)"
     else
       echo "127.0.0.1:$2 does not answer (→ remote $1)"
     fi
@@ -183,14 +188,16 @@ for spec in "$@"; do
 done
 
 probe() {
-  # Each forwarded port should answer once ssh has set the forwards up.
+  # A forwarded port always accepts locally (ssh listens); only an HTTP answer
+  # (any status, even 401) proves the service on the other end is alive.
   for port in $locals; do
-    ok=0
+    code=000
     for _ in 1 2 3 4 5 6 7 8 9 10; do
-      if nc -z -G 3 127.0.0.1 "$port" >/dev/null ; then ok=1; break; fi
+      code="$(http_code "$port")"
+      [ "$code" != "000" ] && break
       sleep 1
     done
-    if [ "$ok" -eq 0 ]; then
+    if [ "$code" = "000" ]; then
       echo "$(date '+%F %T') 127.0.0.1:$port: tunnel up, but nothing answers on $host. Is the service running there?" >&2
       continue
     fi
@@ -199,7 +206,7 @@ probe() {
     if [ -n "$version" ]; then
       echo "$(date '+%F %T') ComfyUI $version on $host is reachable at http://127.0.0.1:$port — LU can use it now."
     else
-      echo "$(date '+%F %T') 127.0.0.1:$port → $host is open."
+      echo "$(date '+%F %T') 127.0.0.1:$port → $host answers (HTTP $code)."
     fi
   done
 }
