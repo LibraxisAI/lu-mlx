@@ -860,9 +860,11 @@ export const useCreateStore = create<CreateState>()(
       setMusicHowtoSeen: (musicHowtoSeen) => set({ musicHowtoSeen }),
       setSource: (source) => set({ source, sourceSetAt: source ? Date.now() : 0, ...(source ? {} : { mask: null }) }),
       setMask: (mask) => set({ mask }),
-      // Flipping to local clears the intents that have no local lane
-      // (upscale/eraser plus character training — all hosted-only) so the
-      // surface never strands on a dead op the IntentBar no longer shows. Edit
+      // Flipping to local clears the intents that have no local lane here so
+      // the surface never strands on a dead op the IntentBar no longer shows:
+      // upscale/eraser everywhere except a Mac with its own ComfyUI connected
+      // (`localLaneMacOnly`), and hosted-only CloudOps. Character trains
+      // locally since 2.6.0 (LOCAL_LANE_OPS). Edit
       // keeps its state since 2.5.7 (checkpoint mask inpaint), removebg keeps
       // its RMBG lane, and animate keeps its i2v state since 2026-07-17 — the
       // local I2V lane is back (buildDynamicWorkflow wires the family's

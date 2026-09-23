@@ -11,6 +11,18 @@ export function isComfyViewUrl(url: string): boolean {
   return /\/view\?/.test(url)
 }
 
+/**
+ * Whether a gallery `/view` URL must never be assigned to `<img>`/`<video>`
+ * and has to come through the Rust proxy instead. Only the Mac app: its
+ * ComfyUI is always the user's own and usually has no CORS header, so the
+ * direct load is a 403. Windows/Linux start LU's ComfyUI with
+ * `--enable-cors-header "*"` and keep the direct load (Range/seek), falling
+ * back to the proxy in `onError`. Dev mode has a same-origin proxy path.
+ */
+export function mustProxyComfyView(url: string, env: { tauri: boolean; mac: boolean }): boolean {
+  return env.tauri && env.mac && isComfyViewUrl(url)
+}
+
 export function galleryItemUrl(item: GalleryItem): string {
   return item.remoteUrl
     ?? item.dataUrl

@@ -3,6 +3,7 @@ import {
   fetchGalleryItemBlob,
   galleryItemUrl,
   isComfyViewUrl,
+  mustProxyComfyView,
   proxiedComfyBlobUrl,
   recoverGalleryUrl,
 } from '../galleryUrl'
@@ -255,5 +256,20 @@ describe('recoverGalleryUrl — local MLX renders on disk', () => {
     await flush()
     expect(vi.mocked(backendCall)).not.toHaveBeenCalled()
     expect(useCreateStore.getState().gallery[0].unavailable).toBe(true)
+  })
+})
+
+describe('mustProxyComfyView — which platform proxies gallery /view', () => {
+  const view = 'http://127.0.0.1:8188/view?filename=a.png&type=output'
+  it('proxies a ComfyUI /view only in the Mac app', () => {
+    expect(mustProxyComfyView(view, { tauri: true, mac: true })).toBe(true)
+  })
+  it('keeps the direct load on Windows/Linux (Range/seek; onError still proxies)', () => {
+    expect(mustProxyComfyView(view, { tauri: true, mac: false })).toBe(false)
+  })
+  it('never proxies in the browser dev build or for blob:/data: URLs', () => {
+    expect(mustProxyComfyView(view, { tauri: false, mac: true })).toBe(false)
+    expect(mustProxyComfyView('blob:abc', { tauri: true, mac: true })).toBe(false)
+    expect(mustProxyComfyView('data:image/png;base64,AA', { tauri: true, mac: true })).toBe(false)
   })
 })

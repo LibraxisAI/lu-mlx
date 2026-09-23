@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { galleryItemUrl, isComfyViewUrl, proxiedComfyBlobUrl, recoverGalleryUrl, markGalleryItemAvailable } from './galleryUrl'
+import { galleryItemUrl, mustProxyComfyView, proxiedComfyBlobUrl, recoverGalleryUrl, markGalleryItemAvailable } from './galleryUrl'
 import { isComfyLocal, isMacOS, isTauri } from '../../../api/backend'
 import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
 
@@ -23,9 +23,8 @@ import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
 export function useComfyMedia(item: GalleryItem | null) {
   const base = item ? galleryItemUrl(item) : ''
   const comfyRunning = useCreateStore((s) => s.comfyRunning)
-  const directView = isComfyViewUrl(base)
   // Cross-origin /view is the 403. Same-origin `/comfyui/view` (dev) is fine.
-  const blockDirectView = isTauri() && isMacOS() && directView
+  const blockDirectView = mustProxyComfyView(base, { tauri: isTauri(), mac: isMacOS() })
   const [proxied, setProxied] = useState<{ base: string; url: string } | null>(null)
   const src = proxied && proxied.base === base ? proxied.url : (blockDirectView ? '' : base)
   const blobRef = useRef<string | null>(null)
