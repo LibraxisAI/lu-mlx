@@ -124,15 +124,12 @@ impl Default for InstallState {
     }
 }
 
-/// Platform default for ComfyUI. Windows/Linux ship on 8188; this Mac's
-/// already-running instance is on 8080. Spawn is still refused on macOS
-/// (`comfy_supported_here`); this default is for *connecting*.
+/// Default ComfyUI port: ComfyUI's own 8188 on every OS. On macOS LU only
+/// connects (spawn is refused, `comfy_supported_here`); a ComfyUI on another
+/// port is set in Settings (`set_comfyui_port`), never baked in as a default
+/// for one machine.
 pub(crate) fn default_comfy_port() -> u16 {
-    if cfg!(target_os = "macos") {
-        8080
-    } else {
-        8188
-    }
+    8188
 }
 
 /// Read persisted ComfyUI port + host from `os_paths::app_config_json()`
@@ -712,12 +709,8 @@ mod shutdown_tests {
     use crate::test_support::{is_alive as alive, sleeper as sleeper_cmd};
 
     #[test]
-    fn default_comfy_port_is_the_platform_listen_port() {
-        let p = super::default_comfy_port();
-        #[cfg(target_os = "macos")]
-        assert_eq!(p, 8080);
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(p, 8188);
+    fn default_comfy_port_is_comfyuis_own_8188_everywhere() {
+        assert_eq!(super::default_comfy_port(), 8188);
     }
 
     /// A live child that outlives the test unless something kills it.

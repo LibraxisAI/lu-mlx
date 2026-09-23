@@ -69,7 +69,7 @@ export function Stage({ displayed, onOpenMaskEditor, onEditResult, onAnimateResu
   // Local model files missing for this intent (fresh PC): gate the stage on a
   // one-click starter-bundle card. connected === false also gates — the same
   // button installs ComfyUI itself first (Windows/Linux) or asks the user to
-  // connect the instance on :8080 (Mac, connect-only). connected === null
+  // connect the user's instance (Mac, connect-only). connected === null
   // (still probing) gates nothing, so the card never flashes during startup.
   //
   // macOS still answers image/video missing from MLX when ComfyUI is not

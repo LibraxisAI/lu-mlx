@@ -124,7 +124,7 @@ fn install_custom_node_blocking(
 
     // A remembered path that no longer contains main.py is not an install.
     // On macOS the disk walk is off, so the usual miss is a ComfyUI that is
-    // already serving the configured port (8080) whose folder was never
+    // already serving the configured port whose folder was never
     // written down. Ask that process before concluding it is absent.
     let remembered = comfy_path.filter(|p| {
         std::path::Path::new(p).join("main.py").is_file()

@@ -785,7 +785,7 @@ export function ollamaUrl(path: string): string {
   return `/api${path}`;
 }
 
-/** Configurable ComfyUI port — Mac default 8080, elsewhere 8188. Runtime `isMacOS()` because dist is shared. */
+/** Configurable ComfyUI port — ComfyUI's own 8188 by default on every OS (see comfy-default-port.ts). */
 let _comfyPort = defaultComfyPort({ isMac: isMacOS() });
 export function setComfyPort(port: number) { _comfyPort = port; }
 export function getComfyPort(): number { return _comfyPort; }

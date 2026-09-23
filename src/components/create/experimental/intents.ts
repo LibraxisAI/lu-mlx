@@ -24,7 +24,7 @@ export interface IntentMeta {
    *  local mode; the cloud glyph becomes a "Try cloud" affordance. */
   hasLocalLane?: true
   /** The local lane exists only in the Mac fork (a ComfyUI the user already
-   *  runs, connected on :8080). Windows/Linux keep the LU Cloud teaser: their
+   *  runs, connected on its port). Windows/Linux keep the LU Cloud teaser: their
    *  local version is a plain resize / checkpoint inpaint, weaker than the
    *  hosted tool, so it must not replace it there. */
   localLaneMacOnly?: true
@@ -181,7 +181,7 @@ export const INTENT_MAP: Record<CreateIntent, IntentMeta> =
  * api/mlx-video.ts). Character Studio trains through the musubi runtime
  * (trainer.rs) — that is not a ComfyUI graph. Everything else on this host is
  * a ComfyUI graph or a ComfyUI-staged source, so it stays locked until the
- * user's already-running ComfyUI answers (connect-only on :8080).
+ * user's already-running ComfyUI answers (connect-only).
  */
 const MLX_LOCAL_INTENTS: ReadonlySet<CreateIntent> = new Set<CreateIntent>(['image', 'video', 'character'])
 
@@ -206,7 +206,7 @@ export function intentNeedsComfyGraph(id: CreateIntent): boolean {
  * tested instead of buried in the IntentBar's JSX.
  *
  * Cloud shows everything. Local ComfyUI hosts (Windows/Linux, and a Mac with
- * ComfyUI connected on :8080) also show everything — hosted-only tools with no
+ * ComfyUI connected) also show everything — hosted-only tools with no
  * local lane would render as locked teasers, but every Create intent now has a
  * local lane when that backend exists. An MLX-only Mac hides the intents that
  * have neither an MLX/trainer path nor a hosted teaser sheet (edit, removebg,

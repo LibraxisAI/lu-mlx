@@ -150,7 +150,7 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
   }, [backend, connected])
 
   // Bootstrap the backend. fetchModels probes ComfyUI on every OS (Mac is
-  // connect-only on :8080 — spawn is still refused). checkConnection is safe
+  // connect-only on its configured port — spawn is still refused). checkConnection is safe
   // on Mac too: it sets comfyRunning without pinning `connected` to false
   // when the probe misses, so the MLX catalog is not covered by a ComfyUI
   // install card. Unlocking edit/upscale/… depends on that flag.
@@ -403,7 +403,7 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
   const installModelBundle = useCallback(async (kind: 'image' | 'video' | 'audio' | 'lipsync' | 'motion', onProgress?: (msg: string) => void, signal?: AbortSignal) => {
     // Image/video on Mac stay on the MLX installer. Other Create lanes
     // (music/lipsync/motion) are ComfyUI graphs: when the user's instance on
-    // :8080 is connected, use that bundle flow. Do not spawn ComfyUI here
+    // is connected, use that bundle flow. Do not spawn ComfyUI here
     // (Rust refuses it on macOS).
     const comfyRunning = useCreateStore.getState().comfyRunning
     if (isMacOS() && (kind === 'image' || kind === 'video')) {
@@ -413,7 +413,7 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
     }
     if (isMacOS() && !comfyRunning) {
       throw new Error(
-        'This tool runs on the ComfyUI already on this Mac. Set Settings → ComfyUI to port 8080, then try again.',
+        'This tool runs on a ComfyUI you already run on this Mac. Start it (default port 8188) or set its port in Settings → ComfyUI, then try again.',
       )
     }
     await ensureComfyRunning(onProgress, signal)

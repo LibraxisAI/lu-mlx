@@ -501,8 +501,8 @@ export interface CustomNodeInstallOptions {
 /**
  * Whether a custom-node install has a ComfyUI to land in.
  *
- * `running` means something is already serving the configured port (8080 on
- * this Mac) even when LU never recorded the install folder. That is not
+ * `running` means something is already serving the configured port (on a
+ * Mac: the user's own ComfyUI) even when LU never recorded the install folder. That is not
  * "absent" — the folder is recovered from the listener. Absent is neither
  * answering nor found. A status we could not read is `install`: guessing
  * "missing" is how a live server was skipped.

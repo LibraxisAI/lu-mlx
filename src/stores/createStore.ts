@@ -887,7 +887,7 @@ export const useCreateStore = create<CreateState>()(
           // Und auf einem Mac OHNE verbundenes ComfyUI laeuft lokal MLX, nicht
           // ComfyUI. MLX kann weder Edit noch Cutout noch Animate. Bleibt eine
           // davon gewaehlt, findet die Werkzeugleiste ihren Eintrag nicht mehr.
-          // Ist ComfyUI auf :8080 verbunden, bleiben sie stehen.
+          // Ist ein ComfyUI verbunden, bleiben sie stehen.
           const opBleibt = ('cloudOp' in patch ? patch.cloudOp : s.cloudOp)
             || ('utilityOp' in patch ? patch.utilityOp : s.utilityOp)
           if (mlxOnly && !opBleibt) {

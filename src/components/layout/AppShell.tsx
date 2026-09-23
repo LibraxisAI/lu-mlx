@@ -166,7 +166,7 @@ export function AppShell() {
       try {
         const { backendCall, setComfyPort, setComfyHost } = await import('../../api/backend')
         // Mac is connect-only (spawn refused) but the user's instance is a
-        // real backend — usually :8080. Mirror the persisted host/port so
+        // real backend on whatever port the user set. Mirror the persisted host/port so
         // gallery /view and the control plane do not fall back to a stale
         // compile-time 8188 after restart.
         const s = await backendCall<{ port?: number; host?: string }>('comfyui_status')

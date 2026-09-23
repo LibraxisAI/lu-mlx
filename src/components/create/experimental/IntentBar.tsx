@@ -67,7 +67,7 @@ export function IntentBar() {
   // extend / motion / character / upscale / eraser) are REAL local tabs on a
   // ComfyUI host — plain selectable pills, no cloud glyph. On an MLX-only Mac
   // (no ComfyUI connected) only image, video and Character Studio run locally;
-  // the rest lock as teasers until the user's ComfyUI on :8080 answers.
+  // the rest lock as teasers until the user's own ComfyUI answers.
   // The rule lives in intents.ts so it stays pure + unit tested.
   const mlxHost = mlxOnlyCreateHost(isMlxImageHost(), useCreateStore((s) => s.comfyRunning))
   const intents = visibleIntents(backend, mlxHost)

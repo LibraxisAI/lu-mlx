@@ -988,7 +988,7 @@ pub fn find_comfyui_path() -> Option<String> {
 /// macOS turns `find_comfyui_path`'s home walk off (`comfyui_disk_search_allowed`)
 /// because the first touch of ~/Desktop and ~/Music is a permission dialog.
 /// That also made a ComfyUI the user had already started — this project's
-/// Mac port is 8080 — invisible: `state.comfy_path` stayed empty, config had
+/// Mac port — invisible: `state.comfy_path` stayed empty, config had
 /// no `comfyui_path`, and `install_custom_node` answered "ComfyUI not found"
 /// while `/system_stats` on that port was fine. The process cwd (and an
 /// absolute `main.py` in argv) is the folder. Anything that is not a ComfyUI
@@ -3000,7 +3000,7 @@ pub fn auto_start_comfyui(state: &AppState) {
     // manually invokes `start_comfyui` — only the unattended boot path skips it.
     if cfg!(target_os = "macos") {
         // Spawn stays refused (local media is MLX). A ComfyUI the user already
-        // started on the configured port — 8080 — still needs its folder
+        // started on the configured port still needs its folder
         // recorded, or custom-node install reports "ComfyUI not found" while
         // the server is answering. This does not walk the disk.
         remember_listening_comfy(state);

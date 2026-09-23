@@ -163,7 +163,7 @@ export function useCreate() {
       // NOT pinning `connected` to false on Mac when the probe misses: that
       // would cover a working MLX catalog with the ComfyUI install card.
       // Left at null ("not applicable") until ComfyUI actually answers.
-      // Mac is connect-only on the default 8080 (spawn refused); a live
+      // Mac is connect-only (spawn refused); a live
       // instance is a real local backend for edit/upscale/eraser/animate.
       const comfyOk = await checkComfyConnection()
       useCreateStore.getState().setComfyRunning(comfyOk)

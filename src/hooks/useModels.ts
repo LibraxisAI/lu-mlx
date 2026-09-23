@@ -120,7 +120,7 @@ let comfyRetryRunning = false
  */
 function armComfyInventoryRetry(refetch: () => Promise<void>): void {
   if (comfyRetryRunning) return
-  // Mac is connect-only, not "no ComfyUI": a user instance on :8080 still
+  // Mac is connect-only, not "no ComfyUI": a user instance still
   // needs the second inventory pass when the first poll raced startup.
   comfyRetryRunning = true
   useModelStore.getState().beginInventoryRefresh()
@@ -442,7 +442,7 @@ export function useModels() {
       // function (Meldung 2, R5 re-measure 2026-08-30).
       // True on the Mac and in the web build, where there is nothing to ask.
       let comfyAnswered = true
-      // Probe on every OS so a Mac with ComfyUI on 8080 is counted. Spawn is
+      // Probe on every OS so a Mac with its own ComfyUI is counted. Spawn is
       // still refused (`comfy_supported_here`); this is connect-only.
       const comfyOk = await checkComfyConnection()
       if (!comfyOk) comfyAnswered = false

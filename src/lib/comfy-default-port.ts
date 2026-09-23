@@ -1,12 +1,13 @@
 /**
- * Default ComfyUI listen port.
+ * Default ComfyUI listen port: ComfyUI's own 8188, on every OS.
  *
- * Windows/Linux ComfyUI ships on 8188. On this Mac the user's ComfyUI is on
- * 8080, and the frontend dist is shared across OS builds, so the Mac default
- * is a runtime `darwin` check — never a compile-time flag. `LU_COMFY_PORT` /
+ * The Mac app only connects to a ComfyUI the user already runs; if that one
+ * listens elsewhere, Settings → ComfyUI stores the port. `LU_COMFY_PORT` /
  * `COMFYUI_PORT` win when they name a real port, so `npm run dev` and the
  * Vite proxy can follow the same instance the desktop app talks to.
  */
+
+export const COMFY_DEFAULT_PORT = 8188
 
 export function defaultComfyPort(opts?: {
   isMac?: boolean
@@ -16,9 +17,5 @@ export function defaultComfyPort(opts?: {
   const env = opts?.env ?? (typeof process !== 'undefined' ? process.env : undefined)
   const raw = Number(env?.LU_COMFY_PORT || env?.COMFYUI_PORT || '')
   if (Number.isInteger(raw) && raw > 0 && raw < 65536) return raw
-  if (opts?.isMac === true) return 8080
-  if (opts?.isMac === false) return 8188
-  const plat = opts?.platform
-    ?? (typeof process !== 'undefined' ? process.platform : '')
-  return plat === 'darwin' ? 8080 : 8188
+  return COMFY_DEFAULT_PORT
 }
