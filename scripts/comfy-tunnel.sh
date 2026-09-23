@@ -10,15 +10,17 @@
 # Start/Install; there, set the remote host in Settings → ComfyUI instead.
 #
 # Usage:
-#   comfy-tunnel.sh SSH_HOST [REMOTE_PORT] [LOCAL_PORT]          # foreground, reconnects
-#   comfy-tunnel.sh --once SSH_HOST                              # foreground, no reconnect
-#   comfy-tunnel.sh install SSH_HOST [REMOTE_PORT] [LOCAL_PORT]  # macOS: always-on LaunchAgent
-#   comfy-tunnel.sh install --dry-run SSH_HOST                   # print the LaunchAgent only
-#   comfy-tunnel.sh status                                       # agent state, port, last log lines
-#   comfy-tunnel.sh uninstall                                    # stop and remove the agent
+#   comfy-tunnel.sh SSH_HOST [PORT...]          # foreground, reconnects
+#   comfy-tunnel.sh --once SSH_HOST [PORT...]   # foreground, no reconnect
+#   comfy-tunnel.sh install SSH_HOST [PORT...]  # macOS: always-on LaunchAgent
+#   comfy-tunnel.sh install --dry-run SSH_HOST [PORT...]  # print the LaunchAgent only
+#   comfy-tunnel.sh status                      # agent state, ports, last log lines
+#   comfy-tunnel.sh uninstall                   # stop and remove the agent
 #
 # SSH_HOST is anything `ssh` accepts (an alias from ~/.ssh/config, user@host).
-# Ports default to 8188 on both ends. The LaunchAgent starts at login and
+# PORT is N (same port both ends) or REMOTE:LOCAL; default 8188 (ComfyUI).
+# One SSH session carries every port, e.g. `install dragon 8188 8000` also
+# brings the chat model on 8000. The LaunchAgent starts at login and
 # launchd reopens the tunnel whenever it drops; it needs key-based SSH (no
 # password prompt in the background). Log: ~/Library/Logs/lu-comfy-tunnel.log
 set -eu
@@ -38,12 +40,25 @@ check_port() {
   esac
 }
 
+# PORT or REMOTE:LOCAL → "REMOTE LOCAL"
+split_spec() {
+  case "$1" in
+    *:*) remote="${1%%:*}"; local_="${1#*:}" ;;
+    *) remote="$1"; local_="$1" ;;
+  esac
+  check_port "$remote"; check_port "$local_"
+  printf '%s %s\n' "$remote" "$local_"
+}
+
 xml_escape() {
   printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
 }
 
 agent_plist() {
-  host="$1"; remote_port="$2"; local_port="$3"
+  host="$1"; shift
+  specs=""
+  for spec in "$@"; do specs="$specs    <string>$spec</string>
+"; done
   cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -57,9 +72,7 @@ agent_plist() {
     <string>--once</string>
     <string>--batch</string>
     <string>$(xml_escape "$host")</string>
-    <string>$remote_port</string>
-    <string>$local_port</string>
-  </array>
+${specs}  </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin</string>
@@ -79,12 +92,12 @@ install_agent() {
   dry_run=0
   if [ "${1:-}" = "--dry-run" ]; then dry_run=1; shift; fi
   host="${1:-}"
-  remote_port="${2:-8188}"
-  local_port="${3:-8188}"
   [ -n "$host" ] || { echo "install needs SSH_HOST" >&2; exit 64; }
-  check_port "$remote_port"; check_port "$local_port"
+  shift
+  [ "$#" -gt 0 ] || set -- 8188
+  for spec in "$@"; do split_spec "$spec" >/dev/null; done
   if [ "$dry_run" -eq 1 ]; then
-    agent_plist "$host" "$remote_port" "$local_port"
+    agent_plist "$host" "$@"
     return 0
   fi
   [ "$(uname -s)" = "Darwin" ] || { echo "install uses launchd (macOS only)." >&2; exit 69; }
@@ -97,13 +110,13 @@ install_agent() {
   mkdir -p "$(dirname "$AGENT_BIN")" "$(dirname "$AGENT_PLIST")" "$(dirname "$AGENT_LOG")"
   cp "$0" "$AGENT_BIN"
   chmod 755 "$AGENT_BIN"
-  agent_plist "$host" "$remote_port" "$local_port" > "$AGENT_PLIST"
+  agent_plist "$host" "$@" > "$AGENT_PLIST"
   plutil -lint "$AGENT_PLIST" >/dev/null
   domain="gui/$(id -u)"
   launchctl bootout "$domain/$LABEL" >/dev/null 2>&1 || true
   launchctl bootstrap "$domain" "$AGENT_PLIST"
   launchctl kickstart -k "$domain/$LABEL" >/dev/null 2>&1 || true
-  echo "Installed $LABEL: 127.0.0.1:$local_port → $host:127.0.0.1:$remote_port, always on."
+  echo "Installed $LABEL: $host ports $*, always on."
   echo "Log: $AGENT_LOG · check: $0 status · remove: $0 uninstall"
 }
 
@@ -114,13 +127,15 @@ agent_status() {
   else
     echo "$LABEL is not installed."
   fi
-  port="$(sed -n 's:.*<string>\([0-9][0-9]*\)</string>.*:\1:p' "$AGENT_PLIST" 2>/dev/null | tail -1)"
-  port="${port:-8188}"
-  if curl -fsS -m 3 "http://127.0.0.1:$port/system_stats" >/dev/null 2>&1; then
-    echo "ComfyUI answers on http://127.0.0.1:$port"
-  else
-    echo "Nothing answers on http://127.0.0.1:$port"
-  fi
+  specs="$(sed -n 's:.*<string>\([0-9][0-9:]*\)</string>.*:\1:p' "$AGENT_PLIST" 2>/dev/null)"
+  for spec in ${specs:-8188}; do
+    set -- $(split_spec "$spec")
+    if nc -z -G 3 127.0.0.1 "$2" >/dev/null 2>&1; then
+      echo "127.0.0.1:$2 answers (→ remote $1)"
+    else
+      echo "127.0.0.1:$2 does not answer (→ remote $1)"
+    fi
+  done
   [ -f "$AGENT_LOG" ] && { echo "--- last log lines"; tail -5 "$AGENT_LOG"; }
   return 0
 }
@@ -148,48 +163,62 @@ while :; do
   esac
 done
 host="${1:-}"
-remote_port="${2:-8188}"
-local_port="${3:-8188}"
 [ -n "$host" ] || { usage; exit 64; }
-check_port "$remote_port"; check_port "$local_port"
-
-if lsof -nP -iTCP:"$local_port" -sTCP:LISTEN >/dev/null 2>&1; then
-  echo "127.0.0.1:$local_port is already taken on this machine:" >&2
-  lsof -nP -iTCP:"$local_port" -sTCP:LISTEN >&2 || true
-  echo "Stop the local ComfyUI (or pick another LOCAL_PORT and set it in LU → Settings → ComfyUI)." >&2
-  # Under launchd, wait before exiting so a busy port does not spin the agent.
-  [ "$batch" -eq 1 ] && sleep 60
-  exit 69
-fi
+shift
+[ "$#" -gt 0 ] || set -- 8188
+forwards=""
+locals=""
+for spec in "$@"; do
+  set -- $(split_spec "$spec")
+  if lsof -nP -iTCP:"$2" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "127.0.0.1:$2 is already taken on this machine:" >&2
+    lsof -nP -iTCP:"$2" -sTCP:LISTEN >&2 || true
+    echo "Stop what listens there (or map it: REMOTE:OTHER_LOCAL)." >&2
+    # Under launchd, wait before exiting so a busy port does not spin the agent.
+    [ "$batch" -eq 1 ] && sleep 60
+    exit 69
+  fi
+  forwards="$forwards -L 127.0.0.1:$2:127.0.0.1:$1"
+  locals="$locals $2"
+done
 
 probe() {
-  # ComfyUI answers /system_stats once the forward is up.
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if curl -fsS -m 3 "http://127.0.0.1:$local_port/system_stats" >/dev/null 2>&1; then
-      version="$(curl -fsS -m 3 "http://127.0.0.1:$local_port/system_stats" \
-        | sed -n 's/.*"comfyui_version": *"\([^"]*\)".*/\1/p')"
-      echo "$(date '+%F %T') ComfyUI ${version:-?} on $host is reachable at http://127.0.0.1:$local_port — LU can use it now."
-      return 0
+  # Each forwarded port should answer once ssh has set the forwards up.
+  for port in $locals; do
+    ok=0
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      if nc -z -G 3 127.0.0.1 "$port" >/dev/null ; then ok=1; break; fi
+      sleep 1
+    done
+    if [ "$ok" -eq 0 ]; then
+      echo "$(date '+%F %T') 127.0.0.1:$port: tunnel up, but nothing answers on $host. Is the service running there?" >&2
+      continue
     fi
-    sleep 1
+    version="$(curl -fsS -m 3 "http://127.0.0.1:$port/system_stats" 2>/dev/null \
+      | sed -n 's/.*"comfyui_version": *"\([^"]*\)".*/\1/p')"
+    if [ -n "$version" ]; then
+      echo "$(date '+%F %T') ComfyUI $version on $host is reachable at http://127.0.0.1:$port — LU can use it now."
+    else
+      echo "$(date '+%F %T') 127.0.0.1:$port → $host is open."
+    fi
   done
-  echo "$(date '+%F %T') Tunnel is up, but nothing answers on $host:127.0.0.1:$remote_port. Is ComfyUI running there?" >&2
-  return 1
 }
 
 delay=2
 while :; do
-  echo "$(date '+%F %T') Tunnel 127.0.0.1:$local_port → $host:127.0.0.1:$remote_port"
+  echo "$(date '+%F %T') Tunnel to $host:$forwards"
   if [ "$batch" -eq 1 ]; then
     set -- -o BatchMode=yes -o ConnectTimeout=10
   else
     set --
   fi
+  # $forwards is our own "-L 127.0.0.1:L:127.0.0.1:R" list (digits only): split on purpose.
+  # shellcheck disable=SC2086
   ssh -N "$@" \
     -o ExitOnForwardFailure=yes \
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=3 \
-    -L "127.0.0.1:$local_port:127.0.0.1:$remote_port" \
+    $forwards \
     "$host" &
   ssh_pid=$!
   trap 'kill "$ssh_pid" 2>/dev/null; exit 0' INT TERM
