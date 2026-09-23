@@ -108,7 +108,10 @@ describe('classifyModel', () => {
     // Older Qwen-Image generations stay unknown rather than being routed onto
     // the 2.1 pipeline, which would build a node graph they cannot run.
     expect(classifyModel('qwen_image_fp8_e4m3fn.safetensors')).toBe('unknown')
-    expect(classifyModel('qwen_image_edit_2509_fp8.safetensors')).toBe('unknown')
+    // Qwen-Image-Edit 2509/2511 have their own lane (TextEncodeQwenImageEditPlus,
+    // dynamic-workflow-qwen-image-edit.test.ts), never the 2.1 pipeline.
+    expect(classifyModel('qwen_image_edit_2509_fp8.safetensors')).toBe('qwen_image_edit')
+    expect(classifyModel('qwen_image_edit_2509_fp8.safetensors')).not.toBe('qwenimage')
     // Companion files, which this same function also sees.
     expect(classifyModel('qwen3vl_8b_int8_convrot.safetensors')).toBe('unknown')
     expect(classifyModel('qwen_image_vae.safetensors')).toBe('unknown')
