@@ -3,8 +3,8 @@
 # Shared helpers for LU macOS install-app + notarized DMG lanes (Tauri 2).
 #
 # WHY artifacts live under release/macos/ and NEVER repo-root dist/:
-# src-tauri/tauri.conf.json sets build.frontendDist to ../dist (Vite). Pensieve
-# can park Pensieve.app in dist/ because it has no Vite bundle. Mixing those
+# src-tauri/tauri.conf.json sets build.frontendDist to ../dist (Vite). An app
+# with no Vite bundle could park its .app in dist/; here, mixing those
 # two meanings would let `make clean` delete the frontend the next tauri build
 # expects, or copy an HTML tree into /Applications.
 #
@@ -20,6 +20,7 @@ KEYS_DIR="${KEYS_DIR:-$LU_KEYS_DIR}"
 # Operator archive shelf (iCloud Drive `_RELEASES`). Override the parent with
 # LU_INTERNAL_RELEASES for tests or another machine. The default contains a
 # space ("Mobile Documents") — always quote expansions of this path.
+# shellcheck disable=SC2034  # read by macos-release.sh after it sources this lib
 LU_INTERNAL_RELEASES_DEFAULT="$HOME/Library/Mobile Documents/com~apple~CloudDocs/_RELEASES"
 
 if ! declare -F die >/dev/null 2>&1; then
@@ -310,7 +311,7 @@ macos_require_signing_identity() {
     ok "Signing identity: $id"
 }
 
-# Map Pensieve-style ~/.keys/.notary.env (NOTARY_APPLE_ID / NOTARY_TEAM_ID /
+# Map a ~/.keys/.notary.env (NOTARY_APPLE_ID / NOTARY_TEAM_ID /
 # NOTARY_PASSWORD) onto the APPLE_* names Tauri 2 and notarytool already
 # understand. Existing APPLE_* win. API-key auth (APPLE_API_KEY +
 # APPLE_API_ISSUER + APPLE_API_KEY_PATH) is preferred when present — it does
@@ -381,7 +382,7 @@ macos_require_notary() {
     export APPLE_PASSWORD='app-specific-password'
     export APPLE_TEAM_ID='TEAMID'
 
-  Option C — Pensieve-style file (never commit it):
+  Option C — a notary env file (never commit it):
     ~/.keys/.notary.env  with NOTARY_APPLE_ID, NOTARY_TEAM_ID, NOTARY_PASSWORD
     chmod 600 ~/.keys/.notary.env
 

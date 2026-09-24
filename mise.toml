@@ -1,7 +1,7 @@
 # LU local task runner. Canonical recipes live in the Makefile —
 # every mise task is `make <target>` so `mise run X` and `make X` cannot drift.
 #
-# Pensieve itself has no mise.toml; this file exists because LU operators
+# This file exists because LU operators
 # already use mise for Node 22 (.nvmrc) and the workstream asked for both
 # surfaces. Rust stays on rustup, not mise, matching CI.
 #

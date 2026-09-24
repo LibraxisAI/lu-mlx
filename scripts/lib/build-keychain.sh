@@ -3,7 +3,7 @@
 # Build-keychain preflight — unlock the dedicated Developer ID keychain inside
 # the same session that runs codesign.
 #
-# WHY this exists (adapted from the Pensieve release lane, same trap):
+# WHY this exists:
 # A keychain's unlocked state belongs to the security session that unlocked it.
 # A keychain the operator opened in their GUI session is still LOCKED for a
 # release driven over SSH — and codesign then dies with the famously unhelpful

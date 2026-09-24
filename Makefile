@@ -2,7 +2,7 @@
 # Thin Makefile. Non-trivial macOS sign/notarize/install lives in scripts/.
 #
 # WHY this exists: LU is a Tauri 2 app. GitHub release.yml ships Windows + Linux
-# only (no macOS CI lane yet). Operators still need a Pensieve-shaped local
+# only (no macOS CI lane yet). Operators still need a local
 # path: `make install-app` into /Applications and `make release` for a signed,
 # notarized DMG. Canonical recipes stay here so `mise run <task>` can wrap them
 # without drifting (see mise.toml).
@@ -182,7 +182,7 @@ gates: typecheck test test-scripts  ## Gating checks: tsc + vitest + shell tests
 	@printf "$(C_GREEN)[ ok ]$(C_RESET) gates passed\n"
 
 # =========================================================================
-# SIDECAR (llama.cpp externalBin — analog of Pensieve ffi / ffi-check)
+# SIDECAR (llama.cpp externalBin)
 # =========================================================================
 
 .PHONY: sidecar
@@ -268,7 +268,7 @@ release-plan: macos-only
 .PHONY: release-appstore
 release-appstore:  ## Not applicable: LU is not distributed via the Mac App Store
 	@printf "$(C_YELLOW)[skip]$(C_RESET) LU ships GitHub .dmg / NSIS / AppImage / deb / rpm, not Mac App Store.\n"
-	@printf "       There is no PENSIEVE_MAS_* analog and no MAS entitlements lane.\n"
+	@printf "       There is no Mac App Store lane and no MAS entitlements.\n"
 	@exit 1
 
 # =========================================================================

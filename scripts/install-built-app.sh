@@ -5,8 +5,8 @@
 # /Applications/LU.app.
 #
 # WHY the idle check: replacing a running bundle on macOS can leave the old
-# Mach-O mapped and the new files half-written. Pensieve's install lane refuses
-# to quit the app for you; LU does the same. Quit LU yourself after saving.
+# Mach-O mapped and the new files half-written. The install lane refuses to
+# quit the app for you. Quit LU yourself after saving.
 
 LU_INSTALL_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
