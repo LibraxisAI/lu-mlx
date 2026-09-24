@@ -1183,9 +1183,15 @@ fn outgoing_token(url: &str, civitai_key: Option<&str>, hf_token: Option<&str>) 
 /// come from public catalogs, and a crafted catalog or model URL must not be
 /// able to reach an internal service or 169.254.169.254 — on the first hop or
 /// on any redirect.
+///
+/// `no_gzip`: a resumed download asks for `Range: bytes=<offset>-` and appends
+/// what comes back to the `.part` file, and the size probe trusts
+/// Content-Length. Both are byte counts of the file as stored, which an
+/// on-the-fly decoded body no longer is, so this client never asks for one.
 fn download_client(connect_secs: u64, read_secs: u64) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .user_agent("LocallyUncensored/1.5")
+        .no_gzip()
         .redirect(crate::commands::proxy::ssrf_safe_redirect_policy(10))
         .connect_timeout(std::time::Duration::from_secs(connect_secs))
         .read_timeout(std::time::Duration::from_secs(read_secs))
