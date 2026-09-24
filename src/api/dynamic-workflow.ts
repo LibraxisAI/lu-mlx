@@ -1,7 +1,7 @@
 import {
   classifyModel, findMatchingVAE, findMatchingCLIP, findFluxCLIPPair,
   findMatchingAudioEncoder, findMatchingClipVision, findFramePackCLIPPair,
-  isLtx2Model,
+  isLtx2Model, getComfyDeviceType,
 } from './comfyui'
 import { isMlxImageModel } from './mlx-image'
 import type { ModelType, GenerateParams, VideoParams } from './comfyui'
@@ -586,7 +586,7 @@ export async function buildDynamicWorkflow(
     return await buildFramePackWorkflow(params as VideoParams, seed, nodes)
   }
   if (strategy === 'unet_ltx' && isVideo && isLtx2Model(params.model)) {
-    return buildLtx2Workflow(params as VideoParams, seed, nodes, allNodes, models)
+    return await buildLtx2Workflow(params as VideoParams, seed, nodes, allNodes, models)
   }
 
   // ─── Standard Strategies (UNET/Checkpoint → CLIP → Latent → KSampler → VAEDecode) ───
@@ -1635,14 +1635,22 @@ const LTX2_DISTILLED_SIGMAS = '1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0
  * Single stage, no latent upscaler: what the user asked for (size, frames, fps,
  * steps, cfg) is what renders. A filename saying "distill" gets the distilled
  * schedule at cfg 1; anything else LTXVScheduler with the user's steps and cfg.
+ *
+ * One device exception, measured on ComfyUI 0.37 / Apple M-series (MPS), same
+ * graph, only one knob changed per run: image-to-video with cfg above 1 decodes
+ * to NaN, black frames and silence (SaveVideo then dies in the AAC encoder,
+ * "avcodec_send_frame() returned 22"); at cfg 1 it animates the picture, with
+ * either schedule, at strength 0.7 or 1. Text-to-video at cfg 3 is fine there,
+ * and Comfy-Org's own LTX-2 i2v template runs cfg 4, so on CUDA the user's cfg
+ * stays. On MPS, I2V runs at cfg 1 and the log says so.
  */
-function buildLtx2Workflow(
+async function buildLtx2Workflow(
   params: VideoParams,
   seed: number,
   nodes: CategorizedNodes,
   allNodes: NodePresence,
   models: AvailableModels,
-): ComfyApiGraph {
+): Promise<ComfyApiGraph> {
   requireNodes(allNodes, [
     'EmptyLTXVLatentVideo', 'LTXVEmptyLatentAudio', 'LTXVConcatAVLatent', 'LTXVSeparateAVLatent',
     'LTXVConditioning', 'LTXVAudioVAEDecode', 'RandomNoise', 'KSamplerSelect', 'CFGGuider',
@@ -1782,6 +1790,11 @@ function buildLtx2Workflow(
   }
 
   const distilled = lower(params.model).includes('distill') || loras.some((l) => lower(l).includes('distill'))
+  let cfg = distilled ? 1 : params.cfgScale
+  if (params.inputImage && cfg > 1 && (await getComfyDeviceType()) === 'mps') {
+    log.warn(`[dynamic-workflow] LTX-2 image-to-video on MPS: cfg ${cfg} → 1 (above 1 the MPS run decodes to NaN)`)
+    cfg = 1
+  }
   const sigmasId = String(n++)
   workflow[sigmasId] = distilled
     ? { class_type: 'ManualSigmas', inputs: { sigmas: LTX2_DISTILLED_SIGMAS } }
@@ -1806,7 +1819,7 @@ function buildLtx2Workflow(
   workflow[samplerSelectId] = { class_type: 'KSamplerSelect', inputs: { sampler_name: samplerName } }
   workflow[guiderId] = {
     class_type: 'CFGGuider',
-    inputs: { model: modelRef, positive: [condId, 0], negative: [condId, 1], cfg: distilled ? 1 : params.cfgScale },
+    inputs: { model: modelRef, positive: [condId, 0], negative: [condId, 1], cfg },
   }
   workflow[samplerId] = {
     class_type: 'SamplerCustomAdvanced',

@@ -31,6 +31,7 @@ vi.mock('../backend', async (importOriginal) => {
 
 import { buildDynamicWorkflow, snapLtx2Length } from '../dynamic-workflow'
 import { getAllNodeInfo } from '../comfyui-nodes'
+import { localFetch } from '../backend'
 import { isLtx2Model, classifyModel } from '../comfyui'
 import type { ComfyApiGraph } from '../../types/comfy-graph'
 import { nodeOf, type BuiltNode } from './graph-test-support'
@@ -140,7 +141,16 @@ const params = {
 
 beforeEach(() => {
   vi.mocked(getAllNodeInfo).mockReset()
+  vi.mocked(localFetch).mockReset()
 })
+
+/** /system_stats of a ComfyUI computing on this torch device. */
+function onDevice(type: string) {
+  vi.mocked(localFetch).mockImplementation(async (url: string) =>
+    url.endsWith('/system_stats')
+      ? new Response(JSON.stringify({ devices: [{ type, name: type }] }), { status: 200 })
+      : new Response('{}', { status: 404 }))
+}
 
 describe('validationErrors (negative control)', () => {
   it('catches the exact graph ComfyUI refused: MODEL wired into a vae input', () => {
@@ -238,6 +248,30 @@ describe('LTX-2 split install (GGUF in diffusion_models, Kijai split files)', ()
   it('says which split files are missing instead of sending a graph ComfyUI will refuse', async () => {
     vi.mocked(getAllNodeInfo).mockResolvedValue(objectInfo({ vaes: [VIDEO_VAE], clips: [GEMMA] }) as never)
     await expect(buildDynamicWorkflow(params)).rejects.toThrow(/LTX23_audio_vae_bf16.*ltx-2\.3_text_projection/)
+  })
+})
+
+describe('LTX-2 image-to-video cfg on MPS', () => {
+  // Measured on ComfyUI 0.37 / MPS: I2V above cfg 1 decodes to NaN (black
+  // frames, silent audio, SaveVideo dies in the AAC encoder). Comfy-Org's own
+  // LTX-2 i2v template runs cfg 4, so only MPS gets the clamp.
+  it('runs image-to-video at cfg 1 on an MPS ComfyUI', async () => {
+    vi.mocked(getAllNodeInfo).mockResolvedValue(objectInfo() as never)
+    onDevice('mps')
+    const wf = await buildDynamicWorkflow({ ...params, inputImage: 'start.png' })
+    expect(node(wf, 'CFGGuider').inputs.cfg).toBe(1)
+  })
+  it('keeps the user cfg for image-to-video on CUDA', async () => {
+    vi.mocked(getAllNodeInfo).mockResolvedValue(objectInfo() as never)
+    onDevice('cuda')
+    const wf = await buildDynamicWorkflow({ ...params, inputImage: 'start.png' })
+    expect(node(wf, 'CFGGuider').inputs.cfg).toBe(3)
+  })
+  it('keeps the user cfg for text-to-video on MPS', async () => {
+    vi.mocked(getAllNodeInfo).mockResolvedValue(objectInfo() as never)
+    onDevice('mps')
+    const wf = await buildDynamicWorkflow(params)
+    expect(node(wf, 'CFGGuider').inputs.cfg).toBe(3)
   })
 })
 

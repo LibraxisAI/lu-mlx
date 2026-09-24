@@ -651,6 +651,25 @@ export async function getSystemVRAM(): Promise<number | null> {
  * different one", see lib/comfy-cors-notice.ts. Not cached: a restart under
  * LU's management, or a user update, is exactly the change worth noticing.
  */
+/**
+ * The torch device the running ComfyUI computes on ("cuda", "mps", "cpu", …),
+ * from /system_stats devices[0].type, or null when it does not answer. A graph
+ * builder asks this when one device needs a different recipe than the rest
+ * (buildLtx2Workflow: LTX-2 image-to-video above cfg 1 comes out as NaN on
+ * MPS). Not cached, for the same reason getComfyVersion is not.
+ */
+export async function getComfyDeviceType(): Promise<string | null> {
+  try {
+    const res = await localFetch(comfyuiUrl('/system_stats'), { timeoutMs: COMFY_STATS_TIMEOUT_MS })
+    if (!res?.ok) return null
+    const data = await res.json()
+    const t = Array.isArray(data?.devices) ? data.devices[0]?.type : null
+    return typeof t === 'string' && t ? t.toLowerCase() : null
+  } catch {
+    return null
+  }
+}
+
 export async function getComfyVersion(): Promise<string | null> {
   try {
     const res = await localFetch(comfyuiUrl('/system_stats'), { timeoutMs: COMFY_STATS_TIMEOUT_MS })
