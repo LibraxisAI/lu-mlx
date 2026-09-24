@@ -1463,11 +1463,23 @@ pub async fn fix_comfyui_cors(app: tauri::AppHandle) -> Result<serde_json::Value
     .map_err(|e| format!("fix_comfyui_cors task: {e}"))?
 }
 
+/// The Origin LU's webview sends, i.e. the value a user-run ComfyUI has to
+/// allow. Tauri 2 serves the app from `http://tauri.localhost` on Windows but
+/// from `tauri://localhost` on macOS and Linux; the hint used to name the
+/// Windows one everywhere, so a Mac following it still got the 403.
+const fn webview_origin() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "http://tauri.localhost"
+    } else {
+        "tauri://localhost"
+    }
+}
+
 fn fix_comfyui_cors_blocking(state: &AppState) -> Result<serde_json::Value, String> {
     let host = state.comfy_host.lock().unwrap().clone();
     if !is_local_host(&host) {
         return Err(
-            "ComfyUI runs on a remote host, so LU can't restart it from here. Add --enable-cors-header http://tauri.localhost to the launch command on that machine instead.".to_string(),
+            format!("ComfyUI runs on a remote host, so LU can't restart it from here. Add --enable-cors-header {} to the launch command on that machine instead (and --enable-compress-response-body, so large answers cross the network compressed).", webview_origin()),
         );
     }
     let path_known = state
@@ -1479,7 +1491,7 @@ fn fix_comfyui_cors_blocking(state: &AppState) -> Result<serde_json::Value, Stri
         .is_some();
     if !path_known {
         return Err(
-            "LU doesn't know this ComfyUI's folder yet. Set it under Settings → AI Backends → ComfyUI → Path, then press the button again. Or add --enable-cors-header http://tauri.localhost to your own launch script.".to_string(),
+            format!("LU doesn't know this ComfyUI's folder yet. Set it under Settings → AI Backends → ComfyUI → Path, then press the button again. Or add --enable-cors-header {} to your own launch script.", webview_origin()),
         );
     }
     let port = *state.comfy_port.lock().unwrap();
