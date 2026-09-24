@@ -133,6 +133,8 @@ agent_status() {
   fi
   specs="$(sed -n 's:.*<string>\([0-9][0-9:]*\)</string>.*:\1:p' "$AGENT_PLIST" 2>/dev/null || true)"
   for spec in ${specs:-8188}; do
+    # split_spec prints "REMOTE LOCAL" (digits only): split on purpose.
+    # shellcheck disable=SC2046
     set -- $(split_spec "$spec")
     code="$(http_code "$2")"
     if [ "$code" != "000" ]; then
@@ -174,6 +176,8 @@ shift
 forwards=""
 locals=""
 for spec in "$@"; do
+  # split_spec prints "REMOTE LOCAL" (digits only): split on purpose.
+  # shellcheck disable=SC2046
   set -- $(split_spec "$spec")
   if lsof -nP -iTCP:"$2" -sTCP:LISTEN >/dev/null 2>&1; then
     echo "127.0.0.1:$2 is already taken on this machine:" >&2
@@ -220,8 +224,14 @@ while :; do
     set --
   fi
   # $forwards is our own "-L 127.0.0.1:L:127.0.0.1:R" list (digits only): split on purpose.
+  # Compression: ComfyUI's /object_info is ~2.8 MB of JSON and LU's Rust proxy
+  # has no gzip. Over a 250 ms tailnet path (2026-09-24, laptop -> dragon) it
+  # took 10-12 s, blew the proxy's per-call timeout mid-body ("error decoding
+  # response body"), and the direct-fetch fallback then hit ComfyUI's 403 for
+  # Origin tauri://localhost. With zlib on the tunnel the same call took 0.5 s.
   # shellcheck disable=SC2086
   ssh -N "$@" \
+    -o Compression=yes \
     -o ExitOnForwardFailure=yes \
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=3 \
