@@ -223,6 +223,18 @@ const KNOWN_MODELS: Record<string, ModelType> = {
   absolutereality: 'sd15',
 }
 
+/**
+ * LTX-2 / 2.3 (Lightricks' audio+video line, Gemma 3 text encoder) as opposed
+ * to the older LTX-Video 0.9.x. Both classify as 'ltx', but they share no graph:
+ * LTX-2 samples one joint audio+video latent (LTXVConcatAVLatent → Sampler-
+ * CustomAdvanced → LTXVSeparateAVLatent) and needs a video VAE, an audio VAE and
+ * the Gemma encoder with its text projection. Matches "ltx-2.3-22b-…",
+ * "ltx2_…", "…_LTX23.gguf"; not "ltx-video-2b-v0.9" or "ltxv-13b-0.9.7".
+ */
+export function isLtx2Model(name: string | null | undefined): boolean {
+  return !!name && /ltx[-_ ]?2(?![0-9]*b)|ltxav/i.test(name)
+}
+
 export function classifyModel(name: string | null | undefined): ModelType {
   // Defensive: treat empty/missing names as unknown. Older installs can persist
   // stale model strings that no longer exist; callers should not crash on those.
@@ -1532,7 +1544,10 @@ export async function findMatchingVAE(modelType: ModelType): Promise<string> {
     throw new Error(`No Wan 2.2 VAE found. Download "wan2.2_vae.safetensors" from the Model Manager.`)
   }
   if (modelType === 'ltx') {
-    const match = vaes.find(v => lower(v).includes('ltx'))
+    // An LTX-2 install carries an AUDIO VAE and a tiny preview VAE next to the
+    // video one (LTX23_audio_vae, taeltx2_3); the audio file sorts first, so a
+    // bare `includes('ltx')` handed the video decoder the audio VAE.
+    const match = vaes.find(v => lower(v).includes('ltx') && !lower(v).includes('audio') && !lower(v).startsWith('tae'))
     if (match) return match
     return vaes[0]
   }

@@ -57,6 +57,18 @@ const CORE_NODES = new Set([
   'WanSoundImageToVideo', 'WanAnimateToVideo', 'WanVaceToVideo',
   // sampling
   'KSampler',
+  // LTX-2 / 2.3 lane (buildLtx2Workflow): all core. Read off /object_info of a
+  // ComfyUI v0.37.0-15-gb5cc883 on 2026-09-24, python_module per node:
+  // comfy_extras.nodes_lt (LTXVConditioning, LTXVConcatAVLatent,
+  // LTXVSeparateAVLatent, LTXVImgToVideoInplace, LTXVPreprocess, LTXVScheduler),
+  // comfy_extras.nodes_lt_audio (LTXVEmptyLatentAudio, LTXVAudioVAEDecode,
+  // LTXVAudioVAELoader, LTXAVTextEncoderLoader), comfy_extras.nodes_custom_sampler
+  // (RandomNoise, KSamplerSelect, CFGGuider, ManualSigmas, SamplerCustomAdvanced).
+  // The same nodes make up Comfy-Org's own video_ltx2_3_i2v template.
+  'LTXVConditioning', 'LTXVConcatAVLatent', 'LTXVSeparateAVLatent', 'LTXVImgToVideoInplace',
+  'LTXVPreprocess', 'LTXVScheduler', 'LTXVEmptyLatentAudio', 'LTXVAudioVAEDecode',
+  'LTXVAudioVAELoader', 'LTXAVTextEncoderLoader',
+  'RandomNoise', 'KSamplerSelect', 'CFGGuider', 'ManualSigmas', 'SamplerCustomAdvanced',
   // lora
   'LoraLoader', 'LoraLoaderModelOnly',
   // decode + image ops
