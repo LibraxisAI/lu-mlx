@@ -19,7 +19,7 @@
 #
 # SSH_HOST is anything `ssh` accepts (an alias from ~/.ssh/config, user@host).
 # PORT is N (same port both ends) or REMOTE:LOCAL; default 8188 (ComfyUI).
-# One SSH session carries every port, e.g. `install dragon 8188 8000` also
+# One SSH session carries every port, e.g. `install host-a 8188 8000` also
 # brings the chat model on 8000. The LaunchAgent starts at login and
 # launchd reopens the tunnel whenever it drops; it needs key-based SSH (no
 # password prompt in the background). Log: ~/Library/Logs/lu-comfy-tunnel.log
@@ -225,7 +225,7 @@ while :; do
   fi
   # $forwards is our own "-L 127.0.0.1:L:127.0.0.1:R" list (digits only): split on purpose.
   # Compression: ComfyUI's /object_info is ~2.8 MB of JSON and LU's Rust proxy
-  # has no gzip. Over a 250 ms tailnet path (2026-09-24, laptop -> dragon) it
+  # has no gzip. Over a 250 ms tailnet path (2026-09-24, laptop -> host-a) it
   # took 10-12 s, blew the proxy's per-call timeout mid-body ("error decoding
   # response body"), and the direct-fetch fallback then hit ComfyUI's 403 for
   # Origin tauri://localhost. With zlib on the tunnel the same call took 0.5 s.
