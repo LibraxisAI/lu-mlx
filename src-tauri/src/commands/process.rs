@@ -1112,14 +1112,17 @@ fn listener_cwd(port: u16) -> Option<PathBuf> {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let Ok(out) = std::process::Command::new("lsof")
+        // lsof is a system program, so it goes through the adapter like every
+        // other one: inside an AppImage it must not inherit the bundle's
+        // LD_LIBRARY_PATH (process_util's command_new_coverage_guard).
+        let Ok(out) = crate::process_util::foreign_system_command("lsof")
             .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-F", "p"])
             .output()
         else {
             return None;
         };
         let pid = pid_from_lsof_f(&String::from_utf8_lossy(&out.stdout))?;
-        let Ok(cwd_out) = std::process::Command::new("lsof")
+        let Ok(cwd_out) = crate::process_util::foreign_system_command("lsof")
             .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-F", "n"])
             .output()
         else {
