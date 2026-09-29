@@ -1693,7 +1693,7 @@ mod tests {
         let p = image_model_cache_dir("stabilityai/sd-turbo");
         let s = p.to_string_lossy();
         assert!(
-            s.ends_with("hub/models--stabilityai--sd-turbo"),
+            s.replace('\\', "/").ends_with("hub/models--stabilityai--sd-turbo"),
             "unexpected cache dir layout: {s}"
         );
     }

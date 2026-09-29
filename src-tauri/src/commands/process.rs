@@ -3261,11 +3261,16 @@ mod tests {
 
     #[test]
     fn listening_comfy_root_comes_from_absolute_main_py_or_cwd() {
-        let root = Path::new("/Users/me/ComfyUI");
+        let root = if cfg!(windows) {
+            Path::new(r"C:\Users\me\ComfyUI")
+        } else {
+            Path::new("/Users/me/ComfyUI")
+        };
+        let main_py = root.join("main.py");
         let has = |p: &Path| p == root;
         let argv = vec![
             "python".to_string(),
-            "/Users/me/ComfyUI/main.py".to_string(),
+            main_py.to_string_lossy().to_string(),
             "--port".to_string(),
             "8080".to_string(),
         ];
@@ -3279,7 +3284,12 @@ mod tests {
             comfy_root_from_hints(&bare, Some(root), has).as_deref(),
             Some(root)
         );
-        assert!(comfy_root_from_hints(&bare, Some(Path::new("/tmp")), has).is_none());
+        let fallback_tmp = if cfg!(windows) {
+            Path::new(r"C:\Windows\Temp")
+        } else {
+            Path::new("/tmp")
+        };
+        assert!(comfy_root_from_hints(&bare, Some(fallback_tmp), has).is_none());
     }
 
     #[test]

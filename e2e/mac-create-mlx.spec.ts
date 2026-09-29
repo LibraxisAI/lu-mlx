@@ -135,11 +135,11 @@ test('fresh mac: the Local Media panel installs the engine and a model', async (
   await page.getByRole('button', { name: /^Settings$/ }).click()
   await page.getByRole('button', { name: /AI Backends/i }).click()
 
-  // The Mac gets the MLX installer where other platforms get the ComfyUI panel.
+  // The Mac gets the MLX installer; ComfyUI install is never offered here.
   const section = page.getByRole('button', { name: /Local Media \(Apple MLX\)/i })
   await expect(section).toBeVisible({ timeout: 15_000 })
   await section.click()
-  await expect(page.getByRole('button', { name: /ComfyUI/i })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /Install ComfyUI/i })).toHaveCount(0)
 
   // Engine first: a model can't install without it.
   await expect(page.getByText(/about 3 GB of Python packages/i)).toBeVisible()
