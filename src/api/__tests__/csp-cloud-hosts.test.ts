@@ -46,6 +46,18 @@ describe('CSP connect-src cloud provider hosts (GH #71)', () => {
   // project on the internet, turning img-src/media-src into an attacker-readable
   // exfil sink (anyone can provision a free <ref>.supabase.co and read its
   // request logs). Pin the one project the app actually talks to.
+  // Tauri 2 on macOS (WKWebView) invokes commands at ipc://localhost/<cmd>.
+  // connect-src used to list only http://ipc.localhost, which is the
+  // Windows/Linux custom-protocol host, so onboarding_window_open was refused
+  // before it reached Rust. ipc: is the scheme; ipc://localhost is the host
+  // WebKit matches. This is not a wildcard host allow-list.
+  it('allows the Tauri IPC custom protocol and nothing broader', () => {
+    expect(connectSrc).toContain('ipc:')
+    expect(connectSrc).toContain('ipc://localhost')
+    expect(connectSrc).not.toContain('ipc://*')
+    expect(connectSrc).not.toMatch(/(^|\s)\*(\s|$)/)
+  })
+
   it('pins the Supabase project host and never re-widens to a wildcard', () => {
     expect(csp).not.toContain('*.supabase.co')
     expect(connectSrc).toContain('https://lrrhheztdytyfpizvuup.supabase.co')

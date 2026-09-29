@@ -74,6 +74,10 @@ SETUP_REPORT.md
 # Built-in engine: llama.cpp build cache (P0 scripts/build-llama.sh)
 .llama-build/
 
+# Operator copies of signed/notarized macOS .app/.dmg (make release).
+# WHY not dist/: tauri.conf.json frontendDist is already ../dist (Vite).
+/release/
+
 # Playwright e2e
 /test-results/
 /playwright-report/
@@ -83,3 +87,13 @@ SETUP_REPORT.md
 # Teaser raw takes + render scratch (scripts/teasers) - only the encoded
 # webm/poster assets in public/teasers ship
 /assets-src/
+# Loctree artifacts (added by loct scan)
+.loctree/
+.loctree
+# src-tauri/.loctree is a SENTINEL FILE (not a snapshot directory). Track it
+# so clones still fail-closed on mkdir; `loct scan` cache writes are a
+# separate hole covered by scripts/assert-loct-repo-root.sh + scripts/bin/loct.
+!src-tauri/.loctree
+
+# Local agent journals and session state stay out of the public tree
+.vibecrafted/

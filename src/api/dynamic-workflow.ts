@@ -1,7 +1,9 @@
 import {
   classifyModel, findMatchingVAE, findMatchingCLIP, findFluxCLIPPair,
   findMatchingAudioEncoder, findMatchingClipVision, findFramePackCLIPPair,
+  isLtx2Model, getComfyDeviceType,
 } from './comfyui'
+import { isMlxImageModel } from './mlx-image'
 import type { ModelType, GenerateParams, VideoParams } from './comfyui'
 import { log } from '../lib/logger'
 import { resolveRunSeed } from '../lib/run-seed'
@@ -63,6 +65,7 @@ export type WorkflowStrategy =
   | 'unet_flux2'      // FLUX 2: UNETLoader + CLIPLoader + VAELoader + EmptyFlux2LatentImage
   | 'unet_krea2'      // Krea 2: UNETLoader + CLIPLoader(type="krea2") + VAELoader + EmptyLatentImage (GH #136)
   | 'unet_zimage'     // Z-Image: UNETLoader + CLIPLoader(qwen_image) + VAELoader + EmptySD3LatentImage
+  | 'unet_qwen_image_edit' // Qwen-Image-Edit: UNETLoader + CLIPLoader(qwen_image) + TextEncodeQwenImageEditPlus + AuraFlow
   | 'unet_ernie_image' // ERNIE-Image: UNETLoader + CLIPLoader(flux2) + VAELoader + EmptyFlux2LatentImage + ConditioningZeroOut
   | 'unet_qwenimage'  // Qwen-Image 2.1: UNETLoader + CLIPLoader(qwen_image) + VAELoader + TextEncodeQwenImage21 (generate and edit)
   | 'unet_video'      // Wan/Hunyuan: UNETLoader + CLIPLoader + VAELoader + EmptyHunyuanLatentVideo
@@ -111,6 +114,23 @@ export function determineStrategy(
       return { strategy: 'unet_ernie_image', reason: 'ERNIE-Image model → UNETLoader + CLIPLoader(flux2) + ConditioningZeroOut' }
     }
     return { strategy: 'unavailable', reason: 'ERNIE-Image requires UNETLoader + CLIPLoader + VAELoader nodes' }
+  }
+
+  // Qwen-Image-Edit → UNET + CLIPLoader(qwen_image) + VAE + TextEncodeQwenImageEditPlus.
+  // Confirmed on the live ComfyUI 0.33 instance (port 8080): the 2511 file is
+  // in UNETLoader.unet_name, not CheckpointLoaderSimple.ckpt_name.
+  if (modelType === 'qwen_image_edit') {
+    const hasEncode = nodes.textEncoders.includes('TextEncodeQwenImageEditPlus')
+      || nodes.textEncoders.includes('TextEncodeQwenImageEdit')
+    const hasShift = nodes.samplers.includes('ModelSamplingAuraFlow')
+    const hasSd3 = nodes.latentInit.includes('EmptySD3LatentImage')
+    if (hasUNET && hasCLIPLoader && hasVAELoader && hasEncode && hasShift && hasSd3) {
+      return { strategy: 'unet_qwen_image_edit', reason: 'Qwen Image Edit → UNETLoader + TextEncodeQwenImageEditPlus' }
+    }
+    return {
+      strategy: 'unavailable',
+      reason: 'Qwen Image Edit needs UNETLoader, CLIPLoader, VAELoader, TextEncodeQwenImageEditPlus, ModelSamplingAuraFlow and EmptySD3LatentImage. Update ComfyUI (0.3.43 or newer).',
+    }
   }
 
   // Qwen-Image 2.1 → UNET + CLIPLoader(qwen_image) + VAE + TextEncodeQwenImage21.
@@ -508,11 +528,29 @@ export async function buildDynamicWorkflow(
     return buildRemoveBgWorkflow(gp, rmbgMeta)
   }
 
+  // An MLX picker id is not a ComfyUI file. CheckpointLoaderSimple rejects it
+  // with "Value not in list" (seen with ckpt_name "MLX NSFW-gen v2" on the
+  // img2img/expand graph). Text-to-image on Apple Silicon never reaches this
+  // builder; a Comfy lane must already have swapped to a real checkpoint.
+  if (isMlxImageModel(params.model)) {
+    throw new WorkflowUnavailableError(
+      `"${params.model}" is an on-device MLX model, not a ComfyUI checkpoint. Pick a ComfyUI checkpoint for this edit.`,
+      'unavailable',
+    )
+  }
+
   const { strategy, reason, installHint } = determineStrategy(type, isVideo, nodes, models)
   log.info(`[dynamic-workflow] Strategy: ${strategy} (${reason})`)
 
   if (strategy === 'unavailable') {
     throw new WorkflowUnavailableError(reason, strategy, installHint)
+  }
+
+  if (strategy === 'unet_qwen_image_edit' && models.unets.length > 0 && !models.unets.includes(params.model)) {
+    throw new WorkflowUnavailableError(
+      `"${params.model}" is not in UNETLoader's list. Put the file in ComfyUI's diffusion_models folder.`,
+      'unavailable',
+    )
   }
 
   // Local Edit (mask inpaint) runs on the SDXL/SD1.5 checkpoint pipeline only.
@@ -547,6 +585,9 @@ export async function buildDynamicWorkflow(
   if (strategy === 'framepack') {
     return await buildFramePackWorkflow(params as VideoParams, seed, nodes)
   }
+  if (strategy === 'unet_ltx' && isVideo && isLtx2Model(params.model)) {
+    return await buildLtx2Workflow(params as VideoParams, seed, nodes, allNodes, models)
+  }
 
   // ─── Standard Strategies (UNET/Checkpoint → CLIP → Latent → KSampler → VAEDecode) ───
 
@@ -563,6 +604,27 @@ export async function buildDynamicWorkflow(
   let samplerModelId: string
 
   if (strategy === 'checkpoint') {
+    // A populated checkpoint enum is the truth. An empty one means this
+    // call has no list (offline fixture) and the historical graph still
+    // builds. A name that is not in a real list must not be sent as
+    // ckpt_name — ComfyUI answers "Value not in list" and we do not
+    // substitute another file.
+    // The node info above is cached for 5 minutes, while the model picker
+    // reads ComfyUI live. A checkpoint downloaded inside that window is in
+    // the picker but not in the cached list, so a miss asks ComfyUI once
+    // more before it becomes a refusal.
+    const freshModels = models.checkpoints.length > 0 && !models.checkpoints.includes(params.model)
+      ? detectAvailableModels(await getAllNodeInfo(true))
+      : models
+    if (freshModels.checkpoints.length > 0 && !freshModels.checkpoints.includes(params.model)) {
+      const inUnet = freshModels.unets.includes(params.model)
+      throw new WorkflowUnavailableError(
+        inUnet
+          ? `"${params.model}" is a diffusion model (UNETLoader), not a ComfyUI checkpoint. It lives in diffusion_models, and this build has no graph for that family.`
+          : `"${params.model}" is not in ComfyUI's checkpoint list. CheckpointLoaderSimple only loads files from the checkpoints folder.`,
+        'unavailable',
+      )
+    }
     // Single loader: outputs MODEL (0), CLIP (1), VAE (2)
     modelNodeId = String(n++)
     workflow[modelNodeId] = {
@@ -575,16 +637,13 @@ export async function buildDynamicWorkflow(
     vaeOutputSlot = 2
     samplerModelId = modelNodeId
 
-  } else if (strategy === 'unet_flux' || strategy === 'unet_flux2' || strategy === 'unet_krea2' || strategy === 'unet_zimage' || strategy === 'unet_ernie_image' || strategy === 'unet_qwenimage' || strategy === 'unet_video' || strategy === 'unet_ltx'
+  } else if (strategy === 'unet_flux' || strategy === 'unet_flux2' || strategy === 'unet_krea2' || strategy === 'unet_zimage' || strategy === 'unet_qwen_image_edit' || strategy === 'unet_ernie_image' || strategy === 'unet_qwenimage' || strategy === 'unet_video' || strategy === 'unet_ltx'
     || strategy === 'unet_mochi' || strategy === 'unet_cosmos') {
     // Separate loaders
     const unetId = String(n++)
     const clipId = String(n++)
 
-    const clipType = type === 'zimage' ? 'qwen_image'
-      // Verbatim from the official templates: CLIPLoader type stays
-      // 'qwen_image' for Qwen-Image 2.1, the same widget value Z-Image uses.
-      : type === 'qwenimage' ? 'qwen_image'
+    const clipType = type === 'zimage' || type === 'qwen_image_edit' || type === 'qwenimage' ? 'qwen_image'
       : type === 'ernie_image' ? 'flux2'
       : type === 'flux2' ? 'flux2'
       : type === 'krea2' ? 'krea2'
@@ -636,20 +695,21 @@ export async function buildDynamicWorkflow(
       }
     }
 
-    // VAE is only loaded for strategies with a separate VAELoader — LTX bakes it
-    // into the pipeline, so a missing VAE there is fine. Validate (same
-    // no-silent-fallback rule) only when it will actually be used.
-    const needsVAELoader = strategy !== 'unet_ltx'
-    let vae = ''
-    if (needsVAELoader) {
-      try {
-        vae = await findMatchingVAE(type)
-      } catch (vaeErr) {
-        throw new WorkflowUnavailableError(
-          vaeErr instanceof Error ? vaeErr.message : 'Required VAE not found in ComfyUI.',
-          strategy,
-        )
-      }
+    // Every strategy here decodes (and LTX's I2V node encodes) through a VAE,
+    // so every one loads it. LTX used to be exempt on the theory that it
+    // "bakes the VAE into the pipeline"; it does not, and the fallback below
+    // then wired the UNET loader's MODEL into the vae inputs: ComfyUI refused
+    // the prompt with "LTXVImgToVideo / VAEDecodeTiled: Return type mismatch,
+    // received_type(MODEL) mismatch input_type(VAE)". LTX-2 has its own
+    // builder (buildLtx2Workflow); this path is left for LTX-Video 0.9.
+    let vae: string
+    try {
+      vae = await findMatchingVAE(type)
+    } catch (vaeErr) {
+      throw new WorkflowUnavailableError(
+        vaeErr instanceof Error ? vaeErr.message : 'Required VAE not found in ComfyUI.',
+        strategy,
+      )
     }
 
     addUnetLoader(workflow, unetId, params.model, allNodes)
@@ -663,15 +723,10 @@ export async function buildDynamicWorkflow(
           inputs: { clip_name: clip, type: clipType, device: 'default' },
         }
 
-    let vaeId: string
-    if (needsVAELoader) {
-      vaeId = String(n++)
-      workflow[vaeId] = {
-        class_type: 'VAELoader',
-        inputs: { vae_name: vae },
-      }
-    } else {
-      vaeId = unetId // fallback reference (won't be used for LTX)
+    const vaeId = String(n++)
+    workflow[vaeId] = {
+      class_type: 'VAELoader',
+      inputs: { vae_name: vae },
     }
 
     modelNodeId = unetId
@@ -803,6 +858,17 @@ export async function buildDynamicWorkflow(
     vaeOutputSlot = 0
   }
 
+  if (strategy === 'unet_qwen_image_edit') {
+    // Official Qwen-Image-Edit graph shifts the flow-matching schedule.
+    // ComfyUI 0.33 ships ModelSamplingAuraFlow; shift 3.1 is the template value.
+    const shiftId = String(n++)
+    workflow[shiftId] = {
+      class_type: 'ModelSamplingAuraFlow',
+      inputs: { model: [samplerModelId, 0], shift: 3.1 },
+    }
+    samplerModelId = shiftId
+  }
+
   if (params.clipSkip && params.clipSkip > 0) {
     const skipId = String(n++)
     workflow[skipId] = {
@@ -825,8 +891,43 @@ export async function buildDynamicWorkflow(
   // edit instruction into ordinary latent img2img.
   const isQwenEdit = !isVideo && strategy === 'unet_qwenimage' && !!gp.inputImage
 
-  const posId = String(n++)
-  const negId = String(n++)
+  let posId: string
+  let negId: string
+
+  if (strategy === 'unet_qwen_image_edit') {
+    const encodeClass = nodes.textEncoders.includes('TextEncodeQwenImageEditPlus')
+      ? 'TextEncodeQwenImageEditPlus'
+      : 'TextEncodeQwenImageEdit'
+    let imageNodeId: string | undefined
+    if (!isVideo && gp.inputImage) {
+      imageNodeId = String(n++)
+      workflow[imageNodeId] = {
+        class_type: 'LoadImage',
+        inputs: { image: gp.inputImage },
+      }
+    }
+    posId = String(n++)
+    negId = String(n++)
+    const posInputs: ComfyNodeInputs = {
+      prompt: params.prompt,
+      clip: [clipSourceId, clipOutputSlot],
+      vae: [vaeSourceId, vaeOutputSlot],
+    }
+    if (imageNodeId) {
+      posInputs[encodeClass === 'TextEncodeQwenImageEditPlus' ? 'image1' : 'image'] = [imageNodeId, 0]
+    }
+    workflow[posId] = { class_type: encodeClass, inputs: posInputs }
+    workflow[negId] = {
+      class_type: encodeClass,
+      inputs: {
+        prompt: params.negativePrompt || '',
+        clip: [clipSourceId, clipOutputSlot],
+        vae: [vaeSourceId, vaeOutputSlot],
+      },
+    }
+  } else {
+  posId = String(n++)
+  negId = String(n++)
 
   if (strategy === 'unet_qwenimage') {
     // ONE node carries prompt and negative prompt, the reference image and
@@ -888,6 +989,7 @@ export async function buildDynamicWorkflow(
       }
     }
   }
+  }
 
   // ─── Phase 3: Latent Initialization ───
   // Inpaint mode (local Edit): source + painted mask on the checkpoint path.
@@ -895,11 +997,10 @@ export async function buildDynamicWorkflow(
   // "repaint everything". Ported 1:1 from the web app's tested builder
   // (create-workflows.ts): same node classes, same defaults.
   const isInpaint = !isVideo && !!gp.inputImage && !!gp.maskImage && strategy === 'checkpoint'
-  // I2I mode: LoadImage → VAEEncode instead of empty latent. A Qwen-Image 2.1
-  // edit is excluded: its reference image is already wired into the text
-  // encoder above, and its sampler runs at denoise 1.0 like the official
-  // template (instruction editing, not a partial re-noise of the source).
-  const isI2I = !isVideo && !isInpaint && !isQwenEdit && params.inputImage && (params.denoise ?? 1.0) < 1.0
+  // I2I mode: LoadImage → VAEEncode instead of empty latent.
+  // Qwen Image Edit 2511 feeds the still into TextEncodeQwenImageEditPlus.
+  // A Qwen-Image 2.1 edit is already wired into TextEncodeQwenImage21.
+  const isI2I = strategy !== 'unet_qwen_image_edit' && !isVideo && !isInpaint && !isQwenEdit && params.inputImage && (params.denoise ?? 1.0) < 1.0
 
   const latentId = String(n++)
 
@@ -967,7 +1068,7 @@ export async function buildDynamicWorkflow(
       class_type: 'EmptyLatentImage',
       inputs: { width: params.width, height: params.height, batch_size: params.batchSize },
     }
-  } else if (strategy === 'unet_zimage') {
+  } else if (strategy === 'unet_zimage' || strategy === 'unet_qwen_image_edit') {
     // Z-Image uses SD3 latent (same architecture family)
     const latentNode = nodes.latentInit.includes('EmptySD3LatentImage')
       ? 'EmptySD3LatentImage'
@@ -1498,6 +1599,247 @@ async function buildWan22Workflow(params: VideoParams, seed: number, nodes: Cate
   workflow[decodeId] = videoDecodeNode([samplerId, 0], [vaeId, 0], nodes.decoders.includes('VAEDecodeTiled'))
 
   addVideoOutput(workflow, n, decodeId, params.fps, nodes, params.prompt)
+  return workflow
+}
+
+/** LTX-2 frame counts are 8k+1 (temporal stride 8). */
+export function snapLtx2Length(frames: number): number {
+  const f = frames > 0 ? frames : 97
+  return Math.max(9, Math.round((f - 1) / 8) * 8 + 1)
+}
+
+/** First stage of ComfyUI's own LTX-2.3 template (video_ltx2_3_i2v): the
+ *  schedule a distilled model (or the dev model + distill LoRA) is trained on,
+ *  run at cfg 1. */
+const LTX2_DISTILLED_SIGMAS = '1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0'
+
+/**
+ * LTX-2 / 2.3 (Lightricks). One model makes picture AND sound: the sampler runs
+ * on a joint latent (EmptyLTXVLatentVideo + LTXVEmptyLatentAudio →
+ * LTXVConcatAVLatent), and the result splits back into a video latent for the
+ * video VAE and an audio latent for the audio VAE. The generic LTX path (built
+ * for LTX-Video 0.9: KSampler on a video-only latent, no audio VAE) cannot run
+ * it; it also never loaded a VAE and fed the model loader's MODEL into every
+ * vae input (Return type mismatch … received_type(MODEL)).
+ *
+ * Two install layouts, both read off the live loader lists:
+ *  - checkpoint (ComfyUI's template layout): the Lightricks file in
+ *    models/checkpoints carries MODEL, the video VAE, the audio VAE and the
+ *    text projection; LTXAVTextEncoderLoader pairs it with Gemma.
+ *  - split (Kijai's LTX2.3_comfy, GGUF quants such as PinkCherry): the model in
+ *    diffusion_models, LTX23_video_vae + LTX23_audio_vae in vae, Gemma + the
+ *    ltx-2.3 text projection in text_encoders through DualCLIPLoader 'ltxv'.
+ *    Core VAELoader recognises the audio VAE file itself (comfy/sd.py, "LTX
+ *    Audio"), so no custom node is needed.
+ *
+ * Single stage, no latent upscaler: what the user asked for (size, frames, fps,
+ * steps, cfg) is what renders. A filename saying "distill" gets the distilled
+ * schedule at cfg 1; anything else LTXVScheduler with the user's steps and cfg.
+ *
+ * One device exception, measured on ComfyUI 0.37 / Apple M-series (MPS), same
+ * graph, only one knob changed per run: image-to-video with cfg above 1 decodes
+ * to NaN, black frames and silence (SaveVideo then dies in the AAC encoder,
+ * "avcodec_send_frame() returned 22"); at cfg 1 it animates the picture, with
+ * either schedule, at strength 0.7 or 1. Text-to-video at cfg 3 is fine there,
+ * and Comfy-Org's own LTX-2 i2v template runs cfg 4, so on CUDA the user's cfg
+ * stays. On MPS, I2V runs at cfg 1 and the log says so.
+ */
+async function buildLtx2Workflow(
+  params: VideoParams,
+  seed: number,
+  nodes: CategorizedNodes,
+  allNodes: NodePresence,
+  models: AvailableModels,
+): Promise<ComfyApiGraph> {
+  requireNodes(allNodes, [
+    'EmptyLTXVLatentVideo', 'LTXVEmptyLatentAudio', 'LTXVConcatAVLatent', 'LTXVSeparateAVLatent',
+    'LTXVConditioning', 'LTXVAudioVAEDecode', 'RandomNoise', 'KSamplerSelect', 'CFGGuider',
+    'SamplerCustomAdvanced',
+  ], 'LTX-2 video')
+  const lower = (s: string) => s.toLowerCase()
+  const workflow: ComfyApiGraph = {}
+  let n = 1
+
+  // Spatial grid 32, temporal 8k+1, same snapping the template's math nodes do.
+  const snap32 = (v: number | undefined, def: number) => Math.max(64, Math.round(((v && v > 0) ? v : def) / 32) * 32)
+  const width = snap32(params.width, 768)
+  const height = snap32(params.height, 512)
+  const length = snapLtx2Length(params.frames)
+  const fps = params.fps > 0 ? params.fps : 24
+
+  const gemma = models.clips.find((c) => lower(c).includes('gemma'))
+  if (!gemma) {
+    throw new WorkflowUnavailableError(
+      'LTX-2 needs the Gemma 3 12B text encoder. Download "gemma_3_12B_it_fp8_scaled.safetensors" into ComfyUI/models/text_encoders from the Model Manager.',
+      'unet_ltx',
+    )
+  }
+
+  let modelRef: [string, number]
+  let vaeRef: [string, number]
+  let audioVaeRef: [string, number]
+  let clipRef: [string, number]
+
+  if (models.checkpoints.includes(params.model)) {
+    requireNodes(allNodes, ['LTXVAudioVAELoader', 'LTXAVTextEncoderLoader'], 'LTX-2 video')
+    const ckptId = String(n++)
+    const audioVaeId = String(n++)
+    const clipId = String(n++)
+    workflow[ckptId] = { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: params.model } }
+    workflow[audioVaeId] = { class_type: 'LTXVAudioVAELoader', inputs: { ckpt_name: params.model } }
+    workflow[clipId] = {
+      class_type: 'LTXAVTextEncoderLoader',
+      inputs: { text_encoder: gemma, ckpt_name: params.model, device: 'default' },
+    }
+    modelRef = [ckptId, 0]
+    vaeRef = [ckptId, 2]
+    audioVaeRef = [audioVaeId, 0]
+    clipRef = [clipId, 0]
+  } else {
+    const isLtxVae = (v: string) => lower(v).includes('ltx') && !lower(v).startsWith('tae')
+    const videoVae = models.vaes.find((v) => isLtxVae(v) && lower(v).includes('video'))
+    const audioVae = models.vaes.find((v) => isLtxVae(v) && lower(v).includes('audio'))
+    const projection = models.clips.find((c) => lower(c).includes('ltx') && lower(c).includes('projection'))
+    const missing = [
+      !videoVae && 'vae/LTX23_video_vae_bf16.safetensors',
+      !audioVae && 'vae/LTX23_audio_vae_bf16.safetensors',
+      !projection && 'text_encoders/ltx-2.3_text_projection_bf16.safetensors',
+    ].filter(Boolean)
+    if (!videoVae || !audioVae || !projection) {
+      throw new WorkflowUnavailableError(
+        `"${params.model}" is an LTX-2 model loaded from diffusion_models, so its VAEs and text projection have to be separate files. ` +
+        `Missing: ${missing.join(', ')} (Hugging Face: Kijai/LTX2.3_comfy). ` +
+        'Or put the full Lightricks checkpoint into ComfyUI/models/checkpoints instead.',
+        'unet_ltx',
+      )
+    }
+    requireNodes(allNodes, ['DualCLIPLoader'], 'LTX-2 video')
+    const unetId = String(n++)
+    const vaeId = String(n++)
+    const audioVaeId = String(n++)
+    const clipId = String(n++)
+    addUnetLoader(workflow, unetId, params.model, allNodes)
+    workflow[vaeId] = { class_type: 'VAELoader', inputs: { vae_name: videoVae } }
+    workflow[audioVaeId] = { class_type: 'VAELoader', inputs: { vae_name: audioVae } }
+    workflow[clipId] = {
+      class_type: 'DualCLIPLoader',
+      inputs: { clip_name1: gemma, clip_name2: projection, type: 'ltxv', device: 'default' },
+    }
+    modelRef = [unetId, 0]
+    vaeRef = [vaeId, 0]
+    audioVaeRef = [audioVaeId, 0]
+    clipRef = [clipId, 0]
+  }
+
+  // Video LoRAs are model-only, same as the Wan 2.2 lane.
+  const loras = normalizeLoraList(params.lora)
+  if (loras.length > 0) {
+    const strengths = normalizeLoraStrengths(params.loraStrength, loras.length)
+    loras.forEach((loraName, i) => {
+      const loraId = String(n++)
+      workflow[loraId] = {
+        class_type: 'LoraLoaderModelOnly',
+        inputs: { lora_name: loraName, strength_model: strengths[i], model: modelRef },
+      }
+      modelRef = [loraId, 0]
+    })
+  }
+
+  const posId = String(n++)
+  const negId = String(n++)
+  const condId = String(n++)
+  workflow[posId] = { class_type: 'CLIPTextEncode', inputs: { text: params.prompt, clip: clipRef } }
+  workflow[negId] = { class_type: 'CLIPTextEncode', inputs: { text: params.negativePrompt || '', clip: clipRef } }
+  workflow[condId] = {
+    class_type: 'LTXVConditioning',
+    inputs: { positive: [posId, 0], negative: [negId, 0], frame_rate: fps },
+  }
+
+  const videoLatentId = String(n++)
+  workflow[videoLatentId] = {
+    class_type: 'EmptyLTXVLatentVideo',
+    inputs: { width, height, length, batch_size: 1 },
+  }
+  let videoLatentRef: [string, number] = [videoLatentId, 0]
+
+  // I2V: the start frame is encoded into the first latent frames in place.
+  // The node scales the picture to the latent's size itself (center crop).
+  if (params.inputImage) {
+    requireNodes(allNodes, ['LTXVImgToVideoInplace', 'LTXVPreprocess'], 'LTX-2 image-to-video')
+    const imageId = String(n++)
+    const prepId = String(n++)
+    const i2vId = String(n++)
+    workflow[imageId] = { class_type: 'LoadImage', inputs: { image: params.inputImage } }
+    workflow[prepId] = { class_type: 'LTXVPreprocess', inputs: { image: [imageId, 0], img_compression: 18 } }
+    workflow[i2vId] = {
+      class_type: 'LTXVImgToVideoInplace',
+      inputs: { vae: vaeRef, image: [prepId, 0], latent: videoLatentRef, strength: 1.0, bypass: false },
+    }
+    videoLatentRef = [i2vId, 0]
+  }
+
+  const audioLatentId = String(n++)
+  const avLatentId = String(n++)
+  workflow[audioLatentId] = {
+    class_type: 'LTXVEmptyLatentAudio',
+    inputs: { frames_number: length, frame_rate: Math.round(fps), batch_size: 1, audio_vae: audioVaeRef },
+  }
+  workflow[avLatentId] = {
+    class_type: 'LTXVConcatAVLatent',
+    inputs: { video_latent: videoLatentRef, audio_latent: [audioLatentId, 0] },
+  }
+
+  const distilled = lower(params.model).includes('distill') || loras.some((l) => lower(l).includes('distill'))
+  let cfg = distilled ? 1 : params.cfgScale
+  if (params.inputImage && cfg > 1 && (await getComfyDeviceType()) === 'mps') {
+    log.warn(`[dynamic-workflow] LTX-2 image-to-video on MPS: cfg ${cfg} → 1 (above 1 the MPS run decodes to NaN)`)
+    cfg = 1
+  }
+  const sigmasId = String(n++)
+  workflow[sigmasId] = distilled
+    ? { class_type: 'ManualSigmas', inputs: { sigmas: LTX2_DISTILLED_SIGMAS } }
+    : {
+        class_type: 'LTXVScheduler',
+        inputs: {
+          steps: params.steps, max_shift: 2.05, base_shift: 0.95, stretch: true, terminal: 0.1,
+          latent: [avLatentId, 0],
+        },
+      }
+  if (!distilled) requireNodes(allNodes, ['LTXVScheduler'], 'LTX-2 video')
+  else requireNodes(allNodes, ['ManualSigmas'], 'LTX-2 video')
+
+  const samplers = readComboOptions((allNodes['KSamplerSelect'] as NodeMetadata | undefined)?.input?.required?.sampler_name) ?? []
+  const samplerName = samplers.length === 0 || samplers.includes(params.sampler) ? params.sampler : 'euler'
+
+  const noiseId = String(n++)
+  const samplerSelectId = String(n++)
+  const guiderId = String(n++)
+  const samplerId = String(n++)
+  workflow[noiseId] = { class_type: 'RandomNoise', inputs: { noise_seed: seed } }
+  workflow[samplerSelectId] = { class_type: 'KSamplerSelect', inputs: { sampler_name: samplerName } }
+  workflow[guiderId] = {
+    class_type: 'CFGGuider',
+    inputs: { model: modelRef, positive: [condId, 0], negative: [condId, 1], cfg },
+  }
+  workflow[samplerId] = {
+    class_type: 'SamplerCustomAdvanced',
+    inputs: {
+      noise: [noiseId, 0], guider: [guiderId, 0], sampler: [samplerSelectId, 0],
+      sigmas: [sigmasId, 0], latent_image: [avLatentId, 0],
+    },
+  }
+
+  const splitId = String(n++)
+  const decodeId = String(n++)
+  const audioDecodeId = String(n++)
+  workflow[splitId] = { class_type: 'LTXVSeparateAVLatent', inputs: { av_latent: [samplerId, 0] } }
+  workflow[decodeId] = videoDecodeNode([splitId, 0], vaeRef, nodes.decoders.includes('VAEDecodeTiled'))
+  workflow[audioDecodeId] = {
+    class_type: 'LTXVAudioVAEDecode',
+    inputs: { samples: [splitId, 1], audio_vae: audioVaeRef },
+  }
+
+  addVideoWithAudioOutput(workflow, n, decodeId, fps, [audioDecodeId, 0], allNodes, params.prompt)
   return workflow
 }
 

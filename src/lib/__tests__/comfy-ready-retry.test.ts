@@ -125,7 +125,11 @@ describe('the second pass runs the moment ComfyUI is there', () => {
 
 describe('the model list arms that second pass, and holds the counter while it runs', () => {
   it('THE FIX: an unreachable ComfyUI marks the pass as unanswered', () => {
-    expect(useModels).toMatch(/if \(!isMacOS\(\) && !comfyOk\) comfyAnswered = false/)
+    // Probe on every OS (Mac is connect-only on :8080). Unreachable stays
+    // unanswered; the second-pass arm still waits on comfyui_status.
+    expect(useModels).toMatch(/const comfyOk = await checkComfyConnection\(\)/)
+    expect(useModels).toMatch(/if \(!comfyOk\) comfyAnswered = false/)
+    expect(useModels).not.toMatch(/!isMacOS\(\) && \(await checkComfyConnection/)
   })
 
   it('THE FIX: both lanes rejected marks the pass as unanswered too', () => {
@@ -157,11 +161,11 @@ describe('the model list arms that second pass, and holds the counter while it r
     expect(arm).toMatch(/if \(comfyRetryRunning\) return/)
   })
 
-  it('NEGATIVE CONTROL: the Mac never arms it, there is no ComfyUI to wait for', () => {
+  it('a Mac with a connected instance still arms the inventory retry', () => {
     const arm = useModels.slice(
       useModels.indexOf('function armComfyInventoryRetry'),
       useModels.indexOf('export function __resetComfyInventoryRetryForTests'),
     )
-    expect(arm).toMatch(/if \(isMacOS\(\)\) return/)
+    expect(arm).not.toMatch(/if \(isMacOS\(\)\) return/)
   })
 })

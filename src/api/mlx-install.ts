@@ -80,6 +80,19 @@ function smallest<T extends { sizeBytes: number; installed: boolean }>(models: T
   return missing.reduce((a, b) => (b.sizeBytes < a.sizeBytes ? b : a))
 }
 
+/** The image-engine install already pre-pulls the smallest model. If any image
+ * model is now installed, the local lane is usable and setup is finished; do
+ * not interpret the next missing catalog entry as another required download.
+ *
+ * Size is `sizeBytes` (same field `smallest` compares). Catalog `sizeGB` is
+ * converted at `listMlxImageModels` / `listVideoModels`; this helper must not
+ * reintroduce `sizeGB` or `undefined < undefined` keeps the first row. */
+export function starterForEmptyImageLane<T extends { sizeBytes: number; installed: boolean }>(
+  models: T[],
+): T | null {
+  return models.some((m) => m.installed) ? null : smallest(models)
+}
+
 /**
  * Bring local MLX media for `kind` from nothing to usable.
  *
@@ -100,9 +113,9 @@ export async function installMlxStack(
       useMlxInstallStore.getState().watch('image-engine', 'MLX image engine')
       await awaitSlot(getMlxImageEngineStatus, 'Image engine install', onProgress, signal)
     }
-    const pick = smallest(await listMlxImageModels())
-    // Null means every catalog entry is already installed — the caller's empty
-    // model list was a stale read, not a missing install. Nothing left to do.
+    const pick = starterForEmptyImageLane(await listMlxImageModels())
+    // The engine installer pre-pulls the starter. Null therefore means the
+    // local image lane is already usable; do not fetch a second model.
     if (!pick) return
     onProgress?.(`Downloading ${pick.name} (${formatBytes(pick.sizeBytes)})…`)
     await installMlxImageModel(pick.id)

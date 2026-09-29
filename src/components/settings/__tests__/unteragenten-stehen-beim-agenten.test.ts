@@ -23,7 +23,7 @@ import { sectionsFor, type SettingsSectionFlags } from '../settings-nav'
 const JSX = readFileSync(resolve(__dirname, '..', 'SettingsPage.tsx'), 'utf8')
 
 const ALLE_AN: SettingsSectionFlags = {
-  gpuPicker: true, builtinExpert: true, comfyui: true,
+  gpuPicker: true, builtinExpert: true, comfyui: true, mlxMedia: true,
   agentMode: true, agentWorkflows: true, mediaTimeouts: true,
 }
 

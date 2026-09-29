@@ -558,10 +558,16 @@ impl ProxyAllowList {
 /// machine they did not. Every hop is put through the same allow-list as the
 /// first request, and the chain is short: a local LLM backend has no legitimate
 /// reason to bounce a request more than a couple of times.
+///
+/// `gzip(true)` sends `Accept-Encoding: gzip` and unpacks the answer before
+/// `resp.text()` sees it. On localhost it changes nothing; for a ComfyUI on
+/// another machine started with `--enable-compress-response-body` it is what
+/// lets the 2.8 MB /object_info arrive inside its timeout at all.
 fn proxy_client(timeout: Duration, allow: ProxyAllowList) -> Result<reqwest::Client, String> {
     const MAX_HOPS: usize = 3;
     reqwest::Client::builder()
         .user_agent("LocallyUncensored/2.0")
+        .gzip(true)
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::custom(move |attempt| {
             if attempt.previous().len() >= MAX_HOPS {
@@ -1881,6 +1887,59 @@ mod tests {
                 .expect("a localhost → localhost redirect is legitimate");
             assert!(resp.status().is_success());
             assert_eq!(resp.text().await.unwrap(), "ok");
+        });
+    }
+
+    /// A ComfyUI on another machine, started with
+    /// `--enable-compress-response-body`, only compresses when the request
+    /// says `Accept-Encoding: gzip`. The proxy used to send no such header, so
+    /// the 2.8 MB /object_info crossed a slow tailnet uncompressed and timed out
+    /// mid-body. This stub answers like that ComfyUI: gzip when asked, a marker
+    /// when not; the proxy has to ask, and hand the caller plain JSON.
+    #[test]
+    fn the_proxy_asks_for_gzip_and_hands_back_the_plain_body() {
+        use std::io::Write as _;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let json = format!("{{\"KSampler\":{{\"input\":\"{}\"}}}}", "x".repeat(4096));
+            let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            gz.write_all(json.as_bytes()).unwrap();
+            let packed = gz.finish().unwrap();
+            assert!(packed.len() < json.len() / 10, "the fixture should compress well");
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                let mut resp: Vec<u8>;
+                if req.lines().any(|l| l.starts_with("accept-encoding:") && l.contains("gzip")) {
+                    resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        packed.len()
+                    )
+                    .into_bytes();
+                    resp.extend_from_slice(&packed);
+                } else {
+                    resp = b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nno-gzip".to_vec();
+                }
+                let _ = sock.write_all(&resp).await;
+                let _ = sock.flush().await;
+            });
+
+            let client = proxy_client(Duration::from_secs(10), ProxyAllowList::default()).unwrap();
+            let body = client
+                .get(format!("http://127.0.0.1:{}/object_info", port))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            assert_eq!(body, json, "the proxy must ask for gzip and unpack it");
         });
     }
 

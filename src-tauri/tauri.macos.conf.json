@@ -1,5 +1,12 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-cli/schema.json",
+  "bundle": {
+    "macOS": {
+      "dmg": {
+        "background": "icons/dmg-background.png"
+      }
+    }
+  },
   "app": {
     "windows": [
       {

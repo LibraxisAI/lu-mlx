@@ -41,7 +41,7 @@ vi.mock('../backend', () => ({
   isTauri: () => true,
 }))
 
-import { installCustomNodes, installBundleComplete } from '../discover'
+import { installCustomNodes, installBundleComplete, __resetCustomNodeInstallLatchForTests } from '../discover'
 import { getAllNodeInfo, clearNodeCache } from '../comfyui-nodes'
 
 /** Wie oft der volle Knotenkatalog wirklich vom Server geholt wurde. */
@@ -63,6 +63,7 @@ beforeEach(() => {
   objectInfoAbrufe = 0
   lebendfragen = 0
   clearNodeCache()
+  __resetCustomNodeInstallLatchForTests()
   backendCall.mockReset().mockResolvedValue({ status: 'installed' })
   localFetch.mockReset().mockImplementation(async (url: string) => {
     if (url.endsWith('/object_info')) {
@@ -143,7 +144,7 @@ describe('T-67 · der Bruch NACH dem Neustart ist der, auf den es ankommt', () =
   it('der Neustart laeuft ueber restartComfyForNewNodes, nicht ueber stop/schlafen/start', async () => {
     await installCustomNodes(['videohelpersuite'], { restart: true })
     expect(backendCall.mock.calls.map((c) => c[0]))
-      .toEqual(['install_custom_node', 'stop_comfyui', 'start_comfyui'])
+      .toEqual(['comfyui_status', 'install_custom_node', 'stop_comfyui', 'start_comfyui'])
     // Und dazwischen wurde gefragt, ob der Port frei geworden ist. Genau das
     // tat die ersetzte Kopie nicht — sie schlief zwei Sekunden und startete.
     // Was passiert, wenn der Port belegt bleibt, steht in comfy-restart.test.ts.
@@ -154,7 +155,7 @@ describe('T-67 · der Bruch NACH dem Neustart ist der, auf den es ankommt', () =
     // Die drei Aufrufer in der Create-Oberflaeche fahren ihren Neustart mit
     // eigenem Fortschrittstext. Ihnen darf hier keiner dazwischenfunken.
     await installCustomNodes(['videohelpersuite'])
-    expect(backendCall.mock.calls.map((c) => c[0])).toEqual(['install_custom_node'])
+    expect(backendCall.mock.calls.map((c) => c[0])).toEqual(['comfyui_status', 'install_custom_node'])
   })
 })
 

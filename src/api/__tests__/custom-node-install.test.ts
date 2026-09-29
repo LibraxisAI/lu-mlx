@@ -15,12 +15,13 @@ vi.mock('../backend', async () => {
 })
 
 import { backendCall } from '../backend'
-import { installCustomNodes, assertNodeInstallOk } from '../discover'
+import { installCustomNodes, assertNodeInstallOk, comfyNodeInstallGate, __resetCustomNodeInstallLatchForTests } from '../discover'
 
 const mockedCall = vi.mocked(backendCall)
 
 beforeEach(() => {
   mockedCall.mockReset()
+  __resetCustomNodeInstallLatchForTests()
 })
 
 describe('assertNodeInstallOk (#72)', () => {
@@ -38,6 +39,18 @@ describe('assertNodeInstallOk (#72)', () => {
     expect(() => assertNodeInstallOk(undefined, 'VHS')).not.toThrow()
     expect(() => assertNodeInstallOk(null, 'VHS')).not.toThrow()
     expect(() => assertNodeInstallOk({ path: 'x' }, 'VHS')).not.toThrow()
+  })
+})
+
+describe('comfyNodeInstallGate', () => {
+  it('treats a server on the configured port as present even without a recorded folder', () => {
+    expect(comfyNodeInstallGate({ running: true, found: false })).toBe('install')
+    expect(comfyNodeInstallGate({ running: false, found: true })).toBe('install')
+  })
+
+  it('stays quiet only when nothing is running and nothing is installed', () => {
+    expect(comfyNodeInstallGate({ running: false, found: false })).toBe('quiet')
+    expect(comfyNodeInstallGate(null)).toBe('install')
   })
 })
 
@@ -64,5 +77,37 @@ describe('installCustomNodes (#72)', () => {
 
     await expect(installCustomNodes(['videohelpersuite']))
       .rejects.toThrow(/network down/)
+  })
+
+  it('does not call install when ComfyUI is absent, and does not retry the log', async () => {
+    mockedCall.mockResolvedValue({ running: false, found: false })
+    await expect(installCustomNodes(['rmbg'])).resolves.toBeUndefined()
+    await expect(installCustomNodes(['rmbg'])).resolves.toBeUndefined()
+    expect(mockedCall.mock.calls.map((c) => c[0])).toEqual(['comfyui_status', 'comfyui_status'])
+  })
+
+  it('installs when ComfyUI is already serving, even if the folder was not recorded', async () => {
+    mockedCall.mockImplementation(async (cmd: string) => {
+      if (cmd === 'comfyui_status') return { running: true, found: false, port: 8080 }
+      return { status: 'installed' }
+    })
+    await expect(installCustomNodes(['rmbg'])).resolves.toBeUndefined()
+    expect(mockedCall).toHaveBeenCalledWith('install_custom_node', {
+      repoUrl: 'https://github.com/1038lab/ComfyUI-RMBG',
+      nodeName: 'ComfyUI-RMBG',
+    })
+  })
+
+  it('logs a real install failure once and does not call the backend again', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    mockedCall.mockImplementation(async (cmd: string) => {
+      if (cmd === 'comfyui_status') return { running: true, found: true }
+      throw new Error('pip exploded')
+    })
+    await expect(installCustomNodes(['rmbg'])).rejects.toThrow(/pip exploded/)
+    await expect(installCustomNodes(['rmbg'])).rejects.toThrow(/pip exploded/)
+    const installs = mockedCall.mock.calls.filter((c) => c[0] === 'install_custom_node')
+    expect(installs).toHaveLength(1)
+    error.mockRestore()
   })
 })

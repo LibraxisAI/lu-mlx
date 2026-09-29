@@ -63,7 +63,7 @@ describe('Der Port', () => {
   it('kennt jeden Port, den diese App selbst aufmacht', () => {
     // Wenn hier einer fehlt, kann der Nutzer sich auf einen Dienst setzen,
     // den die App gleich danach selbst starten will.
-    for (const p of [8127, 11434, 11435, 8188, 1234]) {
+    for (const p of [8127, 11434, 11435, 8080, 8188, 1234]) {
       expect(Object.keys(BELEGTE_PORTS).map(Number)).toContain(p)
     }
   })

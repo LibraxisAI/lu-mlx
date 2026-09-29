@@ -864,13 +864,17 @@ fn scan_gguf_dir(
     }
 }
 
-/// App-owned models directory for the built-in engine:
+/// App-owned models directory for the built-in engine. With a configured
+/// models root (config.json `models_root` / `LU_MODELS_ROOT`) this is
+/// `<models_root>/builtin-models`; otherwise the legacy
 /// `{data_dir}/Locally Uncensored/models`. Created on demand so the first
 /// download / scan just works on a fresh box. This is the same path
 /// `detect_model_path("builtin")` returns.
 pub fn builtin_models_dir() -> Result<PathBuf, String> {
-    dirs::data_dir().ok_or("Cannot resolve app data directory")?;
-    let dir = crate::os_paths::builtin_models_dir();
+    let dir = match crate::os_paths::configured_models_root() {
+        Some(root) => root.join("builtin-models"),
+        None => crate::os_paths::builtin_models_dir(),
+    };
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("Create LU Engine models folder: {}", os_error::english(&e)))?;
     Ok(dir)

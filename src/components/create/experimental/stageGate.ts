@@ -50,6 +50,8 @@ export interface StageGateInput {
   modelsLoaded: boolean
   /** Wie viele Modelle diese Spur tatsaechlich anbieten kann. */
   laneModelCount: number
+  /** ComfyUI answered — a Mac with a connected instance is a Comfy host too. */
+  comfyRunning?: boolean
 }
 
 /**
@@ -63,14 +65,16 @@ export interface StageGateInput {
  * Karte bei jedem Start kurz auf.
  */
 export function stageShowsSetupCard(i: StageGateInput): boolean {
+  const mlxOnly = !!i.mlxMissing && !i.comfyRunning
   const macMissing =
-    i.backend === 'local' && !!i.mlxMissing &&
-    (i.requiresModels === 'image' ? i.mlxMissing.image
-      : i.requiresModels === 'video' ? i.mlxMissing.video
+    i.backend === 'local' && mlxOnly &&
+    (i.requiresModels === 'image' ? i.mlxMissing!.image
+      : i.requiresModels === 'video' ? i.mlxMissing!.video
         : false)
   if (macMissing) return true
+  const comfyHost = i.mlxMissing === null || !!i.comfyRunning
   return (
-    i.mlxMissing === null && i.backend === 'local' && !!i.requiresModels && (
+    comfyHost && i.backend === 'local' && !!i.requiresModels && (
       i.connected === false ||
       (i.connected === true && i.modelsLoaded && i.laneModelCount === 0)
     )

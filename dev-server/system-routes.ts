@@ -3,6 +3,7 @@ import { statfsSync } from 'fs'
 import os from 'os'
 import type { RouteMount } from './routes'
 import { errorText } from '../src/types/json-guards'
+import { defaultComfyPort } from '../src/lib/comfy-default-port'
 
 /** Die vier Auskunfts-Endpunkte über den Rechner. Sie lesen nur. */
 export function registerSystemRoutes(routes: RouteMount): void {
@@ -34,7 +35,7 @@ export function registerSystemRoutes(routes: RouteMount): void {
       : 'http://localhost:11434'
     const [ollama, comfyui, lm_studio] = await Promise.all([
       probe(`${ollamaBase}/api/tags`, ollamaBase),
-      probe('http://localhost:8188/system_stats', 'http://localhost:8188'),
+      probe(`http://localhost:${defaultComfyPort()}/system_stats`, `http://localhost:${defaultComfyPort()}`),
       probe('http://localhost:1234/v1/models', 'http://localhost:1234'),
     ])
     let vram_total_gb: number | null = null

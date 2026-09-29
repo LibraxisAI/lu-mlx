@@ -26,6 +26,7 @@ export const BELEGTE_PORTS: Record<number, string> = {
   5173: 'a Vite dev server',
   5273: 'the Vite dev server LU runs in development',
   8127: 'the LU Engine (llama-server)',
+  8080: 'ComfyUI (macOS default)',
   8188: 'ComfyUI',
   11434: 'Ollama',
   11435: 'the Remote Access server for your phone',

@@ -56,6 +56,8 @@ pub async fn install_custom_node(
     // `State` (and the MutexGuard behind it) is not Send, so clone the values
     // out and move owned copies into the worker.
     let comfy_path = { state.comfy_path.lock().unwrap().clone() };
+    let path_slot = state.comfy_path.clone();
+    let comfy_port = *state.comfy_port.lock().unwrap();
     let fallback_python = { state.python_bin.lock().unwrap().clone() };
     // Freeze fix (David 2026-07-04): the git clone + pip below are blocking. As
     // a plain sync #[command] they ran on the Tauri main thread and froze the
@@ -64,7 +66,14 @@ pub async fn install_custom_node(
     // stays responsive and the staged status messages actually paint — the JS
     // caller still awaits this command's result exactly as before.
     tauri::async_runtime::spawn_blocking(move || {
-        install_custom_node_blocking(repoUrl, nodeName, comfy_path, &fallback_python)
+        install_custom_node_blocking(
+            repoUrl,
+            nodeName,
+            comfy_path,
+            &fallback_python,
+            path_slot,
+            comfy_port,
+        )
     })
     .await
     .map_err(|e| format!("Custom node install task failed to run: {e}"))?
@@ -79,6 +88,8 @@ fn install_custom_node_blocking(
     nodeName: String,
     comfy_path: Option<String>,
     fallback_python: &str,
+    path_slot: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    comfy_port: u16,
 ) -> Result<serde_json::Value, String> {
     let repo_url = repoUrl;
     let node_name = nodeName;
@@ -111,17 +122,33 @@ fn install_custom_node_blocking(
 
     info!(node = %node_name, "custom node install start");
 
-    let comfy_dir = match comfy_path {
-        Some(p) => PathBuf::from(p),
-        None => {
-            // Try to find it
-            match crate::commands::process::find_comfyui_path() {
-                Some(p) => PathBuf::from(p),
-                None => {
-                    error!(node = %node_name, "custom node install failed: comfyui not found");
-                    return Err("ComfyUI not found. Install ComfyUI first.".to_string());
+    // A remembered path that no longer contains main.py is not an install.
+    // On macOS the disk walk is off, so the usual miss is a ComfyUI that is
+    // already serving the configured port whose folder was never
+    // written down. Ask that process before concluding it is absent.
+    let remembered = comfy_path.filter(|p| {
+        std::path::Path::new(p).join("main.py").is_file()
+    });
+    let discovered = remembered.or_else(|| {
+        crate::commands::process::find_comfyui_path().filter(|p| {
+            std::path::Path::new(p).join("main.py").is_file()
+        })
+    }).or_else(|| crate::commands::process::comfy_install_from_listener(comfy_port));
+    let comfy_dir = match discovered {
+        Some(p) => {
+            if path_slot.lock().ok().and_then(|g| g.clone()).as_deref() != Some(p.as_str()) {
+                if let Ok(mut slot) = path_slot.lock() {
+                    *slot = Some(p.clone());
+                }
+                if let Err(e) = crate::commands::process::persist_comfyui_path(&p) {
+                    println!("[Install] Could not persist ComfyUI path: {e}");
                 }
             }
+            PathBuf::from(p)
+        }
+        None => {
+            error!(node = %node_name, port = comfy_port, "custom node install failed: comfyui not found");
+            return Err("ComfyUI not found. Install ComfyUI first.".to_string());
         }
     };
 

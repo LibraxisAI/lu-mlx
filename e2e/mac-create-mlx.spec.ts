@@ -57,14 +57,15 @@ async function bootLocalCreate(page: Page, opts: TauriMockOptions) {
 test('mac local: MLX lanes run locally, cloud-only lanes stay visible as teasers', async ({ page }) => {
   await bootLocalCreate(page, MAC_OPTS)
 
-  // The two lanes MLX genuinely serves are plain, selectable radios.
+  // The two lanes MLX genuinely serves, plus Character Studio (musubi trainer).
   await expect(page.getByRole('radio', { name: 'Image', exact: true })).toBeVisible({ timeout: 15_000 })
   await expect(page.getByRole('radio', { name: 'Video', exact: true })).toBeVisible()
+  await expect(page.getByRole('radio', { name: 'Character Studio', exact: true })).toBeVisible()
 
-  // Everything hosted-only keeps its place in the bar as a locked teaser —
-  // David's rule: what can't run locally is still shown, not deleted.
-  // R5-67 renamed the upscale label to "Enhance Image" (parity with web).
-  for (const label of ['Enhance Image', 'Erase Object', 'Character Studio', 'Talking Character', 'Music', 'Extend Video', 'Motion Control']) {
+  // Comfy-backed hosted tools stay locked teasers until :8080 answers.
+  // R5-67 renamed the upscale label to "Enhance Image". Character Studio is a
+  // real local tab (asserted above), so it is not in this locked list.
+  for (const label of ['Enhance Image', 'Erase Object', 'Talking Character', 'Music', 'Extend Video', 'Motion Control']) {
     await expect(page.getByRole('radio', { name: `${label}, runs on LU Cloud` })).toBeVisible()
   }
 
@@ -134,11 +135,11 @@ test('fresh mac: the Local Media panel installs the engine and a model', async (
   await page.getByRole('button', { name: /^Settings$/ }).click()
   await page.getByRole('button', { name: /AI Backends/i }).click()
 
-  // The Mac gets the MLX installer where other platforms get the ComfyUI panel.
+  // The Mac gets the MLX installer; ComfyUI install is never offered here.
   const section = page.getByRole('button', { name: /Local Media \(Apple MLX\)/i })
   await expect(section).toBeVisible({ timeout: 15_000 })
   await section.click()
-  await expect(page.getByRole('button', { name: /ComfyUI/i })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /Install ComfyUI/i })).toHaveCount(0)
 
   // Engine first: a model can't install without it.
   await expect(page.getByText(/about 3 GB of Python packages/i)).toBeVisible()

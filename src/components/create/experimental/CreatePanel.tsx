@@ -163,6 +163,7 @@ function GalleryThumb({ g }: { g: GalleryItem }) {
       </span>
     )
   }
+  if (!src) return <span className="block w-full h-full bg-white/[0.04]" />
   return g.type === 'video' ? (
     <>
       <video src={src} muted playsInline onError={onError} onLoadedData={onLoad} className="w-full h-full object-cover" />

@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { UploadCloud, ImagePlus, Scissors, Wand2, Sparkles, X, Loader2, Download, AlertTriangle, Image as ImageIcon, Film } from 'lucide-react'
 import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
 import { useCreateExp } from './CreateContext'
-import { INTENT_MAP } from './intents'
+import { INTENT_MAP, intentNeedsComfyGraph } from './intents'
 import { stageShowsSetupCard, laneModelCount } from './stageGate'
 import { GeneratingView, ResultView } from './OutputView'
 import { EmptyState } from '../ui/EmptyState'
@@ -16,9 +16,10 @@ import { mediaRefFrom } from './mediaRef'
 import {
   subscribeInstallRuns, getInstallRun, startInstallRun, cancelInstallRun, clearInstallRun,
 } from '../../../lib/model-install-runs'
-import { galleryItemUrl, fetchGalleryItemBlob, recoverGalleryUrl } from './galleryUrl'
+import { fetchGalleryItemBlob } from './galleryUrl'
+import { useComfyMedia } from './useComfyMedia'
 import { InstallCancelled } from '../../../lib/bundle-install'
-import { isMlxImageHost } from '../../../api/mlx-image'
+import { isMlxImageHost, isMlxImageModel } from '../../../api/mlx-image'
 import { bundleForVideoIntent } from '../../../api/comfyui'
 import { getVideoBundles } from '../../../api/discover'
 
@@ -52,6 +53,13 @@ export function Stage({ displayed, onOpenMaskEditor, onEditResult, onAnimateResu
   const lipsyncModelList = useCreateStore((s) => s.lipsyncModelList)
   const motionModelList = useCreateStore((s) => s.motionModelList)
   const { connected, modelsLoaded, mlxMissing } = useCreateExp()
+  const comfyRunning = useCreateStore((s) => s.comfyRunning)
+  const imageForLane = intentNeedsComfyGraph(intent) && intent !== 'edit'
+    ? imageModelList.filter((m) => !isMlxImageModel(m.name))
+    : imageModelList
+  const videoForLane = intentNeedsComfyGraph(intent)
+    ? videoModelList.filter((m) => !isMlxImageModel(m.name))
+    : videoModelList
   // On the cloud backend the utility ops (background removal, …) run on
   // WaveSpeed's hosted endpoints — there's no local ComfyUI node to install,
   // so the capability is always ready. Only the local backend gates on the
@@ -60,13 +68,13 @@ export function Stage({ displayed, onOpenMaskEditor, onEditResult, onAnimateResu
   const capReady = !meta.capability || backend === 'cloud' || !!caps[meta.capability]
   // Local model files missing for this intent (fresh PC): gate the stage on a
   // one-click starter-bundle card. connected === false also gates — the same
-  // button installs ComfyUI itself first. connected === null (still probing)
-  // gates nothing, so the card never flashes during startup.
+  // button installs ComfyUI itself first (Windows/Linux) or asks the user to
+  // connect the user's instance (Mac, connect-only). connected === null
+  // (still probing) gates nothing, so the card never flashes during startup.
   //
-  // macOS answers this from MLX, not from ComfyUI: `connected` is deliberately
-  // pinned to null there (there is nothing to connect to), so the rule would
-  // never fire and a Mac with no model installed got an empty stage and no way
-  // to fix it — the setup lived in Settings, where nothing pointed.
+  // macOS still answers image/video missing from MLX when ComfyUI is not
+  // connected. Once it answers, this host is a Comfy host too — see stageGate
+  // `comfyRunning`.
   //
   // Die Regel selbst steht in ./stageGate, weil die Kopfzeile in
   // CreateExperimental dieselbe Antwort braucht: sie haelt ihren roten Balken
@@ -77,8 +85,9 @@ export function Stage({ displayed, onOpenMaskEditor, onEditResult, onAnimateResu
     mlxMissing,
     connected,
     modelsLoaded,
+    comfyRunning,
     laneModelCount: laneModelCount(intent, meta.requiresModels, {
-      image: imageModelList, video: videoModelList, audio: audioModelList,
+      image: imageForLane, video: videoForLane, audio: audioModelList,
       lipsync: lipsyncModelList, motion: motionModelList,
     }),
   })
@@ -287,7 +296,7 @@ function InputSlot() {
                   title="Use this image as the source"
                   aria-label="Use this gallery image as the source"
                 >
-                  <img src={galleryItemUrl(g)} alt="" className="w-full h-full object-cover" onError={() => recoverGalleryUrl(g)} />
+                  <GalleryPickThumb item={g} />
                 </button>
               ))}
             </div>
@@ -452,6 +461,14 @@ const BUSY_DESCRIPTION = {
   macBundle: 'This runs in the background and survives leaving this tab. Settings → AI Backends → Local Media shows the same progress.',
 } as const
 
+/** Gallery strip thumb. Must not put a cross-origin `/view` on the img —
+ *  ComfyUI 0.19 answers that with 403 and the webview logs it. */
+function GalleryPickThumb({ item }: { item: GalleryItem }) {
+  const { src, onError, onLoad } = useComfyMedia(item)
+  if (!src) return <span className="block w-full h-full bg-white/[0.04]" />
+  return <img src={src} alt="" className="w-full h-full object-cover" onError={onError} onLoad={onLoad} />
+}
+
 function CapabilityCard({ cap }: { cap: 'rmbg' | 'inpaint-nodes' | 'dwpose' }) {
   const { installCapability } = useCreateExp()
   const [installing, setInstalling] = useState(false)
@@ -563,10 +580,9 @@ function ModelInstallCard({ kind }: { kind: 'image' | 'video' | 'audio' | 'lipsy
   // its status line, its Cancel button and its error message to that.
   const runState = useSyncExternalStore(subscribeInstallRuns, () => getInstallRun(kind))
   const { status, err, running: installing } = runState
-  const mac = isMlxImageHost()
-  const copy = (mac && (kind === 'image' || kind === 'video')) ? MAC_BUNDLE_COPY[kind] : BUNDLE_COPY[kind]
-  // The Mac lane runs its own MLX stack and has no ComfyUI bundle to name.
-  const description = (kind === 'video' && !mac)
+  const macMlxBundle = isMlxImageHost() && (kind === 'image' || kind === 'video')
+  const copy = macMlxBundle ? MAC_BUNDLE_COPY[kind] : BUNDLE_COPY[kind]
+  const description = (kind === 'video' && !macMlxBundle)
     ? copy.description + videoBundleLine(intent)
     : copy.description
 
@@ -582,13 +598,16 @@ function ModelInstallCard({ kind }: { kind: 'image' | 'video' | 'audio' | 'lipsy
       icon={copy.icon}
       tone="accent"
       title={installing ? 'Setting this up for you' : copy.title}
-      description={installing ? (mac ? BUSY_DESCRIPTION.macBundle : BUSY_DESCRIPTION.bundle) : description}
+      // The flag is macMlxBundle. A shorter undeclared name is a free
+      // identifier, and WebKit throws ReferenceError on every render of this
+      // card because cancelTitle reads it even while the install is idle.
+      description={installing ? (macMlxBundle ? BUSY_DESCRIPTION.macBundle : BUSY_DESCRIPTION.bundle) : description}
     >
       <InstallCardBody
         run={run} installing={installing} status={status} err={err}
         onDismiss={() => clearInstallRun(kind)}
         onCancel={() => cancelInstallRun(kind)}
-        cancelTitle={mac ? 'Stops showing progress here. The download itself keeps running — pick it up in Settings → AI Backends → Local Media.' : undefined}
+        cancelTitle={macMlxBundle ? 'Stops showing progress here. The download itself keeps running — pick it up in Settings → AI Backends → Local Media.' : undefined}
       />
     </EmptyState>
   )

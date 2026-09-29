@@ -15,6 +15,7 @@ import { registerDownloadRoutes } from './downloads'
 import { registerExecRoutes } from './exec-routes'
 import { registerFsRoutes } from './fs-routes'
 import { registerSystemRoutes } from './system-routes'
+import { registerConfigRoutes } from './config-routes'
 import { registerWebSearchRoutes } from './web-search'
 import { registerWhisperRoutes } from './whisper'
 
@@ -124,6 +125,7 @@ export function devServerPlugin({ port }: DevServerOptions): Plugin {
       registerExecRoutes(routes)
       registerFsRoutes(routes)
       registerSystemRoutes(routes)
+      registerConfigRoutes(routes)
       registerWebSearchRoutes(routes)
       registerWhisperRoutes(routes, (cb) => {
         server.httpServer?.on('close', cb)

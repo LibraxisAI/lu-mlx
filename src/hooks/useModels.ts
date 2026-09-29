@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo } from 'react'
 import { listModels, pullModel as pullModelApi, pullModelTauri, deleteModel as deleteModelApi } from '../api/ollama'
-import { isTauri, isMacOS, backendCall } from '../api/backend'
+import { isTauri, backendCall } from '../api/backend'
 import {
   inventoryOwesRetry, refetchWhenComfyReady, type ComfyReadyStatus,
 } from '../lib/comfy-ready-retry'
@@ -120,7 +120,8 @@ let comfyRetryRunning = false
  */
 function armComfyInventoryRetry(refetch: () => Promise<void>): void {
   if (comfyRetryRunning) return
-  if (isMacOS()) return
+  // Mac is connect-only, not "no ComfyUI": a user instance still
+  // needs the second inventory pass when the first poll raced startup.
   comfyRetryRunning = true
   useModelStore.getState().beginInventoryRefresh()
   void refetchWhenComfyReady({
@@ -441,11 +442,10 @@ export function useModels() {
       // function (Meldung 2, R5 re-measure 2026-08-30).
       // True on the Mac and in the web build, where there is nothing to ask.
       let comfyAnswered = true
-      // Hard rule: Mac local media is MLX-only — ComfyUI never auto-starts
-      // there (process.rs::auto_start_comfyui), so skip the probe outright
-      // instead of a doomed connection check on every model-list refresh.
-      const comfyOk = !isMacOS() && (await checkComfyConnection())
-      if (!isMacOS() && !comfyOk) comfyAnswered = false
+      // Probe on every OS so a Mac with its own ComfyUI is counted. Spawn is
+      // still refused (`comfy_supported_here`); this is connect-only.
+      const comfyOk = await checkComfyConnection()
+      if (!comfyOk) comfyAnswered = false
       if (comfyOk) {
         // Settled, not all: a folder ComfyUI cannot read costs that one lane,
         // never the whole list. The old code lost both to a single throw.

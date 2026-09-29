@@ -49,19 +49,17 @@ export interface SettingsSectionFlags {
   gpuPicker: boolean
   /** `builtinManaged` — der Expertenblock existiert nur, wenn der openai-Slot die eigene Engine IST. */
   builtinExpert: boolean
-  /** `!isMlxImageHost()` — Windows/Linux bekommen ComfyUI, der Mac an derselben Stelle MLX. */
+  /** Always true — ComfyUI is a connect panel on every OS (spawn still refused on macOS). */
   comfyui: boolean
+  /** `isMlxImageHost()` — Apple Silicon also shows the MLX installer next to ComfyUI. */
+  mlxMedia: boolean
   /** `FEATURE_FLAGS.AGENT_MODE` */
   agentMode: boolean
   /** `FEATURE_FLAGS.AGENT_WORKFLOWS` */
   agentWorkflows: boolean
   /**
-   * `settings.appMode !== 'cloud' && !isMlxImageHost()` — die
-   * ComfyUI-Zeitgrenzen. Zwei Bedingungen, nicht eine: im Cloud-Modus gelten
-   * serverseitige Grenzen, und die MLX-Pipeline des Macs hat ihre eigene.
-   * Diese Bedingung hat mich beim ersten Anlauf erwischt — die Rail bot einen
-   * Sprung an, den der Inhalt nicht hatte. Der Beweis dafuer, dass die
-   * Sperrklinke im Test noetig ist.
+   * `settings.appMode !== 'cloud'` — the ComfyUI time limits. Cloud uses
+   * server-side caps. Shown on Mac too once ComfyUI is a connect target.
    */
   mediaTimeouts: boolean
 }
@@ -95,7 +93,8 @@ export function sectionsFor(tab: SettingsTab, flags: SettingsSectionFlags): stri
         'CivitAI API key',
         'Hugging Face token',
         ...(flags.builtinExpert ? ['LU Engine (expert)'] : []),
-        flags.comfyui ? 'ComfyUI (Image & Video)' : 'Local Media (Apple MLX)',
+        ...(flags.comfyui ? ['ComfyUI (Image & Video)'] : []),
+        ...(flags.mlxMedia ? ['Local Media (Apple MLX)'] : []),
       ]
     case 'agent':
       return [

@@ -113,12 +113,14 @@ describe('D-S31: die Regel selbst', () => {
     expect(stageShowsSetupCard(basis)).toBe(false)
   })
 
-  it('meldet den Mac ohne eingerichtete Bildspur', () => {
-    expect(stageShowsSetupCard({ ...basis, mlxMissing: { image: true, video: false } })).toBe(true)
-    // … und nur die Spur, um die es geht.
+  it('a Mac with ComfyUI connected uses the Comfy setup card, not the MLX-missing one', () => {
+    const mac = { ...basis, mlxMissing: { image: true, video: false } as const }
+    expect(stageShowsSetupCard({ ...mac, comfyRunning: false })).toBe(true)
     expect(stageShowsSetupCard({
       ...basis, requiresModels: 'video', mlxMissing: { image: true, video: false },
     })).toBe(false)
+    expect(stageShowsSetupCard({ ...mac, comfyRunning: true, connected: true, laneModelCount: 3 })).toBe(false)
+    expect(stageShowsSetupCard({ ...mac, comfyRunning: true, connected: false })).toBe(true)
   })
 
   it('meldet ein nicht erreichbares ComfyUI', () => {

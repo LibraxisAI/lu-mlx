@@ -73,6 +73,10 @@ export interface MlxGenerateArgs {
   width?: number
   height?: number
   negativePrompt?: string
+  /** Source still for img2img / expand. Omit for text-to-image. */
+  imageBase64?: string
+  /** How much of the source to repaint (Comfy denoise). 0 keeps the image, 1 ignores it. */
+  strength?: number
 }
 
 export interface MlxGenerateResult {
@@ -105,6 +109,10 @@ export async function mlxGenerate(args: MlxGenerateArgs): Promise<MlxGenerateRes
   if (args.width != null) body.width = args.width
   if (args.height != null) body.height = args.height
   if (args.negativePrompt) body.negative_prompt = args.negativePrompt
+  if (args.imageBase64) {
+    body.image_base64 = args.imageBase64
+    body.strength = args.strength ?? 0.7
+  }
   // A single long-blocking request (model load + diffusion) — in-process
   // invoke has no per-call timeout to pass (unlike the old HTTP bridgeCmd).
   return invokeMedia<MlxGenerateResult>('mlx_generate', body)
@@ -261,6 +269,54 @@ export function buildMlxImageModels(catalog: MlxImageModel[]): ClassifiedModel[]
 /** True when the given model name is a synthetic MLX image model. */
 export function isMlxImageModel(name: string | null | undefined): boolean {
   return !!name && name.startsWith(MLX_MODEL_PREFIX)
+}
+
+export type LocalImageDispatch =
+  | { lane: 'mlx'; model: string }
+  | { lane: 'comfy'; model: string }
+  | { lane: 'blocked'; reason: string }
+
+/**
+ * Where a local image run goes. The model name that comes back is the name
+ * that went in — an MLX id is never rewritten to a Comfy checkpoint, and a
+ * Comfy checkpoint is never rewritten to an MLX id.
+ *
+ * Text-to-image and img2img/expand (the Edit intent, including a prompt whose
+ * filename prefix is "expand") of an MLX model stay on the MLX lane. Other
+ * Comfy-only intents cannot use that id; that is a refusal, not a silent
+ * substitution of the first real checkpoint.
+ */
+export function routeLocalImageRun(opts: {
+  isMlxHost: boolean
+  intent: string
+  model: string
+}): LocalImageDispatch {
+  if (isMlxImageModel(opts.model)) {
+    if (opts.isMlxHost && (opts.intent === 'image' || opts.intent === 'edit')) {
+      return { lane: 'mlx', model: opts.model }
+    }
+    return {
+      lane: 'blocked',
+      reason: `"${opts.model}" runs on Apple MLX. It is not a ComfyUI checkpoint.`,
+    }
+  }
+  return { lane: 'comfy', model: opts.model }
+}
+
+/** Raw base64 (no data: prefix) of a blob: or data: image the stage is holding. */
+export async function imageUrlToBase64(url: string): Promise<string> {
+  if (url.startsWith('data:')) {
+    const comma = url.indexOf(',')
+    return comma >= 0 ? url.slice(comma + 1) : ''
+  }
+  const res = await fetch(url)
+  const bytes = new Uint8Array(await res.arrayBuffer())
+  let binary = ''
+  const chunk = 0x8000
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk))
+  }
+  return btoa(binary)
 }
 
 /** Merge synthetic MLX models into ComfyUI image models — MLX first, dedup by name. */

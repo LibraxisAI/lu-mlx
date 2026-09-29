@@ -13,7 +13,7 @@ import { useUIStore, type CloudTeaserTarget } from '../../stores/uiStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { cloudModelById } from '../../stores/cloudCatalogStore'
 import { useCreateStore, type CreateIntent } from '../../stores/createStore'
-import { isIntentAvailable } from '../create/experimental/intents'
+import { isIntentAvailable, mlxOnlyCreateHost } from '../create/experimental/intents'
 import { isMlxImageHost } from '../../api/mlx-image'
 import { openExternal } from '../../api/backend'
 import { CLOUD_BASE } from '../../api/cloud/config'
@@ -59,6 +59,7 @@ export function CloudTeaserModal() {
   const target = useUIStore((s) => s.cloudTeaser)
   const setCloudTeaser = useUIStore((s) => s.setCloudTeaser)
   const setIntent = useCreateStore((s) => s.setIntent)
+  const comfyRunning = useCreateStore((s) => s.comfyRunning)
   const { updateSettings } = useSettingsStore()
   const teasersEnabled = useSettingsStore((s) => s.settings.cloudTeasersEnabled)
   // The card's own number (David, 2026-09-07): "Your GPU has 6 GB" says why
@@ -92,7 +93,7 @@ export function CloudTeaserModal() {
   // "Try local" button for lanes the bar doesn't even show (MAC-2).
   const localLane =
     target?.surface === 'intent' &&
-    isIntentAvailable(target.intent as CreateIntent, 'local', isMlxImageHost())
+    isIntentAvailable(target.intent as CreateIntent, 'local', mlxOnlyCreateHost(isMlxImageHost(), comfyRunning), isMlxImageHost())
       ? target.intent
       : null
   const copy: TeaserCopy | null =

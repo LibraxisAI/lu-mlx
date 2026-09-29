@@ -48,9 +48,9 @@ export type CreateIntent =
   | 'image' | 'edit' | 'removebg' | 'video' | 'animate' | 'upscale' | 'eraser'
   | CloudOp
 
-/** Cloud-only single-purpose WaveSpeed endpoints (2.5.7): super-resolution
- *  and masked object removal. Local backends have no lane for them, so the
- *  IntentBar only offers these while the cloud backend is active. */
+/** Single-purpose utility intents (2.5.7): super-resolution and masked
+ *  object removal. Cloud still has WaveSpeed clips; local ComfyUI now
+ *  runs them too (`LOCAL_UTILITY_OPS`) via ImageScale / inpaint. */
 export type UtilityOp = 'upscale' | 'eraser'
 
 /** 2.5.8 specialized Create categories (2026-07-17 David):
@@ -69,6 +69,11 @@ export type CloudOp = 'character' | 'lipsync' | 'music' | 'extend' | 'motion'
 // the train lane is a real local tab now (it was cloud-first while 2.5.8
 // had no trainer runtime).
 export const LOCAL_LANE_OPS: ReadonlySet<CloudOp> = new Set(['music', 'lipsync', 'extend', 'motion', 'character'])
+
+/** Upscale (core ImageScale) and eraser (checkpoint inpaint + mask) when
+ *  ComfyUI is connected. Kept off the CloudOp set so the specialized-lane
+ *  picker is unchanged; IntentBar unlocks them via `hasLocalLane`. */
+export const LOCAL_UTILITY_OPS: ReadonlySet<UtilityOp> = new Set(['upscale', 'eraser'])
 
 /** An audio/video file (or training image) staged in the composer before
  *  upload. `blob` carries the bytes for the cloud upload; `url` is a local
@@ -132,6 +137,7 @@ export const MODEL_TYPE_DEFAULTS: Record<ModelType, {
   // this used to copy from the OTHER author's recipe (LUSTIFY! v10 Krea2).
   krea2:       { steps: 8,  cfgScale: 1.0, sampler: 'euler',           scheduler: 'beta',   width: 1024, height: 1024 },
   zimage:      { steps: 12, cfgScale: 3.5, sampler: 'euler',           scheduler: 'simple', width: 1024, height: 1024 },
+  qwen_image_edit: { steps: 20, cfgScale: 4.0, sampler: 'euler',       scheduler: 'simple', width: 1024, height: 1024 },
   ernie_image: { steps: 20, cfgScale: 4.0, sampler: 'euler',           scheduler: 'simple', width: 1024, height: 1024 },
   // Qwen-Image 2.1: mirrors comfyui.ts MODEL_TYPE_DEFAULTS.qwenimage, which
   // takes every number straight from the official Comfy-Org templates.
@@ -854,9 +860,11 @@ export const useCreateStore = create<CreateState>()(
       setMusicHowtoSeen: (musicHowtoSeen) => set({ musicHowtoSeen }),
       setSource: (source) => set({ source, sourceSetAt: source ? Date.now() : 0, ...(source ? {} : { mask: null }) }),
       setMask: (mask) => set({ mask }),
-      // Flipping to local clears the intents that have no local lane
-      // (upscale/eraser plus character training — all hosted-only) so the
-      // surface never strands on a dead op the IntentBar no longer shows. Edit
+      // Flipping to local clears the intents that have no local lane here so
+      // the surface never strands on a dead op the IntentBar no longer shows:
+      // upscale/eraser everywhere except a Mac with its own ComfyUI connected
+      // (`localLaneMacOnly`), and hosted-only CloudOps. Character trains
+      // locally since 2.6.0 (LOCAL_LANE_OPS). Edit
       // keeps its state since 2.5.7 (checkpoint mask inpaint), removebg keeps
       // its RMBG lane, and animate keeps its i2v state since 2026-07-17 — the
       // local I2V lane is back (buildDynamicWorkflow wires the family's
@@ -865,28 +873,26 @@ export const useCreateStore = create<CreateState>()(
         set((s) => {
           if (backend !== 'local') return { backend }
           const patch: Record<string, unknown> = { backend }
-          if (s.utilityOp) Object.assign(patch, { utilityOp: null, mask: null, error: null })
+          const mlxOnly = isMlxImageHost() && !s.comfyRunning
+          // Upscale / eraser run locally only in the Mac fork (Comfy connected);
+          // Windows/Linux keep them as LU Cloud tools (`localLaneMacOnly`).
+          if (s.utilityOp && (mlxOnly || !isMlxImageHost() || !LOCAL_UTILITY_OPS.has(s.utilityOp))) {
+            Object.assign(patch, { utilityOp: null, mask: null, error: null })
+          }
           // music/lipsync/extend/motion (2.5.8) and character (2.6.0, local
           // musubi trainer) run locally, so a backend flip keeps them
-          // selected; only the genuinely hosted-only ops (upscale/eraser)
-          // drop. LOCAL_LANE_OPS is the single source of truth.
+          // selected; only the genuinely hosted-only ops drop.
+          // LOCAL_LANE_OPS is the single source of truth for CloudOp.
           if (s.cloudOp && !LOCAL_LANE_OPS.has(s.cloudOp)) {
             Object.assign(patch, { cloudOp: null, error: null })
           }
-          // Und auf einem Mac laeuft lokal MLX, nicht ComfyUI. MLX kann weder
-          // Edit noch Cutout noch Animate, `visibleIntents` blendet die drei
-          // dort deshalb aus. Bleibt eine davon gewaehlt, findet die
-          // Werkzeugleiste ihren eigenen Eintrag nicht mehr und steht ohne
-          // Auswahl da. Gemessen am 04.09.2026: erreichbar ohne einen einzigen
-          // Klick in der Leiste, allein ueber den Backend-Schalter.
-          //
-          // Nur wenn wirklich das Grundwerkzeug zu sehen ist: haelt der Nutzer
-          // eine der lokalen Bahnen (Music, Lipsync, Extend, Motion,
-          // Character), bleibt seine Wahl fuer img2img und i2v unangetastet,
-          // damit sie beim Zurueckschalten noch da ist.
+          // Und auf einem Mac OHNE verbundenes ComfyUI laeuft lokal MLX, nicht
+          // ComfyUI. MLX kann weder Edit noch Cutout noch Animate. Bleibt eine
+          // davon gewaehlt, findet die Werkzeugleiste ihren Eintrag nicht mehr.
+          // Ist ein ComfyUI verbunden, bleiben sie stehen.
           const opBleibt = ('cloudOp' in patch ? patch.cloudOp : s.cloudOp)
             || ('utilityOp' in patch ? patch.utilityOp : s.utilityOp)
-          if (isMlxImageHost() && !opBleibt) {
+          if (mlxOnly && !opBleibt) {
             if (s.removebg) Object.assign(patch, { removebg: false })
             if (s.imageSubMode === 'img2img') Object.assign(patch, { imageSubMode: 'text2img' })
             if (s.videoSubMode === 'i2v') Object.assign(patch, { videoSubMode: 't2v' })

@@ -248,9 +248,9 @@ export function ResultView({ item, onFullscreen, onSendToEditor, onAnimate }: Re
           <div className="w-[420px] max-w-full flex flex-col items-center gap-3 p-6 rounded-[var(--radius-panel)] border border-white/[0.06] bg-white/[0.02]">
             <AudioLines size={26} className="text-gray-400" strokeWidth={ICON_STROKE_MARK} />
             <p className="t-body text-gray-400 text-center line-clamp-2">{galleryLabel(item)}</p>
-            <audio src={url} controls onError={onError} className="w-full" onLoadedData={() => markGalleryItemAvailable(item)} />
+            {url ? <audio src={url} controls onError={onError} className="w-full" onLoadedData={() => markGalleryItemAvailable(item)} /> : null}
           </div>
-        ) : isVideo ? (
+        ) : !url ? null : isVideo ? (
           <video
             src={url}
             controls

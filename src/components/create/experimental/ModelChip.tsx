@@ -12,6 +12,8 @@ import { useContentPolicy } from '../../../hooks/useContentPolicy'
 import { Select, type SelectOption } from '../ui/Select'
 import { TYPE_BADGE } from './badges'
 import { resolveLocalOpPick, videoLaneModels } from '../../../api/comfyui'
+import { isMlxImageModel } from '../../../api/mlx-image'
+import { intentNeedsComfyGraph } from './intents'
 
 // Portplan P7: lipsync/music/extend/motion reach the Studio track through the
 // SAME picker as their classic op-specialized twins, one list, matching what
@@ -208,7 +210,15 @@ function LocalModelChip() {
   // Video lists t2v-capable ones (SVD/FramePack are i2v-only and drop there).
   // Shared with Stage's missing-models gate so card and picker cannot drift.
   const rawList = isVideo ? videoModelList : imageModelList
-  const list = laneList ?? (!isVideo ? rawList : videoLaneModels(rawList, intent))
+  const laneFiltered = laneList ?? (!isVideo ? rawList : videoLaneModels(rawList, intent))
+  // Comfy graphs cannot load an "MLX …" row. Hide those names on every intent
+  // that submits a checkpoint, so the chip cannot offer the id that
+  // CheckpointLoaderSimple then rejects.
+  // Edit/expand of an MLX model stays on the MLX lane, so those rows stay
+  // in the chip. Other Comfy intents have no MLX path and must not offer them.
+  const list = intentNeedsComfyGraph(intent) && intent !== 'edit'
+    ? laneFiltered.filter((m) => !isMlxImageModel(m.name))
+    : laneFiltered
   const stored = laneList ? localOpModel : (isVideo ? videoModel : imageModel)
   // Reflect the model the run will really use — a leftover pick the current
   // op can't perform must not show as "selected". Lanes share the submit-side

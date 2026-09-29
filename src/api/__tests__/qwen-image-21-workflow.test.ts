@@ -108,9 +108,18 @@ describe('Qwen-Image 2.1 classification', () => {
   })
 
   it('leaves the older Qwen-Image generations alone', () => {
+    // Plain 2508/2512 files still have no lane. Edit 2509/2511 is the
+    // separate UNET + TextEncodeQwenImageEditPlus graph, not the 2.1 one.
     expect(classifyModel('qwen_image_fp8_e4m3fn.safetensors')).toBe('unknown')
-    expect(classifyModel('qwen_image_edit_2509_fp8.safetensors')).toBe('unknown')
+    expect(classifyModel('qwen_image_edit_2509_fp8.safetensors')).toBe('qwen_image_edit')
     expect(classifyModel('qwen_image_2512_bf16.safetensors')).toBe('unknown')
+    for (const name of [
+      'qwen_image_fp8_e4m3fn.safetensors',
+      'qwen_image_edit_2509_fp8.safetensors',
+      'qwen_image_2512_bf16.safetensors',
+    ]) {
+      expect(classifyModel(name)).not.toBe('qwenimage')
+    }
   })
 
   it('is an image model type, so it shows in Generate AND in Edit', () => {

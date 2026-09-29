@@ -1,0 +1,11 @@
+This is a SENTINEL FILE, not a loctree config directory.
+
+Never run `loct` with cwd src-tauri/. That would try to create a nested
+snapshot here (and a second loctree project identity). The canonical map
+is the repository root:
+
+    cd <locally-uncensored> && loct scan
+    make loc          # also asserts repo root first
+
+If this path were a directory named .loctree/, an accidental scan would
+succeed. A regular file makes mkdir fail closed instead.

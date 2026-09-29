@@ -36,6 +36,7 @@ describe('der Mac strandet nicht auf einem Werkzeug, das er lokal nicht hat', ()
   beforeEach(() => {
     useCreateStore.setState({ backend: 'cloud' })
     useCreateStore.getState().setIntent('image')
+    useCreateStore.setState({ comfyRunning: false })
   })
 
   it('drei Werkzeuge sind lokal auf dem Mac wirklich versteckt', () => {
@@ -78,13 +79,18 @@ describe('der Mac strandet nicht auf einem Werkzeug, das er lokal nicht hat', ()
     expect(useCreateStore.getState().imageSubMode).toBe('img2img')
   })
 
-  it('ein hosted-only Werkzeug faellt weiter weg, wie bisher', () => {
-    // Negativkontrolle gegen einen zu breiten Griff: Upscale und Eraser haben
-    // keine lokale Bahn und mussten schon vorher weichen.
-    useCreateStore.setState({ backend: 'cloud' })
+  it('ein Comfy-Werkzeug faellt auf MLX-only weg, bleibt aber bei verbundenem ComfyUI', () => {
+    // Upscale/Eraser haben eine lokale ComfyUI-Bahn, aber ohne Instanz auf
+    // :8080 ist das ein totes Graph-Werkzeug. mlxOnly raeumt sie.
+    useCreateStore.setState({ backend: 'cloud', comfyRunning: false })
     useCreateStore.getState().setIntent('upscale')
     useCreateStore.getState().setBackend('local')
     expect(jetzt()).not.toBe('upscale')
     expect(sichtbar().has(jetzt())).toBe(true)
+
+    useCreateStore.setState({ backend: 'cloud', comfyRunning: true })
+    useCreateStore.getState().setIntent('upscale')
+    useCreateStore.getState().setBackend('local')
+    expect(jetzt()).toBe('upscale')
   })
 })

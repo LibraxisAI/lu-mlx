@@ -1,0 +1,194 @@
+# LU local task runner. Canonical recipes live in the Makefile —
+# every mise task is `make <target>` so `mise run X` and `make X` cannot drift.
+#
+# This file exists because LU operators
+# already use mise for Node 22 (.nvmrc) and the workstream asked for both
+# surfaces. Rust stays on rustup, not mise, matching CI.
+#
+# Do not put Apple ID / notary passwords here.
+#
+# scripts/bin/loct is a PATH shim around scripts/assert-loct-repo-root.sh.
+# Bare `cd src-tauri && loct scan` otherwise writes a crate-keyed cache
+# even though src-tauri/.loctree is a sentinel FILE (not a directory).
+
+[env]
+_.path = ["{{config_root}}/scripts/bin"]
+
+[tools]
+node = "22"
+
+[tasks.help]
+description = "List install-app, release, and every adapted make target"
+run = "make help"
+
+[tasks.build]
+description = "Debug cargo build (not a bundled .app)"
+run = "make build"
+
+[tasks.build-release]
+description = "Release-mode cargo build only"
+run = "make build-release"
+
+[tasks.run]
+description = "tauri:dev"
+run = "make run"
+
+[tasks.run-release]
+description = "Signed .app build + launch"
+run = "make run-release"
+
+[tasks.install-app]
+description = "Signed local .app into /Applications (macOS; LU must be idle)"
+run = "make install-app"
+
+[tasks.install-app-debug]
+description = "Debug-bundle .app into /Applications"
+run = "make install-app-debug"
+
+[tasks.install-built-app]
+description = "Install the existing .app without rebuilding"
+run = "make install-built-app"
+
+[tasks.open]
+description = "Open the current release .app"
+run = "make open"
+
+[tasks.open-dmg]
+description = "Open the current DMG"
+run = "make open-dmg"
+
+[tasks.clean]
+description = "Remove Vite dist/, release/macos/, Tauri bundle dirs"
+run = "make clean"
+
+[tasks.clean-deep]
+description = "clean + nuke src-tauri/target"
+run = "make clean-deep"
+
+[tasks.test]
+description = "vitest unit tests"
+run = "make test"
+
+[tasks.typecheck]
+description = "tsc --noEmit"
+run = "make typecheck"
+
+[tasks.test-scripts]
+description = "Shell tests for sidecar/identity/install/keychain"
+run = "make test-scripts"
+
+[tasks.lint]
+description = "eslint"
+run = "make lint"
+
+[tasks.gates]
+description = "typecheck + vitest + script tests"
+run = "make gates"
+
+[tasks.sidecar]
+description = "Build lu-llama-server-<triple> (slow)"
+run = "make sidecar"
+
+[tasks.check-sidecar]
+description = "Fail if sidecar is missing or the empty CI stub"
+run = "make check-sidecar"
+
+[tasks.sidecar-exists]
+description = "Sidecar file exists (stub allowed with a warning)"
+run = "make sidecar-exists"
+
+[tasks.sidecar-stub]
+description = "Empty sidecar for cargo check only; never clobbers a real binary"
+run = "make sidecar-stub"
+
+[tasks.sidecar-check-boot]
+description = "Boot host sidecar and probe /health"
+run = "make sidecar-check-boot"
+
+[tasks.release]
+description = "Signed + notarized .app + .dmg"
+run = "make release"
+
+[tasks.release-local]
+description = "Signed .app only (no notarize, no DMG)"
+run = "make release-local"
+
+[tasks.release-unsigned]
+description = "Unsigned local .app + .dmg"
+run = "make release-unsigned"
+
+[tasks.release-clean]
+description = "Clean + full notarized release"
+run = "make release-clean"
+
+[tasks.notarize]
+description = "DMG-only from the existing signed .app"
+run = "make notarize"
+
+[tasks.staple]
+description = "Staple existing .app + .dmg"
+run = "make staple"
+
+[tasks.release-plan]
+description = "Preflight + print lane (no compile, no notary submit)"
+run = "make release-plan"
+
+[tasks.release-appstore]
+description = "Not applicable — LU is not on the Mac App Store"
+run = "make release-appstore"
+
+[tasks.loc]
+description = "loctree overview"
+run = "make loc"
+
+[tasks.tree]
+description = "Source file list"
+run = "make tree"
+
+[tasks.log]
+description = "Recent git log"
+run = "make log"
+
+[tasks.info-status]
+description = "git status -sb"
+run = "make info-status"
+
+[tasks.info-artifacts]
+description = "Inspect bundle + stapler"
+run = "make info-artifacts"
+
+[tasks.info-certs]
+description = "Keychain signing identities"
+run = "make info-certs"
+
+[tasks.print-env]
+description = "Redacted signing/notary/sidecar dump"
+run = "make print-env"
+
+[tasks.info-env]
+description = "Alias for print-env"
+run = "make info-env"
+
+[tasks.check-signing]
+description = "codesign --verify + stapler + spctl"
+run = "make check-signing"
+
+[tasks.ci]
+description = "Local CI analog (stubs + gates + cargo check)"
+run = "make ci"
+
+[tasks.ci-tauri-build]
+description = "Keyless tauri build gate (heavy)"
+run = "make ci-tauri-build"
+
+[tasks.cargo-check]
+description = "cargo check --manifest-path src-tauri/Cargo.toml (cwd stays repo root)"
+run = "make cargo-check"
+
+[tasks.preflight]
+description = "Alias for release-plan"
+run = "make preflight"
+
+[tasks.sidecar-health]
+description = "Alias for sidecar-check-boot"
+run = "make sidecar-health"

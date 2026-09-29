@@ -982,6 +982,194 @@ pub fn find_comfyui_path() -> Option<String> {
     None
 }
 
+/// Install directory of a ComfyUI that is already listening, without walking
+/// the disk.
+///
+/// macOS turns `find_comfyui_path`'s home walk off (`comfyui_disk_search_allowed`)
+/// because the first touch of ~/Desktop and ~/Music is a permission dialog.
+/// That also made a ComfyUI the user had already started — this project's
+/// Mac port — invisible: `state.comfy_path` stayed empty, config had
+/// no `comfyui_path`, and `install_custom_node` answered "ComfyUI not found"
+/// while `/system_stats` on that port was fine. The process cwd (and an
+/// absolute `main.py` in argv) is the folder. Anything that is not a ComfyUI
+/// checkout is rejected: the directory must contain `main.py`.
+pub fn comfy_install_from_listener(port: u16) -> Option<String> {
+    if port == 0 {
+        return None;
+    }
+    let argv = argv_from_system_stats(port);
+    let cwd = listener_cwd(port);
+    let root = comfy_root_from_hints(&argv, cwd.as_deref(), |p| p.join("main.py").is_file())?;
+    Some(root.to_string_lossy().into_owned())
+}
+
+/// `argv` from `GET /system_stats` plus the listener's cwd. The predicate is
+/// injected so the rule can be tested without a live server or a real tree.
+pub(crate) fn comfy_root_from_hints(
+    argv: &[String],
+    cwd: Option<&Path>,
+    has_main_py: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    for arg in argv {
+        let p = Path::new(arg);
+        // Only an absolute script path. A bare `main.py` is relative to the
+        // listener's cwd, which we resolve below — joining it onto LU's own
+        // cwd would pick the wrong tree.
+        if !p.is_absolute() {
+            continue;
+        }
+        let name = p.file_name().and_then(|n| n.to_str());
+        if name == Some("main.py") {
+            if let Some(parent) = p.parent() {
+                if has_main_py(parent) {
+                    return Some(parent.to_path_buf());
+                }
+            }
+        }
+    }
+    let mut cur = cwd.map(|p| p.to_path_buf());
+    for _ in 0..4 {
+        let Some(dir) = cur else { break };
+        if has_main_py(&dir) {
+            return Some(dir);
+        }
+        cur = dir.parent().map(|p| p.to_path_buf());
+    }
+    None
+}
+
+pub(crate) fn argv_from_system_stats_body(body: &str) -> Option<Vec<String>> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let argv = v.get("system")?.get("argv")?.as_array()?;
+    Some(
+        argv.iter()
+            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+            .collect(),
+    )
+}
+
+fn argv_from_system_stats(port: u16) -> Vec<String> {
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_millis(1500))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    // 127.0.0.1, not "localhost": the latter can resolve to ::1 while ComfyUI
+    // is bound to IPv4 only, which is how a live server looked absent.
+    let url = format!("http://127.0.0.1:{port}/system_stats");
+    let Ok(resp) = client.get(url).send() else {
+        return Vec::new();
+    };
+    if !resp.status().is_success() {
+        return Vec::new();
+    }
+    let Ok(body) = resp.text() else {
+        return Vec::new();
+    };
+    argv_from_system_stats_body(&body).unwrap_or_default()
+}
+
+/// First pid in `lsof -F p` output (`p12345` lines).
+pub(crate) fn pid_from_lsof_f(output: &str) -> Option<u32> {
+    for line in output.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix('p') {
+            if let Ok(pid) = rest.parse::<u32>() {
+                if pid > 0 {
+                    return Some(pid);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// cwd from `lsof -F n` (`n/path` lines). Skips the socket name (`n*:8080`).
+pub(crate) fn cwd_from_lsof_f(output: &str) -> Option<PathBuf> {
+    for line in output.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix('n') else {
+            continue;
+        };
+        if rest.is_empty() || rest.starts_with('*') || rest.starts_with("TCP") || rest.contains("->")
+        {
+            continue;
+        }
+        if rest.starts_with('/') || (rest.len() > 2 && rest.as_bytes().get(1) == Some(&b':')) {
+            return Some(PathBuf::from(rest));
+        }
+    }
+    None
+}
+
+fn listener_cwd(port: u16) -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = port;
+        None
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // lsof is a system program, so it goes through the adapter like every
+        // other one: inside an AppImage it must not inherit the bundle's
+        // LD_LIBRARY_PATH (process_util's command_new_coverage_guard).
+        let Ok(out) = crate::process_util::foreign_system_command("lsof")
+            .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-F", "p"])
+            .output()
+        else {
+            return None;
+        };
+        let pid = pid_from_lsof_f(&String::from_utf8_lossy(&out.stdout))?;
+        let Ok(cwd_out) = crate::process_util::foreign_system_command("lsof")
+            .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-F", "n"])
+            .output()
+        else {
+            return None;
+        };
+        cwd_from_lsof_f(&String::from_utf8_lossy(&cwd_out.stdout))
+    }
+}
+
+/// Write `comfyui_path` the same way `set_comfyui_path` does, so the next
+/// launch sees the folder without asking the listener again.
+pub fn persist_comfyui_path(path: &str) -> Result<(), String> {
+    let app_config = crate::os_paths::app_config_dir();
+    fs::create_dir_all(&app_config).map_err(|e| os_error::english(&e))?;
+    let config_file = app_config.join("config.json");
+    let mut config: serde_json::Value = if config_file.exists() {
+        fs::read_to_string(&config_file)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    config["comfyui_path"] = serde_json::json!(path);
+    fs::write(
+        &config_file,
+        serde_json::to_string_pretty(&config).unwrap_or_else(|_| "{}".to_string()),
+    )
+    .map_err(|e| os_error::english(&e))
+}
+
+/// Record the install dir of a ComfyUI that is already up. No-op when we
+/// already know a folder, and no-op when nothing on `port` is a ComfyUI.
+fn remember_listening_comfy(state: &AppState) {
+    if state.comfy_path.lock().unwrap().is_some() {
+        return;
+    }
+    let port = *state.comfy_port.lock().unwrap();
+    if let Some(path) = comfy_install_from_listener(port) {
+        println!("[ComfyUI] Instance already listening on port {port}: {path}");
+        *state.comfy_path.lock().unwrap() = Some(path.clone());
+        if let Err(e) = persist_comfyui_path(&path) {
+            println!("[ComfyUI] Could not persist path: {e}");
+        }
+    }
+}
+
 /// Information about a discovered ComfyUI install — surfaced to the
 /// frontend so the user picks the right one when multiple coexist.
 ///
@@ -1278,11 +1466,23 @@ pub async fn fix_comfyui_cors(app: tauri::AppHandle) -> Result<serde_json::Value
     .map_err(|e| format!("fix_comfyui_cors task: {e}"))?
 }
 
+/// The Origin LU's webview sends, i.e. the value a user-run ComfyUI has to
+/// allow. Tauri 2 serves the app from `http://tauri.localhost` on Windows but
+/// from `tauri://localhost` on macOS and Linux; the hint used to name the
+/// Windows one everywhere, so a Mac following it still got the 403.
+const fn webview_origin() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "http://tauri.localhost"
+    } else {
+        "tauri://localhost"
+    }
+}
+
 fn fix_comfyui_cors_blocking(state: &AppState) -> Result<serde_json::Value, String> {
     let host = state.comfy_host.lock().unwrap().clone();
     if !is_local_host(&host) {
         return Err(
-            "ComfyUI runs on a remote host, so LU can't restart it from here. Add --enable-cors-header http://tauri.localhost to the launch command on that machine instead.".to_string(),
+            format!("ComfyUI runs on a remote host, so LU can't restart it from here. Add --enable-cors-header {} to the launch command on that machine instead (and --enable-compress-response-body, so large answers cross the network compressed).", webview_origin()),
         );
     }
     let path_known = state
@@ -1294,7 +1494,7 @@ fn fix_comfyui_cors_blocking(state: &AppState) -> Result<serde_json::Value, Stri
         .is_some();
     if !path_known {
         return Err(
-            "LU doesn't know this ComfyUI's folder yet. Set it under Settings → AI Backends → ComfyUI → Path, then press the button again. Or add --enable-cors-header http://tauri.localhost to your own launch script.".to_string(),
+            format!("LU doesn't know this ComfyUI's folder yet. Set it under Settings → AI Backends → ComfyUI → Path, then press the button again. Or add --enable-cors-header {} to your own launch script.", webview_origin()),
         );
     }
     let port = *state.comfy_port.lock().unwrap();
@@ -2655,6 +2855,44 @@ pub fn set_comfyui_port(port: u16, state: State<'_, AppState>) -> Result<serde_j
     Ok(serde_json::json!({"status": "saved", "port": port}))
 }
 
+/// The Settings field for heavy-model storage. Returns the `models_root` key
+/// from config.json (not the env fallback) so clearing the field is an honest
+/// "use defaults" rather than echoing `LU_MODELS_ROOT`.
+#[tauri::command]
+pub fn get_models_root() -> Result<serde_json::Value, String> {
+    let path = std::fs::read_to_string(crate::os_paths::app_config_json())
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| {
+            v.get("models_root")?
+                .as_str()
+                .map(|s| s.trim().to_string())
+        })
+        .filter(|s| !s.is_empty());
+    Ok(serde_json::json!({ "path": path }))
+}
+
+/// Persist `models_root` in config.json. Empty string removes the key so
+/// callers fall back to `LU_MODELS_ROOT` / per-feature defaults.
+#[tauri::command]
+pub fn set_models_root(path: String) -> Result<serde_json::Value, String> {
+    let trimmed = path.trim().to_string();
+    crate::os_paths::merge_app_config(|config| {
+        if trimmed.is_empty() {
+            if let Some(obj) = config.as_object_mut() {
+                obj.remove("models_root");
+            }
+        } else {
+            config["models_root"] = serde_json::json!(trimmed);
+        }
+        Ok(())
+    })?;
+    Ok(serde_json::json!({
+        "status": "saved",
+        "path": if trimmed.is_empty() { serde_json::Value::Null } else { serde_json::json!(trimmed) }
+    }))
+}
+
 /// Normalize user input into a full Ollama base URL.
 /// Accepts bare `host:port`, scheme-less host, or full URL.
 /// Returns full URL without trailing slash, or Err for obviously bad input.
@@ -2776,7 +3014,12 @@ pub fn auto_start_comfyui(state: &AppState) {
     // ComfyUI itself stays fully intact for Windows/Linux and for a user who
     // manually invokes `start_comfyui` — only the unattended boot path skips it.
     if cfg!(target_os = "macos") {
-        println!("[ComfyUI] Auto-start skipped on macOS — local media is MLX-only");
+        // Spawn stays refused (local media is MLX). A ComfyUI the user already
+        // started on the configured port still needs its folder
+        // recorded, or custom-node install reports "ComfyUI not found" while
+        // the server is answering. This does not walk the disk.
+        remember_listening_comfy(state);
+        println!("[ComfyUI] Auto-start skipped on macOS — connect-only");
         return;
     }
     // If user configured a remote host, don't try to auto-start anything locally.
@@ -3005,13 +3248,63 @@ mod utf8_start_waechter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
 
-    /// The Mac never runs ComfyUI, so it must never search the disk for one:
-    /// the home walk crosses ~/Desktop and ~/Music and macOS turns the first
-    /// touch of each into a permission dialog at launch.
+    /// Disk search stays off on macOS: the home walk crosses ~/Desktop and
+    /// ~/Music and macOS turns the first touch of each into a permission
+    /// dialog at launch. A ComfyUI that is already listening is found from
+    /// that process (`comfy_install_from_listener`), not from this walk.
     #[test]
     fn comfyui_disk_search_is_off_on_macos_and_on_elsewhere() {
         assert_eq!(comfyui_disk_search_allowed(), !cfg!(target_os = "macos"));
+    }
+
+    #[test]
+    fn listening_comfy_root_comes_from_absolute_main_py_or_cwd() {
+        let root = if cfg!(windows) {
+            Path::new(r"C:\Users\me\ComfyUI")
+        } else {
+            Path::new("/Users/me/ComfyUI")
+        };
+        let main_py = root.join("main.py");
+        let has = |p: &Path| p == root;
+        let argv = vec![
+            "python".to_string(),
+            main_py.to_string_lossy().to_string(),
+            "--port".to_string(),
+            "8080".to_string(),
+        ];
+        assert_eq!(
+            comfy_root_from_hints(&argv, None, has).as_deref(),
+            Some(root)
+        );
+        // Bare `main.py` must not be joined onto the caller's cwd.
+        let bare = vec!["main.py".to_string(), "--port".to_string(), "8080".to_string()];
+        assert_eq!(
+            comfy_root_from_hints(&bare, Some(root), has).as_deref(),
+            Some(root)
+        );
+        let fallback_tmp = if cfg!(windows) {
+            Path::new(r"C:\Windows\Temp")
+        } else {
+            Path::new("/tmp")
+        };
+        assert!(comfy_root_from_hints(&bare, Some(fallback_tmp), has).is_none());
+    }
+
+    #[test]
+    fn system_stats_argv_and_lsof_cwd_parse() {
+        let body = r#"{"system":{"argv":["/opt/ComfyUI/main.py","--port","8080"]}}"#;
+        let argv = argv_from_system_stats_body(body).unwrap();
+        assert_eq!(argv[0], "/opt/ComfyUI/main.py");
+        assert!(argv_from_system_stats_body("{}").is_none());
+        assert_eq!(pid_from_lsof_f("p4321\ncpython\n"), Some(4321));
+        assert_eq!(
+            cwd_from_lsof_f("p4321\nn/Users/me/ComfyUI\n"),
+            Some(PathBuf::from("/Users/me/ComfyUI"))
+        );
+        // The listen socket is not a directory.
+        assert!(cwd_from_lsof_f("n*:8080\n").is_none());
     }
 
     // ── OI-1: "your working ComfyUI is a broken torso" ───────────────────
@@ -3898,7 +4191,7 @@ pub(crate) fn offload_ollama_loaded_models_at(base: &str) -> VramRelease {
         Some(a) => a,
         None => return VramRelease::NothingLoaded,
     };
-    let mut any = false;
+    let mut unloaded = Vec::new();
     for m in models {
         if let Some(name) = m
             .get("name")
@@ -3909,10 +4202,10 @@ pub(crate) fn offload_ollama_loaded_models_at(base: &str) -> VramRelease {
                 .post(format!("{base}/api/generate"))
                 .json(&serde_json::json!({ "model": name, "keep_alive": 0 }))
                 .send();
-            any = true;
+            unloaded.push(name.to_string());
         }
     }
-    if any {
+    if !unloaded.is_empty() {
         VramRelease::Released
     } else {
         VramRelease::NothingLoaded

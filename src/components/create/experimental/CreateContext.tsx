@@ -149,17 +149,13 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
     }
   }, [backend, connected])
 
-  // Bootstrap the backend exactly like the old CreateView mount did. On macOS
-  // skip the ComfyUI probe entirely — hard rule: Mac local media is MLX-only
-  // and ComfyUI never auto-starts there (process.rs::auto_start_comfyui).
-  // Probing would pin `connected` to false, which is what the Stage's
-  // ModelInstallCard reads as "no models" — it would cover a perfectly working
-  // MLX catalog with a ComfyUI install card. Leaving it null means "not
-  // applicable", which every ComfyUI-gated surface already treats as neutral.
-  // fetchModels() still runs unconditionally: it's what loads the MLX
-  // image/video catalogs on Mac.
+  // Bootstrap the backend. fetchModels probes ComfyUI on every OS (Mac is
+  // connect-only on its configured port — spawn is still refused). checkConnection is safe
+  // on Mac too: it sets comfyRunning without pinning `connected` to false
+  // when the probe misses, so the MLX catalog is not covered by a ComfyUI
+  // install card. Unlocking edit/upscale/… depends on that flag.
   useEffect(() => {
-    if (!isMacOS()) checkConnection()
+    void checkConnection()
     fetchModels()
   }, [checkConnection, fetchModels])
 
@@ -375,7 +371,7 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
     onProgress?.(cap === 'dwpose'
       ? 'Downloading & installing the pose extractor (controlnet aux). This can take a minute…'
       : 'Downloading & installing the background removal node. This can take a minute…')
-    await installCustomNodes([pack])
+    await installCustomNodes([pack], { force: true })
     onProgress?.('Restarting ComfyUI to register the node…')
     await restartComfyForNewNodes()
     for (let i = 0; i < 20; i++) {
@@ -405,19 +401,20 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
   // a restart. Bundles that need a custom node pack (GGUF loader, pose
   // extractor) install + register it first — one click really means one click.
   const installModelBundle = useCallback(async (kind: 'image' | 'video' | 'audio' | 'lipsync' | 'motion', onProgress?: (msg: string) => void, signal?: AbortSignal) => {
-    // macOS takes the MLX path — engine plus the smallest model of that kind.
-    // Everything below this line is the ComfyUI bundle flow, which would start
-    // by installing ComfyUI itself; on a Mac that is the one thing that must
-    // never happen (Rust refuses it too — see process.rs::comfy_supported_here).
-    // Only image and video exist locally there; the other lanes are cloud
-    // teasers on a Mac and never render this card.
-    if (isMacOS()) {
-      if (kind !== 'image' && kind !== 'video') {
-        throw new Error('This one runs in LU Cloud on a Mac — local generation covers images and video.')
-      }
+    // Image/video on Mac stay on the MLX installer. Other Create lanes
+    // (music/lipsync/motion) are ComfyUI graphs: when the user's instance on
+    // is connected, use that bundle flow. Do not spawn ComfyUI here
+    // (Rust refuses it on macOS).
+    const comfyRunning = useCreateStore.getState().comfyRunning
+    if (isMacOS() && (kind === 'image' || kind === 'video')) {
       await installMlxStack(kind, onProgress, signal)
       await fetchModels()
       return
+    }
+    if (isMacOS() && !comfyRunning) {
+      throw new Error(
+        'This tool runs on a ComfyUI you already run on this Mac. Start it (default port 8188) or set its port in Settings → ComfyUI, then try again.',
+      )
     }
     await ensureComfyRunning(onProgress, signal)
     // The video lane picks by the SAME rule the gate uses, because the two
@@ -436,7 +433,7 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
     if (!bundle) throw new Error('No starter bundle available for this intent.')
     if (bundle.customNodes?.length) {
       onProgress?.('Installing the required node packs. This can take a minute…')
-      await installCustomNodes(bundle.customNodes)
+      await installCustomNodes(bundle.customNodes, { force: true })
       onProgress?.('Restarting ComfyUI to register the new nodes…')
       await restartComfyForNewNodes()
       for (let i = 0; i < 20; i++) {

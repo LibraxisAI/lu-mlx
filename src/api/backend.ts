@@ -11,6 +11,7 @@
 import { log } from "../lib/logger";
 import { prop } from "../types/json-guards";
 import { shouldLogRepeat } from "../lib/probe-backoff";
+import { defaultComfyPort } from "../lib/comfy-default-port";
 
 // Hosts whose proxy failure has already been logged, host -> timestamp. Keeps
 // a dead local backend from filling the console with the same line forever.
@@ -89,12 +90,82 @@ async function getInvoke() {
  * those checks must behave identically whether the bytes traveled through the
  * proxy (Windows/WebView2) or a direct fetch (Linux/macOS/dev).
  */
+/**
+ * The Rust proxy could not open a socket (or gave up waiting). Distinct from
+ * `parseProxyHttpError`, which is a real HTTP answer. A loopback target in
+ * this state is down; fetching it again from the webview only adds
+ * "Could not connect to the server" to the console.
+ */
+export function isUnreachableProxyError(message: string): boolean {
+  return /error sending request|connection refused|connect error|timed out|operation timed out|os error 6[01]|os error 111|ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|network is unreachable/i.test(message)
+}
+
 export function parseProxyHttpError(msg: string): { status: number; body: string } | null {
   const m = /(?:^|:\s*)HTTP (\d{3}):\s?([\s\S]*)$/.exec(msg)
   if (!m) return null
   const status = Number(m[1])
   if (status < 100 || status > 599) return null
   return { status, body: m[2] ?? '' }
+}
+
+/**
+ * The proxy refused the host itself (allow-list, registration, or a URL it
+ * could not parse). That is not a dead socket. A direct webview fetch of the
+ * same URL is what the console prints as a CSP "Refused to connect", so the
+ * caller gets this failure and nothing else is attempted.
+ */
+export function isProxyHostRefusal(message: string): boolean {
+  return /Invalid URL:|not a usable backend host|not allowed|invalid host|Blocked scheme:|never proxied|metadata\/link-local/i.test(message)
+}
+
+/**
+ * Why `url` must not be handed to the proxy or to fetch. Null means the
+ * target is a real backend address.
+ *
+ * A half-typed base (`http://`, then `1`, `12`, `127`, `127.0`) is probed on
+ * each keystroke as `${base}/models`. The URL parser collapses those strokes
+ * (`1` → 0.0.0.1, `12` → 0.0.0.12, `127` → 0.0.0.127, `127.0` → 127.0.0.0)
+ * and an empty authority (`http:///models`) makes the path segment `models`
+ * the host. `0.0.0.0` stays usable: it is the wildcard bind some local
+ * servers report. `127.0.0.1`, `127.1` (same address) and `localhost` stay
+ * usable. A relative `/api` or `/comfyui` path is the Vite dev transport and
+ * is only usable outside Tauri.
+ */
+export function unusableBackendTarget(url: string): string | null {
+  const raw = (url ?? '').trim()
+  if (!raw) return 'empty URL'
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    if (!isTauri() && raw.startsWith('/')) return null
+    return 'relative URL without a base'
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return 'not an http(s) URL'
+  }
+  const host = parsed.hostname.toLowerCase()
+  if (!host) return 'empty host'
+  if (host === 'models') return 'path segment used as host'
+  if (host === '127.0.0.0') return 'unusable loopback network address'
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host)
+  if (v4) {
+    const octets = [Number(v4[1]), Number(v4[2]), Number(v4[3]), Number(v4[4])]
+    if (octets.some((n) => n > 255)) return 'invalid IPv4'
+    // 0.0.0.0/8 except the wildcard bind itself. These are keystroke
+    // collapses, not addresses a backend listens on.
+    if (octets[0] === 0 && (octets[1] !== 0 || octets[2] !== 0 || octets[3] !== 0)) {
+      return 'incomplete IPv4'
+    }
+  }
+  return null
+}
+
+function backendRefusalResponse(error: string): Response {
+  return new Response(JSON.stringify({ error }), {
+    status: 400,
+    headers: { 'Content-Type': 'application/json' },
+  })
 }
 
 /**
@@ -119,6 +190,9 @@ export async function localFetch(
     timeoutMs?: number;
   }
 ): Promise<Response> {
+  const refusal = unusableBackendTarget(url)
+  if (refusal) return backendRefusalResponse(refusal)
+
   if (!isTauri()) {
     // Mirror the Rust-side timeout in dev mode by chaining an
     // AbortController onto whatever signal the caller provided.
@@ -215,6 +289,30 @@ export async function localFetch(
       return new Response(httpErr.body, { status: httpErr.status })
     }
 
+    // Host rejected by the allow-list, or a URL the proxy could not parse.
+    // Falling through to fetch() is the CSP "Refused to connect" line.
+    if (isProxyHostRefusal(proxyErrMsg)) {
+      return backendRefusalResponse(proxyErrMsg)
+    }
+
+    // The proxy runs on this machine. A refused or timed-out loopback connect
+    // cannot succeed as a second fetch from the webview, and that second fetch
+    // is what the console prints as "Could not connect to the server" /
+    // "Failed to load resource" — once per probed preset (built-in engine on
+    // 8127, KoboldCpp on 5001, and the rest of the discovery list). A backend
+    // that is simply not running is an expected discovery miss: return a
+    // non-ok Response and stop. Callers that selected this backend still see
+    // the failure (`res.ok === false`) and can show it. A proxy failure that
+    // is not a dead socket and not a host refusal still falls through to the
+    // direct fetch below (ComfyUI with CORS open, a proxy command that itself
+    // failed). A refused host does not: that second fetch is the CSP log.
+    if (isLoopbackHost(hostnameOf(url)) && isUnreachableProxyError(proxyErrMsg)) {
+      return new Response(JSON.stringify({ error: proxyErrMsg }), {
+        status: 503,
+        headers: { "Content-Type": "application/json" },
+      })
+    }
+
     // One line per host per minute, not one per attempt. A backend that is
     // not installed used to write two console lines every 1.5 seconds, over
     // forty inside a single chat round, and the real errors drowned in it
@@ -272,6 +370,9 @@ export async function localFetchStream(
   url: string,
   options?: { method?: string; body?: string; headers?: Record<string, string>; signal?: AbortSignal }
 ): Promise<Response> {
+  const refusal = unusableBackendTarget(url)
+  if (refusal) return backendRefusalResponse(refusal)
+
   const method = options?.method || "GET";
   const body = options?.body;
   const extraHeaders = options?.headers;
@@ -504,6 +605,8 @@ export async function backendCall<T = unknown>(
     set_comfyui_host: { path: "/local-api/set-comfyui-host", method: "POST" },
     set_ollama_host: { path: "/local-api/set-ollama-host", method: "POST" },
     get_ollama_host: { path: "/local-api/get-ollama-host" },
+    get_models_root: { path: "/local-api/get-models-root" },
+    set_models_root: { path: "/local-api/set-models-root", method: "POST" },
     install_custom_node: { path: "/local-api/install-custom-node", method: "POST" },
     whisper_status: { path: "/local-api/transcribe-status" },
     install_whisper: { path: "/local-api/install-whisper", method: "POST" },
@@ -682,8 +785,8 @@ export function ollamaUrl(path: string): string {
   return `/api${path}`;
 }
 
-/** Configurable ComfyUI port — default 8188, can be changed at runtime */
-let _comfyPort = 8188;
+/** Configurable ComfyUI port — ComfyUI's own 8188 by default on every OS (see comfy-default-port.ts). */
+let _comfyPort = defaultComfyPort({ isMac: isMacOS() });
 export function setComfyPort(port: number) { _comfyPort = port; }
 export function getComfyPort(): number { return _comfyPort; }
 
@@ -1068,6 +1171,10 @@ const _registeredProxyHosts = new Set<string>()
  */
 export async function ensureProxyAllowsHost(baseUrl: string): Promise<void> {
   if (!isTauri()) return
+  // A half-typed host must not be registered. register_openai_host answers
+  // "not a usable backend host", and the probe that follows used to fetch it
+  // from the webview anyway.
+  if (unusableBackendTarget(baseUrl)) return
   const host = hostnameOf(baseUrl)
   if (!host || isLoopbackHost(host)) return
   if (_registeredProxyHosts.has(host)) return

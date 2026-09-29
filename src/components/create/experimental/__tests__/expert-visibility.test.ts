@@ -31,12 +31,21 @@ describe('Expert controls match the desktop backend', () => {
     expect(screen.getByText('Scheduler')).toBeTruthy()
   })
 
-  it('does not offer unsupported controls on MLX', () => {
+  it('does not offer unsupported controls on MLX-only', () => {
     host.mlx = true
-    useCreateStore.setState({ backend: 'local', mode: 'image' })
+    useCreateStore.setState({ backend: 'local', mode: 'image', comfyRunning: false })
     useCreateStore.getState().setIntent('image')
     render(createElement(ParamGroups))
     expect(screen.queryByText('Expert')).toBeNull()
+  })
+
+  it('offers Expert on a Mac once ComfyUI is connected', () => {
+    host.mlx = true
+    useCreateStore.setState({ backend: 'local', mode: 'image', comfyRunning: true })
+    useCreateStore.getState().setIntent('image')
+    render(createElement(ParamGroups))
+    fireEvent.click(screen.getByText('Expert'))
+    expect(screen.getByText('Sampler')).toBeTruthy()
   })
 
   it('hides the five dead knobs on the local music lane', () => {

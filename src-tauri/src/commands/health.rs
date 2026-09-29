@@ -373,7 +373,11 @@ fn comfy_probe_url(state: &AppState) -> String {
         .lock()
         .map(|g| g.clone())
         .unwrap_or_else(|_| "localhost".to_string());
-    let port = state.comfy_port.lock().map(|g| *g).unwrap_or(8188);
+    let port = state
+        .comfy_port
+        .lock()
+        .map(|g| *g)
+        .unwrap_or_else(|_| crate::state::default_comfy_port());
     format!("http://{}:{}/system_stats", host, port)
 }
 
@@ -504,7 +508,13 @@ mod tests {
     #[test]
     fn comfy_probe_url_falls_back_to_the_default_when_unconfigured() {
         let state = AppState::new();
-        assert_eq!(comfy_probe_url(&state), "http://localhost:8188/system_stats");
+        assert_eq!(
+            comfy_probe_url(&state),
+            format!(
+                "http://localhost:{}/system_stats",
+                crate::state::default_comfy_port()
+            )
+        );
     }
 
     // ── LM Studio: a non-default address passed as a command argument ──────

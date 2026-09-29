@@ -6,7 +6,7 @@ import { cloudModelById, defaultCloudModel } from '../../../stores/cloudCatalogS
 import { classifyModel } from '../../../api/comfyui'
 import { nativeHiresFinalSize, type HiresUpscaleMethod } from '../../../api/hires-fix'
 import { isMlxImageHost } from '../../../api/mlx-image'
-import { INTENT_MAP } from './intents'
+import { INTENT_MAP, mlxOnlyCreateHost } from './intents'
 import { SAMPLERS as SAMPLERS_FALLBACK, SCHEDULERS as SCHEDULERS_FALLBACK } from './badges'
 import { Section } from '../ui/Section'
 import { Slider } from '../ui/Slider'
@@ -44,7 +44,7 @@ export function ParamGroups() {
   // ComfyUI, and denoise/mask belong to intents that aren't local there) is
   // silently dropped, so the whole Expert section is dead on the local Mac.
   // Keep it on Mac-cloud and on the ComfyUI hosts (Windows/Linux).
-  const isMlxLocal = !isCloud && isMlxImageHost()
+  const isMlxLocal = !isCloud && mlxOnlyCreateHost(isMlxImageHost(), s.comfyRunning)
   // R2-28, Entscheid David 12.09.2026: auf der LOKALEN Musikbahn waren fuenf
   // Expert-Regler sichtbar und alle fuenf tot. `dynamic-workflow.ts` nagelt
   // sampler_name, scheduler und denoise fuer Audio fest, `LocalOpParams`

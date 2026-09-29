@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# PATH shim for Tauri apps: run scripts/assert-loct-repo-root.sh *before*
+# the real loct CLI. Does not implement a second snapshot policy — it only
+# makes `cd src-tauri && loct` hit the existing assert, because the
+# sentinel FILE at src-tauri/.loctree does not stop a crate-keyed cache write.
+set -euo pipefail
+SELF="$(cd "$(dirname "$0")" && pwd)/loct"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+"$ROOT/scripts/assert-loct-repo-root.sh"
+real=""
+old_ifs="$IFS"
+IFS=:
+for d in $PATH; do
+    cand="${d%/}/loct"
+    [[ -x "$cand" ]] || continue
+    cand_abs="$(cd "$(dirname "$cand")" && pwd)/$(basename "$cand")"
+    if [[ "$cand_abs" == "$SELF" ]]; then
+        continue
+    fi
+    real="$cand"
+    break
+done
+IFS="$old_ifs"
+if [[ -z "$real" ]]; then
+    printf 'loct: repo-root assert passed, but no real loct CLI is on PATH.\n' >&2
+    printf '      Install loctree, then from `.`: loct --help\n' >&2
+    exit 1
+fi
+exec "$real" "$@"

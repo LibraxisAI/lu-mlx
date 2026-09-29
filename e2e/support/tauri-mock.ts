@@ -353,9 +353,12 @@ export function tauriMockInit(opts: TauriMockOptions) {
         // Real Rust returns a shaped object; a null default here trips
         // useActiveContextWindow (`info.loaded`). Return the "unknown" shape.
         return Promise.resolve({ loaded: null, max: null, state: null })
-      case 'comfyui_status':
-        // Recorded, not just refused: a Mac spec asserts this stays at zero.
+      case 'start_comfyui':
+        // Recorded, not just refused: a Mac spec asserts this stays at zero
+        // (Mac is connect-only; LU refuses to spawn ComfyUI on macOS).
         record('__E2E_COMFY_CALLS__', { cmd })
+        return Promise.reject('ComfyUI is not supported on this platform')
+      case 'comfyui_status':
         return Promise.reject('not running (e2e)')
       case 'start_ollama':
       case 'lmstudio_server_status':

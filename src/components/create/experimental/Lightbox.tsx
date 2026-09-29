@@ -77,9 +77,9 @@ export function Lightbox({ item, onClose }: { item: GalleryItem | null; onClose:
               className="w-[480px] max-w-[90vw] flex flex-col items-center gap-4 p-8 rounded-lg bg-white/[0.04] border border-white/[0.08]"
             >
               {item.prompt && <p className="t-body text-gray-300 text-center">{item.prompt}</p>}
-              <audio src={mediaUrl} controls autoPlay onError={onMediaError} className="w-full" />
+              {mediaUrl ? <audio src={mediaUrl} controls autoPlay onError={onMediaError} className="w-full" /> : null}
             </motion.div>
-          ) : item.type === 'video' ? (
+          ) : !mediaUrl ? null : item.type === 'video' ? (
             <motion.video
               initial={{ scale: 0.95 }}
               animate={{ scale: 1 }}

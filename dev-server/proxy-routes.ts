@@ -3,6 +3,7 @@ import type { RouteMount } from './routes'
 import { ssrfDeps } from './ssrf'
 import { SsrfBlockedError, ssrfSafeGet, SSRF_MAX_HOPS } from '../src/dev/ssrf-fetch'
 import { errorText } from '../src/types/json-guards'
+import { defaultComfyPort } from '../src/lib/comfy-default-port'
 
 /**
  * Die drei Endpunkte, die fremde Bytes durchreichen: der ComfyUI-POST-Proxy
@@ -29,7 +30,7 @@ export function registerProxyRoutes(routes: RouteMount): void {
       const body = Buffer.concat(inChunks)
       const proxyReq = http.request({
         hostname: '127.0.0.1',
-        port: 8188,
+        port: defaultComfyPort(),
         path: targetPath,
         method: 'POST',
         headers: {

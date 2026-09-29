@@ -1,7 +1,7 @@
 import { Cloud } from 'lucide-react'
 import { useCreateStore } from '../../../stores/createStore'
 import { useUIStore, type CloudTeaserTarget } from '../../../stores/uiStore'
-import { isIntentLocked, visibleIntents } from './intents'
+import { isIntentLocked, mlxOnlyCreateHost, visibleIntents } from './intents'
 import { isMlxImageHost } from '../../../api/mlx-image'
 import { cn } from '../ui/cn'
 import { ICON_SM } from '../../ui/icon-size'
@@ -63,17 +63,13 @@ export function IntentBar() {
   const setIntent = useCreateStore((s) => s.setIntent)
   const backend = useCreateStore((s) => s.backend)
   const setCloudTeaser = useUIStore((s) => s.setCloudTeaser)
-  // Every tool is always in the bar. The 2.5.8 lanes with hasLocalLane
-  // (lipsync / music / extend / motion) are REAL local tabs, plain selectable
-  // pills with NO cloud glyph (David 2026-07-19: the top row only carries a
-  // cloud badge for the genuinely hosted-only tools). Only upscale, eraser and
-  // character training (cloudOnly, no local backend) render as locked,
-  // cloud-tagged pills in local mode; a tap opens the teaser sheet / plans gate.
-  //
-  // On an MLX Mac (no ComfyUI at all) those lanes have no local implementation
-  // either, so they lock there too. Both rules live in intents.ts so they stay
-  // pure + unit tested; this component only renders the verdict.
-  const mlxHost = isMlxImageHost()
+  // Every tool is always in the bar. Lanes with hasLocalLane (lipsync / music /
+  // extend / motion / character / upscale / eraser) are REAL local tabs on a
+  // ComfyUI host — plain selectable pills, no cloud glyph. On an MLX-only Mac
+  // (no ComfyUI connected) only image, video and Character Studio run locally;
+  // the rest lock as teasers until the user's own ComfyUI answers.
+  // The rule lives in intents.ts so it stays pure + unit tested.
+  const mlxHost = mlxOnlyCreateHost(isMlxImageHost(), useCreateStore((s) => s.comfyRunning))
   const intents = visibleIntents(backend, mlxHost)
 
   return (
@@ -98,7 +94,7 @@ export function IntentBar() {
       className="flex flex-wrap items-center justify-center gap-x-[3px] gap-y-[3px] px-3 pt-1.5 pb-[1.5px] [--text-control:9px]"
     >
       {intents.map((meta) => {
-        const locked = isIntentLocked(meta, backend, mlxHost)
+        const locked = isIntentLocked(meta, backend, mlxHost, isMlxImageHost())
         const selected = !locked && intent === meta.id
         const Icon = meta.icon
         return (

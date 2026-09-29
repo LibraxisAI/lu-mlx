@@ -91,8 +91,8 @@ pub fn agent_workspace_root() -> PathBuf {
 
 #[cfg(test)]
 pub use test_storage::{
-    agent_workspace_root, app_config_dir, builtin_models_dir, cache_dir,
-    config_root, data_dir, tools_bin_dir,
+    agent_workspace_root, app_config_dir, builtin_models_dir, cache_dir, config_root, data_dir,
+    tools_bin_dir,
 };
 
 // No environment switch or test storage implementation exists in a release build.
@@ -182,6 +182,158 @@ pub(crate) mod test_storage {
 /// einen Suffix — siehe [`crate::app_identity`].
 pub fn log_dir() -> PathBuf {
     data_dir().join("logs")
+}
+
+/// Pure resolution of the heavy-models root: `models_root` from the raw
+/// config.json text wins over the `LU_MODELS_ROOT` env var; empty/whitespace
+/// values and unparseable config fall through. Split out of
+/// `configured_models_root` so unit tests don't touch the real config file
+/// or process env.
+fn resolve_models_root(config_raw: Option<&str>, env: Option<&str>) -> Option<PathBuf> {
+    if let Some(raw) = config_raw {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
+            if let Some(m) = v.get("models_root").and_then(|x| x.as_str()) {
+                let trimmed = m.trim();
+                if !trimmed.is_empty() {
+                    return Some(PathBuf::from(trimmed));
+                }
+            }
+        }
+    }
+    env.map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Root for LU's heavy model storage (MLX image/video weights, built-in
+/// GGUFs). Priority: `models_root` in config.json → `LU_MODELS_ROOT` env →
+/// `None` (callers then fall back to their per-feature default dirs, so a
+/// missing override keeps every existing path byte-identical). Same
+/// resolution pattern as `state::load_ollama_base` — config beats env beats
+/// default. Read fresh on every call: the value only changes via config
+/// edits, and a global cache would make unit tests order-dependent. This is
+/// how the ~100 GB of MLX weights moves off the system disk onto an external
+/// volume (GOAL-mac-local, David 2026-09-14).
+///
+/// Reads [`app_config_json()`], never a hand-built `"locally-uncensored"`
+/// path — `keine_quelldatei_baut_einen_pfad_der_echten_app_von_hand`.
+pub fn configured_models_root() -> Option<PathBuf> {
+    configured_models_root_in(&app_config_json())
+}
+
+/// [`configured_models_root`] against an explicit `config.json`. Tests use
+/// their own file here: the test storage is one directory per process, and a
+/// test that rewrites the shared `config.json` races every parallel test that
+/// resolves `hf_home()` (seen as a flaky `image_cache_dir_lives_under_hf_home`).
+pub(crate) fn configured_models_root_in(config: &std::path::Path) -> Option<PathBuf> {
+    let config_raw = std::fs::read_to_string(config).ok();
+    let env = std::env::var("LU_MODELS_ROOT").ok();
+    resolve_models_root(config_raw.as_deref(), env.as_deref())
+}
+
+/// Read-modify-write `config.json` as a JSON object. Missing or unparseable
+/// files start as `{}`. The mutator returning Err aborts without writing.
+pub fn merge_app_config(
+    mutator: impl FnOnce(&mut serde_json::Value) -> Result<(), String>,
+) -> Result<(), String> {
+    merge_config_file(&app_config_json(), mutator)
+}
+
+/// [`merge_app_config`] against an explicit file (see [`configured_models_root_in`]).
+pub(crate) fn merge_config_file(
+    file: &std::path::Path,
+    mutator: impl FnOnce(&mut serde_json::Value) -> Result<(), String>,
+) -> Result<(), String> {
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let mut config: serde_json::Value = if file.exists() {
+        std::fs::read_to_string(file)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    if !config.is_object() {
+        config = serde_json::json!({});
+    }
+    mutator(&mut config)?;
+    // Serialised first: a serde error is our own wording, the write error is
+    // the OS's and goes through `os_error::english` (drift_guard).
+    let body = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    std::fs::write(file, body).map_err(|e| crate::os_error::english(&e))
+}
+
+#[cfg(test)]
+mod models_root_tests {
+    use super::resolve_models_root;
+    use std::path::PathBuf;
+
+    #[test]
+    fn config_wins_over_env() {
+        let r = resolve_models_root(
+            Some(r#"{"models_root": "/workspace/lu-models"}"#),
+            Some("/elsewhere"),
+        );
+        assert_eq!(r, Some(PathBuf::from("/workspace/lu-models")));
+    }
+
+    #[test]
+    fn env_is_used_when_config_has_no_key() {
+        let r = resolve_models_root(Some(r#"{"comfyui_port": 8188}"#), Some("/Volumes/X/models"));
+        assert_eq!(r, Some(PathBuf::from("/Volumes/X/models")));
+    }
+
+    #[test]
+    fn env_is_used_when_config_is_garbage() {
+        let r = resolve_models_root(Some("not json{"), Some("/Volumes/X/models"));
+        assert_eq!(r, Some(PathBuf::from("/Volumes/X/models")));
+    }
+
+    #[test]
+    fn blank_values_fall_through_to_none() {
+        assert_eq!(resolve_models_root(Some(r#"{"models_root": "  "}"#), Some(" ")), None);
+        assert_eq!(resolve_models_root(None, None), None);
+        assert_eq!(resolve_models_root(None, Some("")), None);
+    }
+
+    #[test]
+    fn values_are_trimmed() {
+        let r = resolve_models_root(Some(r#"{"models_root": "  /Volumes/X/models  "}"#), None);
+        assert_eq!(r, Some(PathBuf::from("/Volumes/X/models")));
+    }
+
+    #[test]
+    fn configured_models_root_and_merge_share_one_config_file() {
+        // Own file, never the process-wide test `config.json` (see
+        // `configured_models_root_in`): other tests read that one in parallel.
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("config.json");
+        std::fs::write(&file, r#"{"models_root":"/tmp/lu-models-from-app-config","comfyui_port":8188}"#).unwrap();
+        assert_eq!(
+            super::configured_models_root_in(&file),
+            Some(PathBuf::from("/tmp/lu-models-from-app-config"))
+        );
+        super::merge_config_file(&file, |v| {
+            v["models_root"] = serde_json::json!("/workspace/lu-models");
+            Ok(())
+        })
+        .unwrap();
+        let got: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(got["comfyui_port"], 8188);
+        assert_eq!(got["models_root"], "/workspace/lu-models");
+        super::merge_config_file(&file, |v| {
+            v.as_object_mut().unwrap().remove("models_root");
+            Ok(())
+        })
+        .unwrap();
+        let cleared: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert!(cleared.get("models_root").is_none());
+        assert_eq!(cleared["comfyui_port"], 8188);
+    }
 }
 
 /// Locate a usable Python interpreter. Returns the absolute path to the

@@ -55,6 +55,7 @@ import { restartComfyForNewNodes } from '../api/comfy-restart'
 import { installCustomNodes } from '../api/discover'
 import { checkPromptSafety, SAFETY_BLOCK_MESSAGE } from '../lib/render/safety'
 import { resolveRunSeed } from '../lib/run-seed'
+import { buildLocalUpscaleWorkflow } from '../api/utility-workflows'
 import {
   clearTrainingSet, stageTrainingImage, startCharacterTraining,
   characterTrainingStatus, cancelCharacterTraining,
@@ -64,7 +65,7 @@ import { useWorkflowStore } from '../stores/workflowStore'
 import { injectParameters } from '../api/workflows'
 import { applyNativeHiresFix } from '../api/hires-fix'
 import {
-  generateMlxImageDataUrl, isMlxImageHost, isMlxImageModel,
+  generateMlxImageDataUrl, imageUrlToBase64, isMlxImageHost, isMlxImageModel, routeLocalImageRun,
   mlxStatus, listMlxImageModels, buildMlxImageModels, mergeImageModels, mlxModelIdFor,
 } from '../api/mlx-image'
 import {
@@ -119,7 +120,7 @@ export function useCreate() {
 
   const checkConnection = useCallback(async () => {
     const ok = await checkComfyConnection()
-    setConnected(ok)
+    if (ok || !isMlxImageHost()) setConnected(ok)
     // Mirror into createStore so the header-level Lichtschalter in
     // CreateTopControls stays in sync with the deeper useCreate state.
     useCreateStore.getState().setComfyRunning(ok)
@@ -159,22 +160,17 @@ export function useCreate() {
       // else ever flipped `connected` back to true — the Stage then kept showing
       // the Download & install card while the model chip was happily populated
       // (live-caught on the 2.5.8 extend lane E2E).
-      // NOT on Mac: there is no ComfyUI to be connected to, and pinning
-      // `connected` to false is exactly what makes the Stage cover a working
-      // MLX catalog with the ComfyUI "Download & install" card. Left at null
-      // ("not applicable"), which every ComfyUI-gated surface treats as neutral.
-      // On the Mac the answer is decided, not probed. ComfyUI is never started
-      // there and never renders there, so asking port 8188 can only produce a
-      // wrong answer: anything that happens to reply — a manual install, another
-      // app — used to drag the whole tab into the ComfyUI path, where the model
-      // queries then failed and left the store's list EMPTY while the picker
-      // still displayed the MLX catalog. Pressing Create in that state said
-      // "No image model selected. Add checkpoints or FLUX models to ComfyUI."
-      // (caught by the MLX e2e, MAC-5.)
-      const comfyOk = mlxHost ? false : await checkComfyConnection()
-      if (!mlxHost) {
-        setConnected(comfyOk)
-        useCreateStore.getState().setComfyRunning(comfyOk)
+      // NOT pinning `connected` to false on Mac when the probe misses: that
+      // would cover a working MLX catalog with the ComfyUI install card.
+      // Left at null ("not applicable") until ComfyUI actually answers.
+      // Mac is connect-only (spawn refused); a live
+      // instance is a real local backend for edit/upscale/eraser/animate.
+      const comfyOk = await checkComfyConnection()
+      useCreateStore.getState().setComfyRunning(comfyOk)
+      if (comfyOk) {
+        setConnected(true)
+      } else if (!mlxHost) {
+        setConnected(false)
       }
       if (!comfyOk) {
         // On Apple Silicon MLX alone is a valid image/video backend — don't bail.
@@ -229,7 +225,9 @@ export function useCreate() {
       // Mac video is MLX-only — never surface ComfyUI video checkpoints there,
       // even in the rare case ComfyUI happens to be reachable (a manual install
       // the user started outside LU).
-      const vidModels = mlxHost ? mlxVideoModels : comfyVidModels
+      const vidModels = mlxVideoModels.length
+        ? [...mlxVideoModels, ...comfyVidModels]
+        : comfyVidModels
       setImageModels(imgModels)
       setVideoModelsList(vidModels)
       setSamplerList(samplers)
@@ -565,28 +563,38 @@ export function useCreate() {
         ? imageModel
         : (state.imageModelList[0]?.name ?? imageModel)
 
-    // ── MLX image pipeline (Apple Silicon) — hard rule: Mac local image is the
-    // in-process MLX path, never ComfyUI. Gated on the derived `image` intent
-    // (which already means: no cloudOp, no utilityOp, no removebg, text2img)
-    // AND on the SELECTED model being a synthetic MLX entry, so a real ComfyUI
-    // checkpoint from a manual install is never hijacked. Generation returns a
-    // base64 PNG stored as a data URL on the gallery item, so display +
-    // download work with no ComfyUI /view route. ──
-    if (intent === 'image' && isMlxImageHost() && isMlxImageModel(effImageModel)) {
+    // ── MLX image pipeline (Apple Silicon). Text-to-image AND img2img/expand
+    // (Edit) of an MLX model stay here. The model name is not rewritten into
+    // a Comfy checkpoint. A real Comfy checkpoint falls through below.
+    const imageDispatch = routeLocalImageRun({
+      isMlxHost: isMlxImageHost(),
+      intent,
+      model: effImageModel,
+    })
+    if (imageDispatch.lane === 'mlx') {
       setError(null)
       if (!prompt.trim()) { setError('Please enter a prompt.'); return }
+      if (intent === 'edit' && !source?.url) {
+        setError('Please add a source image first.')
+        return
+      }
       setIsGenerating(true)
       state.setProgressPhase('loading-model')
-      setProgress(10, 'Starting MLX image generation...')
+      setProgress(10, intent === 'edit' ? 'Starting MLX expand...' : 'Starting MLX image generation...')
       addToPromptHistory(prompt)
       const startTime = Date.now()
       try {
+        const imageBase64 = intent === 'edit' && source?.url
+          ? await imageUrlToBase64(source.url)
+          : undefined
         state.setProgressPhase('sampling')
         setProgress(40, 'Generating with MLX...')
         const { dataUrl, width: outW, height: outH, localPath } = await generateMlxImageDataUrl({
           prompt, steps, seed: runSeed, width, height,
-          model: mlxModelIdFor(effImageModel),
+          model: mlxModelIdFor(imageDispatch.model),
           negativePrompt: negativePrompt || undefined,
+          imageBase64,
+          strength: intent === 'edit' ? denoise : undefined,
         })
         const elapsed = Math.round((Date.now() - startTime) / 1000)
         state.setProgressPhase('complete')
@@ -611,21 +619,26 @@ export function useCreate() {
       return
     }
 
-    // ── MLX video pipeline (Apple Silicon) — hard rule: Mac local video is the
-    // in-process mlx-video path, never ComfyUI. Unlike the image branch this
-    // needs no model-name marker: on Mac the video picker IS the MLX catalog
-    // (fetchModels above), so every local video generation routes here. Gated
-    // on the derived `video` intent, which is text-to-video by definition —
-    // animate/extend/motion have no local lane on this host (the IntentBar
-    // shows them hidden / as cloud teasers), and their source images are staged
-    // through a ComfyUI upload that doesn't exist here. Generation is a
-    // subprocess polled via video_progress every 2s (no WebSocket/node graph). ──
+    // ── MLX video pipeline (Apple Silicon) — Mac local t2v is mlx-video,
+    // never a spawned ComfyUI. Animate/extend/motion still need a connected
+    // ComfyUI graph (IntentBar unlocks them when comfyRunning). A Comfy
+    // checkpoint in the merged picker falls through below.
     if (intent === 'video' && isMlxImageHost()) {
       setError(null)
       if (!prompt.trim()) { setError('Please enter a prompt.'); return }
       if (!videoModel) { setError('No local video model selected — pick one from the model picker.'); return }
       const catalogId = mlxVideoModelIdFor(videoModel)
-      if (!catalogId) { setError(`Unknown MLX video model "${videoModel}" — re-select it from the picker.`); return }
+      if (!catalogId) {
+        if (useCreateStore.getState().comfyRunning && videoModel) {
+          // Merged ComfyUI video checkpoint — fall through to the Comfy graph.
+        } else {
+          setError(!videoModel
+            ? 'No local video model selected — pick one from the model picker.'
+            : `Unknown MLX video model "${videoModel}" — re-select it from the picker.`)
+          return
+        }
+      }
+      if (catalogId) {
       try {
         const status = await getVideoStatus()
         if (!status.available) { setError('Local video generation is Apple Silicon only.'); return }
@@ -638,15 +651,27 @@ export function useCreate() {
 
       setIsGenerating(true)
       state.setProgressPhase('loading-model')
-      setProgress(0, 'Starting MLX video generation...')
+      setProgress(0, 'Freeing unified memory for MLX video...')
       addToPromptHistory(prompt)
       const startTime = Date.now()
       abortRef.current = new AbortController()
+      // Apple Silicon has one unified memory pool: a resident Ollama model and
+      // MLX video weights compete for the same RAM. Use the same reversible
+      // hand-off as ComfyUI renders so a large local chat model cannot push
+      // mlx-video into swap. The selected Ollama model is restored afterward.
+      let renderEviction: RenderEviction | null = null
+      try {
+        renderEviction = await evictChatBackendsForRender()
+      } catch { /* unified-memory housekeeping is best-effort */ }
+      setProgress(0, 'Starting MLX video generation...')
       let result: Awaited<ReturnType<typeof generateVideo>>
       try {
         result = await generateVideo({
           id: catalogId,
           prompt,
+          steps,
+          width,
+          height,
           seconds: Math.max(0.5, frames / Math.max(1, fps)),
           fps,
           seed: runSeed,
@@ -655,6 +680,7 @@ export function useCreate() {
         useCreateStore.getState().setError(`Failed to start: ${e instanceof Error ? e.message : String(e)}`)
         useCreateStore.getState().setIsGenerating(false)
         abortRef.current = null
+        if (renderEviction) void restoreChatBackendsAfterRender(renderEviction)
         return
       }
       try {
@@ -728,12 +754,21 @@ export function useCreate() {
         useCreateStore.getState().setIsGenerating(false)
         useCreateStore.getState().setProgress(0)
         abortRef.current = null
+        if (renderEviction) void restoreChatBackendsAfterRender(renderEviction)
       }
       return
+      }
     }
 
     setError(null)
     let activeModel = localOp ? localOpModel : (mode === 'image' ? effImageModel : videoModel)
+    // Edit/expand of an MLX model already returned on the MLX lane. Anything
+    // still here with an MLX id (cutout, upscale, animate, …) must not be
+    // renamed into the first Comfy checkpoint or sent as ckpt_name.
+    if (isMlxImageModel(activeModel)) {
+      setError(`"${activeModel}" runs on Apple MLX. It is not a ComfyUI checkpoint.`)
+      return
+    }
     // Chip↔run agreement (live-caught on the extend E2E): the picker DISPLAYS
     // the first capable model when the stored pick can't run the current
     // intent, but submit read the raw store — the run then used a model the
@@ -761,12 +796,17 @@ export function useCreate() {
     // lipsync/motion drive off their media inputs (the builder supplies a
     // neutral scene prompt when the field is empty).
     const promptOptional = isRemoveBg || localOp === 'lipsync' || localOp === 'motion'
+      || intent === 'upscale' || intent === 'eraser'
     if (!promptOptional && !prompt.trim()) {
       setError(localOp === 'music' ? 'Describe the track first. Genre, mood, tempo…' : 'Please enter a prompt.')
       return
     }
     if (isRemoveBg && !effInputImage) {
       setError('Please add an image to remove its background.')
+      return
+    }
+    if (intent === 'eraser' && !maskFilename) {
+      setError('Please paint a mask over what to erase.')
       return
     }
     if (!localOp && isI2I && !isRemoveBg && !effInputImage) {
@@ -783,7 +823,7 @@ export function useCreate() {
     // already routes it correctly: no mask means isInpaint is false and the
     // request falls into the LoadImage → VAEEncode → KSampler(denoise) i2i
     // branch, driven by the Edit strength slider.
-    if (!isRemoveBg && !activeModel) {
+    if (!isRemoveBg && intent !== 'upscale' && !activeModel) {
       if (localOp === 'music') {
         setError('No music model installed. Use Download & install above to get ACE Step, then generate.')
       } else if (localOp === 'lipsync') {
@@ -956,11 +996,21 @@ export function useCreate() {
         builderUsed = 'dynamic'
       }
 
+      if (!localOp && intent === 'upscale') {
+        if (!effInputImage) {
+          setError('Please add a source image first.')
+          return
+        }
+        setProgress(5, 'Building upscale workflow...')
+        workflow = buildLocalUpscaleWorkflow(effInputImage, width, height)
+        builderUsed = 'dynamic'
+      }
+
       // Check for custom workflow assignment — but verify it's compatible with the model
-      let customWf = localOp ? null : useWorkflowStore.getState().getWorkflowForModel(activeModel, imageModelType)
+      let customWf = (localOp || intent === 'upscale') ? null : useWorkflowStore.getState().getWorkflowForModel(activeModel, imageModelType)
       if (customWf) {
         const wfNodes = apiNodes(customWf.workflow).map(([, n]) => n.class_type)
-        const needsUnet = imageModelType === 'flux' || imageModelType === 'flux2' || imageModelType === 'zimage' || imageModelType === 'wan' || imageModelType === 'hunyuan'
+        const needsUnet = imageModelType === 'flux' || imageModelType === 'flux2' || imageModelType === 'zimage' || imageModelType === 'qwen_image_edit' || imageModelType === 'wan' || imageModelType === 'hunyuan'
         const hasUnet = wfNodes.includes('UNETLoader')
         const hasCheckpoint = wfNodes.includes('CheckpointLoaderSimple')
         if (needsUnet && !hasUnet && hasCheckpoint) {
@@ -978,7 +1028,7 @@ export function useCreate() {
         setProgress(5, `Using workflow: ${customWf.name}...`)
         const params = mode === 'video' ? { ...baseParams, frames, fps, ...(effI2vImage ? { inputImage: effI2vImage } : {}) } : baseParams
         workflow = await injectParameters(customWf.workflow, customWf.parameterMap, params, imageModelType)
-      } else if (!localOp) {
+      } else if (!localOp && intent !== 'upscale') {
         // Dynamic workflow builder — auto-detects nodes and builds the right pipeline
         setProgress(5, 'Building workflow...')
         try {
@@ -1027,7 +1077,7 @@ export function useCreate() {
               if (choice === 'install') {
                 setProgress(8, 'Installing VHS_VideoCombine (git clone + pip)...')
                 try {
-                  await installCustomNodes(['videohelpersuite'])
+                  await installCustomNodes(['videohelpersuite'], { force: true })
                   setProgress(9, 'Restarting ComfyUI to register the new node...')
                   // Shared with the Create surface on purpose. The version that
                   // used to live here trusted "something answers on the port"

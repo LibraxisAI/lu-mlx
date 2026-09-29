@@ -145,11 +145,11 @@ describe('D-S27 / D-S48: die Inhaltsspalte schwebt nicht mehr frei', () => {
 
 const TABS: SettingsTab[] = ['general', 'backends', 'agent', 'voice-remote']
 const ALL_ON: SettingsSectionFlags = {
-  gpuPicker: true, builtinExpert: true, comfyui: true, agentMode: true, agentWorkflows: true,
+  gpuPicker: true, builtinExpert: true, comfyui: true, mlxMedia: true, agentMode: true, agentWorkflows: true,
   mediaTimeouts: true,
 }
 const ALL_OFF: SettingsSectionFlags = {
-  gpuPicker: false, builtinExpert: false, comfyui: false, agentMode: false, agentWorkflows: false,
+  gpuPicker: false, builtinExpert: false, comfyui: false, mlxMedia: false, agentMode: false, agentWorkflows: false,
   mediaTimeouts: false,
 }
 

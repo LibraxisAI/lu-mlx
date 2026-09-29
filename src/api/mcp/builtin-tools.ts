@@ -1511,6 +1511,9 @@ async function executeVideoGenerateMlx(prompt: string, merged: VramHandoffArgs):
     job = await generateMlxVideo({
       id: model.id,
       prompt,
+      steps: typeof merged.steps === 'number' ? merged.steps : undefined,
+      width: typeof merged.width === 'number' ? merged.width : undefined,
+      height: typeof merged.height === 'number' ? merged.height : undefined,
       seconds,
       fps,
       seed: typeof merged.seed === 'number' ? merged.seed : undefined,

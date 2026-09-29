@@ -7,8 +7,9 @@ Thanks for your interest in contributing! This project thrives on community inpu
 ### Prerequisites
 
 - **Node.js** 18+ ([download](https://nodejs.org/))
+- **Rust stable** ([install](https://rustup.rs/)) — required by the Tauri desktop app
 - **Ollama** ([download](https://ollama.com/)) — for text model testing
-- **ComfyUI** (optional) — only needed for image/video gen features
+- **ComfyUI** (optional) — needed for image/video testing outside the Apple Silicon local lanes
 - **Git** (obviously)
 
 ### Dev Setup
@@ -18,6 +19,25 @@ git clone https://github.com/PurpleDoubleD/locally-uncensored.git
 cd locally-uncensored
 npm install
 ```
+
+#### Apple Silicon desktop builds
+
+The bundled `llama-server` binary is intentionally not committed. Build the
+native arm64 sidecar before the first Tauri run; the script enables Metal and
+embeds its shaders so the resulting app does not need a separate llama.cpp
+install:
+
+```bash
+xcode-select --install              # once, if Command Line Tools are missing
+brew install cmake python@3.12
+bash scripts/build-llama.sh
+bash scripts/build-llama.sh --check
+npm run tauri:dev
+```
+
+Ollama remains the recommended text backend on macOS. Local image and video
+dependencies are installed into LU's own Python environment from the Create
+tab; ComfyUI is not required for those Apple Silicon lanes.
 
 You have three dev workflows, depending on what you're working on:
 
@@ -32,6 +52,15 @@ npm run dev           # serves at http://localhost:5173
 # Production build — emits a signed .exe / .msi / .AppImage / .deb / .rpm into
 # src-tauri/target/release/bundle/. Use when you want to test a real installer.
 npm run tauri:build
+
+# macOS local .app / notarized DMG (Developer ID). `make help` is the catalog.
+make help
+make install-app     # signed .app → /Applications (LU must be quit)
+make release         # signed + notarized .app + .dmg
+# Credentials: APPLE_SIGNING_IDENTITY or ~/.keys/signing-identity.txt;
+# notary: APPLE_ID+APPLE_PASSWORD+APPLE_TEAM_ID or ~/.keys/.notary.env.
+# mise run install-app / mise run release wrap the same Makefile targets.
+# Always from the repository root — never `cd src-tauri` for make, tauri, or loct.
 ```
 
 Most pull requests only need `npm run tauri:dev`. Thanks to @k-wilkinson for

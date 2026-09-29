@@ -487,8 +487,44 @@ export interface CustomNodeInstallOptions {
    * download has no such surface and asks for it here.
    */
   restart?: boolean
+  /**
+   * A deliberate click (Create's install card, a bundle the user started).
+   * Clears the one-failure latch so a ComfyUI that was absent and is now
+   * running can be installed into. Automatic callers leave this false: a
+   * missing ComfyUI stays quiet, and a real failure is logged once.
+   */
+  force?: boolean
   /** Progress text for a caller that has somewhere to put it. */
   onProgress?: (message: string) => void
+}
+
+/**
+ * Whether a custom-node install has a ComfyUI to land in.
+ *
+ * `running` means something is already serving the configured port (on a
+ * Mac: the user's own ComfyUI) even when LU never recorded the install folder. That is not
+ * "absent" — the folder is recovered from the listener. Absent is neither
+ * answering nor found. A status we could not read is `install`: guessing
+ * "missing" is how a live server was skipped.
+ */
+export type ComfyNodeInstallGate = 'install' | 'quiet'
+
+export function comfyNodeInstallGate(
+  status: { running?: boolean; found?: boolean } | null | undefined,
+): ComfyNodeInstallGate {
+  if (!status) return 'install'
+  if (status.running === true || status.found === true) return 'install'
+  if (status.running === false && status.found === false) return 'quiet'
+  return 'install'
+}
+
+/** Name → the error already logged this boot. A second automatic call
+ *  rethrows it without another install and without another console line. */
+const nodeInstallFailure = new Map<string, string>()
+
+/** Test seam. The latch is process-wide on purpose. */
+export function __resetCustomNodeInstallLatchForTests(): void {
+  nodeInstallFailure.clear()
 }
 
 /**
@@ -518,6 +554,30 @@ export interface CustomNodeInstallOptions {
  * answer. The restart is when the truth changes.
  */
 export async function installCustomNodes(nodeKeys: string[], opts: CustomNodeInstallOptions = {}): Promise<void> {
+  const known = nodeKeys.filter((k) => CUSTOM_NODE_REGISTRY[k])
+  if (known.length > 0) {
+    if (opts.force) {
+      for (const k of known) nodeInstallFailure.delete(CUSTOM_NODE_REGISTRY[k]!.name)
+    } else if (known.every((k) => nodeInstallFailure.has(CUSTOM_NODE_REGISTRY[k]!.name))) {
+      const name = CUSTOM_NODE_REGISTRY[known[0]]!.name
+      throw new Error(nodeInstallFailure.get(name)!)
+    }
+    let gate: ComfyNodeInstallGate = 'install'
+    try {
+      const st = await backendCall<{ running?: boolean; found?: boolean }>('comfyui_status')
+      gate = comfyNodeInstallGate(st)
+    } catch {
+      // Could not ask. Do not treat that as "ComfyUI is absent".
+      gate = 'install'
+    }
+    if (gate === 'quiet') {
+      // Nothing is serving and nothing is installed. An automatic caller
+      // (boot, a remount) must not clone a node pack or log an error. A
+      // click still hears why.
+      if (!opts.force) return
+      throw new Error('ComfyUI is not running. Start it and try the install again.')
+    }
+  }
   try {
     for (const key of nodeKeys) {
       const entry = CUSTOM_NODE_REGISTRY[key]
@@ -529,13 +589,19 @@ export async function installCustomNodes(nodeKeys: string[], opts: CustomNodeIns
         opts.onProgress?.(`Installing ${entry.name}…`)
         const result = await backendCall('install_custom_node', { repoUrl: entry.repo, nodeName: entry.name })
         assertNodeInstallOk(result, entry.name)
+        nodeInstallFailure.delete(entry.name)
         log.info(`[discover] Installed custom node: ${entry.name}`)
       } catch (err) {
+        const message = `Failed to install ${entry.name}: ${err}`
+        const already = nodeInstallFailure.get(entry.name) === message
+        nodeInstallFailure.set(entry.name, message)
         if (!opts.keepGoing) {
-          log.error(`[discover] Failed to install ${entry.name}`, { err })
-          throw new Error(`Failed to install ${entry.name}: ${err}`)
+          // Once per name per boot. A remount that asks again rethrows above
+          // and does not write another line.
+          if (!already) log.error(`[discover] Failed to install ${entry.name}`, { err })
+          throw new Error(message)
         }
-        log.warn('[discover] Custom node install failed', { err })
+        if (!already) log.warn('[discover] Custom node install failed', { err })
       }
     }
   } finally {

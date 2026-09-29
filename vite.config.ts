@@ -23,6 +23,7 @@ import {
 // und mit echten Anfragen beschiessen kann — dieselben Handler, die
 // `npm run dev` ausliefert. Siehe dev-server/index.ts.
 import { devServerPlugin } from './dev-server/index'
+import { defaultComfyPort } from './src/lib/comfy-default-port'
 
 // Load .env file from project root
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -126,7 +127,7 @@ export default defineConfig({
         rewrite: (path) => path.replace(/^\/ollama-search/, '/search'),
       },
       '/comfyui': {
-        target: 'http://localhost:8188',
+        target: `http://localhost:${defaultComfyPort()}`,
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/comfyui/, ''),
         ws: true,

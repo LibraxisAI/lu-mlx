@@ -280,8 +280,16 @@ pub(crate) fn plan_download(
     prefer_variant: Option<&str>,
 ) -> DownloadPlan {
     let mut plan = DownloadPlan::default();
-    if let Some(index) = files.iter().find(|f| f.path == "model_index.json") {
-        plan.files.push(index.clone());
+    match files.iter().find(|f| f.path == "model_index.json") {
+        Some(index) => plan.files.push(index.clone()),
+        // The listing must still name this file; if it does not, ask for it
+        // by path so `allow_patterns` cannot skip the one file the pipeline
+        // needs to even start.
+        None => plan.files.push(RepoFile {
+            path: "model_index.json".into(),
+            size: 0,
+            sha256: None,
+        }),
     }
     for component in manifest.components() {
         for support in files
@@ -1037,6 +1045,20 @@ mod tests {
         // 8.57 GB of weights and configs, which is not the 5.3 GB the old
         // pattern set pulled and the catalog still promised.
         assert_eq!(plan.bytes, 8576626335);
+    }
+
+    #[test]
+    fn the_download_plan_still_asks_for_model_index_when_the_listing_omits_it() {
+        let files: Vec<RepoFile> = listing()
+            .into_iter()
+            .filter(|f| f.path != "model_index.json")
+            .collect();
+        let manifest = parse_model_index(SDXL_MANIFEST).unwrap();
+        let plan = plan_download(&files, &manifest, Some("fp16"));
+        assert!(
+            plan.files.iter().any(|f| f.path == "model_index.json"),
+            "allow_patterns must name model_index.json even when the listing forgot it"
+        );
     }
 
     /// Qwen-Image and Z-Image: a nine-shard transformer, a four-shard text

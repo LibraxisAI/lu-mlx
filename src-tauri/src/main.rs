@@ -459,6 +459,8 @@ fn main() {
             commands::process::set_comfyui_host,
             commands::process::set_ollama_host,
             commands::process::get_ollama_host,
+            commands::process::get_models_root,
+            commands::process::set_models_root,
             commands::process::offload_local_models,
             // ComfyUI progress WebSocket via Rust (0.19+ origin-check bypass)
             commands::comfy_ws::comfy_ws_connect,

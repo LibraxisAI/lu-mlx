@@ -7,6 +7,30 @@ use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// Build a pip install command that cannot inherit the user's pip policy.
+///
+/// LU installs Python packages only into environments it owns. A perfectly
+/// valid user config such as `global.user = true` makes ordinary pip commands
+/// add `--user`; pip then refuses to run inside a venv with:
+///
+/// ```text
+/// Can not perform a '--user' install. User site-packages are not visible in
+/// this virtualenv.
+/// ```
+///
+/// `--isolated` tells pip to ignore user configuration and all `PIP_*`
+/// environment variables. Keep it before the `install` subcommand: that is
+/// where pip's global options are parsed.
+pub fn isolated_pip_install_command(python: impl AsRef<std::ffi::OsStr>) -> Command {
+    // `--isolated` ignores user pip config (`global.user = true` breaks a
+    // venv). `python_command` adds the UTF-8 stdio env, CREATE_NO_WINDOW, and
+    // the AppImage library-path strip. Both have to ride on the same child:
+    // the Mac fork's pip installs and upstream's Windows/AppImage spawns.
+    let mut cmd = python_command(python);
+    cmd.args(["-m", "pip", "--isolated", "install", "--upgrade"]);
+    cmd
+}
+
 /// Die eine Stelle, die ein Python-Kommando baut.
 ///
 /// Ein Python-Kind mit umgeleiteter Ausgabe kodiert unter Windows mit der alten
@@ -680,6 +704,16 @@ pub fn is_real_python(bin: &str) -> bool {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn app_owned_pip_ignores_user_configuration() {
+        let cmd = isolated_pip_install_command("python3");
+        let args = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(args, ["-m", "pip", "--isolated", "install", "--upgrade"]);
+    }
 
     // ── Ticket 003: die Kodierung haengt am Kommando, nicht am Aufrufer ────
 

@@ -86,6 +86,14 @@ export const COMPONENT_REGISTRY: Record<string, ComponentRequirements> = {
     vae: { matchPatterns: ['qwen_image_2.1_vae', 'qwen_image_2.1'], downloadFilename: 'qwen_image_2.1_vae_bf16.safetensors', downloadUrl: 'https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/vae/qwen_image_2.1_vae_bf16.safetensors', subfolder: 'vae' },
     clip: { matchPatterns: ['qwen3vl_8b'], downloadFilename: 'qwen3vl_8b_int8_convrot.safetensors', downloadUrl: 'https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/text_encoders/qwen3vl_8b_int8_convrot.safetensors', subfolder: 'text_encoders' },
   },
+  // Qwen-Image-Edit 2511 (ComfyUI 0.33). Same CLIPLoader type as Z-Image, but
+  // the 7B VL encoder and the older qwen_image VAE. Patterns stay off the 2.1
+  // filenames above so a box that has both files does not complete the wrong one.
+  qwen_image_edit: {
+    loader: 'UNETLoader', needsSeparateVAE: true, needsSeparateCLIP: true, clipType: 'qwen_image',
+    vae: { matchPatterns: ['qwen_image_vae'], downloadFilename: 'qwen_image_vae.safetensors', subfolder: 'vae' },
+    clip: { matchPatterns: ['qwen_2.5_vl', 'qwen2.5'], downloadFilename: 'qwen_2.5_vl_7b_fp8_scaled.safetensors', subfolder: 'text_encoders' },
+  },
   ernie_image: {
     loader: 'UNETLoader', needsSeparateVAE: true, needsSeparateCLIP: true, clipType: 'flux2',
     vae: { matchPatterns: ['flux2-vae', 'flux2', 'flux'], downloadFilename: 'flux2-vae.safetensors', downloadUrl: 'https://huggingface.co/Comfy-Org/ERNIE-Image/resolve/main/vae/flux2-vae.safetensors', subfolder: 'vae' },

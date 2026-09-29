@@ -111,13 +111,14 @@ test('local mode: local lanes usable, cloud-only ops shown as locked teasers', a
   await expect(page.getByRole('radio', { name: 'Animate Image', exact: true })).toBeVisible()
   await expect(page.getByRole('radio', { name: 'Music', exact: true })).toBeVisible()
 
-  // Character Studio joined the local lanes in 2.6.0 (musubi trainer ships
-  // in trainer.rs), so it renders as a plain selectable tab now.
+  // Character Studio is the musubi trainer — a real local tab on Mac without ComfyUI.
   await expect(page.getByRole('radio', { name: 'Character Studio', exact: true })).toBeVisible()
 
-  // cloudOnly WITHOUT a local lane (upscale / eraser) renders locked:
-  // aria-label gains ", runs on LU Cloud" and a click opens the teaser
-  // instead of switching the lane.
+  // Enhance Image / eraser have a local lane only in the Mac fork
+  // (`localLaneMacOnly`). This spec runs as Windows (tauri-mock default), so
+  // they render locked: aria-label gains ", runs on LU Cloud" and a click
+  // opens the teaser instead of switching the lane.
+  // R5-67 renamed the upscale label to "Enhance Image".
   await expect(page.getByRole('radio', { name: 'Enhance Image, runs on LU Cloud' })).toBeVisible()
   await expect(page.getByRole('radio', { name: 'Erase Object, runs on LU Cloud' })).toBeVisible()
 

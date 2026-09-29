@@ -153,7 +153,7 @@ export function galleryTypeForFile(
 // 2.5.8: ace / wans2v / wananimate / wanvace are the specialized local-lane
 // architectures (music, talking character, motion control). They are neither
 // image nor video picker material — each lane has its own model list.
-export type ModelType = 'flux' | 'flux2' | 'krea2' | 'zimage' | 'ernie_image' | 'qwenimage' | 'sdxl' | 'sd15' | 'wan' | 'wan22' | 'hunyuan' | 'ltx' | 'mochi' | 'cosmos' | 'cogvideo' | 'svd' | 'framepack' | 'pyramidflow' | 'allegro' | 'ace' | 'wans2v' | 'wananimate' | 'wanvace' | 'animatediff' | 'unknown'
+export type ModelType = 'flux' | 'flux2' | 'krea2' | 'zimage' | 'qwen_image_edit' | 'ernie_image' | 'qwenimage' | 'sdxl' | 'sd15' | 'wan' | 'wan22' | 'hunyuan' | 'ltx' | 'mochi' | 'cosmos' | 'cogvideo' | 'svd' | 'framepack' | 'pyramidflow' | 'allegro' | 'ace' | 'wans2v' | 'wananimate' | 'wanvace' | 'animatediff' | 'unknown'
 export type VideoBackend = 'wan' | 'animatediff' | 'none'
 
 export interface ClassifiedModel {
@@ -223,6 +223,18 @@ const KNOWN_MODELS: Record<string, ModelType> = {
   absolutereality: 'sd15',
 }
 
+/**
+ * LTX-2 / 2.3 (Lightricks' audio+video line, Gemma 3 text encoder) as opposed
+ * to the older LTX-Video 0.9.x. Both classify as 'ltx', but they share no graph:
+ * LTX-2 samples one joint audio+video latent (LTXVConcatAVLatent → Sampler-
+ * CustomAdvanced → LTXVSeparateAVLatent) and needs a video VAE, an audio VAE and
+ * the Gemma encoder with its text projection. Matches "ltx-2.3-22b-…",
+ * "ltx2_…", "…_LTX23.gguf"; not "ltx-video-2b-v0.9" or "ltxv-13b-0.9.7".
+ */
+export function isLtx2Model(name: string | null | undefined): boolean {
+  return !!name && /ltx[-_ ]?2(?![0-9]*b)|ltxav/i.test(name)
+}
+
 export function classifyModel(name: string | null | undefined): ModelType {
   // Defensive: treat empty/missing names as unknown. Older installs can persist
   // stale model strings that no longer exist; callers should not crash on those.
@@ -262,6 +274,16 @@ export function classifyModel(name: string | null | undefined): ModelType {
   if (lower.includes('hunyuan')) return 'hunyuan'
   if (lower.includes('ltx')) return 'ltx'
 
+  // Qwen-Image-Edit (2511 and the same family) is a diffusion UNET. It is not
+  // in CheckpointLoaderSimple's list — ComfyUI 0.33 lists it on UNETLoader.
+  // "vae" / "vl" keep the VAE and the Qwen2.5-VL text encoder out of this lane.
+  if (
+    !lower.includes('vae') && !lower.includes('vl') && (
+      lower.includes('qwen_image_edit') || lower.includes('qwen-image-edit')
+      || (lower.includes('qwen') && lower.includes('image') && lower.includes('edit'))
+    )
+  ) return 'qwen_image_edit'
+
   // ERNIE-Image (Baidu, uses flux2 CLIP type + ConditioningZeroOut for negative)
   if (lower.includes('ernie-image') || lower.includes('ernie_image')) return 'ernie_image'
 
@@ -272,9 +294,9 @@ export function classifyModel(name: string | null | undefined): ModelType {
   // Version-bound on purpose. The older Qwen-Image (2508) and Qwen-Image-Edit
   // (2509/2511) files carry the same `qwen_image` stem but need a different
   // text-encode node, so a bare stem match would route them onto the 2.1
-  // pipeline and ComfyUI would reject the graph. They keep falling through to
-  // 'unknown', which refuses honestly with "LU could not determine this
-  // model's architecture" instead of guessing.
+  // pipeline and ComfyUI would reject the graph. Edit files are classified
+  // above as `qwen_image_edit`. A plain older Qwen-Image file falls through
+  // to 'unknown', which refuses honestly instead of guessing.
   //
   // Deliberately NOT caught here: the 2.1 text encoder itself
   // (qwen3vl_8b_int8_convrot) and Z-Image's qwen_3_4b carry no `qwen_image`
@@ -321,7 +343,7 @@ export function classifyModel(name: string | null | undefined): ModelType {
 }
 
 export function isImageModelType(type: ModelType): boolean {
-  return type === 'flux' || type === 'flux2' || type === 'krea2' || type === 'zimage' || type === 'ernie_image' || type === 'qwenimage' || type === 'sdxl' || type === 'sd15' || type === 'unknown'
+  return type === 'flux' || type === 'flux2' || type === 'krea2' || type === 'zimage' || type === 'qwen_image_edit' || type === 'ernie_image' || type === 'qwenimage' || type === 'sdxl' || type === 'sd15' || type === 'unknown'
 }
 
 export function isVideoModelType(type: ModelType): boolean {
@@ -446,6 +468,10 @@ export const MODEL_TYPE_DEFAULTS: Record<string, ModelTypeDefaults> = {
   // than guessing at the other.
   krea2:  { steps: 8,  cfg: 1.0, sampler: 'euler',           scheduler: 'beta',   width: 1024, height: 1024, frames: 1, fps: 1 },
   zimage: { steps: 12, cfg: 3.5, sampler: 'euler',           scheduler: 'simple', width: 1024, height: 1024, frames: 1, fps: 1 },
+  // Qwen-Image-Edit 2511 template on ComfyUI 0.33: euler / simple / cfg 4,
+  // ModelSamplingAuraFlow shift 3.1. cfg 7 (the SD default) still validates
+  // but washes the edit.
+  qwen_image_edit: { steps: 20, cfg: 4.0, sampler: 'euler', scheduler: 'simple', width: 1024, height: 1024, frames: 1, fps: 1 },
   // Qwen-Image 2.1: every number is the one the official Comfy-Org templates
   // ship (image_qwen_image_2_1_t2i.json and image_qwen_image_2_1_image_edit.json,
   // KSampler widgets: 25 steps, cfg 1, euler, simple; canvas 1024x1024 at
@@ -625,6 +651,25 @@ export async function getSystemVRAM(): Promise<number | null> {
  * different one", see lib/comfy-cors-notice.ts. Not cached: a restart under
  * LU's management, or a user update, is exactly the change worth noticing.
  */
+/**
+ * The torch device the running ComfyUI computes on ("cuda", "mps", "cpu", …),
+ * from /system_stats devices[0].type, or null when it does not answer. A graph
+ * builder asks this when one device needs a different recipe than the rest
+ * (buildLtx2Workflow: LTX-2 image-to-video above cfg 1 comes out as NaN on
+ * MPS). Not cached, for the same reason getComfyVersion is not.
+ */
+export async function getComfyDeviceType(): Promise<string | null> {
+  try {
+    const res = await localFetch(comfyuiUrl('/system_stats'), { timeoutMs: COMFY_STATS_TIMEOUT_MS })
+    if (!res?.ok) return null
+    const data = await res.json()
+    const t = Array.isArray(data?.devices) ? data.devices[0]?.type : null
+    return typeof t === 'string' && t ? t.toLowerCase() : null
+  } catch {
+    return null
+  }
+}
+
 export async function getComfyVersion(): Promise<string | null> {
   try {
     const res = await localFetch(comfyuiUrl('/system_stats'), { timeoutMs: COMFY_STATS_TIMEOUT_MS })
@@ -1435,6 +1480,11 @@ export async function findMatchingVAE(modelType: ModelType): Promise<string> {
   if (vaes.length === 0) throw new Error('No VAE models found. Download a VAE for your model type from the Model Manager.')
   const lower = (s: string) => s.toLowerCase()
 
+  if (modelType === 'qwen_image_edit') {
+    const match = vaes.find(v => lower(v).includes('qwen_image') && !isQwenImage21Vae(v))
+    if (match) return match
+    throw new Error(`No Qwen Image VAE found. Put "qwen_image_vae.safetensors" in ComfyUI's vae folder.`)
+  }
   if (modelType === 'zimage') {
     // Z-Image uses ae.safetensors (same as FLUX but prefer exact match)
     const match = vaes.find(v => lower(v) === 'ae.safetensors')
@@ -1513,7 +1563,10 @@ export async function findMatchingVAE(modelType: ModelType): Promise<string> {
     throw new Error(`No Wan 2.2 VAE found. Download "wan2.2_vae.safetensors" from the Model Manager.`)
   }
   if (modelType === 'ltx') {
-    const match = vaes.find(v => lower(v).includes('ltx'))
+    // An LTX-2 install carries an AUDIO VAE and a tiny preview VAE next to the
+    // video one (LTX23_audio_vae, taeltx2_3); the audio file sorts first, so a
+    // bare `includes('ltx')` handed the video decoder the audio VAE.
+    const match = vaes.find(v => lower(v).includes('ltx') && !lower(v).includes('audio') && !lower(v).startsWith('tae'))
     if (match) return match
     return vaes[0]
   }
@@ -1608,6 +1661,13 @@ export async function findMatchingCLIP(modelType: ModelType, activeModelName?: s
   const modelLc = activeModelName ? lower(activeModelName) : ''
   const modelIsFp4 = /fp4|nf4/.test(modelLc)
 
+  if (modelType === 'qwen_image_edit') {
+    // Qwen-Image-Edit's text tower is Qwen2.5-VL, not the Z-Image qwen_3_4b.
+    const match = clips.find(c => lower(c).includes('qwen_2.5_vl') || lower(c).includes('qwen2.5-vl') || lower(c).includes('qwen2.5_vl'))
+      || clips.find(c => lower(c).includes('qwen') && lower(c).includes('vl') && !isQwen3vl8b(c))
+    if (match) return match
+    throw new Error(`No Qwen Image text encoder found. Put "qwen_2.5_vl_7b_fp8_scaled.safetensors" in ComfyUI's text_encoders folder.`)
+  }
   if (modelType === 'zimage') {
     // Z-Image uses qwen_3_4b.safetensors (NOT the fp4_flux2 variant — different embedding dimensions!)
     const match = clips.find(c => lower(c) === 'qwen_3_4b.safetensors')

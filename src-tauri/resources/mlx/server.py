@@ -107,6 +107,12 @@ def _ensure_pipe(
     # No attention/VAE slicing here: on torch 2.12 + MPS it corrupts the
     # forward pass into all-NaN latents (verified live — plain runs are
     # clean, sliced runs decode to black frames).
+    #
+    # `repo` is either a hub id or an absolute snapshot directory. The bridge
+    # passes the snapshot path once the install is on disk, because a
+    # SHA-pinned huggingface_hub download does not write refs/main and
+    # from_pretrained("org/name", local_files_only=True) then cannot find
+    # model_index.json even though the snapshot sitting next door has it.
     _pipe = AutoPipelineForText2Image.from_pretrained(repo, **kwargs).to(device)
     _pipe_repo = repo
     return _pipe
@@ -132,6 +138,10 @@ class GenerateRequest(BaseModel):
     disable_safety_checker: bool = False
     # Set by the bridge when it has verified the model is fully on disk.
     local_files_only: bool = False
+    # Img2img / expand. Absent means text-to-image. strength is Comfy's denoise:
+    # 0 keeps the source, 1 ignores it.
+    image_base64: Optional[str] = None
+    strength: float = 0.7
 
 
 @app.get("/health")
@@ -193,7 +203,21 @@ def generate(req: GenerateRequest):
             gen_kwargs["negative_prompt"] = req.negative_prompt
 
         try:
-            result = pipe(**gen_kwargs)
+            if req.image_base64:
+                from diffusers import AutoPipelineForImage2Image
+                from PIL import Image
+                raw = base64.b64decode(req.image_base64)
+                init = Image.open(io.BytesIO(raw)).convert("RGB")
+                init = init.resize((req.width, req.height))
+                # from_pipe reuses the weights already resident for text-to-image.
+                i2i = AutoPipelineForImage2Image.from_pipe(pipe)
+                gen_kwargs.pop("width", None)
+                gen_kwargs.pop("height", None)
+                gen_kwargs["image"] = init
+                gen_kwargs["strength"] = req.strength
+                result = i2i(**gen_kwargs)
+            else:
+                result = pipe(**gen_kwargs)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"generate: {exc}") from exc
         finally:

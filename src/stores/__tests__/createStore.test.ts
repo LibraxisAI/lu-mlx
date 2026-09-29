@@ -861,13 +861,14 @@ describe('createStore', () => {
     })
   })
 
-  // David 2026-07-10: edit/animate/upscale/eraser are cloud-only — flipping
-  // the backend to local must clear every cloud-only intent (the IntentBar no
-  // longer shows them) so the surface never strands on a hidden op.
+  // Flipping the backend to local must clear hosted-only intents that have
+  // no local lane. Upscale/eraser now keep on a ComfyUI host.
   describe('setBackend local-flip clears cloud-only intents', () => {
     const ref = { filename: 'src.png', url: 'data:image/png;base64,x', width: 8, height: 8 }
 
-    it('clears a utility op (upscale) with its mask', () => {
+    it('drops a utility op (upscale) on a Windows/Linux ComfyUI host — LU Cloud tool there', () => {
+      // Local upscale / eraser are Mac-fork only (`localLaneMacOnly`); the Mac
+      // case lives in der-mac-strandet-nicht-auf-einem-werkzeug.test.ts.
       const s = useCreateStore.getState()
       s.setBackend('cloud')
       s.setIntent('upscale')

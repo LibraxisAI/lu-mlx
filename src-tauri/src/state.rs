@@ -124,12 +124,20 @@ impl Default for InstallState {
     }
 }
 
+/// Default ComfyUI port: ComfyUI's own 8188 on every OS. On macOS LU only
+/// connects (spawn is refused, `comfy_supported_here`); a ComfyUI on another
+/// port is set in Settings (`set_comfyui_port`), never baked in as a default
+/// for one machine.
+pub(crate) fn default_comfy_port() -> u16 {
+    8188
+}
+
 /// Read persisted ComfyUI port + host from `os_paths::app_config_json()`
 /// (Windows: `%APPDATA%\\<APP_CONFIG_DIR>\\config.json`).
-/// Returns (port, host) with sensible defaults (8188, "localhost") on any error.
+/// Returns (port, host) with sensible defaults (platform port, "localhost") on any error.
 /// Called at startup so user-configured values survive app restarts.
 pub(crate) fn load_comfy_config_values() -> (u16, String) {
-    let mut port = 8188u16;
+    let mut port = default_comfy_port();
     let mut host = "localhost".to_string();
 
     {
@@ -400,7 +408,7 @@ impl AppState {
         // Fixes a pre-existing bug where `set_comfyui_port` wrote to disk but
         // startup never read it back. Same loader now handles the new host field.
         let (initial_port, initial_host) = load_comfy_config_values();
-        if initial_port != 8188 {
+        if initial_port != default_comfy_port() {
             println!("[ComfyUI] Loaded persisted port: {}", initial_port);
         }
         if initial_host != "localhost" {
@@ -699,6 +707,11 @@ mod shutdown_tests {
     // Unix behaviour is unchanged; before, both were spelled out here in Unix
     // terms only, which is what switched this test off on Windows.
     use crate::test_support::{is_alive as alive, sleeper as sleeper_cmd};
+
+    #[test]
+    fn default_comfy_port_is_comfyuis_own_8188_everywhere() {
+        assert_eq!(super::default_comfy_port(), 8188);
+    }
 
     /// A live child that outlives the test unless something kills it.
     fn sleeper() -> std::process::Child {

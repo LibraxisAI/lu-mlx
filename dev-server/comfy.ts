@@ -8,6 +8,11 @@ import { requirePost, withJsonBody, failRequest } from './http'
 import { bodyString } from '../src/dev/http-body'
 import { customNodeDir } from '../src/dev/model-paths'
 import { errorText } from '../src/types/json-guards'
+import { defaultComfyPort } from '../src/lib/comfy-default-port'
+
+function comfyListenPort(): number {
+  return defaultComfyPort()
+}
 
 export function findComfyUI(): string | null {
   // 1. Check .env / environment variable
@@ -67,7 +72,8 @@ export function findComfyUI(): string | null {
 }
 
 export function isComfyRunning(): Promise<boolean> {
-  return fetch('http://localhost:8188/system_stats')
+  const port = comfyListenPort()
+  return fetch(`http://localhost:${port}/system_stats`)
     .then(r => r.ok)
     .catch(() => false)
 }
@@ -125,7 +131,7 @@ const startComfy = (comfyPath: string): { status: string; path: string } => {
   comfyLogs = []
   const executable = getComfyPython(comfyPath)
   console.log(`[ComfyUI] Spawning ${executable} in: ${comfyPath}`)
-  comfyProcess = spawn(executable, ['main.py', '--listen', '127.0.0.1', '--port', '8188', '--enable-cors-header', '*'], {
+  comfyProcess = spawn(executable, ['main.py', '--listen', '127.0.0.1', '--port', String(comfyListenPort()), '--enable-cors-header', '*'], {
     cwd: comfyPath,
     stdio: ['ignore', 'pipe', 'pipe'],
     shell: false,
@@ -181,6 +187,10 @@ export type ComfyLauncher = ReturnType<typeof createComfyLauncher>
 
 /** Startet ComfyUI eine Sekunde nach dem Dev-Server, wenn es nicht schon läuft. */
 export function autostartComfy(comfy: ComfyLauncher): void {
+  if (process.platform === 'darwin') {
+    console.log(`[ComfyUI] macOS is connect-only — probing port ${comfyListenPort()}, not spawning`)
+    return
+  }
   // Auto-start ComfyUI when dev server starts
   setTimeout(async () => {
     try {
@@ -195,7 +205,7 @@ export function autostartComfy(comfy: ComfyLauncher): void {
           console.log('[ComfyUI] Not found. Set COMFYUI_PATH in .env or install ComfyUI.')
         }
       } else {
-        console.log('[ComfyUI] Already running on port 8188')
+        console.log(`[ComfyUI] Already running on port ${comfyListenPort()}`)
       }
     } catch (err) {
       console.error('[ComfyUI] Auto-start error:', err)
@@ -207,6 +217,14 @@ export function autostartComfy(comfy: ComfyLauncher): void {
 export function registerComfyControlRoutes(routes: RouteMount, comfy: ComfyLauncher): void {
   // API: Manual start
   routes.use('/local-api/start-comfyui', async (_req, res) => {
+    if (process.platform === 'darwin') {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({
+        status: 'unsupported',
+        message: 'LU does not start ComfyUI on macOS. Connect to an already-running instance via Host/Port.',
+      }))
+      return
+    }
     const alreadyRunning = await isComfyRunning()
     if (alreadyRunning) {
       res.writeHead(200, { 'Content-Type': 'application/json' })
