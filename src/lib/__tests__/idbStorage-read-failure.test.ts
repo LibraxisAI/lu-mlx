@@ -276,3 +276,26 @@ describe('backup_stores merges a lost key instead of replacing the file', () => 
     expect(body).toMatch(/read_to_string\(&target\)[\s\S]*keys_lost\(/)
   })
 })
+
+describe('hasStoredItem answers presence without reading the value', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    vi.stubGlobal('localStorage', fakeLocalStorage())
+  })
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('present, absent, and "could not ask", and never a get()', async () => {
+    const data: Record<string, string> = { 'chat-conversations': HISTORY }
+    const idb = fakeIndexedDB(data)
+    idb.state.failReads = false
+    vi.stubGlobal('indexedDB', idb)
+    const { hasStoredItem } = await import('../idbStorage')
+    expect(await hasStoredItem('chat-conversations')).toBe(true)
+    expect(await hasStoredItem('staged-changes')).toBe(false)
+    idb.state.failReads = true
+    // Unknown is its own answer, so the caller can fall back to a real read
+    // instead of taking a failed probe for an empty store.
+    expect(await hasStoredItem('chat-conversations')).toBeNull()
+  })
+})
+

@@ -1,4 +1,6 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { yieldSilentLocalRuns } from '../../lib/silent-runs'
+import { usePopoverPlatz } from '../../hooks/usePopoverPlatz'
 import { Menu, Loader2, Sun, Moon, RefreshCw, X, MoreVertical } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { useSettingsStore } from '../../stores/settingsStore'
@@ -10,6 +12,7 @@ import { UpdateBadge } from './UpdateBadge'
 import { DownloadBadge } from './DownloadBadge'
 import { CloudSwitch } from '../cloud/CloudSwitch'
 import { loadModel } from '../../api/ollama'
+import { log } from '../../lib/logger'
 import { getProviderIdFromModel } from '../../api/providers'
 import { ModelLoadError } from '../../lib/ollama-errors'
 import { useModels } from '../../hooks/useModels'
@@ -18,7 +21,8 @@ import { checkModelCapability } from '../../api/ollama'
 import { closeDialog, isTopDialog, nextFocusIndex, openDialog } from '../ui/dialog-a11y'
 import { MONOGRAM, MONOGRAM_INVERT } from './brand'
 import type { View } from '../../stores/uiStore'
-import { modelListIsStale } from '../../lib/model-list-staleness'
+import { visibleView } from '../../lib/features'
+import { modelListIsStale, openaiEntriesAreStale } from '../../lib/model-list-staleness'
 
 /**
  * Die Navigation als Daten, nicht als sechs abgeschriebene Knoepfe.
@@ -44,8 +48,13 @@ interface NavTarget {
 const NAV_TARGETS: readonly NavTarget[] = [
   { id: 'chat', label: 'Chat', view: 'chat' },
   { id: 'create', label: 'Create', view: 'create' },
+  // Voice has no cloud service yet, so with the Cloud switch on it goes the
+  // way Benchmark and Models go.
+  { id: 'voice', label: 'Voice', view: 'voice', localOnly: true },
   { id: 'compare', label: 'Compare', view: null },
   { id: 'benchmark', label: 'Benchmark', view: 'benchmark', localOnly: true },
+  // Neurons (P11, 3.0.9) left the header in 3.1.0: it is a plugin now, with
+  // a window of its own (Plugins in the composer).
   { id: 'models', label: 'Models', view: 'models', localOnly: true },
   { id: 'settings', label: 'Settings', view: 'settings' },
 ]
@@ -86,7 +95,8 @@ export function Header() {
   useEffect(() => { fetchModels() }, [fetchModels])
   useEffect(() => {
     const unsub = useProviderStore.subscribe((state, prev) => {
-      if (modelListIsStale(state.providers, prev.providers)) fetchModels()
+      if (modelListIsStale(state.providers, prev.providers)
+        || openaiEntriesAreStale(state.openaiEntries, prev.openaiEntries)) fetchModels()
     })
     return () => unsub()
   }, [fetchModels])
@@ -108,18 +118,24 @@ export function Header() {
     if (!modelToUse || loadingState !== 'idle') return
     setStaleError(null)
     setLoadingState('loading')
+    // A backend cannot swap a model that is still computing (lib/silent-runs.ts).
+    yieldSilentLocalRuns()
     try {
       await loadModel(modelToUse)
       // If the store still thinks this model is stale (e.g. a scan ran before
       // the user re-pulled externally), clear it.
       markHealthFresh(modelToUse)
     } catch (e) {
-      // Bug C (v2.4.5 — Anson192 GH #39): missing-blob errors get the same
+      // Bug C (v2.4.5 — GH #39): missing-blob errors get the same
       // one-click repair path as stale-manifest — `ollama pull <name>`
       // re-fetches missing blobs just like it refreshes stale manifests.
       if (e instanceof ModelLoadError && (e.kind === 'stale-manifest' || e.kind === 'missing-blob')) {
         setStaleError({ model: e.model, message: e.message })
         syncStaleToStore(e.model)
+      } else {
+        // This load has no control of its own on screen (it only follows a
+        // re-pull), so there is nothing to show. It ends at loadModel's limit.
+        log.warn('[header] reloading the model after a re-pull did not finish', { model: modelToUse, err: e })
       }
     }
     finally { setLoadingState('idle') }
@@ -227,6 +243,8 @@ export function Header() {
 
   /** Die sichtbaren Ziele in dieser Betriebsart. */
   const navTargets = NAV_TARGETS.filter((t) => !t.localOnly || settings.appMode !== 'cloud')
+    // A view that is switched off (Neurons in 3.0.9, lib/features) has no tab.
+    .filter((t) => t.view === null || visibleView(t.view) === t.view)
   const isNavActive = (t: NavTarget) =>
     t.view === null ? isComparing : currentView === t.view && !isComparing
   const goto = (t: NavTarget) => {
@@ -259,6 +277,8 @@ export function Header() {
      ──────────────────────────────────────────────────────────────────────── */
   const menuId = useId()
   const menuTriggerRef = useRef<HTMLButtonElement>(null)
+  const moreMenuRef = useRef<HTMLDivElement>(null)
+  const moreMenu = usePopoverPlatz(moreMenuRef, showMoreMenu, { abstand: 8 })
   const menuItemRefs = useRef<(HTMLButtonElement | null)[]>([])
   const [menuActive, setMenuActive] = useState(0)
 
@@ -460,7 +480,9 @@ export function Header() {
               aria-label="Main navigation"
               onPointerDown={(e) => e.stopPropagation()}
               onKeyDown={onMenuKeyDown}
-              className="absolute left-1/2 -translate-x-1/2 top-full mt-2 w-40 rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-[#1a1a1a] shadow-xl z-50 flex flex-col gap-0.5 p-1.5"
+              ref={moreMenuRef}
+              style={moreMenu.style}
+              className={`absolute left-1/2 -translate-x-1/2 w-40 rounded-lg lu-elevated z-50 flex flex-col gap-0.5 p-1.5 overflow-y-auto scrollbar-thin ${moreMenu.nachOben ? 'bottom-full mb-2' : 'top-full mt-2'}`}
             >
               {navTargets.map((t, i) => (
                 <button
@@ -525,7 +547,7 @@ export function Header() {
           </div>
         )}
 
-        {/* Purple Cloud light-switch (David 2026-07-10): left of Downloads,
+        {/* Purple Cloud light-switch (2026-07-10): left of Downloads,
             purple like the website. Gated: flipping ON without a usable
             account opens the CloudGateModal; the first successful flip runs
             the one-time cloud onboarding. */}

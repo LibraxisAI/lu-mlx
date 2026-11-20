@@ -1,10 +1,14 @@
-// Desktop client for the hosted render queue — port of uselu's
-// lib/render/cloud-jobs.ts fetch wrappers onto cloudFetch (bearer + base URL).
+// Desktop client for the hosted render queue — port of the web app's
+// fetch wrappers onto cloudFetch (bearer + base URL).
 // Pure HTTP, no store access; useCloudCreate owns the store choreography.
 
+import { assertCloudContentConsent } from '../../lib/cloud-content-gate'
+import { CONTENT_POLICY_RANK, contentPolicyCap } from '../../lib/content-policy-cap'
+import type { ContentPolicy } from '../../lib/content-policy-cap'
 import type { RenderKind, CloudQuota } from '../../lib/render/cloud-jobs'
 import { cloudFetch, jsonOrError, CloudJobError } from './client'
 import type { RenderOp } from '../../lib/render/cloud-jobs'
+import { originHeaders, type JobOrigin } from '../../lib/create/chat-origin'
 
 export interface CloudJobParams {
   op: RenderOp
@@ -13,6 +17,15 @@ export interface CloudJobParams {
   /** Idempotency key (a UUID minted client-side): a retried submit after a
    *  dropped response replays the same job instead of booking twice. */
   client_request_id?: string
+  /** 3D (3.1.0): where the pictures of the run came from (a file name, the
+   *  prompt of a gallery picture). The server's content gate reads it like
+   *  every other text parameter. */
+  source_prompt?: string
+  /** Bilder in diesem Lauf, 1 bis 4 (nur Bild und Bearbeiten). Fehlt das Feld,
+   *  bucht der Server genau einen Auftrag, wie vor dem 02.10.2026. Ein Server
+   *  ohne die Anzahl bucht ebenfalls einen, deshalb schickt der Start sie nur,
+   *  wenn er mehr als ein Bild will, und prueft die Antwort (`jobs`). */
+  count?: number
   /** The picked step's option values, validated client-side against the same
    *  provider schema studio-contract.ts reads (createStore.cloudStudioOptions). */
   studio_options?: Record<string, unknown>
@@ -57,6 +70,24 @@ export interface CloudJobParams {
   trigger_word?: string // character training
   name?: string // character shelf label
   loras?: { id: string; scale?: number }[] // OWN user_loras rows — server resolves to URLs
+  // Swap Character (07.11.2026). The server cuts the video to the first
+  // clip_seconds seconds (1 to 120), runs and bills exactly that. The models
+  // of SWAP_CONSENT_MODELS (lib/render/swap.ts) need swap_consent true: the
+  // customer confirmed the rights and the consent of the people shown.
+  clip_seconds?: number
+  swap_consent?: boolean
+  /** Swap Character on SCAIL 2 or Kling (14.11.2026): 'frame' builds the first
+   *  frame with the new people (Nano Banana Pro), 'video' runs the clip on it.
+   *  Either step needs swap_consent on the server. 'lipsync' is the step
+   *  after the video when the customer picked a new voice (lib/render/sound.ts). */
+  swap_step?: 'frame' | 'video' | 'lipsync'
+  /** Swap and Motion (14.11.2026): the sound of the result. On original the
+   *  worker lays the clip's sound under a result without one; none removes
+   *  it. */
+  sound?: 'original' | 'none'
+  /** The lip sync step after Swap or Motion: the server cuts a longer voice
+   *  to the length of the clip. */
+  fit_audio?: true
 }
 
 export interface CloudJobSubmit {
@@ -79,6 +110,9 @@ export interface CloudJob {
   started_at?: string | null
   completed_at: string | null
   error: string | null
+  /** A filtered model refused (one click swap): the open model the server
+   *  names as the way out. Only on failed jobs, only on newer servers. */
+  fallback_model?: string | null
   // Die Anzeigefelder, die die Listenroute (GET /api/jobs) aus den params
   // herausreicht, damit eine neu geladene Galerie den Namen des Laufs
   // wiederherstellt statt jedesmal leer anzufangen.
@@ -100,7 +134,16 @@ export interface CloudMe {
      *  what the invoice contradicts. Absent on older servers = unknown, which
      *  every surface reads as "promise nothing". */
     paidPlan?: boolean
+    /** True while a renewal payment of this account failed and no paid plan
+     *  is active. Independent of status: pack credits keep such an account
+     *  'active' on tier 'starter'. Absent on older servers = false. */
+    pastDue?: boolean
+    /** The plan waiting for that payment (hosted | hosted-pro | hosted-max). */
+    pastDueTier?: string | null
   }
+  /** What the server has released for this account. `createChat`: Create in
+   *  chat. Absent on an older server and for a signed out account = nothing. */
+  features?: { createChat?: boolean; characterHub?: boolean }
 }
 
 /** Stage an input; returns the render-inputs storage path. Roles: 'source' /
@@ -110,15 +153,60 @@ export interface CloudMe {
  *  WKWebView's fetch fails a cross-origin FormData(Blob) body with a bare
  *  "Load failed", which broke every source-needing op (edit/removebg/eraser/
  *  upscale/animate). An ArrayBuffer body serialises fine. */
+export type UploadRole = 'source' | 'mask' | 'train' | 'audio' | 'video'
+
+// `origin` on the writing calls below (upload, adopt, submit): an order of the
+// chat names itself (lib/create/chat-origin.ts), so the server can refuse it
+// for an account Create in chat is not released for. The Create tab passes
+// none and sends the requests it always sent.
+
+/** What an upload can be given besides the file and its role. `signal` lets
+ *  the caller end the upload (the phone's Cancel), `origin` names an order of
+ *  the chat. */
+export interface UploadOptions {
+  signal?: AbortSignal
+  origin?: JobOrigin
+}
+
+/** The third argument is either the origin alone (how Create in chat calls
+ *  it) or the options above (how the phone calls it). */
 export async function uploadInput(
   file: Blob,
-  role: 'source' | 'mask' | 'train' | 'audio' | 'video',
+  role: UploadRole,
+  originOrOpts?: JobOrigin | UploadOptions,
 ): Promise<string> {
+  const opts: UploadOptions = typeof originOrOpts === 'string' ? { origin: originOrOpts } : originOrOpts ?? {}
+  const origin = opts.origin
+  // The backstop of the consent (phone, M1): the screens ask, this refuses.
+  assertCloudContentConsent()
   const body = await file.arrayBuffer()
+  // A caller that hands in a signal can end the upload itself (a Cancel while
+  // a 40 MB clip goes up over a phone line). Without one the request runs to
+  // its own deadline, as it always did.
   const res = await cloudFetch(`/api/jobs/upload?role=${role}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/octet-stream' },
+    headers: { 'content-type': 'application/octet-stream', ...originHeaders(origin) },
     body,
+    ...(opts.signal ? { signal: opts.signal } : {}),
+  })
+  const { path } = await jsonOrError<{ path: string }>(res)
+  return path
+}
+
+/** The kind of an own result that is to serve as an input. The server checks
+ *  it against the content, as it does for an upload. */
+export type AdoptRole = 'image' | 'video' | 'audio'
+
+/** Stages the result of an own finished job as an input and returns its path,
+ *  like uploadInput. The server copies it (POST /api/jobs/adopt), nothing is
+ *  downloaded or uploaded here. Throws CloudJobError with the route's status:
+ *  404 unknown or not yours, 409 not finished or already cleaned up, 413 too
+ *  large, 415 wrong kind. */
+export async function adoptInput(jobId: string, role: AdoptRole, origin?: JobOrigin): Promise<string> {
+  const res = await cloudFetch('/api/jobs/adopt', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...originHeaders(origin) },
+    body: JSON.stringify({ job_id: jobId, role }),
   })
   const { path } = await jsonOrError<{ path: string }>(res)
   return path
@@ -132,6 +220,13 @@ export interface CloudJobSubmitResult {
    *  `cost` is guaranteed. */
   quota: { cost: number; used?: number; limit?: number }
   replayed?: boolean
+  /** Nur bei einem Lauf mit mehreren Bildern: alle gebuchten Auftraege. Fehlt
+   *  das Feld trotz count > 1, kennt der Server die Anzahl nicht und hat genau
+   *  einen Auftrag gebucht. */
+  jobs?: { id: string; status: string; cost: number }[]
+  requested?: number
+  /** Gesetzt, wenn weniger liefen als gewuenscht. Gebucht ist nur, was in `jobs` steht. */
+  stopped?: 'credits_exhausted' | 'error'
 }
 
 /** The server re-quoted at submit time (prepareStudio()) and its own number
@@ -146,14 +241,51 @@ export class QuoteChangedError extends CloudJobError {
   }
 }
 
+/** Answers after which nobody knows whether the server booked the job. */
+const SUBMIT_FATE_UNKNOWN = new Set([0, 408, 502, 503, 504])
+const SUBMIT_ATTEMPTS = 3
+/** Pause before a retry, times the attempt number. */
+const SUBMIT_RETRY_MS = 1_000
+
 export async function submitCloudJob(
   submit: CloudJobSubmit,
+  origin?: JobOrigin,
 ): Promise<CloudJobSubmitResult> {
-  const res = await cloudFetch('/api/jobs', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(submit),
+  assertCloudContentConsent()
+  // A dropped or timed-out submit may have booked the job anyway (bug hunt
+  // 01.10.2026, K8): it ran, it was charged, and the desktop, which has no job
+  // list, never saw it. The request id was minted for exactly this and never
+  // used: the same body goes out again, and the server replays the booking
+  // it already made instead of charging twice.
+  // A store build of the phone app sends the upper limit of the content policy
+  // with every job (lib/content-policy-cap.ts), whatever the account says and
+  // whatever a caller put there. No cap on the desktop: nothing is added.
+  // As a number (0 strict, 1 soft), not as a word: the server runs its word
+  // lists over every TEXT in params, and a field of ours must never be part of
+  // what is judged there.
+  const cap = contentPolicyCap()
+  const body = JSON.stringify({
+    ...submit,
+    params: {
+      ...submit.params,
+      client_request_id: submit.params.client_request_id ?? crypto.randomUUID(),
+      ...(cap ? { content_policy_cap: CONTENT_POLICY_RANK[cap] } : {}),
+    },
   })
+  let res: Response
+  for (let attempt = 1; ; attempt++) {
+    try {
+      res = await cloudFetch('/api/jobs', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...originHeaders(origin) },
+        body,
+      })
+      if (!SUBMIT_FATE_UNKNOWN.has(res.status) || attempt >= SUBMIT_ATTEMPTS) break
+    } catch (err) {
+      if (!(err instanceof CloudJobError) || !SUBMIT_FATE_UNKNOWN.has(err.status) || attempt >= SUBMIT_ATTEMPTS) throw err
+    }
+    await new Promise((r) => setTimeout(r, SUBMIT_RETRY_MS * attempt))
+  }
   if (res.status === 409) {
     // Read by hand rather than through jsonOrError: only this one status
     // carries the extra `credits` figure QuoteChangedError needs, and every
@@ -211,7 +343,7 @@ export async function refreshResultUrl(jobId: string): Promise<string | null> {
  *  refreshResultUrl answers null for two very different situations: the render
  *  is gone for good, or we could not reach the server just now. That was fine
  *  while nothing ever deleted a render. Once the seven-day retention sweep runs
- *  (services/render-worker/src/reaper.ts clears result_url as it deletes the
+ *  (the render worker clears result_url as it deletes the
  *  bytes), a tile that keeps retrying an expired render just renders blank
  *  forever. Splitting the two lets the gallery say "expired" once instead. */
 export type ResultUrlState =
@@ -229,6 +361,11 @@ export async function resolveResultUrl(jobId: string): Promise<ResultUrlState> {
 }
 
 const TERMINAL = new Set(['succeeded', 'failed', 'canceled'])
+
+/** Queued or rendering: the job still holds credits and can be canceled. */
+export function isActiveJob(job: Pick<CloudJob, 'status'>): boolean {
+  return job.status === 'queued' || job.status === 'running'
+}
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise<void>((resolve) => {
@@ -280,7 +417,20 @@ export async function pollJob(
         status >= 400 && status < 500 && status !== 401 && status !== 408 && status !== 429
       failures += 1
       if (definitive || failures >= MAX_POLL_FAILURES) throw err
-      if (Date.now() >= deadline) throw new CloudJobError('render timed out', 0)
+      if (Date.now() >= deadline) {
+        // The deadline is a wall clock, and a request can die for a reason
+        // that has nothing to do with the render: a laptop lid, a phone that
+        // froze the app with the request open. Both come back long after the
+        // deadline with one failed request and a job that finished meanwhile.
+        // So the server is asked once more before the customer is told that
+        // the render is still running.
+        const last = await getJob(id).catch(() => null)
+        if (last && TERMINAL.has(last.status)) {
+          opts.onTick?.(last)
+          return last
+        }
+        throw new CloudJobError('render timed out', 0)
+      }
       await sleep(Math.min(intervalMs * failures, 15_000), opts.signal)
       continue
     }
@@ -293,9 +443,9 @@ export async function pollJob(
 
 export { CloudJobError }
 
-// ── Kontoeinstellung: Inhaltsrichtlinie (Migration 0042) ─────────────
+// ── Kontoeinstellung: Inhaltsrichtlinie ─────────────────────────────
 
-export type ContentPolicy = 'strict' | 'soft' | 'off'
+export type { ContentPolicy } from '../../lib/content-policy-cap'
 
 export interface ContentPolicyState {
   policy: ContentPolicy

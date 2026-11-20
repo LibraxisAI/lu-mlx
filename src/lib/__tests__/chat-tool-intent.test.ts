@@ -9,9 +9,10 @@ import {
 } from '../chat-tool-intent'
 
 describe('detectChatToolCapability', () => {
-  it('exposes exactly the five curated tools', () => {
+  it('exposes exactly the six curated tools', () => {
+    // 3.1.0 (P-L): web_research, search and read in one call.
     expect([...CHAT_TOOLS].sort()).toEqual(
-      ['file_write', 'image_generate', 'video_generate', 'web_fetch', 'web_search'].sort(),
+      ['file_write', 'image_generate', 'video_generate', 'web_fetch', 'web_research', 'web_search'].sort(),
     )
   })
 
@@ -71,6 +72,9 @@ describe('detectChatToolCapability', () => {
       'schreib eine datei mit dem text hallo',
       'speicher das als output.json',
       'export the result to a csv file',
+      // Still a target when the name is the object of the write.
+      'write the list to `notes.md`',
+      'save it as notes.md in the workspace',
     ]) {
       it(`file: "${p}"`, () => expect(detectChatToolCapability(p)).toBe('file'))
     }
@@ -90,6 +94,10 @@ describe('detectChatToolCapability', () => {
       'make it shorter please',
       'what do you think about this idea',
       'summarize the conversation so far', // no page/url noun
+      // 3.0.4 box run: a file name mentioned as text is not a file to write.
+      'Write two short sentences. Put the file name `notes.md` in backticks and the word **important** in bold.',
+      'Put notes.md in backticks.',
+      'Schreib zwei Saetze und setz den Dateinamen notes.md fett.',
     ]) {
       it(`plain: "${p}"`, () => expect(detectChatToolCapability(p)).toBeNull())
     }
@@ -102,7 +110,7 @@ describe('detectChatToolCapability', () => {
   })
 })
 
-// David 2026-06-20 — the real "football" chat: every media FOLLOW-UP missed the
+// 2026-06-20 — the real "football" chat: every media FOLLOW-UP missed the
 // single-message detector and dropped to plain chat, so the model planned in
 // circles or faked "(generating…)" and produced nothing.
 describe('isMediaContinuation', () => {

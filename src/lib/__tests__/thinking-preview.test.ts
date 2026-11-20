@@ -1,5 +1,5 @@
 /**
- * Thinking stays folded, streaming shows a bounded window (G14-7, David
+ * Thinking stays folded, streaming shows a bounded window (G14-7, the owner
  * 2026-08-07): the thinking bubble is collapsed by default everywhere and
  * while the model is reasoning a 3-4 line self-scrolling peek streams inside
  * the collapsed block. Supersedes the 2026-06-04 auto-expand rule.

@@ -4,7 +4,7 @@ import { routeCloud, seedOnboardingDone, signInViaGate, cloudSwitch } from './su
 
 /**
  * C10 (Testfenster-Bericht 34501513, e2e/testfenster/BERICHT.md): the picker
- * never showed the "No refusals" mark for any cloud model, because
+ * never showed the "No Filter" mark for any cloud model, because
  * `toModelEntry()` in `src/api/providers/openai-provider.ts` never copied
  * `unfiltered` out of the raw `/v1/models` row. `e2e/cloud-model-picker.spec.ts`
  * did not catch this: it drives the picker against the LIVE catalogue (and is
@@ -16,7 +16,7 @@ import { routeCloud, seedOnboardingDone, signInViaGate, cloudSwitch } from './su
  *
  * Run: npx playwright test e2e/no-refusals-mark.spec.ts
  */
-test('a measured unfiltered model shows the No refusals mark in the picker', async ({ page }) => {
+test('a measured unfiltered model shows the No Filter mark in the picker', async ({ page }) => {
   await page.addInitScript(tauriMockInit, { assistantReply: DEFAULT_ASSISTANT_REPLY, modelName: DEFAULT_MODEL_NAME })
   await seedOnboardingDone(page)
   await routeCloud(page, { license: 'active', access: true, mediaLive: true })
@@ -43,7 +43,7 @@ test('a measured unfiltered model shows the No refusals mark in the picker', asy
 
   const fullRow = page.getByRole('button', { name: /Measured Full/ })
   await fullRow.scrollIntoViewIfNeeded()
-  const mark = fullRow.getByText('No refusals', { exact: true })
+  const mark = fullRow.getByText('No Filter', { exact: true })
   await expect(mark).toBeVisible()
   await expect(mark).toHaveAttribute(
     'title',
@@ -56,9 +56,9 @@ test('a measured unfiltered model shows the No refusals mark in the picker', asy
   // would fail here, not just be absent from a separate run.
   const partialRow = page.getByRole('button', { name: /Measured Partial/ })
   await partialRow.scrollIntoViewIfNeeded()
-  await expect(partialRow.getByText('No refusals', { exact: true })).toHaveCount(0)
+  await expect(partialRow.getByText('No Filter', { exact: true })).toHaveCount(0)
 
   const unmeasuredRow = page.getByRole('button', { name: /^Unmeasured/ })
   await unmeasuredRow.scrollIntoViewIfNeeded()
-  await expect(unmeasuredRow.getByText('No refusals', { exact: true })).toHaveCount(0)
+  await expect(unmeasuredRow.getByText('No Filter', { exact: true })).toHaveCount(0)
 })

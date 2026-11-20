@@ -1,7 +1,7 @@
 /**
  * @vitest-environment jsdom
  *
- * A5, GitHub #123 (Zhorts, 2026-09-01, Windows 11, RX 9070 XT, 64 GB RAM).
+ * A5, GitHub #123 (2026-09-01, Windows 11, RX 9070 XT, 64 GB RAM).
  *
  * The Model Manager fit check read "62 GB GPU · 62 GB RAM": the same number
  * twice, on a machine with a 16 GB card, while the Settings page one tab away
@@ -47,7 +47,7 @@ const __dirname = dirname(__filename)
 
 const GB = 1024 * 1024 * 1024
 
-/** Zhorts' box: ComfyUI on the processor, so one device and it is the CPU. */
+/** a user's box: ComfyUI on the processor, so one device and it is the CPU. */
 const CPU_ONLY = [
   { name: 'cpu', type: 'cpu', index: null, vram_total: 62 * GB, vram_free: 40 * GB, torch_vram_total: 0, torch_vram_free: 0 },
 ]
@@ -125,7 +125,7 @@ describe('a Mac shares one pool, so the CPU entry is the answer there', () => {
   })
 
   it('does not soften the rule for anything else', () => {
-    // NEGATIVE CONTROL: this is Zhorts' box, where the card has its own memory
+    // NEGATIVE CONTROL: this is a user's box, where the card has its own memory
     // and the CPU number is a different figure about a different thing. The
     // flag is off there and the 62 stays out.
     expect(pickDeviceVramBytes(CPU_ONLY)).toBeNull()
@@ -163,7 +163,7 @@ describe('a GPU note is a quiet line, not a fault', () => {
   //
   // The first answer was to keep amber and hang it off the severity the backend
   // sent, so that a confirmed ROCm install went muted and everything else
-  // stayed yellow. David killed the third colour outright on 04.09.2026 ("kein
+  // stayed yellow. The owner killed the third colour outright on 04.09.2026 ("kein
   // gelb mehr ohne farbe"), and with it the reason for the branch: neither note
   // is a fault. One names the ROCm version and the architecture, the other says
   // LU could not check the compute layer, and the card is listed, selectable
@@ -190,7 +190,7 @@ describe('a GPU note is a quiet line, not a fault', () => {
 })
 
 describe('hipErrorInvalidValue names the architecture instead of the error', () => {
-  // A12, artoriuskurokami (Discord 2026-09-02, RX 9070 XT): image generation
+  // A12, a user (Discord 2026-09-02, RX 9070 XT): image generation
   // dies with this, the same run on the processor completes.
   const RAW = "CUDA error: invalid argument\nSearch for 'hipErrorInvalidValue' in the ROCm documentation."
 

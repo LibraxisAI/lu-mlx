@@ -18,6 +18,9 @@
 
 import { useToolAuditStore } from '../../stores/toolAuditStore'
 import type { ExecutionRequest } from './tool-executor'
+import { toolResultIsFailure } from '../../lib/tool-result-failure'
+import { MUTATING_TOOLS } from '../../lib/mutating-tools'
+import { toolRegistry } from '../mcp/tool-registry'
 
 export interface InTurnCacheOptions {
   convId: string
@@ -54,6 +57,29 @@ const NON_CACHEABLE_TOOLS = new Set<string>([
   // store — and a plan that silently stops updating is the one failure mode
   // that makes the whole feature untrustworthy.
   'todo_write',
+  // Puts an order into the conversation's store. Served from cache, the text
+  // would arrive but no order the customer could approve.
+  'create_order',
+  // Asks how the background agents stand right now. Served from cache, an
+  // agent that waits for a task would read "running" for the rest of the turn.
+  'check_tasks',
+  // Sends a message to another agent. The same words twice are two messages.
+  'message_agent',
+  // A11: reads settings that set_setting just changed, and set_setting asks
+  // the user every time. Neither may be answered from an earlier call.
+  'get_settings',
+  'set_setting',
+  // C60: the batch change and the actions read and change live state.
+  'set_settings',
+  'lu_models',
+  'lu_service',
+  'lu_download',
+  'lu_open_settings',
+  // C60-S5: a search may differ a minute later, and install and assign ask the user.
+  'workflow_find',
+  'workflow_inspect',
+  'workflow_install',
+  'workflow_assign',
 ])
 
 /**
@@ -79,6 +105,15 @@ const WORKSPACE_MUTATING_TOOLS = new Set<string>([
 const READ_TOOLS = new Set<string>(['file_read', 'file_list'])
 
 function isNonCacheableTool(name: string): boolean {
+  // Whatever acts outside the conversation has to act every time it is
+  // called. The screen is the plainest case (box, 09.10.2026): a model called
+  // `computer_use` with action "screenshot" and "focus_window" in turns, the
+  // cache answered 97 of 101 calls with the picture and the sentence of the
+  // first ones, no window moved, and the model never saw that.
+  if (MUTATING_TOOLS.has(name)) return true
+  // A tool of a connected MCP server acts in a program LU knows nothing
+  // about. Whether it reads or writes there is not ours to guess.
+  if (toolRegistry.getToolByName(name)?.source === 'external') return true
   // git_* covers the redirected typed git tools, reads and writes alike.
   return NON_CACHEABLE_TOOLS.has(name) || name.startsWith('git_')
 }
@@ -124,6 +159,12 @@ export function makeInTurnCacheLookup(opts: InTurnCacheOptions) {
     // as a miss so the model re-reads the whole file instead of a silently
     // truncated slice. Empty strings are a legitimate cached payload.
     if (typeof candidate.fullResult !== 'string') return undefined
+    // A failure is not an answer to keep (bug hunt 01.10.2026, A5). Tools
+    // report most failures as text with status 'completed', so the audit kept
+    // a timed-out web_fetch or a file_read of a file not written yet as a hit,
+    // and every retry in the same turn got the old error back without the
+    // call running again.
+    if (toolResultIsFailure(candidate.fullResult)) return undefined
     return candidate.fullResult
   }
 }

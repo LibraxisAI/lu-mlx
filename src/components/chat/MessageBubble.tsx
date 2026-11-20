@@ -1,31 +1,50 @@
+import { ChatAttachment } from './ChatAttachment'
+import { ChatFileChip } from './ChatFileChip'
+import { FILE_ONLY_TEXT } from '../../lib/chat-files'
 import { motion } from 'framer-motion'
-import { User, Copy, Check, Pencil, RefreshCw, X, Wrench, Trash2, Scissors, Unlink } from 'lucide-react'
+import { User, Copy, Check, Pencil, RefreshCw, Wrench, Trash2, Scissors, Unlink, Film, Music, GitBranch, ListRestart } from 'lucide-react'
 import { useState, useRef, useEffect, useMemo, memo } from 'react'
 import { MarkdownRenderer } from './MarkdownRenderer'
+import { UserText } from './ChatLookScope'
+import { closeOpenMarkdown } from '../../lib/streaming-markdown'
 import { ThinkingBlock } from './ThinkingBlock'
 import { ToolCallBand } from './ToolCallBand'
 import { ReflectionBlock } from './ReflectionBlock'
+import { RewindHere } from './RewindHere'
+import { SteerNote } from './SteerNote'
 import { groupAgentBlocks } from '../../lib/tool-call-groups'
 import { VramSwitchCard } from './VramSwitchCard'
 import { SpeakerButton } from './SpeakerButton'
 import { ChatArtifactCard } from './ChatArtifactCard'
+import { CreateOrders } from './create/CreateOrders'
+import { messageHasCreateOrder } from '../../lib/create/chat-control'
 import { displayModelName } from '../../api/providers/model-name'
+import { modelDisplayLabel } from '../../lib/model-label'
 import type { Message } from '../../types/chat'
-import { stripModelNoise } from '../../lib/strip-model-noise'
+import { shownAnswer } from '../../lib/shown-answer'
 import { truncationNotice } from '../../lib/answer-notes'
 import { unbackedLinksNotice } from '../../lib/unbacked-links'
 import { useAgentModeStore } from '../../stores/agentModeStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useModelStore } from '../../stores/modelStore'
+import { chatToolsReach } from '../../lib/chat-tools-reach'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { extractToolCallsFromContent, looksLikeToolIntent } from '../../lib/tool-call-repair'
 import { isAgentCompatible } from '../../lib/model-compatibility'
 import { ContextMenu } from '../ui/ContextMenu'
 import { buildMessageMenu, type MessageMenuHandlers } from '../ui/menu-actions'
+import { plainTextToCopy } from '../../lib/copy-plain'
 import { MONOGRAM, MONOGRAM_INVERT } from '../layout/brand'
-import { AVATAR_SLOT } from './avatar-slot'
+import { AVATAR_SLOT, MODEL_MARK, MODEL_MARK_SLOT } from './avatar-slot'
 import { MOTION_S } from '../ui/motion'
 import { Hinweis } from '../ui/Hinweis'
+import { RefusalNotice } from './RefusalNotice'
+import { RequestUsageLine } from './RequestUsageLine'
+import { fitTextarea } from '../../lib/fit-textarea'
+import { editableText } from '../../lib/message-edit'
+import { editKeyAction, editShortcuts, enterKeyMode } from '../../lib/enter-key'
+import { isMacOS } from '../../lib/device-kind'
+import { ForkSwitcher } from './ForkSwitcher'
 
 interface Props {
   message: Message
@@ -33,7 +52,25 @@ interface Props {
    *  ONE stable function to every bubble — a per-message closure would be a new
    *  prop on every render and defeat the memo() below. */
   onRegenerate?: (messageId: string) => void
-  onEdit?: (messageId: string, newContent: string) => void
+  /** GH #199: a group speaker's answer also offers the whole round again,
+   *  as an action of its own beside Regenerate. */
+  onRegenerateRound?: (messageId: string) => void
+  /** "Save & resend" of an edited user message. False when nothing could be
+   *  sent; the edit is then saved instead of lost. */
+  onEdit?: (messageId: string, newContent: string) => boolean
+  /** GH #172, #174: this message carries the "< 1/2 >" of the kept versions
+   *  under `forkKey`. Plain values, not an object, so the memo below holds. */
+  forkKey?: string
+  forkIndex?: number
+  forkTotal?: number
+  /** Absent while a turn streams. */
+  onSwitchFork?: (key: string, index: number) => void
+  /** GH #174: a new chat that ends with this message. */
+  onBranch?: (messageId: string) => void
+  /** An earlier compact layer (3.0.9): the message can be read and copied,
+   *  nothing else. The parent already leaves edit/regenerate/branch out;
+   *  this also takes delete and the assistant's own edit away. */
+  readOnly?: boolean
   /** Tool-call id awaiting user approval. When the matching block in
    *  this message has that id, ToolCallBlock renders Approve/Reject
    *  inline instead of a popup over the chat input. */
@@ -45,40 +82,61 @@ interface Props {
   isLast?: boolean
   /** This bubble is the one currently streaming — hides its action bar. */
   isStreaming?: boolean
+  /** Group chat: the persona this participant speaks as, when it has one of
+   *  its own. Shown in front of the model name. */
+  speakerName?: string
+  /** This answer is the latest one of the chat in which the model declined
+   *  (lib/refusal-detect). The notice with "New chat" stands under it. */
+  declined?: boolean
 }
 
-function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, onApprove, onReject, isLast, isStreaming }: Props) {
+function MessageBubbleImpl({ message, onRegenerate, onRegenerateRound, onEdit, pendingApprovalId, onApprove, onReject, isLast, isStreaming, speakerName, declined, forkKey, forkIndex, forkTotal, onSwitchFork, onBranch, readOnly }: Props) {
   const [copied, setCopied] = useState(false)
   const [isEditing, setIsEditing] = useState(false)
   const [editContent, setEditContent] = useState('')
   const [confirmDelete, setConfirmDelete] = useState(false)
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
+  // `text` is what "Copy text" will copy, taken when the menu opens: the
+  // click into the menu may clear the selection.
+  const [menu, setMenu] = useState<{ x: number; y: number; text: string } | null>(null)
+  const columnRef = useRef<HTMLDivElement>(null)
   const editRef = useRef<HTMLTextAreaElement>(null)
   const isUser = message.role === 'user'
 
-  // Bug #7 (phantomderp v2.4.3): the Codex-style "model parrots tool-call
+  // Bug #7 (a user v2.4.3): the Codex-style "model parrots tool-call
   // JSON as plaintext" only happens when the active chat does NOT have
   // agent mode on. Detect the JSON pattern and show a one-click "Enable
   // agent" banner instead of leaving the user staring at a JSON dump.
   const activeConversationId = useChatStore((s) => s.activeConversationId)
+  const hasCreateOrder = !isUser && messageHasCreateOrder(message)
   const deleteMessage = useChatStore((s) => s.deleteMessage)
   const updateMessageContent = useChatStore((s) => s.updateMessageContent)
+  const saveUserEdit = useChatStore((s) => s.saveUserEdit)
   const isAgentActive = useAgentModeStore((s) =>
     activeConversationId ? s.agentModeActive[activeConversationId] ?? false : false
   )
   const activeModel = useModelStore((s) => s.activeModel)
+  // The catalogue's name for the model that wrote this turn ("Kimi K2.6"), the
+  // same one the picker shows. A string, so the selector stays stable.
+  const answeredByName = useModelStore((s) =>
+    message.modelId ? modelDisplayLabel(s.models, message.modelId) : '',
+  )
   const toggleAgentMode = useAgentModeStore((s) => s.toggleAgentMode)
   const userAvatarDataUrl = useSettingsStore((s) => s.settings.userAvatarDataUrl)
+  // GH #202: the Enter key in the edit field follows the same setting as the composer.
+  const enterMode = enterKeyMode(useSettingsStore((s) => s.settings.enterKey))
+  const editKeys = editShortcuts(enterMode, isMacOS())
   // Chat Tools (v2.5.3) gives plain chat web/file/image/video WITHOUT Agent Mode.
   // When it's on, the "turn Agent Mode on" banners below are wrong + contradictory
   // (the tool IS available in normal chat) — they predate Chat Tools and only
-  // checked `!isAgentActive`. Suppress them when Chat Tools is enabled. David
+  // checked `!isAgentActive`. Suppress them when Chat Tools is enabled. The owner
   // 2026-06-16: web build, Agent off + Chat Tools on, image_generate emitted →
   // bubble showed "Turn Agent Mode on" even though the tool was already running.
-  const chatToolsEnabled = useSettingsStore((s) => s.settings.chatToolsEnabled !== false)
+  // Chat Tools are always on since 3.0.7 where the model can call tools
+  // (lib/chat-tools-reach.ts); the banners stay for a model that cannot.
+  const chatToolsHere = useModelStore((s) => chatToolsReach(s.activeModel, s.models))
 
   const suggestAgent = useMemo(() => {
-    if (isUser || isAgentActive || chatToolsEnabled || !activeConversationId || !activeModel) return false
+    if (isUser || isAgentActive || chatToolsHere || !activeConversationId || !activeModel) return false
     if (!message.content || message.content.length < 10) return false
     // The repair helper extracts {name, arguments}-shaped JSON blocks, plus
     // <tool_call>...</tool_call> Hermes tags. If anything came out, the
@@ -88,7 +146,7 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
     // Only nudge when the model is on the agent-allow-list. Showing this
     // banner on a non-agent-capable model would be a dead-end.
     return isAgentCompatible(activeModel)
-  }, [isUser, isAgentActive, chatToolsEnabled, activeConversationId, activeModel, message.content])
+  }, [isUser, isAgentActive, chatToolsHere, activeConversationId, activeModel, message.content])
 
   // Thought-only completion (live find 2026-06-11): the model reasoned —
   // usually about calling a tool it doesn't have in a non-agent chat — and
@@ -99,35 +157,29 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
   const thoughtOnly = !isUser && !(message.content || '').trim() && !!(message.thinking || '').trim()
     && (!isLast || !!message.usage)
 
-  // Orchestration strip for everything this bubble renders (2.5.9). Memoised:
-  // the regex set is not cheap and a long agent chat re-renders these bubbles
-  // often. Aggressive tier only while a tool loop drives the turn — in plain
-  // chat a {"name": …, "arguments": …} block is often the answer itself.
+  // Orchestration strip for everything this bubble renders (2.5.9), from the
+  // one routine read-aloud takes its text from too (lib/shown-answer.ts).
+  // Memoised: the regex set is not cheap and a long agent chat re-renders
+  // these bubbles often. Aggressive tier only while a tool loop drives the
+  // turn: in plain chat a {"name": …, "arguments": …} block is often the
+  // answer itself.
   // Signature, not the array itself: a streaming turn may grow a block's
   // content in place, leaving the array reference identical. Keying on the
   // total length re-runs the strip on every token while still skipping the
   // work on unrelated re-renders.
   const blockSig = (message.agentBlocks ?? []).reduce((n, b) => n + b.content.length, 0)
     + ':' + (message.agentBlocks?.length ?? 0)
-  const cleanBlocks = useMemo(() => {
-    const map = new Map<string, string>()
-    for (const b of message.agentBlocks ?? []) {
-      if (b.phase === 'answer') map.set(b.id, stripModelNoise(b.content, { aggressive: true }))
-    }
-    return map
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [blockSig])
-  // Aggressive while a tool loop drives the turn, same as Code. In plain chat
-  // the gentle tier only, because a {"name": …, "arguments": …} block there can
-  // be exactly the answer the user asked the model to print.
   const toolLoopDriven = isAgentActive || !!message.agentBlocks?.length
-  const cleanContent = useMemo(
-    () => (isUser ? '' : stripModelNoise(message.content || '', { aggressive: toolLoopDriven })),
-    [isUser, message.content, toolLoopDriven],
+  const shown = useMemo(
+    () => (isUser ? { blocks: new Map<string, string>(), content: '', spoken: '' } : shownAnswer(message, toolLoopDriven)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [isUser, message.content, blockSig, toolLoopDriven],
   )
+  const cleanBlocks = shown.blocks
+  const cleanContent = shown.content
   const thoughtOnlyToolIntent = useMemo(
-    () => thoughtOnly && !isAgentActive && !chatToolsEnabled && looksLikeToolIntent(message.thinking || ''),
-    [thoughtOnly, isAgentActive, chatToolsEnabled, message.thinking],
+    () => thoughtOnly && !isAgentActive && !chatToolsHere && looksLikeToolIntent(message.thinking || ''),
+    [thoughtOnly, isAgentActive, chatToolsHere, message.thinking],
   )
 
   // A turn whose visible body comes from per-iteration answer blocks has no
@@ -142,13 +194,22 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
   useEffect(() => {
     if (isEditing && editRef.current) {
       editRef.current.focus()
-      editRef.current.style.height = 'auto'
-      editRef.current.style.height = editRef.current.scrollHeight + 'px'
+      fitTextarea(editRef.current)
     }
   }, [isEditing])
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(message.content)
+    // A message with files copies what was typed, not the file summaries the
+    // model received along with it.
+    navigator.clipboard.writeText(isUser && message.files?.length ? (message.displayContent ?? message.content) : message.content)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  // Right-click "Copy text": what Ctrl+C would give (lib/copy-plain.ts).
+  const handleCopyText = () => {
+    if (!menu) return
+    navigator.clipboard.writeText(menu.text)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
   }
@@ -156,21 +217,39 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
   const startEdit = () => {
     // User: edit the short slash command, not its expanded instruction.
     // Assistant: edit what the model actually said.
-    setEditContent(isUser ? (message.displayContent || message.content) : message.content)
+    setEditContent(isUser ? editableText(message) : message.content)
     setIsEditing(true)
   }
 
-  const confirmEdit = () => {
+  /**
+   * "Save" (GH #172): the new text goes into the chat and nothing else
+   * happens. No request, no model load, every later turn stays. Enter does
+   * this, so a single key can never send. Editing the model's answer has
+   * always worked this way (D#81).
+   */
+  const saveEdit = () => {
     const next = editContent.trim()
-    if (next && next !== message.content) {
+    if (next && activeConversationId) {
       if (isUser) {
-        // Editing your own message re-asks the question (resend path).
-        onEdit?.(message.id, next)
-      } else if (activeConversationId) {
-        // Editing the model's answer rewrites history in place (D#81):
-        // no resend, and every later turn reads the edited text as context.
+        if (next !== editableText(message)) saveUserEdit(activeConversationId, message.id, next)
+      } else if (next !== message.content) {
         updateMessageContent(activeConversationId, message.id, next)
       }
+    }
+    setIsEditing(false)
+  }
+
+  /**
+   * "Save & resend": ask again from here. The old continuation is kept as a
+   * version ("< 1/2 >"), not deleted. When the send path refuses (no model
+   * picked, a run still going) the text is saved, so the edit is not lost.
+   */
+  const resendEdit = () => {
+    const next = editContent.trim()
+    if (!next) return
+    if (!onEdit?.(message.id, next)) {
+      saveEdit()
+      return
     }
     setIsEditing(false)
   }
@@ -201,12 +280,14 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
   //
   // `edit` und `regenerate` sind `null`, wo die Leiste den Knopf auch nicht
   // zeigt; das Menue laesst den Eintrag dann ebenfalls weg.
-  const canEdit = (isUser && !!onEdit) || canEditAssistant
+  const canEdit = !readOnly && ((isUser && !!onEdit) || canEditAssistant)
   const actions: MessageMenuHandlers = {
     copy: handleCopy,
+    copyText: handleCopyText,
     edit: canEdit ? startEdit : null,
     regenerate: !isUser && onRegenerate ? () => onRegenerate(message.id) : null,
-    remove: handleDelete,
+    branch: onBranch ? () => onBranch(message.id) : null,
+    remove: readOnly ? null : handleDelete,
   }
   // Die Leiste haengt an `!isEditing && !isStreaming` — das Menue bietet
   // dieselben Aktionen an, also gilt fuer es dieselbe Bedingung.
@@ -258,35 +339,33 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
 
   return (
     <motion.div
-      className={'flex gap-2 px-3 py-1 group ' + (isUser ? 'flex-row-reverse' : '')}
+      className={'flex gap-2 px-3 py-1 group ' + (isUser ? 'flex-row-reverse lu-msg-row lu-msg-row-user' : 'lu-msg-row lu-msg-row-model')}
       onContextMenu={(e) => {
         if (!actionsAvailable) return
         e.preventDefault()
-        setMenu({ x: e.clientX, y: e.clientY })
+        const text = columnRef.current ? plainTextToCopy(columnRef.current, window.getSelection()) : ''
+        setMenu({ x: e.clientX, y: e.clientY, text })
       }}
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: MOTION_S.base }}
     >
-      {/* Avatar — EIN Slot, zwei Inhalte (Audit §4, „Zwei Avatar-Systeme:
-          Assistent rahmenlos, User als gerahmte Box").
-          Vorher trug nur die Nutzerseite Rahmen und Flaeche, das Monogramm sass
-          nackt auf der Pane. Zwei Silhouetten in einer Spalte, die der Blick
-          beim Scrollen als Taktgeber benutzt — der Sprecherwechsel war an der
-          Form nicht ablesbar, nur am Inhalt.
-          Jetzt: derselbe Chip fuer beide, und das Monogramm bekommt dabei
-          nebenbei einen definierten Untergrund statt der jeweiligen Pane. */}
-      <div className={AVATAR_SLOT}>
-        {isUser ? (
-          userAvatarDataUrl
+      {/* The avatar column (avatar-slot.ts): a chip for the user, the bare mark for the model. */}
+      {isUser ? (
+        <div className={AVATAR_SLOT} data-msg-avatar="">
+          {userAvatarDataUrl
             ? <img src={userAvatarDataUrl} alt="" className="w-full h-full object-cover" />
-            : <User size={11} className="text-gray-400" />
-        ) : (
-          <img src={MONOGRAM} alt="" className={`w-[70%] h-[70%] object-contain opacity-80 ${MONOGRAM_INVERT}`} />
-        )}
-      </div>
+            : <User size={11} className="text-gray-400" />}
+        </div>
+      ) : (
+        <div className={MODEL_MARK_SLOT} data-msg-avatar="" data-testid="model-mark">
+          <img src={MONOGRAM} alt="" className={`${MODEL_MARK} ${MONOGRAM_INVERT}`} />
+        </div>
+      )}
 
-      <div className="max-w-[80%] space-y-0.5">
+      {/* A reply with a Create order takes the full width in a narrow window:
+          the card and the result need the room. */}
+      <div ref={columnRef} className={'lu-msg-column ' + (hasCreateOrder ? 'min-w-0 flex-1 sm:flex-none sm:max-w-[80%]' : 'max-w-[80%]') + ' space-y-0.5'}>
         {/* Name the model that produced this answer. Group chats have always
             done this; since the R5 re-measure (2026-08-30) every assistant
             turn carries it, because the app had no model name at a single
@@ -304,12 +383,12 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
           // der Fehler in einem Wort: der volle Name ist der Modellname, die
           // Kennung davor ist unsere Adresse. Wer den Zeiger auf der Zeile
           // ruhen liess, bekam sie zu sehen, obwohl sie ihm nichts sagt.
-          <div title={displayModelName(message.modelId)} className="t-mono text-gray-500 dark:text-gray-400 pl-1">
-            {displayModelName(message.modelId)}
+          <div title={displayModelName(message.modelId)} data-testid="answered-by" className="t-mono text-gray-500 dark:text-gray-400 pl-1">
+            {speakerName ? `${speakerName} · ${answeredByName}` : answeredByName}
           </div>
         )}
         {/* Thinking block — auto-expands while this (last) turn is still
-            producing so the reasoning streams LIVE, then collapses (David 2026-06-04). */}
+            producing so the reasoning streams LIVE, then collapses (2026-06-04). */}
         {!isUser && message.thinking && (
           <ThinkingBlock thinking={message.thinking} streaming={!!isLast && !message.content?.trim() && !message.usage} />
         )}
@@ -330,16 +409,14 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
                     b.phase === 'reflection' ||
                     (b.phase === 'answer' && b.content.trim()) ||
                     // G21-2: per-round thoughts render chronologically between
-                    // the calls. The transient "Analyzing..." placeholder is a
-                    // thinking block too and shows as a live bubble until the
-                    // round's first token replaces it.
+                    // the calls.
                     (b.phase === 'thinking' && b.content.trim()),
                 )
                 .sort((a, b) => a.timestamp - b.timestamp),
             )
               .map((group, gruppenIndex, gruppen) => {
                 // Consecutive tool calls render as ONE band that morphs from
-                // tool to tool and collapses to "N steps" when done (David
+                // tool to tool and collapses to "N steps" when done (the owner
                 // 2026-07-31) instead of a chip per call.
                 if (group.kind === 'tools') {
                   return (
@@ -370,6 +447,9 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
                   // answer) in its G14-7 bubble, collapsed, chronological.
                   return <ThinkingBlock key={block.id} thinking={block.content} />
                 }
+                if (block.phase === 'reflection' && block.steer) {
+                  return <SteerNote key={block.id} text={block.content} />
+                }
                 if (block.phase === 'reflection') {
                   return <ReflectionBlock key={block.id} content={block.content} />
                 }
@@ -385,8 +465,8 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
                   const istSchluss = gruppenIndex === gruppen.length - 1
                   return (
                     <div key={block.id} className="px-1 py-0.5">
-                      <div className={'text-[0.8rem] leading-relaxed' + (isStreaming && istSchluss ? ' lu-caret' : '')}>
-                        <MarkdownRenderer content={clean} />
+                      <div data-copy-text className={'lu-msg-text lu-msg-model-text ' + 'text-[0.8rem] leading-relaxed' + (isStreaming && istSchluss ? ' lu-caret' : '')}>
+                        <MarkdownRenderer content={isStreaming && istSchluss ? closeOpenMarkdown(clean) : clean} />
                       </div>
                     </div>
                   )
@@ -396,27 +476,42 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
           </>
         )}
 
+        {/* Create in chat: order, progress and results, from the store of this
+            conversation's orders. */}
+        {hasCreateOrder && <CreateOrders message={message} conversationId={activeConversationId} />}
+
         {/* Feature EE (v2.5.0) — VRAM hand-off status card. Self-hides unless
             an actual model swap is in flight; gated to the last assistant
             message so a swap shows only in the active turn. */}
         {!isUser && isLast && <VramSwitchCard />}
 
+        {/* Attached files: a chip each, the bytes are not in the chat. */}
+        {message.files && message.files.length > 0 && (
+          <div className="flex gap-1 flex-wrap">
+            {message.files.map((file, i) => (
+              <ChatFileChip key={`${file.sha256}-${i}`} file={file} />
+            ))}
+          </div>
+        )}
+
+        {/* Clips and sound tracks for Create: name and kind only, the bytes
+            stay in the session. */}
+        {isUser && message.media && message.media.length > 0 && (
+          <div className="flex flex-wrap justify-end gap-1" data-testid="chat-media-chips">
+            {message.media.map((clip, i) => (
+              <span key={i} className="flex max-w-[200px] items-center gap-1.5 rounded-md border border-gray-200 px-2 py-1 t-micro text-gray-500 dark:border-white/10 dark:text-gray-400">
+                {clip.kind === 'video' ? <Film size={11} className="shrink-0" /> : <Music size={11} className="shrink-0" />}
+                <span className="truncate">{clip.name}</span>
+              </span>
+            ))}
+          </div>
+        )}
+
         {/* Image attachments */}
         {message.images && message.images.length > 0 && (
           <div className="flex gap-1 flex-wrap">
             {message.images.map((img, i) => (
-              <a
-                key={i}
-                href={`data:${img.mimeType};base64,${img.data}`}
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                <img
-                  src={`data:${img.mimeType};base64,${img.data}`}
-                  alt={img.name}
-                  className="max-w-[180px] max-h-[120px] object-cover rounded-md border border-white/10 hover:border-white/25 transition-colors cursor-pointer"
-                />
-              </a>
+              <ChatAttachment key={i} image={img} />
             ))}
           </div>
         )}
@@ -429,8 +524,8 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
           className={
             'relative ' +
             (isUser
-              ? 'rounded-lg px-2.5 py-1.5 bg-gray-100 dark:bg-white/[0.06] border border-gray-200 dark:border-white/[0.08] focus-within:border-gray-400 dark:focus-within:border-white/20 transition-colors'
-              : 'px-1 py-0.5')
+              ? 'lu-msg-user-bubble rounded-lg px-2.5 py-1.5 bg-gray-100 dark:bg-white/[0.06] border border-gray-200 dark:border-white/[0.08] focus-within:border-gray-400 dark:focus-within:border-white/20 transition-colors'
+              : 'lu-msg-model-bubble px-1 py-0.5')
           }
         >
           {isEditing ? (
@@ -440,24 +535,45 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
                 value={editContent}
                 onChange={(e) => {
                   setEditContent(e.target.value)
-                  e.target.style.height = 'auto'
-                  e.target.style.height = e.target.scrollHeight + 'px'
+                  // Measured off-page (GH #139): this field sits INSIDE the
+                  // transcript, so the old auto/scrollHeight toggle laid out
+                  // the whole list on every key.
+                  fitTextarea(e.target)
                 }}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); confirmEdit() }
+                  // Enter saves, Ctrl or Cmd with Enter resends, Shift with
+                  // Enter is a new line. Enter used to resend and drop every
+                  // later turn (GH #172). GH #202: in "new line" mode Enter is a
+                  // line, Ctrl/Cmd+Enter saves and with Shift resends.
+                  const action = editKeyAction({ key: e.key, shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey, altKey: e.altKey, isComposing: e.nativeEvent.isComposing }, enterMode)
+                  if (action !== 'none') {
+                    e.preventDefault()
+                    if (action === 'resend' && isUser && onEdit) resendEdit()
+                    else saveEdit()
+                  }
                   if (e.key === 'Escape') cancelEdit()
                 }}
+                aria-label={isUser ? 'Edit message text' : 'Edit response text'}
                 className="w-full bg-transparent text-[0.78rem] leading-relaxed text-gray-800 dark:text-gray-200 resize-none focus:outline-none"
               />
-              <div className="flex items-center gap-1 justify-end">
-                <button onClick={confirmEdit} className="p-0.5 rounded hover:bg-green-500/20 text-green-500 transition-colors"><Check size={11} /></button>
-                <button onClick={cancelEdit} className="p-0.5 rounded hover:bg-red-500/20 text-red-400 transition-colors"><X size={11} /></button>
+              <div className="flex items-center gap-1 justify-end t-micro">
+                <span className="mr-auto text-gray-500" data-testid="edit-key-hint">{editKeys.hint}</span>
+                <button onClick={cancelEdit} className="px-1.5 py-0.5 rounded text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-white/10 transition-colors">Cancel</button>
+                <button onClick={saveEdit} title={`Change the text only (${editKeys.save})`} className="px-1.5 py-0.5 rounded text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-white/10 transition-colors">Save</button>
+                {isUser && onEdit && (
+                  <button onClick={resendEdit} title={`Ask again from here and keep the current answers as a version (${editKeys.resend})`} className="px-1.5 py-0.5 rounded border border-gray-300 dark:border-white/15 text-gray-800 dark:text-gray-100 hover:bg-gray-200 dark:hover:bg-white/10 transition-colors">Save &amp; resend</button>
+                )}
               </div>
             </div>
+          ) : isUser && message.files?.length && message.displayContent === FILE_ONLY_TEXT ? (
+            // Nothing was typed: the chips below are the whole message.
+            null
           ) : isUser ? (
             // Slash command: show the short "/commit" (displayContent), not the
             // long expanded instruction held in content (which drives the model).
-            <p className="text-[0.78rem] leading-relaxed text-gray-800 dark:text-gray-200 whitespace-pre-wrap">{message.displayContent || message.content}</p>
+            // The same holds for a message with files: content carries their
+            // summaries for the model, the bubble shows what was typed.
+            <p data-copy-text className="lu-msg-text lu-msg-user-text text-[0.78rem] leading-relaxed text-gray-800 dark:text-gray-200 whitespace-pre-wrap wrap-anywhere"><UserText text={message.displayContent || message.content} /></p>
           ) : (
             // Answer-blocks (when present) already rendered the per-iteration
             // text chronologically above; skip message.content here to avoid
@@ -474,12 +590,14 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
                 // eine reine Funktion des vorhandenen `isStreaming`-Props —
                 // kein Zustand, kein Timer, keine Subscription, also auch
                 // kein Rerender, den der Stream nicht ohnehin ausloest.
-                <div className={'text-[0.78rem] leading-relaxed' + (isStreaming ? ' lu-caret' : '')}>
-                  <MarkdownRenderer content={cleanContent} />
+                <div data-copy-text className={'lu-msg-text lu-msg-model-text ' + 'text-[0.78rem] leading-relaxed' + (isStreaming ? ' lu-caret' : '')}>
+                  {/* While it streams, an open ` or ** is closed for the frame
+                      (lib/streaming-markdown.ts); the stored text is untouched. */}
+                  <MarkdownRenderer content={isStreaming ? closeOpenMarkdown(cleanContent) : cleanContent} />
                   {/* Cut-off marker: a turn the model did not finish on its own
                       terms (length budget / dropped connection). The benchmark
                       screen has always flagged cut-offs; the chat did not, so a
-                      truncated answer read as complete (David 2026-08-08). */}
+                      truncated answer read as complete (2026-08-08). */}
                   {truncationNotice(message.finishReason) && (
                     // Ruhig, nicht laut: die Antwort ist kuerzer als geplant,
                     // kaputt ist nichts. Die Zeile stand vorher in Gelb und in
@@ -513,7 +631,7 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
                   {/* A reasoning-only reply used to print a stand-in sentence
                       here ("The model only produced internal reasoning and no
                       answer"). That is our text in the model's mouth (G14-3,
-                      David 2026-08-07), and on an agent surface the loop's job
+                      2026-08-07), and on an agent surface the loop's job
                       is to CONTINUE past such a round (G17), not to explain
                       it. The thinking block above already shows what happened.
                       The hint below survives because it is a labelled app hint
@@ -556,7 +674,7 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
 
         </div>
 
-        {/* Chat-tools artifacts (David 2026-06-12): files the model "wrote" in
+        {/* Chat-tools artifacts (2026-06-12): files the model "wrote" in
             plain chat, rendered inline with preview + Download, never on disk. */}
         {!isUser && message.artifacts && message.artifacts.length > 0 && (
           <div className="space-y-1">
@@ -566,7 +684,11 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
           </div>
         )}
 
-        {/* Action bar UNDER the message (David 2026-06-06: "eigene Leiste unter
+        {/* The model declined: said under the answer, never at the prompt
+            field, and before the action bar so it reads as part of the turn. */}
+        {declined && <RefusalNotice />}
+
+        {/* Action bar UNDER the message (2026-06-06: "eigene Leiste unter
             der Nachricht" instead of cramped hover-icons in the corner). Bigger
             targets; assistant left, user right. */}
         {/* Hidden while this very turn still streams: the bar used to hang on
@@ -576,11 +698,25 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
             never reports usage would otherwise lose the bar for good. */}
         {/* Und seit D-S07 nur noch beim Hovern/Fokus sichtbar — die Begruendung
             samt der beiden bewussten Ausnahmen steht bei `actionBarVisibility`. */}
+        {/* GH #172, #174: the kept versions of this point of the chat. Always
+            visible, not hover gated like the bar below: it says that there IS
+            another version, which nobody would find under a hover. */}
+        {forkKey !== undefined && forkIndex !== undefined && forkTotal !== undefined && !isEditing && (
+          <ForkSwitcher
+            forkKey={forkKey}
+            index={forkIndex}
+            total={forkTotal}
+            onSwitch={onSwitchFork}
+            align={isUser ? 'end' : 'start'}
+          />
+        )}
+
         {actionsAvailable && (
           <div className={
             'flex items-center gap-0.5 ' + actionBarVisibility + ' ' +
             (isUser ? 'justify-end pr-0.5' : 'justify-start pl-0.5')
           }>
+            {isUser && activeConversationId && !readOnly && <RewindHere conversationId={activeConversationId} message={message} />}
             {isUser && actions.edit && (
               <button onClick={actions.edit} className="p-1 rounded-md text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors" aria-label="Edit message" title="Edit"><Pencil size={12} /></button>
             )}
@@ -588,15 +724,22 @@ function MessageBubbleImpl({ message, onRegenerate, onEdit, pendingApprovalId, o
               <button onClick={actions.edit} className="p-1 rounded-md text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors" aria-label="Edit response" title="Edit"><Pencil size={12} /></button>
             )}
             {actions.regenerate && (
-              <button onClick={actions.regenerate} className="p-1 rounded-md text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors" aria-label="Regenerate response" title="Regenerate"><RefreshCw size={12} /></button>
+              <button onClick={actions.regenerate} className="p-1 rounded-md text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors" aria-label="Regenerate response" title={onRegenerateRound ? 'Regenerate this answer' : 'Regenerate'}><RefreshCw size={12} /></button>
+            )}
+            {!isUser && onRegenerateRound && (
+              <button onClick={() => onRegenerateRound(message.id)} data-testid="regenerate-round" className="p-1 rounded-md text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors" aria-label="Regenerate whole round" title="Regenerate whole round: every speaker answers this message again"><ListRestart size={12} /></button>
             )}
             <button onClick={actions.copy} className="p-1 rounded-md text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors" aria-label="Copy message" title={copied ? 'Copied' : 'Copy'}>
               {copied ? <Check size={12} className="text-green-500" /> : <Copy size={12} />}
             </button>
-            {!isUser && <SpeakerButton text={message.content} />}
-            <button onClick={actions.remove} className={'p-1 rounded-md transition-colors hover:bg-gray-100 dark:hover:bg-white/10 ' + (confirmDelete ? 'text-red-500' : 'text-gray-400 dark:text-gray-500 hover:text-red-500')} aria-label="Delete message" title={confirmDelete ? 'Click again to delete' : 'Delete message'}>
+            {!isUser && <SpeakerButton text={shown.spoken} />}
+            {actions.branch && (
+              <button onClick={actions.branch} className="p-1 rounded-md text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors" aria-label="Branch from here" title="Branch from here: a new chat up to this message"><GitBranch size={12} /></button>
+            )}
+            {actions.remove && <button onClick={actions.remove} className={'p-1 rounded-md transition-colors hover:bg-gray-100 dark:hover:bg-white/10 ' + (confirmDelete ? 'text-red-500' : 'text-gray-400 dark:text-gray-500 hover:text-red-500')} aria-label="Delete message" title={confirmDelete ? 'Click again to delete' : 'Delete message'}>
               <Trash2 size={12} />
-            </button>
+            </button>}
+            {!isUser && <RequestUsageLine usage={message.requestUsage} className="pl-1.5" />}
           </div>
         )}
 

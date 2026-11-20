@@ -13,7 +13,7 @@ import { checkPublicUrl, type SsrfFetchDeps } from '../src/dev/ssrf-fetch'
 // boxes, localhost services). The packaged desktop app routes these through
 // the Rust proxy, which has the strong validate_public_url guard
 // (src-tauri/src/commands/proxy.rs); this is the parity guard for the
-// `npm run dev` / web build (konata's SSH-tunnel path). Best-effort against
+// `npm run dev` / web build (a user's SSH-tunnel path). Best-effort against
 // DNS-rebind — this is a dev server, not the production trust boundary.
 //
 // The rule table itself now lives in src/dev/ssrf-policy.ts, next to its test:

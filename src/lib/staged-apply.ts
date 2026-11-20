@@ -14,10 +14,12 @@
  */
 
 import { backendCall } from '../api/backend'
+import { beforeFromError, recordWrite, textBefore, type Before } from './agent-core/checkpoints'
 import { useStagedChangesStore, type StagedChange } from '../stores/stagedChangesStore'
 import { useChatStore } from '../stores/chatStore'
 import { resolveChatWorkspaceSlug } from '../api/workspace-slug'
 import { mergeThreeWay } from './three-way-merge'
+import { contentWithDecisions, describeHunk } from './hunks'
 
 /**
  * Line endings, the difference between "merged" and "we refused your own edit".
@@ -78,31 +80,39 @@ const withEol = (text: string, eol: '\r\n' | '\n') =>
 async function reconcile(
   jail: string,
   change: StagedChange,
-): Promise<{ content: string; merged: number }> {
+): Promise<{ content: string; merged: number; before: Before }> {
   const base = change.oldContent ?? ''
-  let current: string
+  let res: { content?: string; encoding?: string } | undefined
   try {
-    const res = await backendCall<{ content?: string }>('fs_read', {
+    res = await backendCall<{ content?: string; encoding?: string }>('fs_read', {
       path: change.resolvedPath || change.path,
       chatId: jail,
       workingDirectory: change.workingDirectory,
     })
-    current = res?.content ?? ''
-  } catch {
+  } catch (e) {
     // gone or unreadable, the write recreates it, which is what the user asked for
-    return { content: change.newContent, merged: 0 }
+    return { content: change.newContent, merged: 0, before: beforeFromError(e) }
   }
+  // Not UTF-8 on disk (bug hunt 01.10.2026, C8): read as '' it matched an
+  // empty base and was overwritten without the drift check ever seeing it.
+  if (typeof res?.content !== 'string' && (res?.encoding === 'binary' || res?.encoding === 'base64')) {
+    throw new Error(
+      `${change.path} is not a UTF-8 text file on disk, so this edit cannot be checked against it and was not applied. Reject this one and let the model read the file again.`,
+    )
+  }
+  const current = res?.content ?? ''
+  const before = textBefore(current)
   // The file on disk decides the form; an empty file inherits the model's.
   const eol = current ? eolOf(current) : eolOf(change.newContent)
   const baseLf = toLf(base)
   const currentLf = toLf(current)
   const newLf = toLf(change.newContent)
   if (currentLf === baseLf || currentLf === newLf) {
-    return { content: withEol(change.newContent, eol), merged: 0 }
+    return { content: withEol(change.newContent, eol), merged: 0, before }
   }
   const merged = mergeThreeWay(baseLf, currentLf, newLf)
   if (merged.ok) {
-    return { content: withEol(merged.content, eol), merged: merged.mergedRegions }
+    return { content: withEol(merged.content, eol), merged: merged.mergedRegions, before }
   }
   throw new Error(
     `${change.path} changed on disk in the same ${merged.conflicts === 1 ? 'place' : 'places'} this edit touches, so applying it would drop those changes. Everything else was left alone. Reject this one and let the model read the file again.`,
@@ -124,19 +134,78 @@ async function jailFor(chatId: string): Promise<string> {
   return resolveChatWorkspaceSlug(chatId, title)
 }
 
-export async function applyStagedChange(chatId: string, change: StagedChange): Promise<void> {
+/** True when the change is still queued. A Reject removes it from the store;
+ *  the Apply loops run over a snapshot and the reconcile read is async, so
+ *  without this check a change the user rejected mid "Apply all" was written
+ *  anyway. */
+function stillPending(chatId: string, change: StagedChange): boolean {
+  return useStagedChangesStore.getState().list(chatId).some((c) => c.id === change.id)
+}
+
+type AppliedListener = (chatId: string, changeId: string) => void
+const appliedListeners = new Set<AppliedListener>()
+
+/** Hears every staged change that landed on disk, just before it leaves the
+ *  queue (lib/remote-chats-bridge tells "applied" from "rejected" by it). */
+export function subscribeStagedApplied(fn: AppliedListener): () => void {
+  appliedListeners.add(fn)
+  return () => { appliedListeners.delete(fn) }
+}
+
+type FailedListener = (chatId: string, changeId: string, reason: string) => void
+const failedListeners = new Set<FailedListener>()
+
+/** Hears every apply that failed; the change stays in the queue. */
+export function subscribeStagedFailed(fn: FailedListener): () => void {
+  failedListeners.add(fn)
+  return () => { failedListeners.delete(fn) }
+}
+
+/** Writes one staged change. Returns false, without writing, when the user
+ *  rejected it before the write happened. */
+export async function applyStagedChange(chatId: string, change: StagedChange): Promise<boolean> {
+  try {
+    return await applyStagedChangeInner(chatId, change)
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e)
+    for (const fn of failedListeners) {
+      try { fn(chatId, change.id, reason) } catch { /* a listener never changes the outcome */ }
+    }
+    throw e
+  }
+}
+
+async function applyStagedChangeInner(chatId: string, staged: StagedChange): Promise<boolean> {
+  if (!stillPending(chatId, staged)) return false
+  // Hunks the user rejected are left out: the file gets the original text
+  // there. The latest decisions count, read from the store, since the caller
+  // may hold a snapshot from before the last click.
+  const latest = useStagedChangesStore.getState().get(chatId, staged.id) ?? staged
+  const partial = contentWithDecisions(latest.oldContent ?? '', latest.newContent, latest.hunkDecisions)
+  const change: StagedChange = { ...latest, newContent: partial.content }
   const jail = await jailFor(chatId)
-  const { content, merged } = await reconcile(jail, change)
-  const res = await backendCall<{ status?: string; path?: string }>('fs_write', {
-    path: change.resolvedPath || change.path,
-    content,
-    chatId: jail,
-    workingDirectory: change.workingDirectory,
-  })
+  const { content, merged, before } = await reconcile(jail, change)
+  if (!stillPending(chatId, change)) return false
+  // CA U4: what the file held before this apply (reconcile just read it), for "Rewind to here".
+  const target = { path: change.resolvedPath || change.path, chatId: jail, workingDirectory: change.workingDirectory }
+  const res = await backendCall<{ status?: string; path?: string }>('fs_write', { ...target, content })
   // 'saved' and 'unchanged' are both success ('unchanged' = the file already
   // matched byte-for-byte). Anything else is a real failure worth retrying.
   if (res?.status && res.status !== 'saved' && res.status !== 'unchanged') {
     throw new Error(`fs_write returned status "${res.status}"`)
+  }
+  if (res?.status === 'saved') recordWrite(chatId, target, before, res.path)
+  for (const fn of appliedListeners) {
+    try { fn(chatId, change.id) } catch { /* a listener never stops the write */ }
+  }
+  const total = partial.model.hunks.length
+  const left = partial.rejected.length
+  if (left > 0) {
+    useStagedChangesStore.getState().addNote(chatId, {
+      changeId: change.id,
+      path: change.path,
+      text: partialNote(change.path, partial.rejected.map(describeHunk), total),
+    })
   }
   useStagedChangesStore.getState().remove(chatId, change.id)
   // Mirror the apply in the chat log so the user sees a confirmation in the
@@ -154,30 +223,104 @@ export async function applyStagedChange(chatId: string, change: StagedChange): P
   useChatStore.getState().addMessage(chatId, {
     id: crypto.randomUUID(),
     role: 'system',
-    content: merged > 0
+    content: (merged > 0
       ? `Applied staged change: ${change.path} (merged with ${merged} change${merged === 1 ? '' : 's'} made on disk since it was staged, so this file is not byte for byte the diff you approved)`
-      : `Applied staged change: ${change.path}`,
+      : `Applied staged change: ${change.path}`)
+      + (left > 0 ? ` (${total - left} of ${total} parts, ${left} rejected)` : ''),
     timestamp: Date.now(),
     notice: merged > 0 ? 'warn' : 'info',
   })
+  return true
 }
 
-/** Apply every pending change for a chat, sequentially (fs_write serializes
- *  per path anyway). Failures stay in the queue for manual retry and are
- *  reported by path instead of throwing, so one bad write never blocks the
- *  rest. */
+/** What the model hears when some hunks of a file were left out. */
+export function partialNote(path: string, rejected: string[], total: number): string {
+  return `The user applied your change to ${path} but rejected ${rejected.length} of ${total} parts (${rejected.join('; ')}). Those parts keep the original text. Read the file before you edit it again.`
+}
+
+/** What the model hears about a file the user rejected as a whole. */
+export function rejectedNote(path: string): string {
+  return `The user rejected your change to ${path}. Nothing was written to it.`
+}
+
+/** Reject one staged change and tell the model at its next tool result. */
+export function rejectStagedChange(chatId: string, change: Pick<StagedChange, 'id' | 'path'>): void {
+  const store = useStagedChangesStore.getState()
+  if (!store.get(chatId, change.id)) return
+  store.remove(chatId, change.id)
+  store.addNote(chatId, { changeId: change.id, path: change.path, text: rejectedNote(change.path) })
+}
+
+/** Reject every staged change of a chat. */
+export function rejectAllStagedChanges(chatId: string): void {
+  for (const change of useStagedChangesStore.getState().list(chatId)) rejectStagedChange(chatId, change)
+}
+
+/** Apply the pending changes of a chat staged at or after `since` (all of
+ *  them without it), sequentially (fs_write serializes per path anyway).
+ *  Failures stay in the queue for manual retry and are reported by path
+ *  instead of throwing, so one bad write never blocks the rest. */
 export async function applyAllStagedChanges(
   chatId: string,
+  since = 0,
 ): Promise<{ applied: string[]; failed: string[] }> {
   const applied: string[] = []
   const failed: string[] = []
-  for (const change of [...useStagedChangesStore.getState().list(chatId)]) {
+  for (const change of useStagedChangesStore.getState().list(chatId).filter((c) => c.stagedAt >= since)) {
     try {
-      await applyStagedChange(chatId, change)
-      applied.push(change.path)
+      if (await applyStagedChange(chatId, change)) applied.push(change.path)
     } catch {
       failed.push(change.path)
     }
   }
   return { applied, failed }
+}
+
+/** How the review of one staged change ended. */
+export type StagedReview =
+  | { outcome: 'applied' }
+  | { outcome: 'rejected' }
+  | { outcome: 'replaced' }
+  | { outcome: 'failed'; reason: string }
+  | { outcome: 'stopped' }
+
+/**
+ * Waits until a staged change is decided: written (Apply at the desktop, or
+ * once/chat on the paired phone), rejected (Reject, or deny), replaced by a
+ * later write of the same file, or its apply failed (then it leaves the
+ * queue, the model hears why). A stopped run stops waiting and leaves the
+ * change for the desktop.
+ */
+export function waitForStagedReview(chatId: string, changeId: string, path: string, signal?: AbortSignal): Promise<StagedReview> {
+  return new Promise((resolve) => {
+    let landed = false
+    let done = false
+    const offs: Array<() => void> = []
+    const finish = (r: StagedReview) => {
+      if (done) return
+      done = true
+      for (const off of offs) off()
+      resolve(r)
+    }
+    const check = () => {
+      const list = useStagedChangesStore.getState().list(chatId)
+      if (list.some((c) => c.id === changeId)) return
+      if (landed) return finish({ outcome: 'applied' })
+      return finish(list.some((c) => c.path === path) ? { outcome: 'replaced' } : { outcome: 'rejected' })
+    }
+    offs.push(subscribeStagedApplied((c, id) => { if (c === chatId && id === changeId) landed = true }))
+    offs.push(subscribeStagedFailed((c, id, reason) => {
+      if (c !== chatId || id !== changeId) return
+      finish({ outcome: 'failed', reason })
+      useStagedChangesStore.getState().remove(chatId, changeId)
+    }))
+    offs.push(useStagedChangesStore.subscribe(check))
+    if (signal) {
+      if (signal.aborted) return finish({ outcome: 'stopped' })
+      const onAbort = () => finish({ outcome: 'stopped' })
+      signal.addEventListener('abort', onAbort, { once: true })
+      offs.push(() => signal.removeEventListener('abort', onAbort))
+    }
+    check()
+  })
 }

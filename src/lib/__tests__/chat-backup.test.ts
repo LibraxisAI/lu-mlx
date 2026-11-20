@@ -17,7 +17,7 @@ function conv(id: string, over: Partial<Conversation> = {}): Conversation {
   } as Conversation
 }
 
-// Chat backup export/import (konata 2026-06-28: web build has no store_backup.json).
+// Chat backup export/import (a user 2026-06-28: web build has no store_backup.json).
 describe('chat backup parse', () => {
   it('bundle roundtrips through serialize → parse', () => {
     const convs = [conv('a'), conv('b')]

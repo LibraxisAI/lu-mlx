@@ -29,7 +29,7 @@ export const REPAIR_ADVICE =
 
 /** Der Satz unter der Ausgabe, aus einer Stelle statt aus zweien.
  *
- *  Ticket 007 (falcon bob, 01.09. bis 02.09.): sein torch starb an einem
+ *  Ticket 007 (a user, 01.09. bis 02.09.): sein torch starb an einem
  *  WinError 1114, und die Oberflaeche haengte trotzdem den allgemeinen Satz
  *  an. Der Einordner des Installers kannte diesen Fehler die ganze Zeit, also
  *  gewinnt sein Hinweis, sobald Rust einen mitliefert. Bleibt keiner uebrig,
@@ -63,4 +63,51 @@ export function comfyStartThrowText(
   const advice = comfyCrashAdvice(out)
   if (!advice || base.includes(advice)) return base
   return `${base}\n\n${advice}`
+}
+
+/** What ComfyUI itself printed about a node pack it could not load.
+ *
+ *  ComfyUI writes two lines for such a pack at startup: "Cannot import
+ *  <folder> module for custom nodes: <reason>", and further down, in its list
+ *  of import times, "<n> seconds (IMPORT FAILED): <folder>". The first carries
+ *  the reason, so it wins; the second is the fallback. Colour codes and the
+ *  log prefix are dropped. Empty when ComfyUI said nothing about the pack. */
+export function nodePackImportFailure(lines: string[] | undefined, packName: string): string {
+  // eslint-disable-next-line no-control-regex
+  const plain = (lines ?? []).map((l) => l.replace(/\u001b\[[0-9;]*m/g, '').trim())
+  const about = plain.filter((l) => l.includes(packName))
+  const reason = about.filter((l) => l.includes('Cannot import')).pop()
+  if (reason) return reason.slice(reason.indexOf('Cannot import'))
+  return about.filter((l) => l.includes('(IMPORT FAILED)')).pop() ?? ''
+}
+
+/** The error of a node pack that was installed and still did not register its
+ *  node (the box, 03.10.2026, ComfyUI-RMBG). It used to send the user to "the
+ *  ComfyUI console", which the shipped app does not have. It now carries the
+ *  line ComfyUI printed, read from the same buffer the startup errors use. */
+export function nodePackLoadError(packName: string, nodeClass: string, lines?: string[]): string {
+  const failure = nodePackImportFailure(lines, packName)
+  if (failure) {
+    return `ComfyUI could not load ${packName}, so the ${nodeClass} node is missing. ComfyUI reported: ${failure}`
+  }
+  return `Installed ${packName} and restarted ComfyUI, but it still isn't listing the ${nodeClass} node, ` +
+    'and ComfyUI printed no import error for it. Restart ComfyUI under Settings, AI Backends, then try again.'
+}
+
+/** Die Zeile "Device: ..." aus der Startausgabe von ComfyUI, leer wenn keine
+ *  da ist.
+ *
+ *  3.0.7: Nach einem Wechsel des GPU-Modus wusste niemand, ob ComfyUI jetzt
+ *  auf der Karte laeuft. ComfyUI sagt es selbst, in genau einer Zeile beim
+ *  Start ("Device: cuda:0 ...", "Device: xpu:0 ...", "Device: cpu"), und die
+ *  steht im Ringpuffer, den `comfyui_last_output` liefert. Die letzte gewinnt,
+ *  weil der Puffer erst beim naechsten Start geleert wird. */
+export function comfyDeviceLine(lines?: string[] | null): string {
+  for (const raw of [...(lines ?? [])].reverse()) {
+    const at = raw.indexOf('Device: ')
+    if (at < 0) continue
+    const line = raw.slice(at).trim()
+    if (line.length > 'Device: '.length) return line
+  }
+  return ''
 }

@@ -25,17 +25,20 @@
 <meta name="theme-color" content="#0a0a0a">
 <link rel="icon" href="../favicon.png">
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"BlogPosting","headline":"What a Mac Can Actually Run Locally in 2026 (By RAM, Not By Chip)","description":"On Apple Silicon the model weights live in unified memory shared with the whole system, so the memory tier of the machine decides what you can load. An honest walk through the tiers by RAM size, the 32 GB threshold where a 27B at 4-bit becomes comfortable, why a Mac is a poor fit for diffusion work, and where the hosted lane on managed NVIDIA GPUs picks up.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-09-07","dateModified":"2026-09-07","inLanguage":"en","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/what-a-mac-can-run-locally-2026.html"},"keywords":"what a mac can run locally, apple silicon llm ram, mac local ai 2026, unified memory llm, mac 32gb llm"}
+{"@context":"https://schema.org","@type":"BlogPosting","headline":"What a Mac Can Actually Run Locally in 2026 (By RAM, Not By Chip)","description":"On Apple Silicon the model weights live in unified memory shared with the whole system, so the memory tier of the machine decides what you can load. An honest walk through the tiers by RAM size, the 32 GB threshold where a 27B at 4-bit becomes comfortable, why a Mac is a poor fit for diffusion work, and where the hosted lane on managed NVIDIA GPUs picks up.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-09-07","dateModified":"2026-10-19","inLanguage":"en","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/what-a-mac-can-run-locally-2026.html"},"keywords":"what a mac can run locally, apple silicon llm ram, mac local ai 2026, unified memory llm, mac 32gb llm"}
 </script>
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"How much RAM does a Mac need to run local AI models?","acceptedAnswer":{"@type":"Answer","text":"16 GB is the floor for anything useful and gets you 7B to 12B models at 4-bit. 32 GB is the first tier we would call comfortable: it is where Qwen 3.8 27B at Q4_K_M fits, since that file is 17.1 GB of weights resident. 64 GB opens the 70B class at 4-bit. Below 16 GB you are running toys, because macOS and your browser take their share of the same pool."}},{"@type":"Question","name":"Why does unified memory matter more than the chip name?","acceptedAnswer":{"@type":"Answer","text":"On Apple Silicon there is no separate VRAM. The GPU and the CPU share one pool of memory with the operating system, Safari, and everything else you have open. A model has to fit in what is left, so an M4 with 16 GB loads exactly the same models as an M2 with 16 GB. The chip generation changes how fast tokens come out. The memory size changes what you can load at all, which is the harder limit."}},{"@type":"Question","name":"Can a Mac run Stable Diffusion or Flux well?","acceptedAnswer":{"@type":"Answer","text":"It can run them, but it is a poor fit compared with a rented NVIDIA card. Diffusion is a compute bound workload, the Mac tooling lags the CUDA tooling, and a single high resolution image that takes seconds on an H100 can take minutes on a laptop while the fans run. One image for fun is fine locally. A batch of forty variations is where a Mac stops being the right tool."}},{"@type":"Question","name":"Can I train a LoRA on a Mac?","acceptedAnswer":{"@type":"Answer","text":"Realistically, no. Training is more memory hungry and far more compute hungry than inference, and the Mac training tooling is thin. LoRA training on the hosted side is included on the Hosted plan at 2 trainings a month, and is not available on a credit pack."}},{"@type":"Question","name":"Is there a Mac build of the Locally Uncensored desktop app?","acceptedAnswer":{"@type":"Answer","text":"No. The free open source desktop app is Windows and Linux only, and there is no native Mac build. A Mac reader gets a local runner of their choice, such as LM Studio, Ollama or an MLX setup, plus the browser Studio at lu-labs.ai for the models and the image and video lanes the machine cannot handle."}},{"@type":"Question","name":"What does the hosted side cost when my Mac runs out of room?","acceptedAnswer":{"@type":"Answer","text":"A 15 EUR credit pack is 450,000 credits with no subscription and credits never expire. Flux Schnell is 300 credits per image, Flux 2 Dev is 1,200 credits per image, and a 5 second LTX-2 clip is 8,000 credits, so that pack is roughly 1,500 quick images or 375 Flux 2 Dev images. The Hosted plan is 19 EUR a month with 900,000 credits. Full rates at lu-labs.ai/pricing."}}]}
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"How much RAM does a Mac need to run local AI models?","acceptedAnswer":{"@type":"Answer","text":"16 GB is the floor for anything useful and gets you 7B to 12B models at 4-bit. 32 GB is the first tier we would call comfortable: it is where Qwen 3.8 27B at Q4_K_M fits, since that file is 17.1 GB of weights resident. 64 GB opens the 70B class at 4-bit. Below 16 GB you are running toys, because macOS and your browser take their share of the same pool."}},{"@type":"Question","name":"Why does unified memory matter more than the chip name?","acceptedAnswer":{"@type":"Answer","text":"On Apple Silicon there is no separate VRAM. The GPU and the CPU share one pool of memory with the operating system, Safari, and everything else you have open. A model has to fit in what is left, so an M4 with 16 GB loads exactly the same models as an M2 with 16 GB. The chip generation changes how fast tokens come out. The memory size changes what you can load at all, which is the harder limit."}},{"@type":"Question","name":"Can a Mac run Stable Diffusion or Flux well?","acceptedAnswer":{"@type":"Answer","text":"It can run them, but it is a poor fit compared with a rented NVIDIA card. Diffusion is a compute bound workload, the Mac tooling lags the CUDA tooling, and a single high resolution image that takes seconds on an H100 can take minutes on a laptop while the fans run. One image for fun is fine locally. A batch of forty variations is where a Mac stops being the right tool."}},{"@type":"Question","name":"Can I train a LoRA on a Mac?","acceptedAnswer":{"@type":"Answer","text":"Since version 3.0.7 the desktop app trains a Z Image character on the Mac itself, from 4 to 100 photos, but slowly: on an M5 Pro one step takes about 7 seconds, so the Standard setting of 1200 steps runs a little over two hours. We have run it with 10 photos and 100 steps on one Mac with 48 GB, not yet the full settings or a Mac with less memory. LoRA training on the hosted side is included on the Hosted plan at 2 trainings a month, and is not available on a credit pack."}},{"@type":"Question","name":"Is there a Mac build of the Locally Uncensored desktop app?","acceptedAnswer":{"@type":"Answer","text":"Since version 3.0.6, yes, for Apple Silicon on macOS 14 or newer. Intel Macs are not supported. This article was written before that build: it describes a local runner of your choice, such as LM Studio, Ollama or an MLX setup, plus the browser Studio at lu-labs.ai for the models and the image and video lanes the machine cannot handle."}},{"@type":"Question","name":"What does the hosted side cost when my Mac runs out of room?","acceptedAnswer":{"@type":"Answer","text":"A 15 EUR credit pack is 450,000 credits with no subscription and credits never expire. Flux Schnell is 300 credits per image, Flux 2 Dev is 1,200 credits per image, and a 5 second LTX-2 clip is 8,000 credits, so that pack is roughly 1,500 quick images or 375 Flux 2 Dev images. The Hosted plan is 19 EUR a month with 900,000 credits. Full rates at lu-labs.ai/pricing."}}]}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://locallyuncensored.com/"},{"@type":"ListItem","position":2,"name":"Blog","item":"https://locallyuncensored.com/blog/"},{"@type":"ListItem","position":3,"name":"What a Mac Can Actually Run Locally in 2026","item":"https://locallyuncensored.com/blog/what-a-mac-can-run-locally-2026.html"}]}
 </script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/assets/lu.css">
 <script defer src="/assets/lu.js"></script>
-  <script data-goatcounter="https://lu-uncensored.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+  <script data-goatcounter="https://purple47.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
 </head>
 <body>
 <nav class="lu-nav">
@@ -45,16 +48,18 @@
   </a>
   <div class="lu-nav-links" id="lu-nav-links">
     <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/pricing/">Pricing</a>
     <a class="lu-nav-link" href="/blog/">Blog</a>
     <a class="lu-nav-link" href="/guide/">Guide</a>
     <a class="lu-nav-link" href="/remote-access/">Remote</a>
   </div>
   <div class="lu-nav-right">
-    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">1600+&#8202;⭐</span></a>
-    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">800+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">4200+&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">1700+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
     <span class="lu-nav-sep"></span>
     <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
-    <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
+    <a class="he-cta" href="/pricing/" aria-label="LU Cloud plans and what they include"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>Cloud</a>
+    <a class="lu-nav-dl" data-mac-latest href="https://github.com/PurpleDoubleD/locally-uncensored/releases/download/v3.1.2/LU_3.1.2_aarch64.dmg" download><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
     <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
   </div>
 </nav>
@@ -63,7 +68,7 @@
 
   <div class="post-meta">
     <span class="post-tag">Guide</span>
-    <span>September 7, 2026</span>
+    <span>September 7, 2026, updated October 19</span>
     <span>&middot;</span>
     <span>6 min read</span>
   </div>
@@ -99,7 +104,7 @@
 
     <p>Apple charges a lot for that step. Pay it once, or plan on the hosted lane covering the gap. Those are the two honest options, and buying 16 GB while intending to run 35B models is not one of them.</p>
 
-    <p>If you are starting from zero on a Mac, LU Labs has a walkthrough on <a href="https://lu-labs.ai/blog/how-to-run-ai-models-locally-on-your-mac" target="_blank" rel="noopener">how to run AI models locally on your Mac</a>, from picking a model size to the first chat.</p>
+    <p>If you are starting from zero on a Mac, LU Labs has a walkthrough on <a href="https://lu-labs.ai/blog/how-to-run-ai-models-locally-on-your-mac?src=luc-b-what-a-mac-can-run-loca" target="_blank" rel="noopener">how to run AI models locally on your Mac</a>, from picking a model size to the first chat.</p>
 
     <h2>The Half Nobody Mentions: Diffusion</h2>
 
@@ -107,7 +112,9 @@
 
     <p>Diffusion is compute bound rather than bandwidth bound, and it is the workload NVIDIA hardware was tuned for over a decade. The Mac tooling also lags: most new samplers, ControlNets and video pipelines land on CUDA first and arrive on Apple Silicon months later, if at all. In practice a single high resolution image that finishes in seconds on rented hardware can take minutes on a laptop with the fans at full tilt, and a video clip is worse by an order of magnitude. If you want the local diffusion route anyway, our <a href="how-to-run-flux-locally.html">Flux local guide</a> covers what it costs in hardware.</p>
 
-    <p>This is where the cloud earns its keep, and we would rather say that plainly than sell a Mac workflow that does not exist. The hosted lanes at <a href="https://lu-labs.ai/pricing" target="_blank" rel="noopener">LU Labs</a> run on managed NVIDIA H100, A100 and B200 class GPUs, with 10 image models, editing and upscale, and 5 video models producing 5 or 8 second clips. The hardware is shared, so at busy hours there is a short queue.</p>
+    <p>Update for 3.0.6: the desktop app now makes images and video on the Mac itself, and we have timings from one M5 Pro with 48 GB. They are in the <a href="#setup">setup section</a> below. Version 3.0.7 adds character training, Talking Character, Motion Control and Music on the Mac, listed in the same section. The general point about smaller Macs still holds.</p>
+
+    <p>This is where the cloud earns its keep, and we would rather say that plainly than sell a Mac workflow that does not exist. The hosted lanes at <a href="https://lu-labs.ai/pricing?src=luc-b-what-a-mac-can-run-loca" target="_blank" rel="noopener">LU Labs</a> run on managed NVIDIA H100, A100 and B200 class GPUs, with image models, editing and upscale, and video models producing 5 or 8 second clips. The hardware is shared, so at busy hours there is a short queue.</p>
 
     <h2>Where the Line Falls in Practice</h2>
 
@@ -120,25 +127,80 @@
         <tr><td>One image, for fun</td><td>Workable, expect minutes</td><td>Yes, and it is seconds</td></tr>
         <tr><td>A batch of forty variations</td><td>No, this is an evening of waiting</td><td>Yes</td></tr>
         <tr><td>A 5 second video clip</td><td>Not really</td><td>Yes, LTX-2 and four other models</td></tr>
-        <tr><td>LoRA training</td><td>No</td><td>2 a month on the Hosted plan, none on a credit pack</td></tr>
+        <tr><td>LoRA training</td><td>Since 3.0.7, a Z Image character, slowly: the Standard setting runs a little over two hours on an M5 Pro</td><td>2 a month on the Hosted plan, none on a credit pack</td></tr>
       </tbody>
     </table>
 
     <h2>What the Other Side Costs</h2>
 
-    <p>Concrete anchors, because "cloud is expensive" is usually said without numbers. Flux Schnell is 300 credits per image. Flux 2 Dev is 1,200 credits per image. A 5 second LTX-2 clip is 8,000 credits. A <strong>15 EUR pack is 450,000 credits</strong>, needs no subscription, and the credits never expire, which works out to roughly 1,500 quick images or 375 Flux 2 Dev images. The <strong>Hosted plan is 19 EUR a month with 900,000 credits</strong>, about 3,000 quick images or 750 Flux 2 Dev images, plus the LoRA training slots. Per model rates are at <a href="https://lu-labs.ai/pricing" target="_blank" rel="noopener">https://lu-labs.ai/pricing</a>.</p>
+    <p>Concrete anchors, because "cloud is expensive" is usually said without numbers. Flux Schnell is 300 credits per image. Flux 2 Dev is 1,200 credits per image. A 5 second LTX-2 clip is 8,000 credits. A <strong>15 EUR pack is 450,000 credits</strong>, needs no subscription, and the credits never expire, which works out to roughly 1,500 quick images or 375 Flux 2 Dev images. The <strong>Hosted plan is 19 EUR a month with 900,000 credits</strong>, about 3,000 quick images or 750 Flux 2 Dev images, plus the LoRA training slots. Per model rates are at <a href="https://lu-labs.ai/pricing?src=luc-b-what-a-mac-can-run-loca" target="_blank" rel="noopener">https://lu-labs.ai/pricing</a>.</p>
 
     <p>Compare that against the Apple price of stepping from 16 GB to 32 GB and it is not a close call for image work.</p>
 
-    <h2>The Part We Will Not Dress Up</h2>
+    <h2 id="setup">Setting Up Locally Uncensored on a Mac, Step by Step</h2>
 
-    <p>Our free open source desktop app is Windows and Linux only. There is no native Mac build. So a Mac reader ends up with two pieces: a local runner of your choice for the offline half, and the browser Studio for everything the machine cannot hold. The <a href="lm-studio-alternative-for-mac.html">LM Studio alternative for Mac guide</a> walks that setup step by step, including the API key path so the hosted models answer from your terminal too.</p>
+    <p>Our free open source desktop app has a Mac build since version 3.0.6. It is in beta, it needs Apple Silicon and macOS 14 or newer, and Intel Macs are not supported. The earlier sections of this article were written before that build existed. This one covers the setup.</p>
+
+    <ol>
+      <li><a data-mac-latest href="https://github.com/PurpleDoubleD/locally-uncensored/releases/download/v3.1.2/LU_3.1.2_aarch64.dmg" download>Download the .dmg</a> for Apple Silicon.</li>
+      <li>Open the .dmg and drag the app into Applications.</li>
+      <li>Start it. The setup wizard picks a first model for your machine.</li>
+      <li>Send a first message in Chat. Local models run through the bundled server with Metal, so there is no separate runner to install.</li>
+      <li>Open Create when you want a picture. On a Mac, Create makes images and video on the Mac itself, without ComfyUI.</li>
+    </ol>
+
+    <p>If you keep models in a folder under Desktop, Documents or Downloads, LU says up front that macOS will ask once for access to it.</p>
+
+    <h3>What to Expect From Create on a Mac</h3>
+
+    <p>We have numbers from one machine, an M5 Pro with 48 GB. DreamShaper XL Turbo made an image in 33 seconds and Qwen-Image 2.1 Turbo in 38. LTX-2.3 Distilled 4-bit made a clip of two seconds at 768x512 with sound in 64 seconds. A smaller Mac will be slower, and we have not measured by how much.</p>
+
+    <p>Three things the app does for you there:</p>
+
+    <ul>
+      <li>A Mac has one pool of memory for chat and Create. Before a picture or video run, Create takes the chat model out of memory, shows "Freeing memory..." while it does, and brings the model back when the run is over</li>
+      <li>Where we timed a model on a real run, Create says before the start how long a clip takes once that is ten minutes or more. During the run the line under the bar names the step and the time left</li>
+      <li>The 8-bit and Turbo versions of Qwen-Image 2.1 ask for 24 GB. Their runs on our 48 GB Mac peaked at 10.3 and 14.9 GB. We have not run either on a Mac with 24 GB</li>
+    </ul>
+
+    <h3>What 3.0.7 Adds on a Mac</h3>
+
+    <p>Version 3.0.7 brings more of Create to the Mac, still without ComfyUI. Everything in this list is for macOS only:</p>
+
+    <ul>
+      <li>Character Studio trains a Z Image character from 4 to 100 photos. The first run downloads a training adapter of 340 MB. One step takes about 7 seconds on an M5 Pro, so the Standard setting (1200 steps) runs a little over two hours. The trained character then works in Image, the video tabs and the chat tools</li>
+      <li>Talking Character turns a portrait and a voice recording into a clip of up to 10 seconds with LTX-2.3 4-bit. It needs one more download of 11.3 GB and a Mac with 24 GB or more, and it is slow: a 4 second clip took about 10 minutes on an M5 Pro</li>
+      <li>Motion Control makes a start image follow a motion clip, with LTX-2.3 4-bit and a control file of about 650 MB. A 2 second clip at 512 x 512 took 103 seconds on an M5 Pro</li>
+      <li>Music runs ACE-Step 1.5, a download of about 10 GB, for tracks from 10 seconds to 4 minutes</li>
+      <li>Enhance Image runs with SeedVR2 3B (7.28 GB) at 2x or 4x. Remove Background uses the subject detection built into macOS and needs no download</li>
+      <li>Edit with Qwen-Image 2.1 can paint under a mask and takes up to ten images, as many as the memory holds at the size you set</li>
+      <li>HiRes fix runs as a second pass with a model that edits, and Extend Video is a local tab while a video model that takes a start image is installed</li>
+    </ul>
+
+    <p>All of this ran with the real engine on one Mac with 48 GB. None of it has been clicked through in a built app yet, nothing has run on a Mac with less memory, and training has only run with 10 photos and 100 steps.</p>
+
+    <p>Most video models in the Mac catalog are marked "Experimental: not yet tested in LU". Take that label at its word.</p>
+
+    <h3>What Is Not Confirmed on a Mac Yet</h3>
+
+    <p>The app has run on that one Mac only. It has not run on macOS 14 or 15, and not on a Mac with 16 or 24 GB. Voice is in the Mac build and has been tried by hand in the app, in English only. Computer control is in the app but not fully tested yet on macOS. Remote Access and the automatic update are not confirmed on macOS. The <a href="/mac/">Mac page</a> keeps this list current, and the <a href="locally-uncensored-v3-0-6-release.html">3.0.6 release notes</a> have the rest.</p>
+
+    <p>If your Mac is an Intel model or short on memory, the browser Studio covers what the machine cannot hold. The <a href="lm-studio-alternative-for-mac.html">LM Studio alternative for Mac guide</a> walks that setup step by step, including the API key path so the hosted models answer from your terminal too.</p>
 
     <p>If you want to compare the local runners themselves first, the <a href="best-local-ai-apps-2026.html">best local AI apps of 2026</a> roundup covers which ones have decent Apple Silicon support.</p>
 
     <hr>
 
     <p><em>Locally Uncensored is AGPL-3.0 licensed and built by <a href="https://github.com/PurpleDoubleD">PurpleDoubleD</a>. Corrections welcome on <a href="https://github.com/PurpleDoubleD/locally-uncensored/discussions">GitHub Discussions</a> or in the <a href="https://locallyuncensored.com/discord">Discord</a>.</em></p>
+    <h2>In the handbook</h2>
+
+    <ul>
+      <li><a href="/mac/">Locally Uncensored for Mac</a>, the Apple Silicon build, in beta</li>
+      <li><a href="/guide/install/">Install and update</a>, the SmartScreen warning and how updates arrive</li>
+      <li><a href="/guide/chat/">Chat</a>, the model picker, the context window and thinking mode</li>
+      <li><a href="/guide/faq-and-glossary/">FAQ and glossary</a>, answers to the questions people really ask</li>
+    </ul>
+
   </article>
 
   <div class="post-footer">
@@ -154,6 +216,15 @@
   <div class="footer-row footer-links">
     <a href="https://locallyuncensored.com/blog/">Blog</a>
     <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/pricing/">Pricing</a>
+    <a href="https://locallyuncensored.com/cloud/">LU Cloud</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-chat-online/">Uncensored AI chat online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-image-generator-online/">Image generator online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-video-generator-online/">Video generator online</a>
+    <a href="https://locallyuncensored.com/unrestricted-ai/">Unrestricted AI</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-coding-agent/">AI coding agent</a>
+    <a href="https://locallyuncensored.com/alternatives/">Alternatives</a>
+    <a href="https://locallyuncensored.com/is-locally-uncensored-safe/">Is it safe?</a>
     <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
     <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
     <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
@@ -161,6 +232,9 @@
     <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
     <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
     <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+    <a href="https://locallyuncensored.com/privacy/">Privacy</a>
+    <a href="https://locallyuncensored.com/terms/">Terms</a>
+    <a href="https://locallyuncensored.com/impressum/">Impressum</a>
   </div>
 </footer>
 </body>

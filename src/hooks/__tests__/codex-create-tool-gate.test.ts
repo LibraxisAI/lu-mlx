@@ -73,7 +73,17 @@ describe('a plain coding turn does not carry the generators', () => {
     // tool-catalog-tokens.test.ts, nicht von einem Menschen.
     const before = names(codingCatalog())
     const after = names(gateCreateTools(codingCatalog(), 'fix the failing test in parser.ts'))
-    expect(before.length - after.length).toBe(7)
+    // 3.0.8 (A11): neun, get_settings und set_setting fahren nur auf einer
+    // Nachricht ueber Einstellungen mit.
+    // 3.1.0 (C60): vierzehn, die fuenf Selbststeuerungswerkzeuge hinter
+    // demselben Tor (set_settings, lu_models, lu_service, lu_download,
+    // lu_open_settings).
+    // C60-S5: dazu die vier Workflow-Werkzeuge, zusammen achtzehn.
+    // C59 A6–A8: +4 (memory, session_search, skill_view, skill_save), on demand only.
+    // Zusammen mit C60 und C60-S5: zweiundzwanzig.
+    // Waechter: +4 (watcher_create/_list/_update/_delete) hinter ihrem eigenen
+    // Tor, zusammen sechsundzwanzig.
+    expect(before.length - after.length).toBe(26)
     expect(before.filter((n) => !after.includes(n)).sort()).toEqual([...GATE_OPENING_TOOLS].sort())
   })
 
@@ -176,7 +186,7 @@ describe('the prompt and the tool list answer the same question', () => {
 
 describe('the wiring in useCodex', () => {
   it('the gate runs on the routed list, so it covers all three branches', () => {
-    expect(src).toMatch(/const relevantDefs = gateCreateTools\(routedDefs, lastUserMsg, createGateOpened\)/)
+    expect(src).toMatch(/const gatedDefs = gatePlanTool\(\s*gateCreateTools\(routedDefs, lastUserMsg, createGateOpened\),/)
   })
 
   it('the hermes fallback is gated too, it carries the weakest models', () => {
@@ -252,7 +262,16 @@ describe('a run that discovers halfway through that it needs a picture', () => {
     // dessen zwei Begleiter. Die Liste steht hier ausgeschrieben und wird
     // NICHT aus GATE_KEYWORDS abgeleitet — sonst pruefte sie eine Karte gegen
     // sich selbst und waere fuer jeden kuenftigen Eintrag automatisch gruen.
-    const TOR = [...CREATE_TOOLS, 'pr_resume', 'delegate_task', 'check_tasks', 'message_agent']
+    // 3.0.8 (A11): dazu die zwei Einstellungswerkzeuge.
+    // 3.1.0 (C60): dazu die fuenf Selbststeuerungswerkzeuge.
+    const TOR = [...CREATE_TOOLS, 'pr_resume', 'delegate_task', 'check_tasks', 'message_agent', 'get_settings', 'set_setting',
+      'set_settings', 'lu_models', 'lu_service', 'lu_download', 'lu_open_settings',
+      // C60-S5
+      'workflow_find', 'workflow_inspect', 'workflow_install', 'workflow_assign',
+      // C59 A6–A8
+      'memory', 'session_search', 'skill_view', 'skill_save',
+      // Waechter
+      'watcher_create', 'watcher_list', 'watcher_update', 'watcher_delete']
     for (const n of TOR) expect(isGatedTool(n), n).toBe(true)
     for (const n of ['file_read', 'file_edit', 'shell_execute', 'todo_write', 'web_search']) {
       expect(isGatedTool(n), n).toBe(false)

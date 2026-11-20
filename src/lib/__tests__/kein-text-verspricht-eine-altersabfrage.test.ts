@@ -1,7 +1,7 @@
 /**
  * Kein Kundentext kuendigt eine Altersbestaetigung an, die nicht kommt.
  *
- * Entscheid David vom 13.09.2026: fuer 3.0.0 faellt der Bestaetigungsschritt
+ * Entscheid vom 13.09.2026: fuer 3.0.0 faellt der Bestaetigungsschritt
  * weg, in 3.0.1 kommt er wieder. Die Stellung steht im Server
  * (`AGE_CONFIRMATION_REQUIRED`), die Oberflaeche folgt ihr zur Laufzeit. Die
  * TEXTE koennen das nicht: sie sind gedruckt und muessen beschreiben, was der

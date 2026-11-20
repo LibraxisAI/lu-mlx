@@ -3,7 +3,7 @@
  * ergebnis-r67-nachmessung.md).
  *
  * Two byte-identical files lay in the SAME folder,
- * C:\Users\ddrob\ComfyUI\models\diffusion_models, 13.631.488 bytes each:
+ * C:\Users\alice\ComfyUI\models\diffusion_models, 13.631.488 bytes each:
  *
  *   flux1-dev-fp8.safetensors      ->  in no list, no counter, no size, no
  *                                      delete button. Invisible in the app.
@@ -134,7 +134,7 @@ describe('NEGATIVE CONTROL: the pickers still hide what they cannot render with'
     expect((await getInstalledImageModels()).map((m) => m.name)).toEqual([CATALOG_NAME])
   })
 
-  it('a file the probe cannot locate stays in the picker (konata 2026-06-07)', async () => {
+  it('a file the probe cannot locate stays in the picker (a user 2026-06-07)', async () => {
     // exists false means the size checker looked in the wrong ComfyUI root, not
     // that the file is short. ComfyUI enumerated it, so ComfyUI can load it.
     backendCall.mockImplementation(async (_cmd: string, args: { files: Array<{ filename: string }> }) =>

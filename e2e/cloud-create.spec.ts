@@ -78,7 +78,7 @@ test('ops start EMPTY and adopt a gallery image only on explicit pick', async ({
   await page.getByRole('button', { name: /^Create$/ }).last().click()
   await expect(page.locator('img[src*="/e2e/result.png"]').first()).toBeVisible({ timeout: 30_000 })
 
-  // Switching to Edit must NOT auto-adopt the gallery image (David 2026-07-10):
+  // Switching to Edit must NOT auto-adopt the gallery image (2026-07-10):
   // the stage shows the empty input slot with the explicit gallery pick strip.
   // (2.6.0 label: "Edit / Image to Image".)
   await page.getByRole('radio', { name: /Edit \/ Image to Image/i }).click()
@@ -111,18 +111,22 @@ test('local mode: local lanes usable, cloud-only ops shown as locked teasers', a
   await expect(page.getByRole('radio', { name: 'Animate Image', exact: true })).toBeVisible()
   await expect(page.getByRole('radio', { name: 'Music', exact: true })).toBeVisible()
 
-  // Character Studio is the musubi trainer — a real local tab on Mac without ComfyUI.
-  await expect(page.getByRole('radio', { name: 'Character Studio', exact: true })).toBeVisible()
+  // Character Studio joined the local lanes in 2.6.0 (musubi trainer ships
+  // in trainer.rs), so it renders as a plain selectable tab now.
+  // Since 3.1.0 part B it is the Character area, one pill for four tabs.
+  await expect(page.getByRole('radiogroup', { name: 'Create mode' }).getByRole('radio', { name: 'Character', exact: true })).toBeVisible()
 
-  // Enhance Image / eraser have a local lane only in the Mac fork
-  // (`localLaneMacOnly`). This spec runs as Windows (tauri-mock default), so
-  // they render locked: aria-label gains ", runs on LU Cloud" and a click
-  // opens the teaser instead of switching the lane.
-  // R5-67 renamed the upscale label to "Enhance Image".
-  await expect(page.getByRole('radio', { name: 'Enhance Image, runs on LU Cloud' })).toBeVisible()
+  // Enhance Image runs on local ComfyUI on Windows and Linux since 3.0.7
+  // (Discord wish D10), so it is a plain local tab here, not a teaser.
+  await expect(page.getByRole('radio', { name: 'Enhance Image', exact: true })).toBeVisible()
+  await expect(page.getByRole('radio', { name: 'Enhance Image, runs on LU Cloud' })).toHaveCount(0)
+
+  // cloudOnly WITHOUT a local lane on Windows/Linux (eraser) renders locked:
+  // aria-label gains ", runs on LU Cloud" and a click opens the teaser
+  // instead of switching the lane. (Eraser is local on Mac+ComfyUI only.)
   await expect(page.getByRole('radio', { name: 'Erase Object, runs on LU Cloud' })).toBeVisible()
 
-  await page.getByRole('radio', { name: 'Enhance Image, runs on LU Cloud' }).click()
+  await page.getByRole('radio', { name: 'Erase Object, runs on LU Cloud' }).click()
   await expect(page.getByRole('radio', { name: 'Image', exact: true })).toBeChecked()
 })
 

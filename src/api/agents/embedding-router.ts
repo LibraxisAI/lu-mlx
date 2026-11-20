@@ -43,8 +43,28 @@ function hashDescription(s: string): string {
   return (h >>> 0).toString(16)
 }
 
+/**
+ * The query's own vector, by query text. The agent loop routes on the user's
+ * instruction, which stays the same for every step of a run, and asked the
+ * embedding server for that same vector again before every model call
+ * (realtime pass 01.10.2026, R3). A few entries cover the runs in flight.
+ */
+const QUERY_CACHE = new Map<string, number[]>()
+const QUERY_CACHE_MAX = 8
+
+async function queryVector(query: string, embed: EmbeddingFn): Promise<number[] | undefined> {
+  const hit = QUERY_CACHE.get(query)
+  if (hit) return hit
+  const [vec] = await embed([query])
+  if (!vec) return undefined
+  QUERY_CACHE.set(query, vec)
+  if (QUERY_CACHE.size > QUERY_CACHE_MAX) QUERY_CACHE.delete(QUERY_CACHE.keys().next().value as string)
+  return vec
+}
+
 export function clearEmbeddingCache(): void {
   CACHE.clear()
+  QUERY_CACHE.clear()
 }
 
 /**
@@ -105,7 +125,14 @@ export async function rankToolsByEmbedding(
   opts: { topN?: number } = {}
 ): Promise<Array<{ tool: ToolLike; score: number }>> {
   const topN = opts.topN ?? 10
-  const [queryVec] = await embed([query])
+  let queryVec = await queryVector(query, embed)
+  // A cached vector from an embedding backend that has since changed (the
+  // built-in engine and Ollama differ in length) is asked for once more.
+  const sample = tools.map((t) => CACHE.get(t.name)).find(Boolean)
+  if (queryVec && sample && sample.vector.length !== queryVec.length) {
+    QUERY_CACHE.delete(query)
+    queryVec = await queryVector(query, embed)
+  }
   if (!queryVec) return []
 
   const scored: Array<{ tool: ToolLike; score: number }> = []

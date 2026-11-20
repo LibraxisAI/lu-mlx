@@ -161,7 +161,7 @@ test('expert panel shows live engine status and Apply & Restart uses the edited 
   //
   // Der Abschnitt hiess bis zum 02.09.2026 "Built-in Engine (expert)", die
   // Zeile darunter "Expert settings for the built-in engine". Commit 69cfeaf0
-  // hat beides auf LU Engine umbenannt, Davids Produktentscheidung, und zwar
+  // hat beides auf LU Engine umbenannt, eine Produktentscheidung des Inhabers, und zwar
   // nur, was der Nutzer LIEST. Die internen Bezeichner blieben, deshalb steht
   // im Satz oben weiter der openai-Slot. Der Test wurde nicht mitgezogen und
   // war seitdem rot; in der gebauten Windows-App am 04.09.2026 nachgesehen,

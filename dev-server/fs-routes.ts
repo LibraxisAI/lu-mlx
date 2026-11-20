@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync, type Dirent } from 'fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, type Dirent } from 'fs'
 import os from 'os'
-import { join, resolve } from 'path'
+import { basename, join, resolve } from 'path'
 import type { RouteMount } from './routes'
 import { requirePost, withJsonBody } from './http'
 import { bodyFlag, bodyNumber, bodyString } from '../src/dev/http-body'
@@ -8,6 +8,7 @@ import { resolveFsRequestPath } from '../src/dev/fs-request-path'
 import {
   devResolveWithinJail,
   devWorkspaceRoot,
+  DEV_WRITE_BYTES_CAP,
   effectiveByteCap,
   JailEscapeError,
   namedDepth,
@@ -70,8 +71,12 @@ export function registerFsRoutes(routes: RouteMount): void {
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ content, encoding: 'utf8' }))
       } catch (err) {
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: String(err) }))
+        // Wie fs_read in Rust: ein Lesefehler ist ein Fehler, keine leere Datei.
+        // Mit 200 + `error` las file_read daraus "" — ein 9B hielt eine
+        // fehlende Datei für leer, erfand Zahlen und schrieb sie hinein (C59).
+        const missing = (err as NodeJS.ErrnoException)?.code === 'ENOENT'
+        res.writeHead(missing ? 404 : 500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: missing ? `File not found: ${bodyString(body, 'path') || resolved}` : String(err) }))
       }
     })
   })
@@ -118,6 +123,84 @@ export function registerFsRoutes(routes: RouteMount): void {
         const buf = readFileSync(resolved)
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ base64: buf.toString('base64'), bytes: buf.length }))
+      } catch (err) {
+        fail(err instanceof JailEscapeError ? 403 : 400, String(err instanceof Error ? err.message : err))
+      }
+    })
+  })
+
+  // API: FS write bytes, one base64 chunk of a BINARY file attached in the
+  // chat (3.0.5). Parity port of the `fs_write_bytes` Tauri command: the same
+  // jail, the same 256 MiB ceiling, never over an existing file, and the bytes
+  // grow in a hidden `.name.lu-part` sibling until the last chunk renames it
+  // into place.
+  routes.use('/local-api/fs-write-bytes', (req, res) => {
+    if (!requirePost(req, res)) return
+    withJsonBody(req, res, (body) => {
+      const fail = (status: number, error: string) => {
+        res.writeHead(status, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error }))
+      }
+      try {
+        const filePath = bodyString(body, 'path')
+        const chatId = bodyString(body, 'chatId')
+        const workingDirectory = bodyString(body, 'workingDirectory')
+        const offset = bodyNumber(body, 'offset') ?? 0
+        const last = bodyFlag(body, 'last')
+        const resolved = devResolveWithinJail({
+          path: filePath ?? '',
+          homeDir: os.homedir(),
+          chatId,
+          workingDirectory,
+          ...devJail,
+        })
+        // The same check fs-write makes: a request that names no file resolves
+        // to the workspace root itself.
+        if (namedDepth(resolved) === namedDepth(devWorkspaceRoot(os.homedir(), chatId, workingDirectory))) {
+          fail(400, `Missing path: fs-write-bytes writes a FILE inside the workspace, but this request names the workspace root itself (${resolved})`)
+          return
+        }
+        if (existsSync(resolved)) {
+          fail(400, `File already exists: ${resolved}`)
+          return
+        }
+        const encoded = bodyString(body, 'base64') ?? ''
+        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded) || encoded.length % 4 !== 0) {
+          fail(400, 'Invalid base64 data')
+          return
+        }
+        const bytes = Buffer.from(encoded, 'base64')
+        const total = offset + bytes.length
+        if (total > DEV_WRITE_BYTES_CAP) {
+          fail(400, `File is too large to attach: more than ${DEV_WRITE_BYTES_CAP} bytes`)
+          return
+        }
+        const parentDir = resolve(resolved, '..')
+        const part = join(parentDir, `.${basename(resolved)}.lu-part`)
+        if (!existsSync(parentDir)) mkdirSync(parentDir, { recursive: true })
+        if (offset === 0) {
+          writeFileSync(part, bytes)
+        } else {
+          const have = existsSync(part) ? statSync(part).size : 0
+          if (have !== offset) {
+            fail(400, `Upload out of order: expected the chunk at byte ${have}, got the one at byte ${offset}`)
+            return
+          }
+          appendFileSync(part, bytes)
+        }
+        if (!last) {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ status: 'partial', bytes: total }))
+          return
+        }
+        try {
+          renameSync(part, resolved)
+        } catch (err) {
+          rmSync(part, { force: true })
+          throw err
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ status: 'saved', path: resolved, bytes: total }))
       } catch (err) {
         fail(err instanceof JailEscapeError ? 403 : 400, String(err instanceof Error ? err.message : err))
       }

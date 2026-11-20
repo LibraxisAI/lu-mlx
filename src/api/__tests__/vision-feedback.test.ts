@@ -7,7 +7,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 // Fix: only image_generate produces a feedable still — video_generate always
 // no-ops, regardless of output container (mp4 / webm / animated webp / gif).
 //
-// 2026-06-22 (konata): the loop was Ollama-only, so a non-Ollama vision model
+// 2026-06-22: the loop was Ollama-only, so a non-Ollama vision model
 // never received the image and described from the prompt (hallucination). Now
 // provider-aware: Ollama uses modelSupportsVision (/api/show); other providers
 // use the STRICT model-name family match (modelNameSuggestsVision) so a
@@ -84,7 +84,7 @@ describe('buildVisionFeedback — image_generate feeds a still to a vision model
   })
 })
 
-describe('buildVisionFeedback — provider-aware: non-Ollama uses the strict name check (konata)', () => {
+describe('buildVisionFeedback — provider-aware: non-Ollama uses the strict name check', () => {
   it('non-Ollama VISION model (llava on an openai-compatible endpoint) → feeds the image', async () => {
     const result = `Image generated: frog.png (prompt: "a frog")\n${VIEW('frog.png')}`
     const vf = await buildVisionFeedback('openai::llava-v1.6-mistral-7b', 'image_generate', result, 'openai')

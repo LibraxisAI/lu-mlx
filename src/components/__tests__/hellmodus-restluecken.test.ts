@@ -267,9 +267,11 @@ describe('keine Hex-Flaeche ohne Modus mehr', () => {
   })
 
   it('die neuen Flaechen sind Tokens, keine zweiten Literale', () => {
-    expect(PROVIDER_DROPDOWN).toContain('bg-white dark:bg-lu-overlay')
-    expect(BADGE).toContain('bg-white dark:bg-lu-overlay')
-    expect(QR_MODAL).toContain('bg-white dark:bg-lu-base')
+    // Since the pop-up redesign the three take the shared sheet recipes,
+    // which bring both themes along (index.css, .lu-elevated / .lu-dialog).
+    expect(PROVIDER_DROPDOWN).toContain('lu-elevated')
+    expect(BADGE).toContain('lu-elevated')
+    expect(QR_MODAL).toContain('lu-dialog')
   })
 })
 

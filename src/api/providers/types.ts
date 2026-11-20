@@ -9,8 +9,20 @@
 
 import { LU_ENGINE_NAME } from '../../lib/engine-name'
 import type { ResolvedContextWindow } from '../../lib/context-source'
+import type { WindowChoice } from '../../lib/context-window'
 
-export type ProviderId = 'ollama' | 'openai' | 'anthropic' | 'lu-cloud'
+import type { CompatProviderId } from './compat-id'
+export type { CompatProviderId } from './compat-id'
+export { isCompatProviderId, compatProviderId, speaksOpenAIProtocol } from './compat-id'
+
+/**
+ * The four fixed slots plus any number of extra OpenAI-compatible ones
+ * (`openai-<slug>`, see compat-id.ts). A table over this type still has to
+ * name the four fixed slots; the extra ones are an index signature, so every
+ * such table needs a spoken rule for them next to it.
+ */
+export type FixedProviderId = 'ollama' | 'openai' | 'anthropic' | 'lu-cloud'
+export type ProviderId = FixedProviderId | CompatProviderId
 
 export interface ProviderConfig {
   id: ProviderId
@@ -19,12 +31,21 @@ export interface ProviderConfig {
   baseUrl: string       // e.g. "http://localhost:11434", "https://openrouter.ai/api/v1"
   apiKey: string        // Encrypted in store. Empty string for local providers.
   isLocal: boolean      // true for Ollama, LM Studio, vLLM, no API key needed
+  // CA (13.11.2026): send an assistant step's own reasoning back as
+  // `reasoning_content` (lib/agent-core/reasoning-replay.ts). Set by LU Cloud,
+  // whose reasoners need it between tool calls. Undefined = not sent.
+  replayReasoning?: boolean
   // Built-in engine (2.5.7): the app manages this OpenAI-compatible backend's
   // lifecycle itself (bundled llama-server on 127.0.0.1:8127). When true the UI
   // hides the URL/key inputs and the model list comes from `list_bundled_models`
   // (the Tauri command), not `/v1/models`. Undefined = a normal user-configured
   // backend, unchanged behavior.
   managed?: boolean
+  // GitHub #173: set on an ADDITIONAL OpenAI-compatible entry (LM Studio next
+  // to KoboldCpp next to the LU Engine), never on the four fixed slots. Its
+  // models are named `openai:<entryId>::<model>` (api/providers/model-name.ts)
+  // and route to this entry's own address and key. Undefined = the slot itself.
+  entryId?: string
   // Set when the user switched this provider off with the Disable button in
   // Settings, AI Backends, and cleared when Enable puts it back. The list keeps
   // such a row visible (greyed, with Enable) instead of dropping it, so the
@@ -101,6 +122,10 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   { id: 'aphrodite', name: 'Aphrodite', providerId: 'openai', baseUrl: 'http://localhost:2242/v1', isLocal: true },
   { id: 'sglang', name: 'SGLang', providerId: 'openai', baseUrl: 'http://localhost:30000/v1', isLocal: true },
   { id: 'tgi', name: 'TGI (HuggingFace)', providerId: 'openai', baseUrl: 'http://localhost:8080/v1', isLocal: true },
+  // GH #214: Magnitude (magnitudedev/magnitude, Apache 2.0). Its docs: the
+  // OpenAI compatible API is served on port 10100 under /inference/v1, on
+  // 127.0.0.1 only unless Network access is on, no key needed locally.
+  { id: 'magnitude', name: 'Magnitude', providerId: 'openai', baseUrl: 'http://127.0.0.1:10100/inference/v1', isLocal: true },
 
   // ── Cloud providers (API key required) ───────────────────
   { id: 'openrouter', name: 'OpenRouter', providerId: 'openai', baseUrl: 'https://openrouter.ai/api/v1', isLocal: false, placeholder: 'sk-or-...' },
@@ -108,6 +133,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   { id: 'together', name: 'Together', providerId: 'openai', baseUrl: 'https://api.together.xyz/v1', isLocal: false, placeholder: 'tok_...' },
   { id: 'deepseek', name: 'DeepSeek', providerId: 'openai', baseUrl: 'https://api.deepseek.com/v1', isLocal: false, placeholder: 'sk-...' },
   { id: 'mistral', name: 'Mistral', providerId: 'openai', baseUrl: 'https://api.mistral.ai/v1', isLocal: false, placeholder: 'sk-...' },
+  { id: 'minimax', name: 'MiniMax', providerId: 'openai', baseUrl: 'https://api.minimax.io/v1', isLocal: false, placeholder: 'API key' },
   { id: 'openai', name: 'OpenAI', providerId: 'openai', baseUrl: 'https://api.openai.com/v1', isLocal: false, placeholder: 'sk-...' },
   { id: 'custom-openai', name: 'Custom (OpenAI-compat)', providerId: 'openai', baseUrl: '', isLocal: false },
 
@@ -124,14 +150,30 @@ export interface ProviderModel {
    *  antwortet ohne Ablehnung. Fehlt das Feld, ist nichts gemessen und nichts
    *  versprochen. */
   unfiltered?: 'full' | 'partial'
+  /** Die zweite Marke des Katalogs (LU Cloud /models `unrestricted`): vom
+   *  Hersteller ohne Ablehnungsschicht herausgegeben. Nur Anzeige. */
+  unrestricted?: boolean
+  /** The name the catalogue route itself gives the model (`name`), kept only
+   *  where the app shows another one (`native_name`). A store build of the
+   *  phone app shows this one: the words of the web, no text of its own. */
+  catalogName?: string
 
   id: string            // Model ID as provider knows it (e.g. "gpt-4o", "claude-sonnet-4-20250514")
   name: string          // Display name
   provider: ProviderId
   providerName: string  // "OpenRouter", "Ollama", "Anthropic" etc.
+  /** GitHub #173: the additional OpenAI-compatible entry this row came from.
+   *  Absent for the original slot and every other provider. */
+  entryId?: string
   contextLength?: number
   supportsTools?: boolean
   supportsVision?: boolean
+  /** May the two Create tools of the chat go to this model? Stated by the LU
+   *  Cloud models route (`create_in_chat`). Absent on every other endpoint. */
+  createInChat?: boolean
+  /** The server's `limited_capacity`: the model has little room for all
+   *  customers together. The picker notes it. Absent = no. */
+  limitedCapacity?: boolean
   /** Think-button capability (LU Cloud /models `think` field): 'toggle' shows
    *  the switch, 'always' reasons regardless, 'never' hides it. Absent =
    *  fall back to the local name-heuristic. */
@@ -144,6 +186,27 @@ export interface ProviderModel {
   /** The rung the model itself defaults to (`reasoning_effort_default`). Used
    *  only where no wish was made; the user's own choice always wins. */
   effortDefault?: string
+  /** A LAN model whose server takes no rungs (issue 176): the sentence the
+   *  greyed effort control shows. See lib/local-effort.ts. */
+  effortNote?: string
+  /** The rungs come from the local server, not from a catalogue (issue 176).
+   *  They go on the wire only once the user picked one (localEffortChosen). */
+  effortLocal?: boolean
+  /** The context window the server itself stated in its listing, and nothing
+   *  else: no table, no guess from the name. `contextLength` above always
+   *  holds a number to budget with; this one is absent when nobody stated
+   *  one, so the model picker can leave the figure empty. */
+  declaredContext?: number
+  /** What the model draws per one million tokens, in credits, input and output
+   *  apart (LU Cloud /models `credit_rates`, from the meter's own price
+   *  source). Credits per token count only, never a money amount. Absent on a
+   *  server that does not send the field. */
+  creditRates?: CreditRates
+}
+
+export interface CreditRates {
+  inputPerMillion: number
+  outputPerMillion: number
 }
 
 // ── Chat Messages (unified format) ────────────────────────────
@@ -154,6 +217,10 @@ export interface ChatMessage {
   images?: { data: string; mimeType: string }[]  // base64 image attachments
   tool_calls?: ToolCall[]
   tool_call_id?: string  // Required for OpenAI tool results
+  /** The model's own reasoning on this assistant step, sent back as
+   *  `reasoning_content` where the provider asks for it (replayReasoning).
+   *  Set only by the agent loops for steps of the run that is going. */
+  reasoning?: string
 }
 
 export interface ToolCall {
@@ -175,6 +242,18 @@ export interface ChatOptions {
   // an extension field, the same way it already sends top_p.
   topK?: number
   maxTokens?: number
+  /** GH #175: the extra samplers a persona (or a chat) can set. Each provider
+   *  sends only the ones its backend reads, see sampler-fields.ts. */
+  minP?: number
+  repeatPenalty?: number
+  presencePenalty?: number
+  frequencyPenalty?: number
+  dryMultiplier?: number
+  /** GH #198: custom sampling parameters, key → parsed value. OpenAI
+   *  compatible providers put them at the top level of the body, Ollama in
+   *  `options`; a key LU sets from its own field is never taken from here
+   *  (lib/custom-params.ts). */
+  customParams?: Record<string, unknown>
   /**
    * True when `maxTokens` above is THIS caller's own fallback default, not a
    * value the user actually typed into a slider (bau/wfprogress.md Runde 3,
@@ -209,29 +288,72 @@ export interface ChatOptions {
    * a model default above it would quietly upgrade the bill.
    */
   effortDefault?: string
-  // Bug AA v2.5.0, Kj103x Discord 2026-05-27. Ollama defaults `num_ctx` to
-  // 2048 if you don't pass it in /api/chat options, which silently caps RAG
-  // and long-turn chats even though the loaded model supports way more. When
-  // set, we forward this as `options.num_ctx` to Ollama. Other providers
-  // ignore it (they have their own context handling). 0/undefined = let the
-  // provider use its default.
-  contextWindow?: number
+  /**
+   * Has the user picked a rung for a local model himself (settings
+   * `localEffortChosen`)? Until then a local server gets exactly the request
+   * it got before 3.0.7: top-level 'high' with Think on and nothing in the
+   * template. Absent counts as not picked, so a caller that does not pass it
+   * keeps the old request rather than a new rung.
+   */
+  localEffortChosen?: boolean
+  /**
+   * Think budget in tokens (D12), 0 or absent for auto. Read only by the
+   * backends that take a count (lib/think-budget.ts) and only while
+   * `thinking` is true; every other provider ignores it.
+   */
+  thinkingBudget?: number
+  /**
+   * Which window this call runs in on an Ollama model. Named only by a turn a
+   * person started (`chat` or `agent`); left out, the call is sent the window
+   * the model was last sent and can never make Ollama load it again. The
+   * number itself is never a caller's business: `ollamaNumCtx` in
+   * api/ollama.ts resolves it. Other providers ignore the field (their window
+   * is set when the model is loaded).
+   */
+  window?: WindowChoice
+  /**
+   * A JSON schema the answer must match, for a caller that parses the answer
+   * as one JSON object (the computer control executor). Sent as the server's
+   * own constrained output where one exists: `response_format` on an
+   * OpenAI-compatible server, `format` on Ollama. LU Cloud and Anthropic
+   * ignore it, and the caller's parser has to cope with free text anyway.
+   * Read by chatWithTools only.
+   */
+  jsonSchema?: Record<string, unknown>
+  /**
+   * Phone only (round 10, lib/continue-answer.ts): the last message is an
+   * answer that was cut, and the engine goes on inside it instead of
+   * starting a new one. Only the OpenAI-compatible provider sends it, and
+   * only the send path of the phone sets it, for the engine of the phone.
+   */
+  continueFinalMessage?: boolean
   signal?: AbortSignal
   // Tool definitions for a STREAMING tool turn. chatStream implementations
   // that support tools include these in the request and stream tool-call
   // deltas into the done-chunk's toolCalls; providers that cannot stream
   // tools ignore the field, and their callers keep using chatWithTools.
   // This is what lets Code/Agent mode stream on every transport instead of
-  // sitting silent until the whole call returns (David 2026-07-31).
+  // sitting silent until the whole call returns (2026-07-31).
   tools?: ToolDefinition[]
 }
 
 // ── Streaming Chunk (unified output) ──────────────────────────
 
+export interface ToolCallProgress {
+  name: string
+  argsChars: number
+}
+
 export interface ChatStreamChunk {
   content: string
   thinking?: string    // Model reasoning (Ollama thinking field, <think> tags)
   toolCalls?: ToolCall[]
+  // A tool call the model is still writing: its name and how much of its
+  // arguments has arrived. The finished calls still come only on the done
+  // chunk; this is what the run shows in the meantime instead of "Working"
+  // (a 4 kB file_write streams for ~11 s on Mistral Small, measured
+  // 01.10.2026).
+  toolProgress?: ToolCallProgress
   done: boolean
   // Why generation ended, on the final done:true chunk. 'stop' | 'length'
   // (token budget exhausted, e.g. the whole budget went into reasoning) |
@@ -246,8 +368,17 @@ export interface ChatStreamChunk {
   // makes client-side TTFT measurement meaningless for fast models.
   evalCount?: number      // tokens generated by the model
   promptEvalCount?: number // tokens in the prompt = real consumed context (system+tools+history+input)
+  /** Of promptEvalCount, how many the upstream served from its prompt cache
+   *  (usage.prompt_tokens_details.cached_tokens, or DeepSeek's
+   *  prompt_cache_hit_tokens). CA, 14.11.2026. */
+  cachedPromptCount?: number
   evalDurationMs?: number // generation time in ms (excludes prompt eval + load)
+  /** How LU Cloud billed this request (`x-lu-chat-billing`): 'flash' drew no
+   *  credits. Absent on every other backend and when the header was missing. */
+  billing?: ChatBilling
 }
+
+export type ChatBilling = 'flash' | 'credits'
 
 // ── Tool Definition (OpenAI format, converted per provider) ───
 
@@ -268,6 +399,9 @@ export interface ToolDefinition {
 
 export interface ProviderClient {
   readonly id: ProviderId
+  /** GitHub #173: the additional OpenAI-compatible entry this client serves.
+   *  Absent for the four fixed slots. */
+  readonly entryId?: string
 
   /** Stream a chat response. Yields unified ChatStreamChunks. */
   chatStream(
@@ -286,7 +420,7 @@ export interface ProviderClient {
     messages: ChatMessage[],
     tools: ToolDefinition[],
     options?: ChatOptions
-  ): Promise<{ content: string; toolCalls: ToolCall[]; promptEvalCount?: number; evalCount?: number; thinking?: string }>
+  ): Promise<{ content: string; toolCalls: ToolCall[]; promptEvalCount?: number; evalCount?: number; cachedPromptCount?: number; thinking?: string; billing?: ChatBilling }>
 
   /** List available models from this provider. */
   listModels(): Promise<ProviderModel[]>
@@ -326,7 +460,7 @@ export class ProviderError extends Error {
   // Explicit fields (not constructor parameter-properties): the build runs
   // under `erasableSyntaxOnly`, which forbids TS parameter-properties.
   readonly provider: ProviderId
-  /** 'auth' | 'rate_limit' | 'not_found' | 'network' | 'ollama_missing_blob' | 'ollama_stale_manifest' */
+  /** 'auth' | 'rate_limit' | 'not_found' | 'network' | 'outage' | 'ollama_missing_blob' | 'ollama_stale_manifest' */
   readonly code?: string
   readonly status?: number
   /**

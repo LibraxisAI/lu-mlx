@@ -1,21 +1,29 @@
 import { backendCall, fetchExternal } from "./backend"
+import { folderIsAGuess } from '../lib/model-folder-guess'
 import { readComfyFolderLists, filterPartialFiles, refreshComfyModels } from "./comfyui"
 import { COMPONENT_REGISTRY, type ComponentSpec, type ComponentRequirements } from './component-registry'
-import { clearNodeCache } from "./comfyui-nodes"
+import { clearNodeCache, getAllNodeInfo } from "./comfyui-nodes"
 import { restartComfyForNewNodes } from "./comfy-restart"
 import type { ProviderId } from "./providers/types"
 import { log } from "../lib/logger"
 import { useWorkflowStore } from "../stores/workflowStore"
+import { recordSourceFromDownload } from "../stores/modelSourceStore"
 import { waitForModelsVisible } from "../lib/bundle-install"
+import { bundleBytesToFetch } from "../lib/bundle-state"
 import type { DownloadProgress } from "../types/downloads"
 import { asNumber, asRecordArray, asString, isRecord, prop, propPath } from "../types/json-guards"
 import type { DiscoverModel, ModelBundle } from "./model-bundles"
 import { formatCount } from '../lib/formatters'
 import { BUILTIN_BACKEND_ID } from '../lib/onboarding-backend'
 import { customModelDirs } from './engine'
+import { extractGgufQuant, hfUrlToTreePath, parseHfUrl } from '../lib/hf-to-provider'
+import { IMAGE_PART } from './image-parts'
+import { kimiK3CatalogEntries } from './kimi-k3-catalog'
+import { imagePartFileName, isUpstreamImagePart, pickUpstreamImagePart } from '../lib/image-part'
+import { shardSetGap, type ShardGap } from '../lib/gguf-shards'
 import {
   CUSTOM_NODE_REGISTRY,
-  getImageBundles, getVideoBundles, getAudioBundles, getLipsyncBundles, getMotionBundles,
+  getImageBundles, getVideoBundles, getAudioBundles, getLipsyncBundles, getMotionBundles, getUpscaleBundles, getThreeDBundles,
 } from "./model-bundles"
 
 // Katalog + Formen liegen in model-bundles.ts (siehe dort). Re-Export, damit
@@ -24,7 +32,7 @@ export type { DiscoverModel, ModelBundle, CustomNodeDef } from './model-bundles'
 export {
   CUSTOM_NODE_REGISTRY,
   getImageBundles, getImageModelsDiscover, getVideoBundles,
-  getAudioBundles, getLipsyncBundles, getMotionBundles,
+  getAudioBundles, getLipsyncBundles, getMotionBundles, getUpscaleBundles,
 } from './model-bundles'
 
 // Welche Ordner der Katalog beschreibt und wer sie zurueckliest, steht als EINE
@@ -60,7 +68,7 @@ export function isCivitaiUrl(url: string): boolean {
 /**
  * The user's CivitAI API key, for a CivitAI URL and no other.
  *
- * goonerforporn (Discord #bug-reports, 2026-08-28): downloads from the CivitAI
+ * A user (Discord #bug-reports, 2026-08-28): downloads from the CivitAI
  * search died in 400s because they went out anonymous. The key was in the store
  * and read by the search, and by nothing on the download path.
  */
@@ -70,7 +78,14 @@ export function civitaiAuthToken(url: string): string | null {
   return key ? key : null
 }
 
-export async function startModelDownload(url: string, subfolder: string, filename: string, expectedBytes?: number, sha256?: string): Promise<{ status: string; id: string; error?: string }> {
+export { folderIsAGuess }
+
+export async function startModelDownload(
+  url: string, subfolder: string, filename: string, expectedBytes?: number, sha256?: string,
+  opts: { sniffFolder?: boolean } = {},
+): Promise<{ status: string; id: string; error?: string }> {
+  // D1: the page this file came from, for Details in Models.
+  recordSourceFromDownload(filename, url)
   return backendCall("download_model", {
     url,
     subfolder,
@@ -78,7 +93,63 @@ export async function startModelDownload(url: string, subfolder: string, filenam
     expectedBytes: expectedBytes ?? null,
     expectedSha256: sha256 ?? null,
     authToken: civitaiAuthToken(url),
+    ...(opts.sniffFolder ? { sniffFolder: true } : {}),
   })
+}
+
+/**
+ * A download the chat agent starts from a link the user sent (C60, 3.1.0).
+ * Rust checks the link again (`chat_download_allowed`): https on
+ * huggingface.co or civitai.com, a .safetensors or .gguf file, a model folder.
+ */
+export async function startChatLinkDownload(url: string, subfolder: string, filename: string): Promise<{ status: string; id: string; error?: string }> {
+  recordSourceFromDownload(filename, url)
+  return backendCall("download_model", {
+    url,
+    subfolder,
+    filename,
+    expectedBytes: null,
+    expectedSha256: null,
+    authToken: civitaiAuthToken(url),
+    chatOrigin: true,
+    // A27: the agent picks the folder from the link and the page, a guess.
+    ...(folderIsAGuess(subfolder) ? { sniffFolder: true } : {}),
+  })
+}
+
+/** What `comfy_model_info` reads about one ComfyUI model file (D1). */
+export interface ComfyFileFacts {
+  path: string
+  folder: string
+  bytes: number
+  /** Seconds since 1970, or null when the system did not say. */
+  modified: number | null
+  /** The file sits in the user's own Storage folder, not ComfyUI's. */
+  ownFolder: boolean
+  /** How many copies of that name the model folders hold. */
+  copies: number
+  /** A27: the main model folder the file's header names, when it sits in another one. */
+  belongsIn?: string
+  /** A27: the main model folder it sits in, set with `belongsIn`. */
+  foundIn?: string
+}
+
+/** Details for a ComfyUI file of the Installed list. Throws with the reason. */
+export async function comfyModelInfo(filename: string): Promise<ComfyFileFacts> {
+  return backendCall('comfy_model_info', { filename, extraDirs: customModelDirs() })
+}
+
+/** C41: show a ComfyUI model file in Finder or Explorer. Throws with the reason. */
+export async function revealComfyModel(filename: string): Promise<void> {
+  await backendCall('comfy_model_reveal', { filename, extraDirs: customModelDirs() })
+}
+
+/** C17: delete one ComfyUI model file, or move it to the Trash. */
+export async function deleteComfyModelFile(filename: string, opts: { trash?: boolean } = {}): Promise<{ bytes: number }> {
+  const res = await backendCall<{ bytes?: number }>('delete_comfy_model', {
+    filename, extraDirs: customModelDirs(), ...(opts.trash ? { trash: true } : {}),
+  })
+  return { bytes: res?.bytes ?? 0 }
 }
 
 export async function getDownloadProgress(): Promise<Record<string, DownloadProgress>> {
@@ -107,13 +178,29 @@ export async function cancelDownload(id: string): Promise<void> {
 }
 
 /**
+ * Remove the finished image part of a model whose download was cancelled.
+ *
+ * The Rust side takes nothing but a file this app named as an image part, and
+ * never the part of a model that is installed (download.rs
+ * `image_part_to_remove`). Best effort: a part that cannot be removed is a few
+ * hundred megabytes left on disk, not a reason to fail the cancel.
+ */
+export async function removeImagePart(destDir: string, filename: string): Promise<void> {
+  try {
+    await backendCall('remove_image_part', { destDir, filename })
+  } catch (err) {
+    log.warn('[discover] image part not removed', { filename, err })
+  }
+}
+
+/**
  * Drop a settled row (error / paused / complete) from the Rust progress map and
  * LEAVE THE PARTIAL FILE ALONE.
  *
  * Clearing the Rust side is not optional before a retry: `download_model`
  * short-circuits on a file that is already on disk without ever touching the
  * map, so the next poll would resurrect the error row the user just retried
- * (the_mr_pickles). That bookkeeping is all this does — it is not a decision
+ *. That bookkeeping is all this does — it is not a decision
  * about the user's bytes.
  */
 export async function clearDownloadEntry(id: string): Promise<void> {
@@ -154,7 +241,7 @@ export function isPermanentDownloadError(error?: string | null): boolean {
   return !!error && PERMANENT_HTTP.test(error)
 }
 
-export async function resumeDownload(id: string, url: string, subfolder: string, expectedBytes?: number, sha256?: string): Promise<void> {
+export async function resumeDownload(id: string, url: string, subfolder: string, expectedBytes?: number, sha256?: string, sniffFolder?: boolean): Promise<void> {
   await backendCall("resume_download", {
     id,
     url,
@@ -162,6 +249,8 @@ export async function resumeDownload(id: string, url: string, subfolder: string,
     expectedBytes: expectedBytes ?? null,
     expectedSha256: sha256 ?? null,
     authToken: civitaiAuthToken(url),
+    ...(sniffFolder ? { sniffFolder: true } : {}),
+    ...titleArg(id),
   })
 }
 
@@ -259,7 +348,53 @@ export async function checkDownloadSpace(
   }
 }
 
+// ─── A ComfyUI on another machine (GH #143) ───
+
+/** Where ComfyUI models land. `remote`: the ComfyUI LU talks to runs on
+ *  another machine, so the files go to `root` on this one, in ComfyUI's own
+ *  folder layout, for the user to copy over (download.rs remote_comfy). */
+export interface ComfyModelTarget {
+  remote: boolean
+  host?: string
+  root?: string
+}
+
+export async function comfyModelTarget(): Promise<ComfyModelTarget> {
+  try {
+    const t = await backendCall<ComfyModelTarget>('comfy_model_target')
+    return t && t.remote && t.host && t.root ? t : { remote: false }
+  } catch {
+    // An older backend, or the dev server: the files go where they always went.
+    return { remote: false }
+  }
+}
+
+/** What a bundle install onto a remote ComfyUI leaves for the user to do. */
+export interface RemoteBundleReport {
+  host: string
+  root: string
+  /** Node packs the bundle needs, to install on that machine. */
+  customNodes: string[]
+}
+
+export function remoteBundleNotice(bundleName: string, r: RemoteBundleReport): string {
+  const nodes = r.customNodes.length > 0
+    ? ` It also needs ${r.customNodes.length === 1 ? 'this node pack' : 'these node packs'} on that machine: ${r.customNodes.join(', ')}. Install ${r.customNodes.length === 1 ? 'it' : 'them'} there and restart ComfyUI.`
+    : ''
+  return `${bundleName}: your ComfyUI runs on ${r.host}, so LU saves the files here, in ${r.root}, in ComfyUI's own folder layout. Once they are done, copy the folders in there into the models folder of ComfyUI on that machine (or share the folder with it), then refresh the models.${nodes}`
+}
+
 // ─── Custom Node Installation ───
+
+/** Is the file on disk the catalog's file? `check_model_sizes` only says "plausibly
+ *  there" (50 % of the catalog estimate). Where the catalog knows the byte count
+ *  exactly (`sizeBytes`), a file of the same name and another size is a repack from
+ *  another mirror, not this model, so it must not count as installed: Get is
+ *  offered again and the downloader's own size check fetches the right file. */
+export function onDiskMatchesCatalog(file: { sizeBytes?: number }, check: { complete: boolean; actualBytes?: number } | undefined): boolean {
+  if (!check?.complete) return false
+  return file.sizeBytes == null || check.actualBytes === file.sizeBytes
+}
 
 /** Check if ALL files in a bundle are completely downloaded (size validated) */
 export async function checkBundleInstalled(bundle: ModelBundle): Promise<boolean> {
@@ -274,7 +409,8 @@ export async function checkBundleInstalled(bundle: ModelBundle): Promise<boolean
     if (files.length === 0) return false
     const results: Array<{ filename: string; exists: boolean; actualBytes: number; complete: boolean }> =
       await backendCall('check_model_sizes', { files })
-    return results.every(r => r.complete)
+    const byName = new Map(results.map(r => [r.filename, r]))
+    return bundle.files.filter(f => f.subfolder && f.filename).every(f => onDiskMatchesCatalog(f, byName.get(f.filename!)))
   } catch {
     return false
   }
@@ -282,7 +418,17 @@ export async function checkBundleInstalled(bundle: ModelBundle): Promise<boolean
 
 /** Check multiple bundles at once, returns map of bundle name → installed status */
 export async function checkBundlesInstalled(bundles: ModelBundle[]): Promise<Record<string, boolean>> {
+  return (await checkBundlesOnDisk(bundles)).installed
+}
+
+/** What the disk says about a list of bundles: which bundles are installed, and
+ *  which of their files are there already. The second half is what a card needs
+ *  to announce only what it will really fetch: bundles share files, so "Get"
+ *  on a three file bundle is often one file (the box, 03.10.2026). A file
+ *  counts by the same rule `installBundleComplete` skips it by. */
+export async function checkBundlesOnDisk(bundles: ModelBundle[]): Promise<{ installed: Record<string, boolean>; files: Set<string> }> {
   const result: Record<string, boolean> = {}
+  const files = new Set<string>()
   // Collect ALL files from ALL bundles into a single batch request
   const allFiles: Array<{ subfolder: string; filename: string; expectedBytes: number; bundleName: string }> = []
   for (const bundle of bundles) {
@@ -296,7 +442,7 @@ export async function checkBundlesInstalled(bundles: ModelBundle[]): Promise<Rec
       })
     }
   }
-  if (allFiles.length === 0) return result
+  if (allFiles.length === 0) return { installed: result, files }
 
   try {
     const checkFiles = allFiles.map(f => ({ subfolder: f.subfolder, filename: f.filename, expectedBytes: f.expectedBytes }))
@@ -304,10 +450,13 @@ export async function checkBundlesInstalled(bundles: ModelBundle[]): Promise<Rec
       await backendCall('check_model_sizes', { files: checkFiles })
 
     // Map results back to bundles
-    const fileStatus = new Map(results.map(r => [r.filename, r.complete]))
+    const fileStatus = new Map(results.map(r => [r.filename, r]))
     for (const bundle of bundles) {
       const bundleFiles = bundle.files.filter(f => f.filename)
-      result[bundle.name] = bundleFiles.length > 0 && bundleFiles.every(f => fileStatus.get(f.filename!) === true)
+      for (const f of bundleFiles) {
+        if (onDiskMatchesCatalog(f, fileStatus.get(f.filename!))) files.add(f.filename!)
+      }
+      result[bundle.name] = bundleFiles.length > 0 && bundleFiles.every(f => onDiskMatchesCatalog(f, fileStatus.get(f.filename!)))
     }
   } catch {
     // If check fails (e.g. no ComfyUI), all bundles are not installed
@@ -317,7 +466,7 @@ export async function checkBundlesInstalled(bundles: ModelBundle[]): Promise<Rec
   // ComfyUI's own model lists — fetched once, used twice: to CONFIRM the
   // size-check hits (a file the RUNNING ComfyUI cannot see must not count as
   // installed) and as the fuzzy variant fallback further down.
-  // Issue #51 (adhney): ComfyUI lists partially-downloaded files too, so the
+  // Issue #51: ComfyUI lists partially-downloaded files too, so the
   // fuzzy fallback would mark an incomplete download as INSTALLED. Drop any
   // file check_model_sizes confirms is partial before matching.
   let comfyLists: Record<string, string[]> | null = null
@@ -339,7 +488,7 @@ export async function checkBundlesInstalled(bundles: ModelBundle[]): Promise<Rec
     comfyLists = null // ComfyUI not reachable · size-check verdicts stand
   }
 
-  // pnwpdr4519 (Discord 2026-07-27): the size check looks at the directory LU
+  // A user (Discord 2026-07-27): the size check looks at the directory LU
   // resolves, but the RUNNING ComfyUI may scan a different install (second
   // copy, moved install). "Installed" from the disk check alone then locks the
   // user out: the Create picker (fed by ComfyUI's enums) shows nothing AND
@@ -347,7 +496,7 @@ export async function checkBundlesInstalled(bundles: ModelBundle[]): Promise<Rec
   // as installed if ComfyUI can actually see the files it needs.
   //
   // EVERY enumerable file, not merely one of them. GH #113 came back on 2.6.6
-  // (Blahx with a screenshot, lapbo: "the model is not visible, although it is
+  // (Blahx with a screenshot, a user: "the model is not visible, although it is
   // downloaded") because "at least one" is nearly free in this catalogue:
   // seven of the thirteen video bundles ship the same umt5_xxl_fp8_e4m3fn_scaled
   // text encoder and six the same wan_2.1_vae. One neighbour that installed
@@ -395,7 +544,7 @@ export async function checkBundlesInstalled(bundles: ModelBundle[]): Promise<Rec
     }
   }
 
-  return result
+  return { installed: result, files }
 }
 
 /** Base identity of a model file: basename only (ComfyUI enums can carry
@@ -441,7 +590,7 @@ export async function judgeableFolders(): Promise<Set<string>> {
  *  bundle installed from Create (CreateContext) and a download finished in the
  *  Model Manager (downloadStore). C8 gave the first one a wait and left the
  *  second with a single fetch, so the same slow directory scan that froze
- *  Voxyl AI's card on 2026-08-13 simply left a model out of the Installed tab
+ * A user AI's card on 2026-08-13 simply left a model out of the Installed tab
  *  instead. Two probes would have been two chances to drift.
  *
  *  An engine it cannot reach reports everything as missing: an answer we could
@@ -587,7 +736,9 @@ export async function installCustomNodes(nodeKeys: string[], opts: CustomNodeIns
       }
       try {
         opts.onProgress?.(`Installing ${entry.name}…`)
-        const result = await backendCall('install_custom_node', { repoUrl: entry.repo, nodeName: entry.name })
+        const result = await backendCall('install_custom_node', {
+          repoUrl: entry.repo, nodeName: entry.name, ...(entry.commit ? { commit: entry.commit } : {}),
+        })
         assertNodeInstallOk(result, entry.name)
         nodeInstallFailure.delete(entry.name)
         log.info(`[discover] Installed custom node: ${entry.name}`)
@@ -655,7 +806,7 @@ export async function whenVisibilityConfirmed(): Promise<void> {
  * transition to complete, and announceUntilVisible is never called. Those 4.5
  * seconds were the only window such a file ever got, and the video bundles
  * share exactly those files, so the case is the common one and not the rare
- * one. Voxyl AI and Aldrich Ironhart (Discord 2026-08-13) measured scans on the
+ * one. Two users (Discord 2026-08-13) measured scans on the
  * big files that run far longer than that.
  *
  * So the click says what it knows for certain, that the file is on disk, and
@@ -691,35 +842,55 @@ async function runVisibilityConfirmation(filename: string): Promise<void> {
   }
 }
 
-/** One gibibyte, the unit the catalog's `sizeGB` and every size message use. */
-const GIB = 1_073_741_824
-
 /**
- * How many bytes this bundle still has to fetch, and where they land.
+ * ONE space check for the whole bundle, before the first byte moves.
  *
- * Pure, so the sum can be tested without a drive. Files already on disk are
- * left out — re-checking space for a file that is not going to be fetched would
- * refuse installs that fit perfectly well. `totalSizeGB` is the fallback when
- * the per-file sizes are missing: a rough number is a far better plan than
- * planning for nothing, and it is only ever used to refuse, never to promise.
+ * Every file starts its own transfer and every transfer checked the free
+ * space on its own, so a four file bundle passed the same free bytes four
+ * times over and then filled the drive between them. The sum is the only
+ * honest question, and it has to be asked before anything starts: refusing
+ * file three after files one and two have written 20 GB helps nobody. Throws
+ * with the numbers (how much is short, the download, the free space) when the
+ * missing files plus the reserve do not fit.
  */
-export function bundleBytesToFetch(
-  bundle: ModelBundle,
-  installed: Set<string>,
-): { bytes: number; subfolder?: string; files: number } {
-  const pending = bundle.files.filter(
-    f => f.downloadUrl && f.filename && f.subfolder && !installed.has(f.filename),
-  )
-  if (pending.length === 0) return { bytes: 0, files: 0 }
-  const known = pending.reduce((sum, f) => sum + (f.sizeGB ? f.sizeGB * GIB : 0), 0)
-  // Not one file states a size: fall back to the bundle total, minus nothing,
-  // because we cannot tell which part of it is already there.
-  const bytes = known > 0 ? known : (bundle.totalSizeGB || 0) * GIB
-  return { bytes: Math.round(bytes), subfolder: pending[0].subfolder, files: pending.length }
+export async function assertBundleFits(bundle: ModelBundle, installed: ReadonlySet<string>): Promise<void> {
+  const pending = bundleBytesToFetch(bundle, installed)
+  if (pending.bytes <= 0 || !pending.subfolder) return
+  const verdict = await checkDownloadSpace({ subfolder: pending.subfolder }, pending.bytes)
+  if (verdict && !verdict.fits) {
+    throw new Error(verdict.message || `${bundle.name} does not fit on this drive.`)
+  }
 }
 
-export async function installBundleComplete(bundle: ModelBundle): Promise<void> {
+/**
+ * The node packs of `keys` the running ComfyUI has not loaded.
+ *
+ * The box, 03.10.2026: a click on Get for a GGUF bundle pulled ComfyUI-GGUF
+ * again and restarted ComfyUI, with the pack loaded all along and nothing on
+ * the surface saying so. A pack whose nodes are registered needs neither. One
+ * that is on disk and failed to import is not loaded, so it still gets the
+ * install that heals it. With ComfyUI not answering nobody can tell, and
+ * every pack counts as missing, as before.
+ */
+export async function nodePacksNotLoaded(keys: string[]): Promise<string[]> {
+  let registered: Set<string>
+  try {
+    registered = new Set(Object.keys(await getAllNodeInfo()))
+  } catch {
+    return keys
+  }
+  return keys.filter((key) => {
+    const entry = CUSTOM_NODE_REGISTRY[key]
+    return !entry || !entry.requiredNodes.every((node) => registered.has(node))
+  })
+}
+
+export async function installBundleComplete(bundle: ModelBundle): Promise<{ remote?: RemoteBundleReport }> {
   const errors: string[] = []
+  // GH #143: a ComfyUI on another machine. The files land here for the user
+  // to copy over, so there is no engine to wait for and no node pack LU could
+  // install; the report says what is left instead.
+  const target = await comfyModelTarget()
 
   // Pre-check: which files already exist on disk (skip re-downloading them)
   const installedFiles = new Set<string>()
@@ -728,10 +899,14 @@ export async function installBundleComplete(bundle: ModelBundle): Promise<void> 
       .filter(f => f.subfolder && f.filename)
       .map(f => ({ subfolder: f.subfolder!, filename: f.filename!, expectedBytes: f.sizeGB ? Math.round(f.sizeGB * 1_073_741_824) : 0 }))
     if (checkFiles.length > 0) {
-      const results: Array<{ filename: string; exists: boolean; complete: boolean }> =
+      const results: Array<{ filename: string; exists: boolean; actualBytes?: number; complete: boolean }> =
         await backendCall('check_model_sizes', { files: checkFiles })
+      const byName = new Map(bundle.files.map(f => [f.filename, f]))
       for (const r of results) {
-        if (r.complete) installedFiles.add(r.filename)
+        // A same-named file of another size is not ours: leave it out of the set
+        // so the download starts, and download_model refetches on the size
+        // mismatch (judge_existing).
+        if (onDiskMatchesCatalog(byName.get(r.filename) ?? {}, r)) installedFiles.add(r.filename)
       }
     }
   } catch { /* can't check · download everything */ }
@@ -739,7 +914,7 @@ export async function installBundleComplete(bundle: ModelBundle): Promise<void> 
   // Lazily fetched ComfyUI visibility set: "already installed" is only true
   // when the RUNNING ComfyUI lists the file. A file that exists on disk but is
   // invisible to ComfyUI means LU and ComfyUI look at different model folders
-  // (pnwpdr4519 Discord 2026-07-27) — silently skipping it as installed left
+  // (Discord 2026-07-27) — silently skipping it as installed left
   // the user with no picker entry AND no way to re-download.
   let visibleBases: Set<string> | null | undefined
   const readVisibleBases = async (): Promise<Set<string> | null> => {
@@ -781,25 +956,16 @@ export async function installBundleComplete(bundle: ModelBundle): Promise<void> 
   // it ran "lazily", which was not true, the request always goes out).
   const judgeable = judgeableFolders()
 
-  // ONE space check for the whole bundle, before the first byte moves.
-  //
-  // Every file starts its own transfer and every transfer checked the free
-  // space on its own, so a four file bundle passed the same free bytes four
-  // times over and then filled the drive between them. The sum is the only
-  // honest question, and it has to be asked before anything starts: refusing
-  // file three after files one and two have written 20 GB helps nobody.
-  const pendingBytes = bundleBytesToFetch(bundle, installedFiles)
-  if (pendingBytes.bytes > 0 && pendingBytes.subfolder) {
-    const verdict = await checkDownloadSpace({ subfolder: pendingBytes.subfolder }, pendingBytes.bytes)
-    if (verdict && !verdict.fits) {
-      throw new Error(verdict.message || `${bundle.name} does not fit on this drive.`)
-    }
-  }
+  await assertBundleFits(bundle, installedFiles)
 
   // Step 1: Start downloads only for files NOT already installed
   for (const file of bundle.files) {
     if (!file.downloadUrl || !file.filename || !file.subfolder) continue
     if (installedFiles.has(file.filename)) {
+      if (target.remote) {
+        window.dispatchEvent(new CustomEvent('comfyui-download-exists', { detail: { filename: file.filename } }))
+        continue
+      }
       const visible = (await judgeable).has(file.subfolder) ? await comfyCanSee(file.filename) : null
       // The file is on disk at its full size. That much is certain right now,
       // so it is what the card is told, and an engine that has not caught up
@@ -831,8 +997,11 @@ export async function installBundleComplete(bundle: ModelBundle): Promise<void> 
   // builder went on recommending the pack this very call had just installed
   // (T-67), and its restart was a hand-rolled sleep that could not tell a
   // ComfyUI LU owns from one it does not.
-  if (bundle.customNodes && bundle.customNodes.length > 0) {
-    void installCustomNodes([...bundle.customNodes], { keepGoing: true, restart: true })
+  if (bundle.customNodes && bundle.customNodes.length > 0 && !target.remote) {
+    // Only the packs ComfyUI has not loaded: installing one that is there
+    // restarts ComfyUI for nothing (nodePacksNotLoaded).
+    void nodePacksNotLoaded([...bundle.customNodes])
+      .then((missing) => (missing.length > 0 ? installCustomNodes(missing, { keepGoing: true, restart: true }) : undefined))
       .catch((err) => log.warn('[discover] Custom node install/restart failed', { err }))
   }
 
@@ -854,6 +1023,16 @@ export async function installBundleComplete(bundle: ModelBundle): Promise<void> 
   if (errors.length > 0) {
     throw new Error(`Bundle install had ${errors.length} issue(s): ${errors.join('; ')}`)
   }
+  if (target.remote && target.host && target.root) {
+    return {
+      remote: {
+        host: target.host,
+        root: target.root,
+        customNodes: (bundle.customNodes ?? []).map((k) => CUSTOM_NODE_REGISTRY[k]?.name ?? k),
+      },
+    }
+  }
+  return {}
 }
 
 // ─── Component Registry: What each model type needs to work ───
@@ -872,30 +1051,18 @@ export { COMPONENT_REGISTRY }
 
 const HF = (repo: string, file: string) => `https://huggingface.co/${repo}/resolve/main/${file}`
 
-/**
- * On-disk name of the vision projector that belongs to `modelFilename`:
- * `<model stem>.mmproj.gguf`, written next to the model.
- *
- * Derived, never hand-written in the catalog, because the built-in engine has
- * to find the projector from the model path alone (src-tauri engine.rs mirrors
- * this exact rule). The upstream repos disagree on naming (`mmproj-F16.gguf`,
- * `mmproj-model-bf16.gguf`, `mmproj-Qwen3.8-27B-Uncensored-f16.gguf`), and the
- * built-in models dir is FLAT, so keeping the upstream name would leave two
- * models fighting over one projector file. Tying the name to the model also
- * keeps the pairing right when a user downloads several quants of one model.
- *
- * The third example used to read `Qwen3.8-27B-Uncensored-vision-f16.gguf`.
- * That file never existed: the address built from it answered 404, and all six
- * Qwen 3.8 27B entries pointed at it, so every one of them would have fetched
- * 11-29 GB of model and then failed on the projector. Nothing noticed for as
- * long as nobody asked the host — which is the whole of T-70. Corrected
- * against the repo's own file list on 2026-09-01, first run of the gate in
- * `__tests__/hf-catalog-addresses.live.test.ts`.
- */
-export function mmprojFileName(modelFilename: string): string {
-  const stem = modelFilename.replace(/\.gguf$/i, '')
-  return `${stem}.mmproj.gguf`
-}
+// The name an image part gets on disk is one rule for the whole app and lives
+// in lib/image-part.ts, next to the Rust side's `mmproj_sibling_path`. Kept
+// under this name here because the catalog and its tests speak of mmproj.
+//
+// A note that used to stand at this place and must not get lost: the example
+// `Qwen3.8-27B-Uncensored-vision-f16.gguf` once named a file that never
+// existed. Its address answered 404, and all six Qwen 3.8 27B entries pointed
+// at it, so every one of them would have fetched 11 to 29 GB of model and then
+// failed on the part. Corrected against the repository's own file list on
+// 2026-09-01, first run of the gate in
+// `__tests__/hf-catalog-addresses.live.test.ts`.
+export { imagePartFileName as mmprojFileName, isImagePartFile } from '../lib/image-part'
 
 /** One file a catalog entry writes into the model folder. */
 export interface PlannedDownload {
@@ -906,30 +1073,64 @@ export interface PlannedDownload {
   sha256?: string
 }
 
+/** The image part of a model as the download needs it. */
+export interface ImagePartSource {
+  url: string
+  sizeBytes?: number
+  sha256?: string
+}
+
+/** The image part a catalog entry names, or null for a text model. */
+export function imagePartOf(model: Pick<DiscoverModel, 'mmprojUrl' | 'mmprojBytes' | 'mmprojSizeGB' | 'mmprojSha256'>): ImagePartSource | null {
+  if (!model.mmprojUrl) return null
+  return {
+    url: model.mmprojUrl,
+    sizeBytes: model.mmprojBytes ?? (model.mmprojSizeGB ? Math.round(model.mmprojSizeGB * 1_073_741_824) : undefined),
+    sha256: model.mmprojSha256,
+  }
+}
+
 /**
- * Everything a catalog entry has to put on disk: the model, and its vision
- * projector when it has one. `url` / `filename` / `bytes` are the RESOLVED
- * model file (the HF tree corrects the catalog's guess), the projector rides
- * along under the derived name.
+ * Everything a model has to put on disk: the model file, and its image part
+ * when it has one and the user did not leave it out. `url` / `filename` /
+ * `bytes` are the RESOLVED model file (the HF tree corrects the catalog's
+ * guess), the part rides along under the derived name with its own byte count
+ * and digest.
+ *
+ * `part` is the catalog's part, or the one found in the repository's file list
+ * for a model the catalog does not know. `withImagePart: false` is the user's
+ * choice in the download dialog.
  *
  * Pure on purpose: the download UI only loops over the result, so the "does
  * this model need a second file, and what is it called" decision is unit
  * testable without rendering the Models tab.
  */
-export function planModelDownload(model: DiscoverModel, url: string, filename: string, bytes?: number, sha256?: string): PlannedDownload[] {
+export function planModelDownload(
+  model: DiscoverModel,
+  url: string,
+  filename: string,
+  bytes?: number,
+  sha256?: string,
+  opts: { part?: ImagePartSource | null; withImagePart?: boolean } = {},
+): PlannedDownload[] {
   // The resolved digest wins over the catalog's: `url` may have been corrected
   // by the HF tree, and a digest that belongs to a different file is worse than
   // none at all.
   const plan: PlannedDownload[] = [{ url, filename, expectedBytes: bytes, sha256: sha256 ?? (url === model.downloadUrl ? model.sha256 : undefined) }]
-  if (model.mmprojUrl) {
-    plan.push({
-      url: model.mmprojUrl,
-      filename: mmprojFileName(filename),
-      expectedBytes: model.mmprojSizeGB ? Math.round(model.mmprojSizeGB * 1_073_741_824) : undefined,
-    })
+  const part = opts.part === undefined ? imagePartOf(model) : opts.part
+  if (part && opts.withImagePart !== false) {
+    plan.push({ url: part.url, filename: imagePartFileName(filename), expectedBytes: part.sizeBytes, sha256: part.sha256 })
   }
   return plan
 }
+
+/**
+ * Why an entry of a family with image input carries no image part: its
+ * repository ships none, and it is a finetune or a distill, so nothing proves
+ * that the part of its base model still fits its weights. Such a model is
+ * offered as what it is, a text model.
+ */
+const NO_PART_UPSTREAM = 'The repository ships no image part, and none of another repository is proven to fit.'
 
 /** Sort models by release date, newest first */
 function sortByRelease(models: DiscoverModel[]): DiscoverModel[] {
@@ -948,31 +1149,17 @@ export function getUncensoredTextModels(): DiscoverModel[] {
     // The DevQuasar HF-GGUF repack dropped the tool template → Ollama returned
     // "does not support tools" for every tool call (verified live 2026-06-06).
     { name: 'Qwen3 4B Abliterated', description: 'huihui Qwen3 4B abliterated · unfiltered + native Hermes tool calling in under 4GB (Ollama). Run thinking-OFF for reliable tool calls. Apache-2.0 base.', pulls: '20K+', tags: ['4B', 'Q4_K_M', '2.4 GB', 'Tools', 'Unfiltered'], updated: 'Hot', agent: true, lightweight: true, released: '2025-05', ollamaModel: 'huihui_ai/qwen3-abliterated:4b', sizeGB: 2.4 },
-    // ── HOT: Hermes 3 ──
-    // Bug Z/b v2.5.0 · leonsk29 GH #48. Pre-v2.5.0 these pointed at
-    // `bartowski/Hermes-3-Llama-*-GGUF`. leon's 2026-05-26 CLI repro
-    // `ollama pull hf.co/bartowski/Hermes-3-Llama-3.1-8B-GGUF:Q4_K_M`
-    // returned HTTP 400 "Repository is not GGUF or is not compatible with
-    // llama.cpp" on current Ollama. Switched to `mradermacher/...-GGUF`
-    // mirrors which produce llama.cpp-compatible quants (verified all
-    // three repos host Q4_K_M files of the expected size). Note the
-    // filename convention: mradermacher uses `.` between model name and
-    // quant (e.g. `Hermes-3-Llama-3.1-8B.Q4_K_M.gguf`), bartowski uses `-`.
-    { name: 'Hermes 3 Llama 3.2 3B', description: 'NousResearch Hermes 3 · unfiltered + native tool calling. Runs on 8 GB RAM, CPU-only.', pulls: '500K+', tags: ['3B', 'Q4_K_M', '2 GB'], updated: 'Hot', agent: true, lightweight: true, released: '2024-08', downloadUrl: HF('mradermacher/Hermes-3-Llama-3.2-3B-GGUF', 'Hermes-3-Llama-3.2-3B.Q4_K_M.gguf'), filename: 'Hermes-3-Llama-3.2-3B.Q4_K_M.gguf', sizeGB: 2 },
-    { name: 'Hermes 3 Llama 3.1 8B', description: 'NousResearch Hermes 3 · unfiltered + native tool calling. THE agent model.', pulls: '500K+', tags: ['8B', 'Q4_K_M', '5 GB'], updated: 'Hot', agent: true, released: '2024-08', downloadUrl: HF('mradermacher/Hermes-3-Llama-3.1-8B-GGUF', 'Hermes-3-Llama-3.1-8B.Q4_K_M.gguf'), filename: 'Hermes-3-Llama-3.1-8B.Q4_K_M.gguf', sizeGB: 5 },
-    { name: 'Hermes 3 Llama 3.1 70B', description: 'NousResearch Hermes 3 70B · maximum intelligence, unfiltered.', pulls: '500K+', tags: ['70B', 'Q4_K_M', '42 GB'], updated: 'Hot', agent: true, released: '2024-08', downloadUrl: HF('mradermacher/Hermes-3-Llama-3.1-70B-GGUF', 'Hermes-3-Llama-3.1-70B.Q4_K_M.gguf'), filename: 'Hermes-3-Llama-3.1-70B.Q4_K_M.gguf', sizeGB: 42 },
-    // ── HOT: Dolphin 3 ──
-    { name: 'Dolphin 3 Llama 3.1 8B', description: 'Dolphin 3 · unfiltered from training. Coding, math, general purpose.', pulls: '3.7M', tags: ['8B', 'Q4_K_M', '5 GB'], updated: 'Hot', released: '2024-12', downloadUrl: HF('bartowski/dolphin-2.9.4-llama3.1-8b-GGUF', 'dolphin-2.9.4-llama3.1-8b-Q4_K_M.gguf'), filename: 'dolphin-2.9.4-llama3.1-8b-Q4_K_M.gguf', sizeGB: 5 },
     // ── HOT: Qwen 3.5 Abliterated ──
-    { name: 'Qwen 3.5 9B Abliterated', description: 'Qwen 3.5 abliterated · newest, strongest reasoning + coding.', pulls: '10K+', tags: ['9B', 'Q4_K_M', '6 GB'], updated: 'Hot', agent: true, released: '2026-03', downloadUrl: HF('mradermacher/Qwen3.5-9B-abliterated-GGUF', 'Qwen3.5-9B-abliterated.Q4_K_M.gguf'), filename: 'Qwen3.5-9B-abliterated.Q4_K_M.gguf', sizeGB: 5 },
+    { name: 'Qwen 3.5 9B Abliterated', description: 'Qwen 3.5 abliterated · newest, strongest reasoning + coding.', pulls: '10K+', tags: ['9B', 'Vision', 'Q4_K_M', '6 GB'], updated: 'Hot', agent: true, released: '2026-03', downloadUrl: HF('mradermacher/Qwen3.5-9B-abliterated-GGUF', 'Qwen3.5-9B-abliterated.Q4_K_M.gguf'), filename: 'Qwen3.5-9B-abliterated.Q4_K_M.gguf', sizeGB: 5, ...IMAGE_PART['unsloth/Qwen3.5-9B-GGUF/mmproj-F16.gguf'] },
     // ── HOT: GPT-OSS Abliterated ──
     { name: 'GPT-OSS 20B Abliterated', description: 'OpenAI GPT-OSS · abliterated open-source GPT model.', pulls: '15K+', tags: ['20B', 'Q4_K_M', '13 GB'], updated: 'Hot', agent: true, released: '2026-03', downloadUrl: HF('bartowski/huihui-ai_Huihui-gpt-oss-20b-BF16-abliterated-GGUF', 'huihui-ai_Huihui-gpt-oss-20b-BF16-abliterated-Q4_K_M.gguf'), filename: 'huihui-ai_Huihui-gpt-oss-20b-BF16-abliterated-Q4_K_M.gguf', sizeGB: 13 },
     // ── Qwen 3.8 27B UNCENSORED (August 2026) ──
     // Two independent uncensors of the same dense 27B base. Both are native
     // vision-language models, so every entry carries the repo's own mmproj and
     // LU downloads it with the model (see `mmprojFileName`). The MTP head that
-    // ships inside these GGUFs loads fine on the pinned llama.cpp b9949, which
+    // ships inside these GGUFs loads fine on llama.cpp b9949, which
     // implements the qwen35 MTP block, so we point at the plain files.
+    // (E1, 3.0.9: the pin is b11960 now; these two were not loaded there.)
     //
     // The uncensored build is OrcaRouter's abliteration. Its own GGUF repo
     // (orcarouter/Qwen3.8-27B-Uncensored-GGUF) is gated: every file answers
@@ -983,50 +1170,33 @@ export function getUncensoredTextModels(): DiscoverModel[] {
     // the entries used to point at JonathanColetti's requant. One HF row
     // serves both the built-in engine and LM Studio (the downloader writes
     // into whichever folder is active); Ollama gets the author's own tag.
-    { name: 'Qwen 3.8 27B Uncensored', group: 'Qwen 3.8 27B Uncensored', description: 'OrcaRouter Qwen 3.8 27B uncensored · the viral abliterated build, from the author\'s own repo. Vision + thinking + tools, 262K context. Recommended quant. The 0.9 GB vision projector comes with it.', pulls: '35K+', tags: ['27B', 'Vision', 'Q4_K_M', '18 GB'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF', 'orcarouter_Qwen3.8-27B-Uncensored-Q4_K_M.gguf'), filename: 'orcarouter_Qwen3.8-27B-Uncensored-Q4_K_M.gguf', sizeGB: 17.8, mmprojUrl: HF('bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF', 'mmproj-orcarouter_Qwen3.8-27B-Uncensored-f16.gguf'), mmprojSizeGB: 0.93 },
-    { name: 'Qwen 3.8 27B Uncensored IQ2_M', group: 'Qwen 3.8 27B Uncensored', description: 'OrcaRouter Qwen 3.8 27B uncensored · smallest quant, fits a 12 GB card. Real quality tradeoff, but it runs.', pulls: '35K+', tags: ['27B', 'Vision', 'IQ2_M', '11 GB'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF', 'orcarouter_Qwen3.8-27B-Uncensored-IQ2_M.gguf'), filename: 'orcarouter_Qwen3.8-27B-Uncensored-IQ2_M.gguf', sizeGB: 10.9, mmprojUrl: HF('bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF', 'mmproj-orcarouter_Qwen3.8-27B-Uncensored-f16.gguf'), mmprojSizeGB: 0.93 },
-    { name: 'Qwen 3.8 27B Uncensored IQ4_XS', group: 'Qwen 3.8 27B Uncensored', description: 'OrcaRouter Qwen 3.8 27B uncensored · IQ4_XS, the cheapest 4 bit. Close to Q4_K_M on 16 GB cards.', pulls: '35K+', tags: ['27B', 'Vision', 'IQ4_XS', '16 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF', 'orcarouter_Qwen3.8-27B-Uncensored-IQ4_XS.gguf'), filename: 'orcarouter_Qwen3.8-27B-Uncensored-IQ4_XS.gguf', sizeGB: 15.6, mmprojUrl: HF('bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF', 'mmproj-orcarouter_Qwen3.8-27B-Uncensored-f16.gguf'), mmprojSizeGB: 0.93 },
-    { name: 'Qwen 3.8 27B Uncensored Q5_K_M', group: 'Qwen 3.8 27B Uncensored', description: 'OrcaRouter Qwen 3.8 27B uncensored · Q5, higher quality. For 24 GB cards.', pulls: '35K+', tags: ['27B', 'Vision', 'Q5_K_M', '21 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF', 'orcarouter_Qwen3.8-27B-Uncensored-Q5_K_M.gguf'), filename: 'orcarouter_Qwen3.8-27B-Uncensored-Q5_K_M.gguf', sizeGB: 20.8, mmprojUrl: HF('bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF', 'mmproj-orcarouter_Qwen3.8-27B-Uncensored-f16.gguf'), mmprojSizeGB: 0.93 },
-    { name: 'Qwen 3.8 27B Uncensored Q6_K', group: 'Qwen 3.8 27B Uncensored', description: 'OrcaRouter Qwen 3.8 27B uncensored · Q6, near-lossless. High-VRAM setups.', pulls: '35K+', tags: ['27B', 'Vision', 'Q6_K', '23 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF', 'orcarouter_Qwen3.8-27B-Uncensored-Q6_K.gguf'), filename: 'orcarouter_Qwen3.8-27B-Uncensored-Q6_K.gguf', sizeGB: 23.5, mmprojUrl: HF('bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF', 'mmproj-orcarouter_Qwen3.8-27B-Uncensored-f16.gguf'), mmprojSizeGB: 0.93 },
-    { name: 'Qwen 3.8 27B Uncensored Q8_0', group: 'Qwen 3.8 27B Uncensored', description: 'OrcaRouter Qwen 3.8 27B uncensored · Q8, full quality. 32 GB+ or CPU with lots of RAM.', pulls: '35K+', tags: ['27B', 'Vision', 'Q8_0', '29 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF', 'orcarouter_Qwen3.8-27B-Uncensored-Q8_0.gguf'), filename: 'orcarouter_Qwen3.8-27B-Uncensored-Q8_0.gguf', sizeGB: 29.1, mmprojUrl: HF('bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF', 'mmproj-orcarouter_Qwen3.8-27B-Uncensored-f16.gguf'), mmprojSizeGB: 0.93 },
-    { name: 'Qwen 3.8 27B Abliterated', group: 'Qwen 3.8 27B Abliterated', description: 'huihui Qwen 3.8 27B abliterated · clean uncensor of the newest Qwen dense model. Vision + thinking. Note the quant is called Q4_K, not Q4_K_M.', pulls: '635K+', tags: ['27B', 'Vision', 'Q4_K', '17 GB'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'Huihui-Qwen3.8-27B-abliterated-Q4_K.gguf'), filename: 'Huihui-Qwen3.8-27B-abliterated-Q4_K.gguf', sizeGB: 16.8, mmprojUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'mmproj-model-bf16.gguf'), mmprojSizeGB: 0.93 },
-    { name: 'Qwen 3.8 27B Abliterated Q2_K', group: 'Qwen 3.8 27B Abliterated', description: 'huihui Qwen 3.8 27B abliterated · smallest quant for 12 GB cards.', pulls: '635K+', tags: ['27B', 'Vision', 'Q2_K', '11 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'Huihui-Qwen3.8-27B-abliterated-Q2_K.gguf'), filename: 'Huihui-Qwen3.8-27B-abliterated-Q2_K.gguf', sizeGB: 10.9, mmprojUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'mmproj-model-bf16.gguf'), mmprojSizeGB: 0.93 },
-    { name: 'Qwen 3.8 27B Abliterated Q5_K', group: 'Qwen 3.8 27B Abliterated', description: 'huihui Qwen 3.8 27B abliterated · Q5, higher quality. For 24 GB cards.', pulls: '635K+', tags: ['27B', 'Vision', 'Q5_K', '20 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'Huihui-Qwen3.8-27B-abliterated-Q5_K.gguf'), filename: 'Huihui-Qwen3.8-27B-abliterated-Q5_K.gguf', sizeGB: 19.5, mmprojUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'mmproj-model-bf16.gguf'), mmprojSizeGB: 0.93 },
-    { name: 'Qwen 3.8 27B Abliterated Q6_K', group: 'Qwen 3.8 27B Abliterated', description: 'huihui Qwen 3.8 27B abliterated · Q6, near-lossless.', pulls: '635K+', tags: ['27B', 'Vision', 'Q6_K', '22 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'Huihui-Qwen3.8-27B-abliterated-Q6_K.gguf'), filename: 'Huihui-Qwen3.8-27B-abliterated-Q6_K.gguf', sizeGB: 22.4, mmprojUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'mmproj-model-bf16.gguf'), mmprojSizeGB: 0.93 },
-    { name: 'Qwen 3.8 27B Abliterated Q8_0', group: 'Qwen 3.8 27B Abliterated', description: 'huihui Qwen 3.8 27B abliterated · Q8, full quality.', pulls: '635K+', tags: ['27B', 'Vision', 'Q8_0', '29 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'Huihui-Qwen3.8-27B-abliterated-Q8_0.gguf'), filename: 'Huihui-Qwen3.8-27B-abliterated-Q8_0.gguf', sizeGB: 29, mmprojUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'mmproj-model-bf16.gguf'), mmprojSizeGB: 0.93 },
+    { name: 'Qwen 3.8 27B Uncensored', group: 'Qwen 3.8 27B Uncensored', description: 'OrcaRouter Qwen 3.8 27B uncensored · the viral abliterated build, from the author\'s own repo. Vision + thinking + tools, 262K context. Recommended quant. The 0.9 GB vision projector comes with it.', pulls: '35K+', tags: ['27B', 'Vision', 'Q4_K_M', '18 GB'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF', 'orcarouter_Qwen3.8-27B-Uncensored-Q4_K_M.gguf'), filename: 'orcarouter_Qwen3.8-27B-Uncensored-Q4_K_M.gguf', sizeGB: 17.8, ...IMAGE_PART['bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF/mmproj-orcarouter_Qwen3.8-27B-Uncensored-f16.gguf'] },
+    { name: 'Qwen 3.8 27B Uncensored IQ2_M', group: 'Qwen 3.8 27B Uncensored', description: 'OrcaRouter Qwen 3.8 27B uncensored · smallest quant, fits a 12 GB card. Real quality tradeoff, but it runs.', pulls: '35K+', tags: ['27B', 'Vision', 'IQ2_M', '11 GB'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF', 'orcarouter_Qwen3.8-27B-Uncensored-IQ2_M.gguf'), filename: 'orcarouter_Qwen3.8-27B-Uncensored-IQ2_M.gguf', sizeGB: 10.9, ...IMAGE_PART['bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF/mmproj-orcarouter_Qwen3.8-27B-Uncensored-f16.gguf'] },
+    { name: 'Qwen 3.8 27B Uncensored IQ4_XS', group: 'Qwen 3.8 27B Uncensored', description: 'OrcaRouter Qwen 3.8 27B uncensored · IQ4_XS, the cheapest 4 bit. Close to Q4_K_M on 16 GB cards.', pulls: '35K+', tags: ['27B', 'Vision', 'IQ4_XS', '16 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF', 'orcarouter_Qwen3.8-27B-Uncensored-IQ4_XS.gguf'), filename: 'orcarouter_Qwen3.8-27B-Uncensored-IQ4_XS.gguf', sizeGB: 15.6, ...IMAGE_PART['bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF/mmproj-orcarouter_Qwen3.8-27B-Uncensored-f16.gguf'] },
+    { name: 'Qwen 3.8 27B Uncensored Q5_K_M', group: 'Qwen 3.8 27B Uncensored', description: 'OrcaRouter Qwen 3.8 27B uncensored · Q5, higher quality. For 24 GB cards.', pulls: '35K+', tags: ['27B', 'Vision', 'Q5_K_M', '21 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF', 'orcarouter_Qwen3.8-27B-Uncensored-Q5_K_M.gguf'), filename: 'orcarouter_Qwen3.8-27B-Uncensored-Q5_K_M.gguf', sizeGB: 20.8, ...IMAGE_PART['bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF/mmproj-orcarouter_Qwen3.8-27B-Uncensored-f16.gguf'] },
+    { name: 'Qwen 3.8 27B Uncensored Q6_K', group: 'Qwen 3.8 27B Uncensored', description: 'OrcaRouter Qwen 3.8 27B uncensored · Q6, near-lossless. High-VRAM setups.', pulls: '35K+', tags: ['27B', 'Vision', 'Q6_K', '23 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF', 'orcarouter_Qwen3.8-27B-Uncensored-Q6_K.gguf'), filename: 'orcarouter_Qwen3.8-27B-Uncensored-Q6_K.gguf', sizeGB: 23.5, ...IMAGE_PART['bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF/mmproj-orcarouter_Qwen3.8-27B-Uncensored-f16.gguf'] },
+    { name: 'Qwen 3.8 27B Uncensored Q8_0', group: 'Qwen 3.8 27B Uncensored', description: 'OrcaRouter Qwen 3.8 27B uncensored · Q8, full quality. 32 GB+ or CPU with lots of RAM.', pulls: '35K+', tags: ['27B', 'Vision', 'Q8_0', '29 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF', 'orcarouter_Qwen3.8-27B-Uncensored-Q8_0.gguf'), filename: 'orcarouter_Qwen3.8-27B-Uncensored-Q8_0.gguf', sizeGB: 29.1, ...IMAGE_PART['bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF/mmproj-orcarouter_Qwen3.8-27B-Uncensored-f16.gguf'] },
+    { name: 'Qwen 3.8 27B Abliterated', group: 'Qwen 3.8 27B Abliterated', description: 'huihui Qwen 3.8 27B abliterated · clean uncensor of the newest Qwen dense model. Vision + thinking. Note the quant is called Q4_K, not Q4_K_M.', pulls: '635K+', tags: ['27B', 'Vision', 'Q4_K', '17 GB'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'Huihui-Qwen3.8-27B-abliterated-Q4_K.gguf'), filename: 'Huihui-Qwen3.8-27B-abliterated-Q4_K.gguf', sizeGB: 16.8, ...IMAGE_PART['huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF/mmproj-model-bf16.gguf'] },
+    { name: 'Qwen 3.8 27B Abliterated Q2_K', group: 'Qwen 3.8 27B Abliterated', description: 'huihui Qwen 3.8 27B abliterated · smallest quant for 12 GB cards.', pulls: '635K+', tags: ['27B', 'Vision', 'Q2_K', '11 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'Huihui-Qwen3.8-27B-abliterated-Q2_K.gguf'), filename: 'Huihui-Qwen3.8-27B-abliterated-Q2_K.gguf', sizeGB: 10.9, ...IMAGE_PART['huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF/mmproj-model-bf16.gguf'] },
+    { name: 'Qwen 3.8 27B Abliterated Q5_K', group: 'Qwen 3.8 27B Abliterated', description: 'huihui Qwen 3.8 27B abliterated · Q5, higher quality. For 24 GB cards.', pulls: '635K+', tags: ['27B', 'Vision', 'Q5_K', '20 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'Huihui-Qwen3.8-27B-abliterated-Q5_K.gguf'), filename: 'Huihui-Qwen3.8-27B-abliterated-Q5_K.gguf', sizeGB: 19.5, ...IMAGE_PART['huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF/mmproj-model-bf16.gguf'] },
+    { name: 'Qwen 3.8 27B Abliterated Q6_K', group: 'Qwen 3.8 27B Abliterated', description: 'huihui Qwen 3.8 27B abliterated · Q6, near-lossless.', pulls: '635K+', tags: ['27B', 'Vision', 'Q6_K', '22 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'Huihui-Qwen3.8-27B-abliterated-Q6_K.gguf'), filename: 'Huihui-Qwen3.8-27B-abliterated-Q6_K.gguf', sizeGB: 22.4, ...IMAGE_PART['huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF/mmproj-model-bf16.gguf'] },
+    { name: 'Qwen 3.8 27B Abliterated Q8_0', group: 'Qwen 3.8 27B Abliterated', description: 'huihui Qwen 3.8 27B abliterated · Q8, full quality.', pulls: '635K+', tags: ['27B', 'Vision', 'Q8_0', '29 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF', 'Huihui-Qwen3.8-27B-abliterated-Q8_0.gguf'), filename: 'Huihui-Qwen3.8-27B-abliterated-Q8_0.gguf', sizeGB: 29, ...IMAGE_PART['huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF/mmproj-model-bf16.gguf'] },
     // Ollama ships the projector as a layer of the tag, so vision works there
     // without a second file.
     { name: 'Qwen 3.8 27B Uncensored (Ollama)', description: 'OrcaRouter Qwen 3.8 27B uncensored · one-command pull, projector included. Vision + tools + thinking out of the box. Needs Ollama 0.17.1 or newer.', pulls: '137K+', tags: ['27B', 'Vision', 'Tools', '18 GB'], updated: 'Hot', agent: true, released: '2026-08', ollamaModel: 'orcarouter/Qwen3.8-27B-Uncensored:q4_K_M', sizeGB: 18 },
     { name: 'Qwen 3.8 27B Abliterated (Ollama)', description: 'huihui Qwen 3.8 27B abliterated · one-command pull, projector included. Vision + tools + thinking out of the box.', pulls: '24K+', tags: ['27B', 'Vision', 'Tools', '18 GB'], updated: 'Hot', agent: true, released: '2026-08', ollamaModel: 'huihui_ai/Qwen3.8-abliterated:27b', sizeGB: 17.7 },
     // ── HOT: Qwen 3.6 Unfiltered (April 2026) ──
-    { name: 'Qwen 3.6 27B Samantha Unfiltered', description: 'Qwen 3.6 27B dense · Samantha personality, unfiltered finetune. Released April 22 2026. Needs GGUF conversion (see HF).', pulls: 'New', tags: ['27B', 'Vision', 'Unfiltered', '50 GB'], updated: 'Hot', agent: true, released: '2026-04', url: 'https://huggingface.co/cloudbjorn/Qwen3.6-27B_Samantha-Uncensored', canPull: false, sizeGB: 50 },
     { name: 'Qwen 3.6 35B MoE Abliterated', description: 'Qwen 3.6 35B MoE abliterated · brand new unfiltered. 3B active, vision + agentic coding + thinking. 256K context.', pulls: '1K+', tags: ['35B MoE', 'Vision', 'Q4_K_M', '24 GB'], updated: 'Hot', agent: true, released: '2026-04', ollamaModel: 'huihui_ai/Qwen3.6-abliterated:35b', sizeGB: 24 },
     // Task #34 v2.5.0 · leon-recommended Heretic abliteration (GH #48 reply
     // pointed users with weak Ollama-side downloads at this LM-Studio-friendly
     // direct path). 21.2 GB single file, Q4_K_M. 3B-active MoE so it runs
     // surprisingly well on 24 GB cards with -ncmoe expert offload.
-    { name: 'Qwen 3.6 35B MoE Abliterated Heretic', description: 'Qwen 3.6 35B MoE · Heretic abliteration (stronger unfiltered). 3B active expert MoE, runs on 24 GB GPUs.', pulls: '12K+', tags: ['35B MoE', 'Vision', 'Q4_K_M', '21 GB', 'Heretic'], updated: 'Hot', agent: true, released: '2026-05', downloadUrl: HF('Youssofal/Qwen3.6-35B-A3B-Abliterated-Heretic-GGUF', 'Qwen3.6-35B-A3B-Abliterated-Heretic-Q4_K_M/Qwen3.6-35B-A3B-Abliterated-Heretic-Q4_K_M.gguf'), filename: 'Qwen3.6-35B-A3B-Abliterated-Heretic-Q4_K_M.gguf', sizeGB: 21 },
-    // ── HOT: Qwen 3.5 Abliterated (larger variants) ──
-    { name: 'Qwen 3.5 27B Abliterated', description: 'Qwen 3.5 27B abliterated · Claude Opus-style, strongest reasoning.', pulls: '20K+', tags: ['27B', 'Q4_K_M', '16 GB'], updated: 'Hot', agent: true, released: '2026-03', downloadUrl: HF('mradermacher/Huihui-Qwen3.5-27B-Claude-4.6-Opus-abliterated-GGUF', 'Huihui-Qwen3.5-27B-Claude-4.6-Opus-abliterated.Q4_K_M.gguf'), filename: 'Huihui-Qwen3.5-27B-Claude-4.6-Opus-abliterated.Q4_K_M.gguf', sizeGB: 16 },
-    { name: 'Qwen 3.5 35B MoE Abliterated', description: 'Qwen 3.5 35B MoE abliterated · best agentic, 256K context.', pulls: '26K+', tags: ['35B MoE', 'Q4_K_M', '22 GB'], updated: 'Hot', agent: true, released: '2026-03', downloadUrl: HF('mradermacher/Huihui-Qwen3.5-35B-A3B-abliterated-i1-GGUF', 'Huihui-Qwen3.5-35B-A3B-abliterated.i1-Q4_K_M.gguf'), filename: 'Huihui-Qwen3.5-35B-A3B-abliterated.i1-Q4_K_M.gguf', sizeGB: 22 },
-    // ── HOT: Qwen3-Coder Abliterated ──
-    { name: 'Qwen3-Coder 30B Abliterated', description: 'Qwen3-Coder abliterated · 30B MoE (3B active), built for code agents. 256K context.', pulls: '10K+', tags: ['30B MoE', 'Q4_K_M', '19 GB'], updated: 'Hot', agent: true, released: '2026-02', downloadUrl: HF('mradermacher/Huihui-Qwen3-Coder-30B-A3B-Instruct-abliterated-i1-GGUF', 'Huihui-Qwen3-Coder-30B-A3B-Instruct-abliterated.i1-Q4_K_M.gguf'), filename: 'Huihui-Qwen3-Coder-30B-A3B-Instruct-abliterated.i1-Q4_K_M.gguf', sizeGB: 19 },
+    { name: 'Qwen 3.6 35B MoE Abliterated Heretic', description: 'Qwen 3.6 35B MoE · Heretic abliteration (stronger unfiltered). 3B active expert MoE, runs on 24 GB GPUs.', pulls: '12K+', tags: ['35B MoE', 'Vision', 'Q4_K_M', '21 GB', 'Heretic'], updated: 'Hot', agent: true, released: '2026-05', downloadUrl: HF('Youssofal/Qwen3.6-35B-A3B-Abliterated-Heretic-GGUF', 'Qwen3.6-35B-A3B-Abliterated-Heretic-Q4_K_M/Qwen3.6-35B-A3B-Abliterated-Heretic-Q4_K_M.gguf'), filename: 'Qwen3.6-35B-A3B-Abliterated-Heretic-Q4_K_M.gguf', sizeGB: 21, ...IMAGE_PART['Youssofal/Qwen3.6-35B-A3B-Abliterated-Heretic-GGUF/mmproj-Qwen3.6-35B-A3B-Abliterated-Heretic.gguf'] },
     // ── HOT: Gemma 4 Unfiltered Variants ──
-    { name: 'Gemma 4 31B Unfiltered', description: 'Gemma 4 31B unfiltered · frontier dense model, native tool calling + vision. 256K context.', pulls: '400+', tags: ['31B', 'Q4_K_M', '17 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('TrevorJS/gemma-4-31B-it-uncensored-GGUF', 'gemma-4-31B-it-uncensored-Q4_K_M.gguf'), filename: 'gemma-4-31B-it-uncensored-Q4_K_M.gguf', sizeGB: 17 },
-    { name: 'Gemma 4 26B MoE Heretic', description: 'Gemma 4 26B MoE HERETIC · 26B brain, 4B active. Unfiltered + tools + vision.', pulls: '43K+', tags: ['26B MoE', 'Q4_K_M', '16 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('nohurry/gemma-4-26B-A4B-it-heretic-GUFF', 'gemma-4-26b-a4b-it-heretic.q4_k_m.gguf'), filename: 'gemma-4-26b-a4b-it-heretic.q4_k_m.gguf', sizeGB: 16 },
-    { name: 'Gemma 4 31B Heretic', description: 'Gemma 4 31B HERETIC · full uncensor, native tool calling, 256K context.', pulls: '32K+', tags: ['31B', 'Q4_K_M', '17 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('Stabhappy/gemma-4-31B-it-heretic-Gguf', 'coder3101_gemma_4_31b_it_heretic-Q4_K_M.gguf'), filename: 'coder3101_gemma_4_31b_it_heretic-Q4_K_M.gguf', sizeGB: 17 },
-    { name: 'Gemma 4 31B Abliterated', description: 'Gemma 4 31B abliterated · strong reasoning, Apache 2.0.', pulls: '7K+', tags: ['31B', 'Q4_K_M', '17 GB'], updated: 'New', agent: true, released: '2026-04', downloadUrl: HF('LiconStudio/Gemma-4-31B-it-abliterated-GGUF', 'gemma-4-31B-it-abliterated-Q4_K_M.gguf'), filename: 'gemma-4-31B-it-abliterated-Q4_K_M.gguf', sizeGB: 17 },
-    // ── Popular: Qwen3 Abliterated ──
-    { name: 'Qwen3 8B Abliterated', description: 'Qwen3 abliterated · best overall. Exceptional reasoning, coding, multilingual.', pulls: '30K+', tags: ['8B', 'Q4_K_M', '5 GB'], updated: 'Popular', agent: true, released: '2025-05', downloadUrl: HF('mradermacher/Qwen3-8B-abliterated-GGUF', 'Qwen3-8B-abliterated.Q4_K_M.gguf'), filename: 'Qwen3-8B-abliterated.Q4_K_M.gguf', sizeGB: 5 },
-    { name: 'Qwen3 30B MoE Abliterated', description: 'Qwen3 30B MoE abliterated · powerful, runs like 3B active.', pulls: '30K+', tags: ['30B MoE', 'Q4_K_M', '19 GB'], updated: 'Popular', agent: true, released: '2025-05', downloadUrl: HF('mradermacher/Qwen3-30B-A3B-abliterated-GGUF', 'Qwen3-30B-A3B-abliterated.Q4_K_M.gguf'), filename: 'Qwen3-30B-A3B-abliterated.Q4_K_M.gguf', sizeGB: 19 },
-    // ── Popular: Llama 3.1 8B Abliterated (two quants) ──
-    { name: 'Llama 3.1 8B Abliterated Q5', group: 'Llama 3.1 8B Abliterated', description: 'Llama 3.1 8B abliterated · fast, reliable, great entry point. Higher quality quant.', pulls: '200K+', tags: ['8B', 'Q5_K_M', '6 GB'], updated: 'Popular', agent: true, released: '2024-07', downloadUrl: HF('bartowski/Meta-Llama-3.1-8B-Instruct-abliterated-GGUF', 'Meta-Llama-3.1-8B-Instruct-abliterated-Q5_K_M.gguf'), filename: 'Meta-Llama-3.1-8B-Instruct-abliterated-Q5_K_M.gguf', sizeGB: 6 },
-    { name: 'Llama 3.1 8B Abliterated Q4', group: 'Llama 3.1 8B Abliterated', description: 'Llama 3.1 8B abliterated · fast, reliable, great entry point. Smaller quant.', pulls: '200K+', tags: ['8B', 'Q4_K_M', '5 GB'], updated: 'Popular', agent: true, released: '2024-07', downloadUrl: HF('bartowski/Meta-Llama-3.1-8B-Instruct-abliterated-GGUF', 'Meta-Llama-3.1-8B-Instruct-abliterated-Q4_K_M.gguf'), filename: 'Meta-Llama-3.1-8B-Instruct-abliterated-Q4_K_M.gguf', sizeGB: 5 },
-    // ── Popular: DeepSeek R1 Abliterated ──
-    { name: 'DeepSeek R1 8B Abliterated', description: 'DeepSeek R1 abliterated 8B · chain-of-thought reasoning.', pulls: '40K+', tags: ['8B', 'Q4_K_M', '5 GB'], updated: 'Popular', released: '2025-01', downloadUrl: HF('mradermacher/DeepSeek-R1-Distill-Qwen-7B-abliterated-v2-GGUF', 'DeepSeek-R1-Distill-Qwen-7B-abliterated-v2.Q4_K_M.gguf'), filename: 'DeepSeek-R1-Distill-Qwen-7B-abliterated-v2.Q4_K_M.gguf', sizeGB: 5 },
-    { name: 'DeepSeek R1 14B Abliterated', description: 'DeepSeek R1 abliterated 14B · stronger reasoning.', pulls: '40K+', tags: ['14B', 'Q4_K_M', '9 GB'], updated: 'Popular', released: '2025-01', downloadUrl: HF('QuantFactory/DeepSeek-R1-Distill-Qwen-14B-abliterated-v2-GGUF', 'DeepSeek-R1-Distill-Qwen-14B-abliterated-v2.Q4_K_M.gguf'), filename: 'DeepSeek-R1-Distill-Qwen-14B-abliterated-v2.Q4_K_M.gguf', sizeGB: 9 },
-    { name: 'DeepSeek R1 32B Abliterated', description: 'DeepSeek R1 abliterated 32B · powerful reasoning.', pulls: '40K+', tags: ['32B', 'Q4_K_M', '19 GB'], updated: 'Popular', released: '2025-01', downloadUrl: HF('bartowski/DeepSeek-R1-Distill-Qwen-32B-abliterated-GGUF', 'DeepSeek-R1-Distill-Qwen-32B-abliterated-Q4_K_M.gguf'), filename: 'DeepSeek-R1-Distill-Qwen-32B-abliterated-Q4_K_M.gguf', sizeGB: 19 },
-    { name: 'DeepSeek R1 70B Abliterated', description: 'DeepSeek R1 abliterated 70B · maximum reasoning for high-VRAM setups.', pulls: '40K+', tags: ['70B', 'Q4_K_M', '42 GB'], updated: 'Popular', released: '2025-01', downloadUrl: HF('bartowski/huihui-ai_DeepSeek-R1-Distill-Llama-70B-abliterated-GGUF', 'huihui-ai_DeepSeek-R1-Distill-Llama-70B-abliterated-Q4_K_M.gguf'), filename: 'huihui-ai_DeepSeek-R1-Distill-Llama-70B-abliterated-Q4_K_M.gguf', sizeGB: 42 },
+    { name: 'Gemma 4 31B Unfiltered', description: 'Gemma 4 31B unfiltered · frontier dense model, native tool calling + vision. 256K context.', pulls: '400+', tags: ['31B', 'Vision', 'Q4_K_M', '17 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('TrevorJS/gemma-4-31B-it-uncensored-GGUF', 'gemma-4-31B-it-uncensored-Q4_K_M.gguf'), filename: 'gemma-4-31B-it-uncensored-Q4_K_M.gguf', sizeGB: 17, ...IMAGE_PART['unsloth/gemma-4-31B-it-GGUF/mmproj-F16.gguf'] },
+    { name: 'Gemma 4 26B MoE Heretic', description: 'Gemma 4 26B MoE HERETIC · 26B brain, 4B active. Unfiltered + tools + vision.', pulls: '43K+', tags: ['26B MoE', 'Vision', 'Q4_K_M', '16 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('nohurry/gemma-4-26B-A4B-it-heretic-GUFF', 'gemma-4-26b-a4b-it-heretic.q4_k_m.gguf'), filename: 'gemma-4-26b-a4b-it-heretic.q4_k_m.gguf', sizeGB: 16, ...IMAGE_PART['nohurry/gemma-4-26B-A4B-it-heretic-GUFF/gemma-4-26B-A4B-it-heretic-mmproj.f16.gguf'] },
+    { name: 'Gemma 4 31B Heretic', description: 'Gemma 4 31B HERETIC · full uncensor, native tool calling, 256K context.', pulls: '32K+', tags: ['31B', 'Vision', 'Q4_K_M', '17 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('Stabhappy/gemma-4-31B-it-heretic-Gguf', 'coder3101_gemma_4_31b_it_heretic-Q4_K_M.gguf'), filename: 'coder3101_gemma_4_31b_it_heretic-Q4_K_M.gguf', sizeGB: 17, ...IMAGE_PART['Stabhappy/gemma-4-31B-it-heretic-Gguf/mmproj-coder3101_gemma_4_31b_it_heretic-f16.gguf'] },
+    { name: 'Gemma 4 31B Abliterated', description: 'Gemma 4 31B abliterated · strong reasoning, Apache 2.0.', pulls: '7K+', tags: ['31B', 'Vision', 'Q4_K_M', '17 GB'], updated: 'New', agent: true, released: '2026-04', downloadUrl: HF('LiconStudio/Gemma-4-31B-it-abliterated-GGUF', 'gemma-4-31B-it-abliterated-Q4_K_M.gguf'), filename: 'gemma-4-31B-it-abliterated-Q4_K_M.gguf', sizeGB: 17, ...IMAGE_PART['LiconStudio/Gemma-4-31B-it-abliterated-GGUF/mmproj-F16.gguf'] },
     // ── HOT: GLM 4.7 Flash Unfiltered Heretic ──
     { name: 'GLM 4.7 Flash Heretic IQ2', group: 'GLM 4.7 Flash Heretic', description: 'GLM 4.7 Flash HERETIC · 30B unfiltered, fits 12GB VRAM. Strongest 30B class.', pulls: '5K+', tags: ['30B', 'IQ2_M', '10 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('DavidAU/GLM-4.7-Flash-Uncensored-Heretic-NEO-CODE-Imatrix-MAX-GGUF', 'GLM-4.7-Flash-Uncen-Hrt-NEO-CODE-MAX-imat-D_AU-IQ2_M.gguf'), filename: 'GLM-4.7-Flash-Uncen-Hrt-NEO-CODE-MAX-imat-D_AU-IQ2_M.gguf', sizeGB: 10 },
     { name: 'GLM 4.7 Flash Heretic Q4', group: 'GLM 4.7 Flash Heretic', description: 'GLM 4.7 Flash HERETIC · 30B unfiltered, best quality/size balance.', pulls: '5K+', tags: ['30B', 'Q4_K_M', '19 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('DavidAU/GLM-4.7-Flash-Uncensored-Heretic-NEO-CODE-Imatrix-MAX-GGUF', 'GLM-4.7-Flash-Uncen-Hrt-NEO-CODE-MAX-imat-D_AU-Q4_K_M.gguf'), filename: 'GLM-4.7-Flash-Uncen-Hrt-NEO-CODE-MAX-imat-D_AU-Q4_K_M.gguf', sizeGB: 19 },
@@ -1034,7 +1204,7 @@ export function getUncensoredTextModels(): DiscoverModel[] {
     { name: 'GLM 4.7 Flash Heretic Q8', group: 'GLM 4.7 Flash Heretic', description: 'GLM 4.7 Flash HERETIC · 30B unfiltered, near-lossless quality.', pulls: '5K+', tags: ['30B', 'Q8_0', '32 GB'], updated: 'New', agent: true, released: '2026-04', downloadUrl: HF('DavidAU/GLM-4.7-Flash-Uncensored-Heretic-NEO-CODE-Imatrix-MAX-GGUF', 'GLM-4.7-Flash-Uncen-Hrt-NEO-CODE-MAX-imat-D_AU-Q8_0.gguf'), filename: 'GLM-4.7-Flash-Uncen-Hrt-NEO-CODE-MAX-imat-D_AU-Q8_0.gguf', sizeGB: 32 },
     // ── Qwen 3.8 27B Heretic RVN ──────────────────────────────────────
     //
-    // Nachgetragen am 02.09.2026, nachdem David gesagt hatte „such mehr nach
+    // Nachgetragen am 02.09.2026, nachdem der Inhaber gesagt hatte „such mehr nach
     // uncensored, irgendwas muss es geben". Es gab etwas: dieses Repo stand
     // mit 1,2 Mio Downloads auf Platz zwei aller unzensierten GGUF-Modelle
     // und fehlte hier.
@@ -1050,86 +1220,113 @@ export function getUncensoredTextModels(): DiscoverModel[] {
     //
     // Architektur am 02.09.2026 aus dem echten Dateikopf gelesen: `qwen35` —
     // dieselbe wie beim Nachbareintrag oben, also von b9949 getragen.
-    { name: 'Qwen 3.8 27B Heretic', group: 'Qwen 3.8 27B Heretic', description: 'Qwen 3.8 27B RVN Heretic · twice-sharpened abliteration, 0–1 refusals per 100 prompts. Vision, multilingual. Recommended size.', pulls: '1.2M+', tags: ['27B', 'Vision', 'Q4_K_M', '17 GB'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF', 'RVN-Q4_K_M-multilingual.gguf'), filename: 'RVN-Q4_K_M-multilingual.gguf', sizeGB: 16.6, mmprojUrl: HF('0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF', 'mmproj-Qwen3.8-27B-Q8_0.gguf'), mmprojSizeGB: 0.63 },
-    { name: 'Qwen 3.8 27B Heretic IQ2_M', group: 'Qwen 3.8 27B Heretic', description: 'Qwen 3.8 27B RVN Heretic · the smallest usable quant, fits a 12 GB card.', pulls: '1.2M+', tags: ['27B', 'Vision', 'IQ2_M', '10 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF', 'RVN-IQ2_M-multilingual.gguf'), filename: 'RVN-IQ2_M-multilingual.gguf', sizeGB: 10, mmprojUrl: HF('0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF', 'mmproj-Qwen3.8-27B-Q8_0.gguf'), mmprojSizeGB: 0.63 },
-    { name: 'Qwen 3.8 27B Heretic Q5_K_M', group: 'Qwen 3.8 27B Heretic', description: 'Qwen 3.8 27B RVN Heretic · Q5, higher quality. For 24 GB cards.', pulls: '1.2M+', tags: ['27B', 'Vision', 'Q5_K_M', '19 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF', 'RVN-Q5_K_M-multilingual.gguf'), filename: 'RVN-Q5_K_M-multilingual.gguf', sizeGB: 19.2, mmprojUrl: HF('0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF', 'mmproj-Qwen3.8-27B-Q8_0.gguf'), mmprojSizeGB: 0.63 },
-    { name: 'Qwen 3.8 27B Heretic Q6_K', group: 'Qwen 3.8 27B Heretic', description: 'Qwen 3.8 27B RVN Heretic · Q6, near-lossless. For high-VRAM setups.', pulls: '1.2M+', tags: ['27B', 'Vision', 'Q6_K', '22 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF', 'RVN-Q6_K-multilingual.gguf'), filename: 'RVN-Q6_K-multilingual.gguf', sizeGB: 22.1, mmprojUrl: HF('0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF', 'mmproj-Qwen3.8-27B-Q8_0.gguf'), mmprojSizeGB: 0.63 },
+    { name: 'Qwen 3.8 27B Heretic', group: 'Qwen 3.8 27B Heretic', description: 'Qwen 3.8 27B RVN Heretic · twice-sharpened abliteration, 0–1 refusals per 100 prompts. Vision, multilingual. Recommended size.', pulls: '1.2M+', tags: ['27B', 'Vision', 'Q4_K_M', '17 GB'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF', 'RVN-Q4_K_M-multilingual.gguf'), filename: 'RVN-Q4_K_M-multilingual.gguf', sizeGB: 16.6, ...IMAGE_PART['0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF/mmproj-Qwen3.8-27B-Q8_0.gguf'] },
+    { name: 'Qwen 3.8 27B Heretic IQ2_M', group: 'Qwen 3.8 27B Heretic', description: 'Qwen 3.8 27B RVN Heretic · the smallest usable quant, fits a 12 GB card.', pulls: '1.2M+', tags: ['27B', 'Vision', 'IQ2_M', '10 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF', 'RVN-IQ2_M-multilingual.gguf'), filename: 'RVN-IQ2_M-multilingual.gguf', sizeGB: 10, ...IMAGE_PART['0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF/mmproj-Qwen3.8-27B-Q8_0.gguf'] },
+    { name: 'Qwen 3.8 27B Heretic Q5_K_M', group: 'Qwen 3.8 27B Heretic', description: 'Qwen 3.8 27B RVN Heretic · Q5, higher quality. For 24 GB cards.', pulls: '1.2M+', tags: ['27B', 'Vision', 'Q5_K_M', '19 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF', 'RVN-Q5_K_M-multilingual.gguf'), filename: 'RVN-Q5_K_M-multilingual.gguf', sizeGB: 19.2, ...IMAGE_PART['0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF/mmproj-Qwen3.8-27B-Q8_0.gguf'] },
+    { name: 'Qwen 3.8 27B Heretic Q6_K', group: 'Qwen 3.8 27B Heretic', description: 'Qwen 3.8 27B RVN Heretic · Q6, near-lossless. For high-VRAM setups.', pulls: '1.2M+', tags: ['27B', 'Vision', 'Q6_K', '22 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF', 'RVN-Q6_K-multilingual.gguf'), filename: 'RVN-Q6_K-multilingual.gguf', sizeGB: 22.1, ...IMAGE_PART['0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF/mmproj-Qwen3.8-27B-Q8_0.gguf'] },
     // ── Gemma 4 12B Heretic ───────────────────────────────────────────
     //
     // Die Luecke, die dem Katalog am meisten gefehlt hat: alles Unzensierte
     // hier ist Qwen oder GLM. Wer mit Gemma anders zurechtkommt — und viele
     // tun das —, hatte keine Wahl. 302K Downloads, Architektur `gemma4` am
     // 02.09.2026 aus dem Dateikopf gelesen, von b9949 getragen.
-    { name: 'Gemma 4 12B Heretic', group: 'Gemma 4 12B Heretic', description: 'Gemma 4 12B heretic-abliterated · the uncensored counterpart to Qwen and GLM, with a different voice. Vision. Recommended size.', pulls: '300K+', tags: ['12B', 'Vision', 'Q4_K_M', '7 GB'], updated: 'Hot', agent: true, released: '2026-06', downloadUrl: HF('culturerevolt/gemma-4-12b-heretic-abliterated-GGUF', 'gemma-4-12b-heretic-Q4_K_M.gguf'), filename: 'gemma-4-12b-heretic-Q4_K_M.gguf', sizeGB: 7.4, mmprojUrl: HF('culturerevolt/gemma-4-12b-heretic-abliterated-GGUF', 'gemma-4-12b-heretic-mmproj-f16.gguf'), mmprojSizeGB: 0.18 },
-    { name: 'Gemma 4 12B Heretic IQ4_XS', group: 'Gemma 4 12B Heretic', description: 'Gemma 4 12B heretic · IQ4_XS, the cheapest 4-bit. For 8 GB cards.', pulls: '300K+', tags: ['12B', 'Vision', 'IQ4_XS', '7 GB'], updated: 'New', agent: true, released: '2026-06', downloadUrl: HF('culturerevolt/gemma-4-12b-heretic-abliterated-GGUF', 'gemma-4-12b-heretic-IQ4_XS.gguf'), filename: 'gemma-4-12b-heretic-IQ4_XS.gguf', sizeGB: 6.6, mmprojUrl: HF('culturerevolt/gemma-4-12b-heretic-abliterated-GGUF', 'gemma-4-12b-heretic-mmproj-f16.gguf'), mmprojSizeGB: 0.18 },
-    { name: 'Gemma 4 12B Heretic Q6_K', group: 'Gemma 4 12B Heretic', description: 'Gemma 4 12B heretic · Q6, near-lossless.', pulls: '300K+', tags: ['12B', 'Vision', 'Q6_K', '10 GB'], updated: 'New', agent: true, released: '2026-06', downloadUrl: HF('culturerevolt/gemma-4-12b-heretic-abliterated-GGUF', 'gemma-4-12b-heretic-Q6_K.gguf'), filename: 'gemma-4-12b-heretic-Q6_K.gguf', sizeGB: 9.8, mmprojUrl: HF('culturerevolt/gemma-4-12b-heretic-abliterated-GGUF', 'gemma-4-12b-heretic-mmproj-f16.gguf'), mmprojSizeGB: 0.18 },
+    { name: 'Gemma 4 12B Heretic', group: 'Gemma 4 12B Heretic', description: 'Gemma 4 12B heretic-abliterated · the uncensored counterpart to Qwen and GLM, with a different voice. Vision. Recommended size.', pulls: '300K+', tags: ['12B', 'Vision', 'Q4_K_M', '7 GB'], updated: 'Hot', agent: true, released: '2026-06', downloadUrl: HF('culturerevolt/gemma-4-12b-heretic-abliterated-GGUF', 'gemma-4-12b-heretic-Q4_K_M.gguf'), filename: 'gemma-4-12b-heretic-Q4_K_M.gguf', sizeGB: 7.4, ...IMAGE_PART['culturerevolt/gemma-4-12b-heretic-abliterated-GGUF/gemma-4-12b-heretic-mmproj-f16.gguf'] },
+    { name: 'Gemma 4 12B Heretic IQ4_XS', group: 'Gemma 4 12B Heretic', description: 'Gemma 4 12B heretic · IQ4_XS, the cheapest 4-bit. For 8 GB cards.', pulls: '300K+', tags: ['12B', 'Vision', 'IQ4_XS', '7 GB'], updated: 'New', agent: true, released: '2026-06', downloadUrl: HF('culturerevolt/gemma-4-12b-heretic-abliterated-GGUF', 'gemma-4-12b-heretic-IQ4_XS.gguf'), filename: 'gemma-4-12b-heretic-IQ4_XS.gguf', sizeGB: 6.6, ...IMAGE_PART['culturerevolt/gemma-4-12b-heretic-abliterated-GGUF/gemma-4-12b-heretic-mmproj-f16.gguf'] },
+    { name: 'Gemma 4 12B Heretic Q6_K', group: 'Gemma 4 12B Heretic', description: 'Gemma 4 12B heretic · Q6, near-lossless.', pulls: '300K+', tags: ['12B', 'Vision', 'Q6_K', '10 GB'], updated: 'New', agent: true, released: '2026-06', downloadUrl: HF('culturerevolt/gemma-4-12b-heretic-abliterated-GGUF', 'gemma-4-12b-heretic-Q6_K.gguf'), filename: 'gemma-4-12b-heretic-Q6_K.gguf', sizeGB: 9.8, ...IMAGE_PART['culturerevolt/gemma-4-12b-heretic-abliterated-GGUF/gemma-4-12b-heretic-mmproj-f16.gguf'] },
     // ── Qwen3-VL 8B Abliterated ───────────────────────────────────────
     //
     // Die zweite echte Luecke: alles Unzensierte mit Bildverstehen ist hier
     // 27B aufwaerts. Wer eine 8-GB-Karte hat, konnte Bilder nur zensiert
     // ansehen lassen. Das hier laeuft in 5 GB. Architektur `qwen3vl`, am
     // 02.09.2026 aus dem Dateikopf gelesen, von b9949 getragen.
-    { name: 'Qwen3-VL 8B Abliterated', group: 'Qwen3-VL 8B Abliterated', description: 'Qwen3-VL 8B abliterated · uncensored image understanding on an 8 GB card. Recommended size.', pulls: '650K+', tags: ['8B', 'Vision', 'Q4_K_M', '5 GB'], updated: 'Hot', agent: true, released: '2025-11', downloadUrl: HF('mradermacher/Qwen3-VL-8B-Instruct-abliterated-GGUF', 'Qwen3-VL-8B-Instruct-abliterated.Q4_K_M.gguf'), filename: 'Qwen3-VL-8B-Instruct-abliterated.Q4_K_M.gguf', sizeGB: 5, mmprojUrl: HF('mradermacher/Qwen3-VL-8B-Instruct-abliterated-GGUF', 'Qwen3-VL-8B-Instruct-abliterated.mmproj-f16.gguf'), mmprojSizeGB: 1.16 },
-    { name: 'Qwen3-VL 8B Abliterated Q5_K_M', group: 'Qwen3-VL 8B Abliterated', description: 'Qwen3-VL 8B abliterated · Q5, higher quality.', pulls: '650K+', tags: ['8B', 'Vision', 'Q5_K_M', '6 GB'], updated: 'New', agent: true, released: '2025-11', downloadUrl: HF('mradermacher/Qwen3-VL-8B-Instruct-abliterated-GGUF', 'Qwen3-VL-8B-Instruct-abliterated.Q5_K_M.gguf'), filename: 'Qwen3-VL-8B-Instruct-abliterated.Q5_K_M.gguf', sizeGB: 5.9, mmprojUrl: HF('mradermacher/Qwen3-VL-8B-Instruct-abliterated-GGUF', 'Qwen3-VL-8B-Instruct-abliterated.mmproj-f16.gguf'), mmprojSizeGB: 1.16 },
-    { name: 'Qwen3-VL 8B Abliterated Q6_K', group: 'Qwen3-VL 8B Abliterated', description: 'Qwen3-VL 8B abliterated · Q6, near-lossless.', pulls: '650K+', tags: ['8B', 'Vision', 'Q6_K', '7 GB'], updated: 'New', agent: true, released: '2025-11', downloadUrl: HF('mradermacher/Qwen3-VL-8B-Instruct-abliterated-GGUF', 'Qwen3-VL-8B-Instruct-abliterated.Q6_K.gguf'), filename: 'Qwen3-VL-8B-Instruct-abliterated.Q6_K.gguf', sizeGB: 6.7, mmprojUrl: HF('mradermacher/Qwen3-VL-8B-Instruct-abliterated-GGUF', 'Qwen3-VL-8B-Instruct-abliterated.mmproj-f16.gguf'), mmprojSizeGB: 1.16 },
-    // ── Popular: GLM 4.6 Abliterated ──
-    { name: 'GLM 4 9B Abliterated', description: 'GLM 4 9B abliterated · strong coding and reasoning.', pulls: '5K+', tags: ['9B', 'Q4_K_M', '5 GB'], updated: 'New', agent: true, released: '2026-03', downloadUrl: HF('bartowski/glm-4-9b-chat-abliterated-GGUF', 'glm-4-9b-chat-abliterated-Q4_K_M.gguf'), filename: 'glm-4-9b-chat-abliterated-Q4_K_M.gguf', sizeGB: 5 },
-    // ── Popular: Gemma 3 Abliterated ──
-    { name: 'Gemma 3 4B Abliterated', description: 'Google Gemma 3 4B abliterated · vision support, runs on 8 GB RAM CPU-only.', pulls: '20K+', tags: ['4B', 'Q4_K_M', '2.3 GB'], updated: 'Popular', lightweight: true, released: '2025-03', downloadUrl: HF('bartowski/mlabonne_gemma-3-4b-it-abliterated-GGUF', 'mlabonne_gemma-3-4b-it-abliterated-Q4_K_M.gguf'), filename: 'mlabonne_gemma-3-4b-it-abliterated-Q4_K_M.gguf', sizeGB: 2.3 },
-    // ── Lightweight pinned for CPU-only / ≤8 GB RAM (F4 juliandiggins-stack GH#21) ──
+    { name: 'Qwen3-VL 8B Abliterated', group: 'Qwen3-VL 8B Abliterated', description: 'Qwen3-VL 8B abliterated · uncensored image understanding on an 8 GB card. Recommended size.', pulls: '650K+', tags: ['8B', 'Vision', 'Q4_K_M', '5 GB'], updated: 'Hot', agent: true, released: '2025-11', downloadUrl: HF('mradermacher/Qwen3-VL-8B-Instruct-abliterated-GGUF', 'Qwen3-VL-8B-Instruct-abliterated.Q4_K_M.gguf'), filename: 'Qwen3-VL-8B-Instruct-abliterated.Q4_K_M.gguf', sizeGB: 5, ...IMAGE_PART['mradermacher/Qwen3-VL-8B-Instruct-abliterated-GGUF/Qwen3-VL-8B-Instruct-abliterated.mmproj-f16.gguf'] },
+    { name: 'Qwen3-VL 8B Abliterated Q5_K_M', group: 'Qwen3-VL 8B Abliterated', description: 'Qwen3-VL 8B abliterated · Q5, higher quality.', pulls: '650K+', tags: ['8B', 'Vision', 'Q5_K_M', '6 GB'], updated: 'New', agent: true, released: '2025-11', downloadUrl: HF('mradermacher/Qwen3-VL-8B-Instruct-abliterated-GGUF', 'Qwen3-VL-8B-Instruct-abliterated.Q5_K_M.gguf'), filename: 'Qwen3-VL-8B-Instruct-abliterated.Q5_K_M.gguf', sizeGB: 5.9, ...IMAGE_PART['mradermacher/Qwen3-VL-8B-Instruct-abliterated-GGUF/Qwen3-VL-8B-Instruct-abliterated.mmproj-f16.gguf'] },
+    { name: 'Qwen3-VL 8B Abliterated Q6_K', group: 'Qwen3-VL 8B Abliterated', description: 'Qwen3-VL 8B abliterated · Q6, near-lossless.', pulls: '650K+', tags: ['8B', 'Vision', 'Q6_K', '7 GB'], updated: 'New', agent: true, released: '2025-11', downloadUrl: HF('mradermacher/Qwen3-VL-8B-Instruct-abliterated-GGUF', 'Qwen3-VL-8B-Instruct-abliterated.Q6_K.gguf'), filename: 'Qwen3-VL-8B-Instruct-abliterated.Q6_K.gguf', sizeGB: 6.7, ...IMAGE_PART['mradermacher/Qwen3-VL-8B-Instruct-abliterated-GGUF/Qwen3-VL-8B-Instruct-abliterated.mmproj-f16.gguf'] },
+    // ── Lightweight pinned for CPU-only / ≤8 GB RAM (F4 GH#21) ──
     { name: 'Llama 3.2 3B Abliterated', description: 'Meta Llama 3.2 3B abliterated · proven small unfiltered, low resource footprint.', pulls: '50K+', tags: ['3B', 'Q4_K_M', '2 GB'], updated: 'Popular', agent: true, lightweight: true, released: '2024-09', downloadUrl: HF('mradermacher/Llama-3.2-3B-Instruct-abliterated-GGUF', 'Llama-3.2-3B-Instruct-abliterated.Q4_K_M.gguf'), filename: 'Llama-3.2-3B-Instruct-abliterated.Q4_K_M.gguf', sizeGB: 2 },
-    { name: 'Gemma 3 12B Abliterated', description: 'Google Gemma 3 12B abliterated · vision support, great quality.', pulls: '20K+', tags: ['12B', 'Q4_K_M', '8 GB'], updated: 'Popular', released: '2025-03', downloadUrl: HF('bartowski/mlabonne_gemma-3-12b-it-abliterated-GGUF', 'mlabonne_gemma-3-12b-it-abliterated-Q4_K_M.gguf'), filename: 'mlabonne_gemma-3-12b-it-abliterated-Q4_K_M.gguf', sizeGB: 8 },
-    { name: 'Gemma 3 27B Abliterated', description: 'Google Gemma 3 27B abliterated · strong reasoning + vision.', pulls: '20K+', tags: ['27B', 'Q4_K_M', '17 GB'], updated: 'Popular', released: '2025-03', downloadUrl: HF('bartowski/mlabonne_gemma-3-27b-it-abliterated-GGUF', 'mlabonne_gemma-3-27b-it-abliterated-Q4_K_M.gguf'), filename: 'mlabonne_gemma-3-27b-it-abliterated-Q4_K_M.gguf', sizeGB: 17 },
-    // ── Popular: Qwen3 14B Abliterated (two quants) ──
-    { name: 'Qwen3 14B Abliterated Q4', group: 'Qwen3 14B Abliterated', description: 'Qwen3 14B abliterated · sweet spot of speed and intelligence.', pulls: '4K+', tags: ['14B', 'Q4_K_M', '9 GB'], updated: 'Recent', agent: true, released: '2025-05', downloadUrl: HF('bartowski/huihui-ai_Qwen3-14B-abliterated-GGUF', 'huihui-ai_Qwen3-14B-abliterated-Q4_K_M.gguf'), filename: 'huihui-ai_Qwen3-14B-abliterated-Q4_K_M.gguf', sizeGB: 9 },
-    { name: 'Qwen3 14B Abliterated Q5', group: 'Qwen3 14B Abliterated', description: 'Qwen3 14B abliterated · higher quality quant.', pulls: '4K+', tags: ['14B', 'Q5_K_M', '10 GB'], updated: 'Recent', agent: true, released: '2025-05', downloadUrl: HF('bartowski/huihui-ai_Qwen3-14B-abliterated-GGUF', 'huihui-ai_Qwen3-14B-abliterated-Q5_K_M.gguf'), filename: 'huihui-ai_Qwen3-14B-abliterated-Q5_K_M.gguf', sizeGB: 10 },
     // ── Popular: Qwen 2.5 Abliterated ──
     { name: 'Qwen 2.5 7B Abliterated', description: 'Qwen 2.5 7B abliterated · proven and reliable.', pulls: '50K+', tags: ['7B', 'Q4_K_M', '5 GB'], updated: 'Popular', agent: true, released: '2024-09', downloadUrl: HF('QuantFactory/Qwen2.5-7B-Instruct-abliterated-v2-GGUF', 'Qwen2.5-7B-Instruct-abliterated-v2.Q4_K_M.gguf'), filename: 'Qwen2.5-7B-Instruct-abliterated-v2.Q4_K_M.gguf', sizeGB: 5 },
-    { name: 'Qwen 2.5 14B Abliterated', description: 'Qwen 2.5 14B abliterated · stronger reasoning.', pulls: '50K+', tags: ['14B', 'Q4_K_M', '9 GB'], updated: 'Popular', agent: true, released: '2024-09', downloadUrl: HF('mradermacher/Qwen2.5-14B-Instruct-abliterated-GGUF', 'Qwen2.5-14B-Instruct-abliterated.Q4_K_M.gguf'), filename: 'Qwen2.5-14B-Instruct-abliterated.Q4_K_M.gguf', sizeGB: 9 },
-    { name: 'Qwen 2.5 32B Abliterated', description: 'Qwen 2.5 32B abliterated · powerful.', pulls: '50K+', tags: ['32B', 'Q4_K_M', '19 GB'], updated: 'Popular', agent: true, released: '2024-09', downloadUrl: HF('RichardErkhov/huihui-ai_-_Qwen2.5-32B-Instruct-abliterated-gguf', 'Qwen2.5-32B-Instruct-abliterated.Q4_K_M.gguf'), filename: 'Qwen2.5-32B-Instruct-abliterated.Q4_K_M.gguf', sizeGB: 19 },
     // ── Popular: Single-size unfiltered ──
     { name: 'Llama 3.3 70B Abliterated', description: 'Llama 3.3 70B abliterated · maximum intelligence for high-VRAM setups.', pulls: '15K+', tags: ['70B', 'Q4_K_M', '42 GB'], updated: 'Popular', agent: true, released: '2024-12', downloadUrl: HF('bartowski/Llama-3.3-70B-Instruct-abliterated-GGUF', 'Llama-3.3-70B-Instruct-abliterated-Q4_K_M.gguf'), filename: 'Llama-3.3-70B-Instruct-abliterated-Q4_K_M.gguf', sizeGB: 42 },
-    { name: 'Mistral Small 24B Abliterated', description: 'Mistral Small 24B abliterated · powerful, strong multilingual.', pulls: '10K+', tags: ['24B', 'Q4_K_M', '14 GB'], updated: 'Recent', agent: true, released: '2024-09', downloadUrl: HF('bartowski/huihui-ai_Mistral-Small-24B-Instruct-2501-abliterated-GGUF', 'huihui-ai_Mistral-Small-24B-Instruct-2501-abliterated-Q4_K_M.gguf'), filename: 'huihui-ai_Mistral-Small-24B-Instruct-2501-abliterated-Q4_K_M.gguf', sizeGB: 14 },
-    { name: 'Phi-4 14B Abliterated', description: 'Microsoft Phi-4 abliterated · excellent at math, logic, structured tasks.', pulls: '8K+', tags: ['14B', 'Q4_K_M', '8 GB'], updated: 'Recent', agent: true, released: '2024-12', downloadUrl: HF('mradermacher/phi-4-abliterated-GGUF', 'phi-4-abliterated.Q4_K_M.gguf'), filename: 'phi-4-abliterated.Q4_K_M.gguf', sizeGB: 8 },
-    { name: 'Mistral Nemo 12B Abliterated', description: 'Mistral Nemo 12B abliterated · multilingual powerhouse.', pulls: '5K+', tags: ['12B', 'Q4_K_M', '7 GB'], updated: 'Popular', released: '2024-07', downloadUrl: HF('QuantFactory/Mistral-Nemo-Instruct-2407-abliterated-GGUF', 'Mistral-Nemo-Instruct-2407-abliterated.Q4_K_M.gguf'), filename: 'Mistral-Nemo-Instruct-2407-abliterated.Q4_K_M.gguf', sizeGB: 7 },
     // ── 2026-07-17 catalog refresh (May to July 2026 wave, HF-API-verified
     //    repos/filenames/sizes; DL counts from HF at research time) ──
-    { name: 'Qwen 3.6 40B Deckard Heretic', description: 'DavidAU Qwen 3.6 40B Deckard · Heretic uncensored thinking + code model, Claude-Opus-distill flavor. The top unfiltered release of mid-2026 (380K+ downloads).', pulls: '384K+', tags: ['40B', 'Q4_K_M', '23 GB', 'Heretic'], updated: 'Hot', agent: true, released: '2026-05', downloadUrl: HF('DavidAU/Qwen3.6-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-NEO-CODE-Di-IMatrix-MAX-GGUF', 'Qwen3.6-40B-Deck-Opus-NEO-CODE-HERE-2T-OT-Q4_K_M.gguf'), filename: 'Qwen3.6-40B-Deck-Opus-NEO-CODE-HERE-2T-OT-Q4_K_M.gguf', sizeGB: 23 },
-    { name: 'Qwen 3.6 27B Heretic Finetune', description: 'DavidAU Qwen 3.6 27B · Heretic uncensored finetune with NEO-CODE tuning. Strongest 27B-class unfiltered.', pulls: '156K+', tags: ['27B', 'Q4_K_M', '16 GB', 'Heretic'], updated: 'Hot', agent: true, released: '2026-05', downloadUrl: HF('DavidAU/Qwen3.6-27B-Heretic-Uncensored-FINETUNE-NEO-CODE-Di-IMatrix-MAX-GGUF', 'Qwen3.6-27B-NEO-CODE-HERE-2T-OT-Q4_K_M.gguf'), filename: 'Qwen3.6-27B-NEO-CODE-HERE-2T-OT-Q4_K_M.gguf', sizeGB: 16 },
-    { name: 'Qwen 3.6 27B Abliterated', description: 'huihui Qwen 3.6 27B abliterated · clean uncensor of the newest Qwen dense model.', pulls: '95K+', tags: ['27B', 'Q4_K', '16 GB'], updated: 'Hot', agent: true, released: '2026-05', downloadUrl: HF('huihui-ai/Huihui-Qwen3.6-27B-abliterated-MTP-GGUF', 'Huihui-Qwen3.6-27B-abliterated-ggml-model-Q4_K.gguf'), filename: 'Huihui-Qwen3.6-27B-abliterated-ggml-model-Q4_K.gguf', sizeGB: 16 },
-    { name: 'Qwen 3.6 35B MoE Opus Abliterated', description: 'huihui Qwen 3.6 35B MoE · Claude-4.7-Opus-distill flavor, abliterated. Fast 3B-active MoE.', pulls: '42K+', tags: ['35B MoE', 'Q4_K', '20 GB'], updated: 'New', agent: true, released: '2026-05', downloadUrl: HF('huihui-ai/Huihui-Qwen3.6-35B-A3B-Claude-4.7-Opus-abliterated-MTP-GGUF', 'Huihui-Qwen3.6-35B-A3B-Claude-4.7-Opus-abliterated-ggml-model-Q4_K.gguf'), filename: 'Huihui-Qwen3.6-35B-A3B-Claude-4.7-Opus-abliterated-ggml-model-Q4_K.gguf', sizeGB: 20 },
-    { name: 'Qwythos 9B Mythos Abliterated', description: 'huihui Qwythos 9B · community Claude-Mythos distill on Qwen 3.5, abliterated. Creative-writing hit of June 2026.', pulls: '90K+', tags: ['9B', 'Q4_K', '5.4 GB'], updated: 'Hot', agent: true, released: '2026-06', downloadUrl: HF('huihui-ai/Huihui-Qwythos-9B-Claude-Mythos-5-1M-abliterated-GGUF', 'Huihui-Qwythos-9B-Claude-Mythos-5-1M-abliterated-Q4_K.gguf'), filename: 'Huihui-Qwythos-9B-Claude-Mythos-5-1M-abliterated-Q4_K.gguf', sizeGB: 5.4 },
-    { name: 'Gemma 4 12B Abliterated', description: 'huihui Gemma 4 12B QAT abliterated · the first solid Gemma 4 uncensor, vision-capable base.', pulls: '33K+', tags: ['12B', 'Q4_K', '6.9 GB'], updated: 'New', released: '2026-06', downloadUrl: HF('huihui-ai/Huihui-gemma-4-12B-it-qat-q4_0-unquantized-abliterated-GGUF', 'Huihui-gemma-4-12B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf'), filename: 'Huihui-gemma-4-12B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf', sizeGB: 6.9 },
-    { name: 'Ornith 1.0 35B Heretic', description: 'Heretic uncensored pass on Ornith 1.0 35B · June 2026\'s hottest agentic coder, unfiltered. MIT.', pulls: '55K+', tags: ['35B MoE', 'Q4_K_M', '20 GB', 'Heretic'], updated: 'Hot', agent: true, released: '2026-07', downloadUrl: HF('llmfan46/Ornith-1.0-35B-uncensored-heretic-GGUF', 'Ornith-1.0-35B-uncensored-heretic-Q4_K_M.gguf'), filename: 'Ornith-1.0-35B-uncensored-heretic-Q4_K_M.gguf', sizeGB: 20 },
-    { name: 'Agents A1 Abliterated', description: 'huihui abliterated Agents-A1 · uncensored 35B MoE (3B active) agent model, a rare combo. Apache-2.0.', pulls: '10K+', tags: ['35B MoE', 'Q4_K', '20 GB'], updated: 'New', agent: true, released: '2026-07', downloadUrl: HF('huihui-ai/Huihui-Agents-A1-abliterated-GGUF', 'Agents-A1-abliterated-Q4_K.gguf'), filename: 'Agents-A1-abliterated-Q4_K.gguf', sizeGB: 20 },
+    { name: 'Qwen 3.6 40B Deckard Heretic', description: 'DavidAU Qwen 3.6 40B Deckard · Heretic uncensored thinking + code model, Claude-Opus-distill flavor. The top unfiltered release of mid-2026 (380K+ downloads).', pulls: '384K+', tags: ['40B', 'Vision', 'Q4_K_M', '23 GB', 'Heretic'], updated: 'Hot', agent: true, released: '2026-05', downloadUrl: HF('DavidAU/Qwen3.6-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-NEO-CODE-Di-IMatrix-MAX-GGUF', 'Qwen3.6-40B-Deck-Opus-NEO-CODE-HERE-2T-OT-Q4_K_M.gguf'), filename: 'Qwen3.6-40B-Deck-Opus-NEO-CODE-HERE-2T-OT-Q4_K_M.gguf', sizeGB: 23, ...IMAGE_PART['DavidAU/Qwen3.6-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-NEO-CODE-Di-IMatrix-MAX-GGUF/mmproj-F16.gguf'] },
+    { name: 'Qwen 3.6 27B Heretic Finetune', description: 'DavidAU Qwen 3.6 27B · Heretic uncensored finetune with NEO-CODE tuning. Strongest 27B-class unfiltered.', pulls: '156K+', tags: ['27B', 'Vision', 'Q4_K_M', '16 GB', 'Heretic'], updated: 'Hot', agent: true, released: '2026-05', downloadUrl: HF('DavidAU/Qwen3.6-27B-Heretic-Uncensored-FINETUNE-NEO-CODE-Di-IMatrix-MAX-GGUF', 'Qwen3.6-27B-NEO-CODE-HERE-2T-OT-Q4_K_M.gguf'), filename: 'Qwen3.6-27B-NEO-CODE-HERE-2T-OT-Q4_K_M.gguf', sizeGB: 16, ...IMAGE_PART['DavidAU/Qwen3.6-27B-Heretic-Uncensored-FINETUNE-NEO-CODE-Di-IMatrix-MAX-GGUF/mmproj-F16.gguf'] },
+    { name: 'Qwen 3.6 27B Abliterated', description: 'huihui Qwen 3.6 27B abliterated · clean uncensor of the newest Qwen dense model.', pulls: '95K+', tags: ['27B', 'Vision', 'Q4_K', '16 GB'], updated: 'Hot', agent: true, released: '2026-05', downloadUrl: HF('huihui-ai/Huihui-Qwen3.6-27B-abliterated-MTP-GGUF', 'Huihui-Qwen3.6-27B-abliterated-ggml-model-Q4_K.gguf'), filename: 'Huihui-Qwen3.6-27B-abliterated-ggml-model-Q4_K.gguf', sizeGB: 16, ...IMAGE_PART['huihui-ai/Huihui-Qwen3.6-27B-abliterated-MTP-GGUF/mmproj-model-f16.gguf'] },
+    { name: 'Qwen 3.6 35B MoE Opus Abliterated', description: 'huihui Qwen 3.6 35B MoE · Claude-4.7-Opus-distill flavor, abliterated. Fast 3B-active MoE.', pulls: '42K+', tags: ['35B MoE', 'Vision', 'Q4_K', '20 GB'], updated: 'New', agent: true, released: '2026-05', downloadUrl: HF('huihui-ai/Huihui-Qwen3.6-35B-A3B-Claude-4.7-Opus-abliterated-MTP-GGUF', 'Huihui-Qwen3.6-35B-A3B-Claude-4.7-Opus-abliterated-ggml-model-Q4_K.gguf'), filename: 'Huihui-Qwen3.6-35B-A3B-Claude-4.7-Opus-abliterated-ggml-model-Q4_K.gguf', sizeGB: 20, ...IMAGE_PART['huihui-ai/Huihui-Qwen3.6-35B-A3B-Claude-4.7-Opus-abliterated-MTP-GGUF/mmproj-model-f16.gguf'] },
+    { name: 'Qwythos 9B Mythos Abliterated', description: 'huihui Qwythos 9B · community Claude-Mythos distill on Qwen 3.5, abliterated. Creative-writing hit of June 2026.', pulls: '90K+', tags: ['9B', 'Vision', 'Q4_K', '5.4 GB'], updated: 'Hot', agent: true, released: '2026-06', downloadUrl: HF('huihui-ai/Huihui-Qwythos-9B-Claude-Mythos-5-1M-abliterated-GGUF', 'Huihui-Qwythos-9B-Claude-Mythos-5-1M-abliterated-Q4_K.gguf'), filename: 'Huihui-Qwythos-9B-Claude-Mythos-5-1M-abliterated-Q4_K.gguf', sizeGB: 5.4, ...IMAGE_PART['huihui-ai/Huihui-Qwythos-9B-Claude-Mythos-5-1M-abliterated-GGUF/mmproj-model-bf16.gguf'] },
+    { name: 'Gemma 4 12B Abliterated', description: 'huihui Gemma 4 12B QAT abliterated · the first solid Gemma 4 uncensor, vision-capable base.', pulls: '33K+', tags: ['12B', 'Vision', 'Q4_K', '6.9 GB'], updated: 'New', released: '2026-06', downloadUrl: HF('huihui-ai/Huihui-gemma-4-12B-it-qat-q4_0-unquantized-abliterated-GGUF', 'Huihui-gemma-4-12B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf'), filename: 'Huihui-gemma-4-12B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf', sizeGB: 6.9, ...IMAGE_PART['huihui-ai/Huihui-gemma-4-12B-it-qat-q4_0-unquantized-abliterated-GGUF/mmproj-model-bf16.gguf'] },
+    { name: 'Agents A1 Abliterated', description: 'huihui abliterated Agents-A1 · uncensored 35B MoE (3B active) agent model, a rare combo. Apache-2.0.', pulls: '10K+', tags: ['35B MoE', 'Vision', 'Q4_K', '20 GB'], updated: 'New', agent: true, released: '2026-07', downloadUrl: HF('huihui-ai/Huihui-Agents-A1-abliterated-GGUF', 'Agents-A1-abliterated-Q4_K.gguf'), filename: 'Agents-A1-abliterated-Q4_K.gguf', sizeGB: 20, ...IMAGE_PART['huihui-ai/Huihui-Agents-A1-abliterated-GGUF/mmproj-model-bf16.gguf'] },
     { name: 'Rocinante XL 16B', description: 'TheDrummer Rocinante XL · roleplay / creative-writing specialist, successor to the classic Rocinante.', pulls: '6K+', tags: ['16B', 'Q4_K_M', '9.1 GB', 'RP'], updated: 'New', released: '2026-04', downloadUrl: HF('TheDrummer/Rocinante-XL-16B-v1-GGUF', 'Rocinante-XL-16B-v1a-Q4_K_M.gguf'), filename: 'Rocinante-XL-16B-v1a-Q4_K_M.gguf', sizeGB: 9.1 },
-    { name: 'Cydonia 24B v4.3', description: 'TheDrummer Cydonia · the de-facto standard roleplay finetune of Mistral Small 24B.', pulls: '50K+', tags: ['24B', 'Q4_K_M', '13.4 GB', 'RP'], updated: 'Popular', released: '2025-12', downloadUrl: HF('TheDrummer/Cydonia-24B-v4.3-GGUF', 'Cydonia-24B-v4zg-Q4_K_M.gguf'), filename: 'Cydonia-24B-v4zg-Q4_K_M.gguf', sizeGB: 13.4 },
-    // 2026-08-01: swapped the ds4 single file for huihui's plain llama.cpp
-    // repo. Their "ds4" files are built for the DwarfStar engine first and
-    // "may work with other inference engines or not" (their README); a 154 GB
-    // download that might not load is the most expensive catalog bug we can
-    // ship. Base is still the V4-Flash preview: no GGUF uncensor of 0731
-    // exists yet (checked 2026-08-01, one day after the 0731 drop; only FP8
-    // and MLX abliterations are out). Watchlist: swap to the 0731 uncensor
-    // the day huihui or DavidAU ships one.
+    // DeepSeek V4 Flash 0731, abliterated by huihui. Replaces the two entries
+    // that pointed at huihui-ai/Huihui-DeepSeek-V4-Flash-abliterated-GGUF, which
+    // answered HTTP 401 from 2026-09-01 on. Repo and file read from the Hugging
+    // Face tree on 2026-10-08, architecture deepseek4.
     //
-    // BOTH ADDRESSES BELOW ANSWER 401 (measured 2026-09-01, first run of the
-    // catalog gate in __tests__/hf-catalog-addresses.live.test.ts).
-    // `huihui-ai/Huihui-DeepSeek-V4-Flash-abliterated-GGUF` is private or gone
-    // — HuggingFace answers 401 for both, on purpose, so which one it is
-    // cannot be told from outside. They are LEFT AS THEY ARE and not repointed,
-    // because there is nothing verified to repoint them to: the two surviving
-    // huihui repos with similar names
-    // (`...-abliterated-ds4-GGUF`, `...-0731-abliterated-GGUF`) carry neither
-    // `DeepSeek-V4-Flash-UD-IQ1_M.gguf` nor `ggml-model-Q3_K_S.gguf`, and their
-    // quants (Q2/Q2_K/Q4_K) are different files at different sizes. Swapping a
-    // dead 87 GB promise for an unverified one is not a fix, it is a new bug
-    // with a nicer address. Until someone confirms a replacement, the user
-    // clicking these gets the gated-repo sentence from `http_error_message`
-    // and no Retry button (T-07), which is the honest end of the road.
-    { name: 'DeepSeek V4 Flash Abliterated IQ1', group: 'DeepSeek V4 Flash Abliterated', description: 'huihui abliterated DeepSeek V4-Flash · 284B MoE (13B active), the most-downloaded uncensored model of 2026 so far. Smallest quant, single 87 GB file, runs on 96 GB RAM rigs. MIT.', pulls: '115K+', tags: ['284B MoE', 'UD-IQ1_M', '87 GB'], updated: 'Hot', agent: true, released: '2026-05', downloadUrl: HF('huihui-ai/Huihui-DeepSeek-V4-Flash-abliterated-GGUF', 'DeepSeek-V4-Flash-UD-IQ1_M.gguf'), filename: 'DeepSeek-V4-Flash-UD-IQ1_M.gguf', sizeGB: 86.8 },
-    { name: 'DeepSeek V4 Flash Abliterated Q3', group: 'DeepSeek V4 Flash Abliterated', description: 'huihui abliterated DeepSeek V4-Flash · Q3_K_S, higher fidelity. Single 122 GB file for big-RAM setups. MIT.', pulls: '115K+', tags: ['284B MoE', 'Q3_K_S', '122 GB'], updated: 'Hot', agent: true, released: '2026-05', downloadUrl: HF('huihui-ai/Huihui-DeepSeek-V4-Flash-abliterated-GGUF', 'ggml-model-Q3_K_S.gguf'), filename: 'ggml-model-Q3_K_S.gguf', sizeGB: 122 },
+    // The names end in `-0731.gguf`, so no quant can be read from them. Until
+    // 2026-10-08 the download knew a file only by its quant, and every card of
+    // this repo would have fetched the first file of the tree. Since then the
+    // named file decides (`selectGgufFromTree`, exactPath), and Q4_K is listed
+    // next to Q2. The repo also carries Q2_K (98 GB), not listed.
+    { name: 'DeepSeek V4 Flash 0731 Abliterated', group: 'DeepSeek V4 Flash 0731 Abliterated', description: 'huihui abliterated DeepSeek V4-Flash-0731 · 284B MoE (13B active), the uncensored build of the official V4-Flash release. Single 87 GB file, needs about 96 GB of memory or more. MIT.', pulls: '354K+', tags: ['284B MoE', 'Q2', '87 GB'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('huihui-ai/Huihui-DeepSeek-V4-Flash-0731-abliterated-GGUF', 'DeepSeek-V4-Flash-Q2-0731.gguf'), filename: 'DeepSeek-V4-Flash-Q2-0731.gguf', sizeGB: 86.72 },
+    { name: 'DeepSeek V4 Flash 0731 Abliterated Q4_K', group: 'DeepSeek V4 Flash 0731 Abliterated', description: 'huihui abliterated DeepSeek V4-Flash-0731 · higher quality quant. Single 165 GB file, needs about 180 GB of memory or more.', pulls: '354K+', tags: ['284B MoE', 'Q4_K', '165 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('huihui-ai/Huihui-DeepSeek-V4-Flash-0731-abliterated-GGUF', 'DeepSeek-V4-Flash-Q4_K-0731.gguf'), filename: 'DeepSeek-V4-Flash-Q4_K-0731.gguf', sizeGB: 164.63 },
     { name: 'GLM 5.2 Abliterated', description: 'huihui abliterated GLM 5.2 · 744B MoE (40B active) uncensored frontier coder. Multi-part download, ~356 GB. MIT.', pulls: '13K+', tags: ['744B MoE', 'UD-Q3_K_M', '356 GB', 'Multi-part'], updated: 'New', agent: true, released: '2026-06', downloadUrl: HF('huihui-ai/Huihui-GLM-5.2-abliterated-GGUF', 'UD-Q3_K_M/GLM-5.2-UD-Q3_K_M-00001-of-00009.gguf'), filename: 'GLM-5.2-UD-Q3_K_M-00001-of-00009.gguf', sizeGB: 356 },
+    // 2026-10-08 catalog refresh. Repos, file names and sizes read from the
+    // Hugging Face tree API on that day; every architecture is one the pinned
+    // llama.cpp lists. Nothing here was loaded in the engine. The download
+    // takes the file named here (`selectGgufFromTree`, exactPath), which
+    // `katalog-datei-ist-die-geladene.test.ts` proves for every entry.
+    //
+    // HauhauCS names most of its quants Q*_K_P. No quant is read from that
+    // suffix, so these files are reachable only by name. The Q4_K_P and Q8_K_P
+    // cards came in on 2026-10-08, once the named file decided.
+    { name: 'Qwen 3.8 27B HauhauCS Aggressive', group: 'Qwen 3.8 27B HauhauCS Aggressive', description: 'HauhauCS Qwen 3.8 27B uncensored, Aggressive variant · vision, tool calling and thinking. The files carry an MTP head. Recommended quant. The 0.9 GB vision projector comes with it.', pulls: '2.1M', tags: ['27B', 'Vision', 'IQ4_XS', '16 GB'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF', 'Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-IQ4_XS.gguf'), filename: 'Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-IQ4_XS.gguf', sizeGB: 15.71, ...IMAGE_PART['HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF/mmproj-Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-BF16.gguf'] },
+    { name: 'Qwen 3.8 27B HauhauCS Aggressive IQ2_M', group: 'Qwen 3.8 27B HauhauCS Aggressive', description: 'HauhauCS Qwen 3.8 27B uncensored, Aggressive variant · smallest quant.', pulls: '2.1M', tags: ['27B', 'Vision', 'IQ2_M', '10 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF', 'Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-IQ2_M.gguf'), filename: 'Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-IQ2_M.gguf', sizeGB: 10.32, ...IMAGE_PART['HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF/mmproj-Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-BF16.gguf'] },
+    { name: 'Qwen 3.8 27B HauhauCS Aggressive IQ3_M', group: 'Qwen 3.8 27B HauhauCS Aggressive', description: 'HauhauCS Qwen 3.8 27B uncensored, Aggressive variant · middle quant.', pulls: '2.1M', tags: ['27B', 'Vision', 'IQ3_M', '13 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF', 'Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-IQ3_M.gguf'), filename: 'Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-IQ3_M.gguf', sizeGB: 12.79, ...IMAGE_PART['HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF/mmproj-Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-BF16.gguf'] },
+    { name: 'Qwen 3.8 27B HauhauCS Aggressive Q4_K_P', group: 'Qwen 3.8 27B HauhauCS Aggressive', description: 'HauhauCS Qwen 3.8 27B uncensored, Aggressive variant · higher quality quant.', pulls: '2.1M', tags: ['27B', 'Vision', 'Q4_K_P', '18 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF', 'Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-Q4_K_P.gguf'), filename: 'Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-Q4_K_P.gguf', sizeGB: 17.92, ...IMAGE_PART['HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF/mmproj-Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-BF16.gguf'] },
+    { name: 'Qwen 3.8 27B HauhauCS Aggressive Q8_K_P', group: 'Qwen 3.8 27B HauhauCS Aggressive', description: 'HauhauCS Qwen 3.8 27B uncensored, Aggressive variant · largest quant, closest to the original weights.', pulls: '2.1M', tags: ['27B', 'Vision', 'Q8_K_P', '31 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF', 'Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-Q8_K_P.gguf'), filename: 'Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-Q8_K_P.gguf', sizeGB: 31.46, ...IMAGE_PART['HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF/mmproj-Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-BF16.gguf'] },
+    { name: 'Gemma 4 12B QAT HauhauCS', description: 'HauhauCS Gemma 4 12B QAT uncensored, Balanced variant · built on Google\'s quantization-aware weights. Vision. The 0.2 GB vision projector comes with it.', pulls: '984K+', tags: ['12B', 'Vision', 'Q4_K_M', '7.4 GB'], updated: 'Hot', released: '2026-06', downloadUrl: HF('HauhauCS/Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced', 'Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf'), filename: 'Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf', sizeGB: 7.38, ...IMAGE_PART['HauhauCS/Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced/mmproj-Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced-BF16.gguf'] },
+    { name: 'Gemma 4 E4B HauhauCS', group: 'Gemma 4 E4B HauhauCS', description: 'HauhauCS Gemma 4 E4B uncensored, Aggressive variant · small 4.5B model with vision. The 1 GB vision projector comes with it.', pulls: '1.4M', tags: ['4.5B', 'Vision', 'Q4_K_M', '5.3 GB'], updated: 'Hot', lightweight: true, released: '2026-04', downloadUrl: HF('HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive', 'Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf'), filename: 'Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf', sizeGB: 5.34, ...IMAGE_PART['HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive/mmproj-Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-f16.gguf'] },
+    { name: 'Gemma 4 E4B HauhauCS Q3_K_M', group: 'Gemma 4 E4B HauhauCS', description: 'HauhauCS Gemma 4 E4B uncensored, Aggressive variant · smaller quant.', pulls: '1.4M', tags: ['4.5B', 'Vision', 'Q3_K_M', '4.8 GB'], updated: 'New', lightweight: true, released: '2026-04', downloadUrl: HF('HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive', 'Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q3_K_M.gguf'), filename: 'Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q3_K_M.gguf', sizeGB: 4.85, ...IMAGE_PART['HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive/mmproj-Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-f16.gguf'] },
+    { name: 'Gemma 4 E4B HauhauCS Q5_K_M', group: 'Gemma 4 E4B HauhauCS', description: 'HauhauCS Gemma 4 E4B uncensored, Aggressive variant · higher quality quant.', pulls: '1.4M', tags: ['4.5B', 'Vision', 'Q5_K_M', '5.8 GB'], updated: 'New', lightweight: true, released: '2026-04', downloadUrl: HF('HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive', 'Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q5_K_M.gguf'), filename: 'Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q5_K_M.gguf', sizeGB: 5.76, ...IMAGE_PART['HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive/mmproj-Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-f16.gguf'] },
+    { name: 'Gemma 4 E4B HauhauCS Q8_K_P', group: 'Gemma 4 E4B HauhauCS', description: 'HauhauCS Gemma 4 E4B uncensored, Aggressive variant · largest quant, closest to the original weights.', pulls: '1.4M', tags: ['4.5B', 'Vision', 'Q8_K_P', '8.1 GB'], updated: 'New', lightweight: true, released: '2026-04', downloadUrl: HF('HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive', 'Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q8_K_P.gguf'), filename: 'Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q8_K_P.gguf', sizeGB: 8.13, ...IMAGE_PART['HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive/mmproj-Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-f16.gguf'] },
+    // Gemma 4 QAT abliterations by huihui: E2B for 8 GB machines, 31B on top
+    { name: 'Gemma 4 E2B Abliterated', description: 'huihui Gemma 4 E2B QAT abliterated · small 2.3B model with vision for 8 GB machines. The 1 GB vision projector comes with it.', pulls: '6K+', tags: ['2.3B', 'Vision', 'Q4_K', '3.4 GB'], updated: 'New', lightweight: true, released: '2026-06', downloadUrl: HF('huihui-ai/Huihui-gemma-4-E2B-it-qat-q4_0-unquantized-abliterated-GGUF', 'Huihui-gemma-4-E2B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf'), filename: 'Huihui-gemma-4-E2B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf', sizeGB: 3.42, ...IMAGE_PART['huihui-ai/Huihui-gemma-4-E2B-it-qat-q4_0-unquantized-abliterated-GGUF/mmproj-model-bf16.gguf'] },
+    { name: 'Gemma 4 31B QAT Abliterated', description: 'huihui Gemma 4 31B QAT abliterated · built on Google\'s quantization-aware weights, newer than the three April builds. Vision. The 1.2 GB vision projector comes with it.', pulls: '9K+', tags: ['31B', 'Vision', 'Q4_K', '19 GB'], updated: 'New', released: '2026-06', downloadUrl: HF('huihui-ai/Huihui-gemma-4-31B-it-qat-q4_0-unquantized-abliterated-GGUF', 'Huihui-gemma-4-31B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf'), filename: 'Huihui-gemma-4-31B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf', sizeGB: 18.69, ...IMAGE_PART['huihui-ai/Huihui-gemma-4-31B-it-qat-q4_0-unquantized-abliterated-GGUF/mmproj-model-bf16.gguf'] },
+    // Ornith 1.5 uncensored (August 2026), in place of Ornith 1.0 35B Heretic
+    { name: 'Ornith 1.5 9B Uncensored', group: 'Ornith 1.5 9B Uncensored', description: 'Ornith 1.5 9B uncensored · the coding and agent model without refusals, with vision and tool calling. Recommended quant. The 0.9 GB vision projector comes with it.', pulls: '1.3M', tags: ['9B', 'Vision', 'Q4_K_M', '5.6 GB'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('mradermacher/Ornith-1.5-9B-uncensored-GGUF', 'Ornith-1.5-9B-uncensored.Q4_K_M.gguf'), filename: 'Ornith-1.5-9B-uncensored.Q4_K_M.gguf', sizeGB: 5.63, ...IMAGE_PART['mradermacher/Ornith-1.5-9B-uncensored-GGUF/Ornith-1.5-9B-uncensored.mmproj-f16.gguf'] },
+    { name: 'Ornith 1.5 9B Uncensored Q2_K', group: 'Ornith 1.5 9B Uncensored', description: 'Ornith 1.5 9B uncensored · smallest quant, for 8 GB machines.', pulls: '1.3M', tags: ['9B', 'Vision', 'Q2_K', '3.8 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('mradermacher/Ornith-1.5-9B-uncensored-GGUF', 'Ornith-1.5-9B-uncensored.Q2_K.gguf'), filename: 'Ornith-1.5-9B-uncensored.Q2_K.gguf', sizeGB: 3.83, ...IMAGE_PART['mradermacher/Ornith-1.5-9B-uncensored-GGUF/Ornith-1.5-9B-uncensored.mmproj-f16.gguf'] },
+    { name: 'Ornith 1.5 9B Uncensored Q8_0', group: 'Ornith 1.5 9B Uncensored', description: 'Ornith 1.5 9B uncensored · largest quant, closest to the original weights.', pulls: '1.3M', tags: ['9B', 'Vision', 'Q8_0', '9.5 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('mradermacher/Ornith-1.5-9B-uncensored-GGUF', 'Ornith-1.5-9B-uncensored.Q8_0.gguf'), filename: 'Ornith-1.5-9B-uncensored.Q8_0.gguf', sizeGB: 9.53, ...IMAGE_PART['mradermacher/Ornith-1.5-9B-uncensored-GGUF/Ornith-1.5-9B-uncensored.mmproj-f16.gguf'] },
+    { name: 'Ornith 1.5 35B MoE Abliterated', group: 'Ornith 1.5 35B MoE Abliterated', description: 'huihui Ornith 1.5 35B MoE abliterated · the larger Ornith 1.5 without refusals, 3B active parameters. Vision and tool calling. Recommended quant. The 0.9 GB vision projector comes with it. MIT.', pulls: '4K+', tags: ['35B MoE', 'Vision', 'Q4_K_M', '22 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('mradermacher/Huihui-Ornith-1.5-35B-A3B-abliterated-GGUF', 'Huihui-Ornith-1.5-35B-A3B-abliterated.Q4_K_M.gguf'), filename: 'Huihui-Ornith-1.5-35B-A3B-abliterated.Q4_K_M.gguf', sizeGB: 21.71, ...IMAGE_PART['mradermacher/Huihui-Ornith-1.5-35B-A3B-abliterated-GGUF/Huihui-Ornith-1.5-35B-A3B-abliterated.mmproj-f16.gguf'] },
+    { name: 'Ornith 1.5 35B MoE Abliterated Q2_K', group: 'Ornith 1.5 35B MoE Abliterated', description: 'huihui Ornith 1.5 35B MoE abliterated · smallest quant, for 16 GB machines.', pulls: '4K+', tags: ['35B MoE', 'Vision', 'Q2_K', '13 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('mradermacher/Huihui-Ornith-1.5-35B-A3B-abliterated-GGUF', 'Huihui-Ornith-1.5-35B-A3B-abliterated.Q2_K.gguf'), filename: 'Huihui-Ornith-1.5-35B-A3B-abliterated.Q2_K.gguf', sizeGB: 13.25, ...IMAGE_PART['mradermacher/Huihui-Ornith-1.5-35B-A3B-abliterated-GGUF/Huihui-Ornith-1.5-35B-A3B-abliterated.mmproj-f16.gguf'] },
+    { name: 'Ornith 1.5 35B MoE Abliterated Q8_0', group: 'Ornith 1.5 35B MoE Abliterated', description: 'huihui Ornith 1.5 35B MoE abliterated · largest quant, closest to the original weights.', pulls: '4K+', tags: ['35B MoE', 'Vision', 'Q8_0', '38 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('mradermacher/Huihui-Ornith-1.5-35B-A3B-abliterated-GGUF', 'Huihui-Ornith-1.5-35B-A3B-abliterated.Q8_0.gguf'), filename: 'Huihui-Ornith-1.5-35B-A3B-abliterated.Q8_0.gguf', sizeGB: 37.8, ...IMAGE_PART['mradermacher/Huihui-Ornith-1.5-35B-A3B-abliterated-GGUF/Huihui-Ornith-1.5-35B-A3B-abliterated.mmproj-f16.gguf'] },
+    // Qwen 3.5 9B The Defiant Fable (DavidAU). The repo carries every K quant
+    // twice, plain and with an MTP head, and the MTP file sorts first. A quant
+    // alone would therefore fetch the MTP build. The download takes the named
+    // file, so the plain Q4_K_M and Q8_0 are listed since 2026-10-08.
+    { name: 'Qwen 3.5 9B Defiant Fable Heretic', group: 'Qwen 3.5 9B Defiant Fable Heretic', description: 'DavidAU Qwen 3.5 9B The Defiant Fable · Heretic uncensored finetune with vision and thinking. Recommended quant. The 0.9 GB vision projector comes with it. Apache-2.0.', pulls: '2.0M', tags: ['9B', 'Vision', 'IQ4_XS', '6.4 GB', 'Heretic'], updated: 'Hot', released: '2026-07', downloadUrl: HF('DavidAU/Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-GGUF', 'Qwen3.5-9B-The-Defiant-Fable-Uncnr-Heretic-NEO-MAX-IQ4_XS.gguf'), filename: 'Qwen3.5-9B-The-Defiant-Fable-Uncnr-Heretic-NEO-MAX-IQ4_XS.gguf', sizeGB: 6.4, ...IMAGE_PART['DavidAU/Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-GGUF/mmproj-F16.gguf'] },
+    { name: 'Qwen 3.5 9B Defiant Fable Heretic IQ2_M', group: 'Qwen 3.5 9B Defiant Fable Heretic', description: 'DavidAU Qwen 3.5 9B The Defiant Fable · smallest quant, for 8 GB machines.', pulls: '2.0M', tags: ['9B', 'Vision', 'IQ2_M', '4.9 GB', 'Heretic'], updated: 'New', released: '2026-07', downloadUrl: HF('DavidAU/Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-GGUF', 'Qwen3.5-9B-The-Defiant-Fable-Uncnr-Heretic-NEO-MAX-IQ2_M.gguf'), filename: 'Qwen3.5-9B-The-Defiant-Fable-Uncnr-Heretic-NEO-MAX-IQ2_M.gguf', sizeGB: 4.94, ...IMAGE_PART['DavidAU/Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-GGUF/mmproj-F16.gguf'] },
+    { name: 'Qwen 3.5 9B Defiant Fable Heretic IQ3_M', group: 'Qwen 3.5 9B Defiant Fable Heretic', description: 'DavidAU Qwen 3.5 9B The Defiant Fable · middle quant.', pulls: '2.0M', tags: ['9B', 'Vision', 'IQ3_M', '5.6 GB', 'Heretic'], updated: 'New', released: '2026-07', downloadUrl: HF('DavidAU/Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-GGUF', 'Qwen3.5-9B-The-Defiant-Fable-Uncnr-Heretic-NEO-MAX-IQ3_M.gguf'), filename: 'Qwen3.5-9B-The-Defiant-Fable-Uncnr-Heretic-NEO-MAX-IQ3_M.gguf', sizeGB: 5.62, ...IMAGE_PART['DavidAU/Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-GGUF/mmproj-F16.gguf'] },
+    { name: 'Qwen 3.5 9B Defiant Fable Heretic Q4_K_M', group: 'Qwen 3.5 9B Defiant Fable Heretic', description: 'DavidAU Qwen 3.5 9B The Defiant Fable · higher quality quant, without the MTP head.', pulls: '2.0M', tags: ['9B', 'Vision', 'Q4_K_M', '6.8 GB', 'Heretic'], updated: 'New', released: '2026-07', downloadUrl: HF('DavidAU/Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-GGUF', 'Qwen3.5-9B-The-Defiant-Fable-Uncnr-Heretic-NEO-MAX-Q4_K_M.gguf'), filename: 'Qwen3.5-9B-The-Defiant-Fable-Uncnr-Heretic-NEO-MAX-Q4_K_M.gguf', sizeGB: 6.83, ...IMAGE_PART['DavidAU/Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-GGUF/mmproj-F16.gguf'] },
+    { name: 'Qwen 3.5 9B Defiant Fable Heretic Q8_0', group: 'Qwen 3.5 9B Defiant Fable Heretic', description: 'DavidAU Qwen 3.5 9B The Defiant Fable · largest quant, closest to the original weights, without the MTP head.', pulls: '2.0M', tags: ['9B', 'Vision', 'Q8_0', '10 GB', 'Heretic'], updated: 'New', released: '2026-07', downloadUrl: HF('DavidAU/Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-GGUF', 'Qwen3.5-9B-The-Defiant-Fable-Uncnr-Heretic-NEO-MAX-Q8_0.gguf'), filename: 'Qwen3.5-9B-The-Defiant-Fable-Uncnr-Heretic-NEO-MAX-Q8_0.gguf', sizeGB: 10.48, ...IMAGE_PART['DavidAU/Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-GGUF/mmproj-F16.gguf'] },
+    // Small uncensored models for 8 GB machines (below the 7B chat minimum)
+    { name: 'Qwen 3.5 4B Abliterated', group: 'Qwen 3.5 4B Abliterated', description: 'huihui Qwen 3.5 4B abliterated · small unfiltered model with vision and tool calling. The 0.7 GB vision projector comes with it. Apache-2.0.', pulls: '32K+', tags: ['4B', 'Vision', 'Q4_K_M', '2.7 GB'], updated: 'New', agent: true, lightweight: true, released: '2026-03', downloadUrl: HF('mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF', 'Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf'), filename: 'Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf', sizeGB: 2.71, ...IMAGE_PART['mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF/Huihui-Qwen3.5-4B-abliterated.mmproj-f16.gguf'] },
+    { name: 'Qwen 3.5 4B Abliterated Q2_K', group: 'Qwen 3.5 4B Abliterated', description: 'huihui Qwen 3.5 4B abliterated · smallest quant.', pulls: '32K+', tags: ['4B', 'Vision', 'Q2_K', '1.8 GB'], updated: 'New', agent: true, lightweight: true, released: '2026-03', downloadUrl: HF('mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF', 'Huihui-Qwen3.5-4B-abliterated.Q2_K.gguf'), filename: 'Huihui-Qwen3.5-4B-abliterated.Q2_K.gguf', sizeGB: 1.8, ...IMAGE_PART['mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF/Huihui-Qwen3.5-4B-abliterated.mmproj-f16.gguf'] },
+    { name: 'Qwen 3.5 4B Abliterated Q8_0', group: 'Qwen 3.5 4B Abliterated', description: 'huihui Qwen 3.5 4B abliterated · largest quant, closest to the original weights.', pulls: '32K+', tags: ['4B', 'Vision', 'Q8_0', '4.5 GB'], updated: 'New', agent: true, lightweight: true, released: '2026-03', downloadUrl: HF('mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF', 'Huihui-Qwen3.5-4B-abliterated.Q8_0.gguf'), filename: 'Huihui-Qwen3.5-4B-abliterated.Q8_0.gguf', sizeGB: 4.48, ...IMAGE_PART['mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF/Huihui-Qwen3.5-4B-abliterated.mmproj-f16.gguf'] },
+    { name: 'LFM 2.5 2.6B Heretic', group: 'LFM 2.5 2.6B Heretic', description: 'Liquid AI LFM 2.5 2.6B, Heretic abliterated · the smallest uncensored model here, text only. Few downloads so far.', pulls: '3K+', tags: ['2.6B', 'Q4_K_M', '1.7 GB', 'Heretic'], updated: 'New', lightweight: true, released: '2026-08', downloadUrl: HF('Abiray/LFM2.5-2.6B-Heretic-Abliterated-GGUF', 'LFM2.5-2.6B-heretic-Q4_K_M.gguf'), filename: 'LFM2.5-2.6B-heretic-Q4_K_M.gguf', sizeGB: 1.67 },
+    { name: 'LFM 2.5 2.6B Heretic Q3_K_M', group: 'LFM 2.5 2.6B Heretic', description: 'Liquid AI LFM 2.5 2.6B, Heretic abliterated · smallest quant.', pulls: '3K+', tags: ['2.6B', 'Q3_K_M', '1.4 GB', 'Heretic'], updated: 'New', lightweight: true, released: '2026-08', downloadUrl: HF('Abiray/LFM2.5-2.6B-Heretic-Abliterated-GGUF', 'LFM2.5-2.6B-heretic-Q3_K_M.gguf'), filename: 'LFM2.5-2.6B-heretic-Q3_K_M.gguf', sizeGB: 1.37 },
+    { name: 'LFM 2.5 2.6B Heretic Q8_0', group: 'LFM 2.5 2.6B Heretic', description: 'Liquid AI LFM 2.5 2.6B, Heretic abliterated · largest quant, closest to the original weights.', pulls: '3K+', tags: ['2.6B', 'Q8_0', '2.9 GB', 'Heretic'], updated: 'New', lightweight: true, released: '2026-08', downloadUrl: HF('Abiray/LFM2.5-2.6B-Heretic-Abliterated-GGUF', 'LFM2.5-2.6B-heretic-Q8_0.gguf'), filename: 'LFM2.5-2.6B-heretic-Q8_0.gguf', sizeGB: 2.87 },
+    // TheDrummer on Gemma 4 (September 2026), in place of Cydonia 24B v4.3.
+    // The repos name no license.
+    { name: 'Artemis 31B v1.2', group: 'Artemis 31B v1.2', description: 'TheDrummer Artemis 31B · roleplay and creative-writing finetune on a Gemma 4 base, with vision. Recommended quant. The 1.2 GB vision projector comes with it.', pulls: '26K+', tags: ['31B', 'Vision', 'Q4_K_M', '20 GB', 'RP'], updated: 'New', released: '2026-09', downloadUrl: HF('bartowski/TheDrummer_Artemis-31B-v1.2-GGUF', 'TheDrummer_Artemis-31B-v1.2-Q4_K_M.gguf'), filename: 'TheDrummer_Artemis-31B-v1.2-Q4_K_M.gguf', sizeGB: 19.52, ...IMAGE_PART['bartowski/TheDrummer_Artemis-31B-v1.2-GGUF/mmproj-TheDrummer_Artemis-31B-v1.2-f16.gguf'] },
+    { name: 'Artemis 31B v1.2 IQ2_M', group: 'Artemis 31B v1.2', description: 'TheDrummer Artemis 31B · smallest quant, for 16 GB machines.', pulls: '26K+', tags: ['31B', 'Vision', 'IQ2_M', '11 GB', 'RP'], updated: 'New', released: '2026-09', downloadUrl: HF('bartowski/TheDrummer_Artemis-31B-v1.2-GGUF', 'TheDrummer_Artemis-31B-v1.2-IQ2_M.gguf'), filename: 'TheDrummer_Artemis-31B-v1.2-IQ2_M.gguf', sizeGB: 11.34, ...IMAGE_PART['bartowski/TheDrummer_Artemis-31B-v1.2-GGUF/mmproj-TheDrummer_Artemis-31B-v1.2-f16.gguf'] },
+    { name: 'Artemis 31B v1.2 Q8_0', group: 'Artemis 31B v1.2', description: 'TheDrummer Artemis 31B · largest quant, closest to the original weights.', pulls: '26K+', tags: ['31B', 'Vision', 'Q8_0', '33 GB', 'RP'], updated: 'New', released: '2026-09', downloadUrl: HF('bartowski/TheDrummer_Artemis-31B-v1.2-GGUF', 'TheDrummer_Artemis-31B-v1.2-Q8_0.gguf'), filename: 'TheDrummer_Artemis-31B-v1.2-Q8_0.gguf', sizeGB: 32.64, ...IMAGE_PART['bartowski/TheDrummer_Artemis-31B-v1.2-GGUF/mmproj-TheDrummer_Artemis-31B-v1.2-f16.gguf'] },
+    { name: 'Orion 26B MoE v1.1', group: 'Orion 26B MoE v1.1', description: 'TheDrummer Orion 26B MoE · roleplay finetune on the Gemma 4 MoE base, 4B active parameters, with vision. Recommended quant. The 1.2 GB vision projector comes with it.', pulls: '36K+', tags: ['26B MoE', 'Vision', 'Q4_K_M', '18 GB', 'RP'], updated: 'New', released: '2026-09', downloadUrl: HF('bartowski/TheDrummer_Orion-26B-A4B-v1.1-GGUF', 'TheDrummer_Orion-26B-A4B-v1.1-Q4_K_M.gguf'), filename: 'TheDrummer_Orion-26B-A4B-v1.1-Q4_K_M.gguf', sizeGB: 17.97, ...IMAGE_PART['bartowski/TheDrummer_Orion-26B-A4B-v1.1-GGUF/mmproj-TheDrummer_Orion-26B-A4B-v1.1-f16.gguf'] },
+    { name: 'Orion 26B MoE v1.1 IQ2_M', group: 'Orion 26B MoE v1.1', description: 'TheDrummer Orion 26B MoE · smallest quant, for 16 GB machines.', pulls: '36K+', tags: ['26B MoE', 'Vision', 'IQ2_M', '11 GB', 'RP'], updated: 'New', released: '2026-09', downloadUrl: HF('bartowski/TheDrummer_Orion-26B-A4B-v1.1-GGUF', 'TheDrummer_Orion-26B-A4B-v1.1-IQ2_M.gguf'), filename: 'TheDrummer_Orion-26B-A4B-v1.1-IQ2_M.gguf', sizeGB: 10.9, ...IMAGE_PART['bartowski/TheDrummer_Orion-26B-A4B-v1.1-GGUF/mmproj-TheDrummer_Orion-26B-A4B-v1.1-f16.gguf'] },
+    { name: 'Orion 26B MoE v1.1 Q8_0', group: 'Orion 26B MoE v1.1', description: 'TheDrummer Orion 26B MoE · largest quant, closest to the original weights.', pulls: '36K+', tags: ['26B MoE', 'Vision', 'Q8_0', '27 GB', 'RP'], updated: 'New', released: '2026-09', downloadUrl: HF('bartowski/TheDrummer_Orion-26B-A4B-v1.1-GGUF', 'TheDrummer_Orion-26B-A4B-v1.1-Q8_0.gguf'), filename: 'TheDrummer_Orion-26B-A4B-v1.1-Q8_0.gguf', sizeGB: 26.86, ...IMAGE_PART['bartowski/TheDrummer_Orion-26B-A4B-v1.1-GGUF/mmproj-TheDrummer_Orion-26B-A4B-v1.1-f16.gguf'] },
+    // GPT-OSS 120B abliterated. The base is wangzhang's abliteration, not huihui's.
+    { name: 'GPT-OSS 120B Abliterated', group: 'GPT-OSS 120B Abliterated', description: 'GPT-OSS 120B abliterated · wangzhang\'s abliteration of the large open-weight GPT model, with tool calling. Single 88 GB file, for 128 GB machines. Few downloads so far. Apache-2.0.', pulls: '3K+', tags: ['120B', 'Q4_K_M', '88 GB'], updated: 'New', agent: true, released: '2026-04', downloadUrl: HF('mradermacher/gpt-oss-120b-abliterated-GGUF', 'gpt-oss-120b-abliterated.Q4_K_M.gguf'), filename: 'gpt-oss-120b-abliterated.Q4_K_M.gguf', sizeGB: 87.85 },
+    { name: 'GPT-OSS 120B Abliterated Q2_K', group: 'GPT-OSS 120B Abliterated', description: 'GPT-OSS 120B abliterated · smallest quant, single 66 GB file, for 96 GB machines and up.', pulls: '3K+', tags: ['120B', 'Q2_K', '66 GB'], updated: 'New', agent: true, released: '2026-04', downloadUrl: HF('mradermacher/gpt-oss-120b-abliterated-GGUF', 'gpt-oss-120b-abliterated.Q2_K.gguf'), filename: 'gpt-oss-120b-abliterated.Q2_K.gguf', sizeGB: 66.15 },
   ])
 }
 
@@ -1140,58 +1337,67 @@ export function getMainstreamTextModels(): DiscoverModel[] {
     //    verified 2026-06-06). All run in UNDER 4GB VRAM/RAM (Ultra-Lightweight
     //    weight class), commercially licensed (Apache-2.0 / MIT), native tool
     //    calling. The curated "good tool calls on weak hardware" set. ──
-    { name: 'Qwen3 4B', description: 'Qwen3 4B · best all-round sub-4GB tool caller (BFCL ~62%). Native Hermes-style tools, 256K context. Tip: run thinking-OFF for reliable tool calls. Apache-2.0.', pulls: '5M+', tags: ['4B', 'Q4_K_M', '2.4 GB', 'Tools'], updated: 'Hot', agent: true, lightweight: true, released: '2025-05', downloadUrl: HF('Qwen/Qwen3-4B-GGUF', 'Qwen3-4B-Q4_K_M.gguf'), filename: 'Qwen3-4B-Q4_K_M.gguf', sizeGB: 2.4 },
-    { name: 'IBM Granite 4.0 Micro', description: 'IBM Granite 4.0 Micro (3B) · agentic + coding tool caller. BFCL v3 59.98 (best third-party-sourced sub-4GB score). Native tool calling, runs CPU-only. Apache-2.0.', pulls: '50K+', tags: ['3B', 'Q4_K_M', '2 GB', 'Tools'], updated: 'Hot', agent: true, lightweight: true, released: '2025-10', downloadUrl: HF('ibm-granite/granite-4.0-micro-GGUF', 'granite-4.0-micro-Q4_K_M.gguf'), filename: 'granite-4.0-micro-Q4_K_M.gguf', sizeGB: 2 },
     { name: 'Phi-4 Mini', description: 'Microsoft Phi-4-mini (3.8B) · disciplined JSON-schema function calling, 128K context. Different tool format (<|tool|> tokens) than the Qwen/Granite trio, adds diversity. MIT.', pulls: '500K+', tags: ['3.8B', 'Q4_K_M', '2.4 GB', 'Tools'], updated: 'Hot', agent: true, lightweight: true, released: '2025-02', downloadUrl: HF('lmstudio-community/Phi-4-mini-instruct-GGUF', 'Phi-4-mini-instruct-Q4_K_M.gguf'), filename: 'Phi-4-mini-instruct-Q4_K_M.gguf', sizeGB: 2.4 },
     // ── Gemma 4 (April 2026) ──
-    { name: 'Gemma 4 31B', description: 'Google Gemma 4 31B · frontier dense model, native tools + vision. 256K context.', pulls: '100K+', tags: ['31B', 'Q4_K_M', '17 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('unsloth/gemma-4-31B-it-GGUF', 'gemma-4-31B-it-Q4_K_M.gguf'), filename: 'gemma-4-31B-it-Q4_K_M.gguf', sizeGB: 17 },
-    { name: 'Gemma 4 26B MoE', description: 'Gemma 4 26B MoE · 26B brain, runs like 4B. Tools + vision. Apache 2.0.', pulls: '100K+', tags: ['26B', 'Q4_K_XL', '16 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('unsloth/gemma-4-26B-A4B-it-GGUF', 'gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf'), filename: 'gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf', sizeGB: 16 },
-    { name: 'Gemma 4 12B (Q4)', group: 'Gemma 4 12B', description: 'Google Gemma 4 12B · Q4_K_M, ~7 GB, fits 8 GB GPUs. Native tools + vision, 128K context. lmstudio-community build (LM-Studio-curated) with a fixed tool-template, so tool calling works. Best on LM Studio (Ollama cannot load the gemma4 vision projector yet).', pulls: '100K+', tags: ['12B', 'Q4_K_M', '7 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('lmstudio-community/gemma-4-12b-it-GGUF', 'gemma-4-12B-it-Q4_K_M.gguf'), filename: 'gemma-4-12B-it-Q4_K_M.gguf', sizeGB: 7 },
-    { name: 'Gemma 4 12B (Q6)', group: 'Gemma 4 12B', description: 'Google Gemma 4 12B · Q6_K, ~10 GB, fits 12 GB GPUs. Native tools + vision, 128K context. lmstudio-community build (LM-Studio-curated) with a fixed tool-template, so tool calling works. Best on LM Studio (Ollama cannot load the gemma4 vision projector yet).', pulls: '100K+', tags: ['12B', 'Q6_K', '10 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('lmstudio-community/gemma-4-12b-it-GGUF', 'gemma-4-12B-it-Q6_K.gguf'), filename: 'gemma-4-12B-it-Q6_K.gguf', sizeGB: 10 },
-    { name: 'Gemma 4 12B (Q8)', group: 'Gemma 4 12B', description: 'Google Gemma 4 12B · Q8_0, near-lossless full quality. Native tools + vision, 128K context, ~13 GB. lmstudio-community build (LM-Studio-curated) with a fixed tool-template, so tool calling works out of the box. Best on LM Studio (Ollama cannot load the gemma4 vision projector yet).', pulls: '100K+', tags: ['12B', 'Q8_0', '13 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('lmstudio-community/gemma-4-12b-it-GGUF', 'gemma-4-12B-it-Q8_0.gguf'), filename: 'gemma-4-12B-it-Q8_0.gguf', sizeGB: 13 },
-    { name: 'Gemma 4 E4B', description: 'Gemma 4 E4B · lightweight 4.5B, great for small GPUs.', pulls: '100K+', tags: ['4.5B', 'Q4_K_M', '5 GB'], updated: 'Hot', released: '2026-04', downloadUrl: HF('unsloth/gemma-4-E4B-it-GGUF', 'gemma-4-E4B-it-Q4_K_M.gguf'), filename: 'gemma-4-E4B-it-Q4_K_M.gguf', sizeGB: 5 },
-    { name: 'Gemma 4 E2B', description: 'Gemma 4 E2B · ultra-light 2.3B, runs on anything.', pulls: '100K+', tags: ['2.3B', 'Q4_K_M', '3 GB'], updated: 'New', released: '2026-04', downloadUrl: HF('unsloth/gemma-4-E2B-it-GGUF', 'gemma-4-E2B-it-Q4_K_M.gguf'), filename: 'gemma-4-E2B-it-Q4_K_M.gguf', sizeGB: 3 },
+    { name: 'Gemma 4 31B', description: 'Google Gemma 4 31B · frontier dense model, native tools + vision. 256K context.', pulls: '100K+', tags: ['31B', 'Vision', 'Q4_K_M', '17 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('unsloth/gemma-4-31B-it-GGUF', 'gemma-4-31B-it-Q4_K_M.gguf'), filename: 'gemma-4-31B-it-Q4_K_M.gguf', sizeGB: 17, ...IMAGE_PART['unsloth/gemma-4-31B-it-GGUF/mmproj-F16.gguf'] },
+    { name: 'Gemma 4 26B MoE', description: 'Gemma 4 26B MoE · 26B brain, runs like 4B. Tools + vision. Apache 2.0.', pulls: '100K+', tags: ['26B', 'Vision', 'Q4_K_XL', '16 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('unsloth/gemma-4-26B-A4B-it-GGUF', 'gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf'), filename: 'gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf', sizeGB: 16, ...IMAGE_PART['unsloth/gemma-4-26B-A4B-it-GGUF/mmproj-F16.gguf'] },
+    { name: 'Gemma 4 12B (Q4)', group: 'Gemma 4 12B', description: 'Google Gemma 4 12B · Q4_K_M, ~7 GB, fits 8 GB GPUs. Native tools + vision, 128K context. lmstudio-community build (LM-Studio-curated) with a fixed tool-template, so tool calling works. Best on LM Studio (Ollama cannot load the gemma4 vision projector yet).', pulls: '100K+', tags: ['12B', 'Vision', 'Q4_K_M', '7 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('lmstudio-community/gemma-4-12b-it-GGUF', 'gemma-4-12B-it-Q4_K_M.gguf'), filename: 'gemma-4-12B-it-Q4_K_M.gguf', sizeGB: 7, ...IMAGE_PART['lmstudio-community/gemma-4-12b-it-GGUF/mmproj-gemma-4-12B-it-BF16.gguf'] },
+    { name: 'Gemma 4 12B (Q6)', group: 'Gemma 4 12B', description: 'Google Gemma 4 12B · Q6_K, ~10 GB, fits 12 GB GPUs. Native tools + vision, 128K context. lmstudio-community build (LM-Studio-curated) with a fixed tool-template, so tool calling works. Best on LM Studio (Ollama cannot load the gemma4 vision projector yet).', pulls: '100K+', tags: ['12B', 'Vision', 'Q6_K', '10 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('lmstudio-community/gemma-4-12b-it-GGUF', 'gemma-4-12B-it-Q6_K.gguf'), filename: 'gemma-4-12B-it-Q6_K.gguf', sizeGB: 10, ...IMAGE_PART['lmstudio-community/gemma-4-12b-it-GGUF/mmproj-gemma-4-12B-it-BF16.gguf'] },
+    { name: 'Gemma 4 12B (Q8)', group: 'Gemma 4 12B', description: 'Google Gemma 4 12B · Q8_0, near-lossless full quality. Native tools + vision, 128K context, ~13 GB. lmstudio-community build (LM-Studio-curated) with a fixed tool-template, so tool calling works out of the box. Best on LM Studio (Ollama cannot load the gemma4 vision projector yet).', pulls: '100K+', tags: ['12B', 'Vision', 'Q8_0', '13 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('lmstudio-community/gemma-4-12b-it-GGUF', 'gemma-4-12B-it-Q8_0.gguf'), filename: 'gemma-4-12B-it-Q8_0.gguf', sizeGB: 13, ...IMAGE_PART['lmstudio-community/gemma-4-12b-it-GGUF/mmproj-gemma-4-12B-it-BF16.gguf'] },
+    { name: 'Gemma 4 E4B', description: 'Gemma 4 E4B · lightweight 4.5B, great for small GPUs.', pulls: '100K+', tags: ['4.5B', 'Vision', 'Q4_K_M', '5 GB'], updated: 'Hot', released: '2026-04', downloadUrl: HF('unsloth/gemma-4-E4B-it-GGUF', 'gemma-4-E4B-it-Q4_K_M.gguf'), filename: 'gemma-4-E4B-it-Q4_K_M.gguf', sizeGB: 5, ...IMAGE_PART['unsloth/gemma-4-E4B-it-GGUF/mmproj-F16.gguf'] },
+    { name: 'Gemma 4 E2B', description: 'Gemma 4 E2B · ultra-light 2.3B, runs on anything.', pulls: '100K+', tags: ['2.3B', 'Vision', 'Q4_K_M', '3 GB'], updated: 'New', released: '2026-04', downloadUrl: HF('unsloth/gemma-4-E2B-it-GGUF', 'gemma-4-E2B-it-Q4_K_M.gguf'), filename: 'gemma-4-E2B-it-Q4_K_M.gguf', sizeGB: 3, ...IMAGE_PART['unsloth/gemma-4-E2B-it-GGUF/mmproj-F16.gguf'] },
     // ── Qwen 3.8 (August 2026) ──
     // Qwen shipped no GGUF of its own, so the 27B rides on unsloth's dynamic
     // quants (the most-downloaded conversion by a wide margin). Every 27B entry
     // pairs with the repo's mmproj so vision works on the built-in engine and in
     // LM Studio; the Ollama tag brings its own projector layer. The 9B distill
     // has no projector upstream and is therefore text-only.
-    { name: 'Qwen 3.8 27B', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B dense · vision + tools + switchable thinking, 262K context. Unsloth dynamic Q4, the recommended default.', pulls: '6M+', tags: ['27B', 'Vision', 'UD-Q4_K_M', '16 GB'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-UD-Q4_K_M.gguf'), filename: 'Qwen3.8-27B-UD-Q4_K_M.gguf', sizeGB: 16.5, mmprojUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'mmproj-F16.gguf'), mmprojSizeGB: 0.93 },
-    { name: 'Qwen 3.8 27B UD-IQ2_XXS', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B · smallest dynamic quant, runs on an 8 GB card.', pulls: '6M+', tags: ['27B', 'Vision', 'UD-IQ2_XXS', '7 GB'], updated: 'New', released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-UD-IQ2_XXS.gguf'), filename: 'Qwen3.8-27B-UD-IQ2_XXS.gguf', sizeGB: 7.3, mmprojUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'mmproj-F16.gguf'), mmprojSizeGB: 0.93 },
-    { name: 'Qwen 3.8 27B UD-IQ3_XXS', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B · 3 bit dynamic, fits 12 GB with context to spare.', pulls: '6M+', tags: ['27B', 'Vision', 'UD-IQ3_XXS', '11 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-UD-IQ3_XXS.gguf'), filename: 'Qwen3.8-27B-UD-IQ3_XXS.gguf', sizeGB: 10.9, mmprojUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'mmproj-F16.gguf'), mmprojSizeGB: 0.93 },
-    { name: 'Qwen 3.8 27B UD-Q3_K_XL', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B · Q3 dynamic, the 12 GB sweet spot.', pulls: '6M+', tags: ['27B', 'Vision', 'UD-Q3_K_XL', '13 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-UD-Q3_K_XL.gguf'), filename: 'Qwen3.8-27B-UD-Q3_K_XL.gguf', sizeGB: 13.1, mmprojUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'mmproj-F16.gguf'), mmprojSizeGB: 0.93 },
-    { name: 'Qwen 3.8 27B UD-Q4_K_XL', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B · better quality per GB than plain Q4. For 20 GB+ cards.', pulls: '6M+', tags: ['27B', 'Vision', 'UD-Q4_K_XL', '18 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-UD-Q4_K_XL.gguf'), filename: 'Qwen3.8-27B-UD-Q4_K_XL.gguf', sizeGB: 17.6, mmprojUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'mmproj-F16.gguf'), mmprojSizeGB: 0.93 },
-    { name: 'Qwen 3.8 27B UD-Q5_K_M', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B · Q5 dynamic, higher quality. For 24 GB cards.', pulls: '6M+', tags: ['27B', 'Vision', 'UD-Q5_K_M', '20 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-UD-Q5_K_M.gguf'), filename: 'Qwen3.8-27B-UD-Q5_K_M.gguf', sizeGB: 19.8, mmprojUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'mmproj-F16.gguf'), mmprojSizeGB: 0.93 },
-    { name: 'Qwen 3.8 27B UD-Q6_K', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B · Q6 dynamic, near-lossless.', pulls: '6M+', tags: ['27B', 'Vision', 'UD-Q6_K', '22 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-UD-Q6_K.gguf'), filename: 'Qwen3.8-27B-UD-Q6_K.gguf', sizeGB: 22, mmprojUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'mmproj-F16.gguf'), mmprojSizeGB: 0.93 },
-    { name: 'Qwen 3.8 27B Q8_0', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B · Q8, full quality. 32 GB+ or CPU with lots of RAM.', pulls: '6M+', tags: ['27B', 'Vision', 'Q8_0', '29 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-Q8_0.gguf'), filename: 'Qwen3.8-27B-Q8_0.gguf', sizeGB: 29, mmprojUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'mmproj-F16.gguf'), mmprojSizeGB: 0.93 },
+    { name: 'Qwen 3.8 27B', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B dense · vision + tools + switchable thinking, 262K context. Unsloth dynamic Q4, the recommended default.', pulls: '6M+', tags: ['27B', 'Vision', 'UD-Q4_K_M', '16 GB'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-UD-Q4_K_M.gguf'), filename: 'Qwen3.8-27B-UD-Q4_K_M.gguf', sizeGB: 16.5, ...IMAGE_PART['unsloth/Qwen3.8-27B-GGUF/mmproj-F16.gguf'] },
+    { name: 'Qwen 3.8 27B UD-IQ2_XXS', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B · smallest dynamic quant, runs on an 8 GB card.', pulls: '6M+', tags: ['27B', 'Vision', 'UD-IQ2_XXS', '7 GB'], updated: 'New', released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-UD-IQ2_XXS.gguf'), filename: 'Qwen3.8-27B-UD-IQ2_XXS.gguf', sizeGB: 7.3, ...IMAGE_PART['unsloth/Qwen3.8-27B-GGUF/mmproj-F16.gguf'] },
+    { name: 'Qwen 3.8 27B UD-IQ3_XXS', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B · 3 bit dynamic, fits 12 GB with context to spare.', pulls: '6M+', tags: ['27B', 'Vision', 'UD-IQ3_XXS', '11 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-UD-IQ3_XXS.gguf'), filename: 'Qwen3.8-27B-UD-IQ3_XXS.gguf', sizeGB: 10.9, ...IMAGE_PART['unsloth/Qwen3.8-27B-GGUF/mmproj-F16.gguf'] },
+    { name: 'Qwen 3.8 27B UD-Q3_K_XL', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B · Q3 dynamic, the 12 GB sweet spot.', pulls: '6M+', tags: ['27B', 'Vision', 'UD-Q3_K_XL', '13 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-UD-Q3_K_XL.gguf'), filename: 'Qwen3.8-27B-UD-Q3_K_XL.gguf', sizeGB: 13.1, ...IMAGE_PART['unsloth/Qwen3.8-27B-GGUF/mmproj-F16.gguf'] },
+    { name: 'Qwen 3.8 27B UD-Q4_K_XL', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B · better quality per GB than plain Q4. For 20 GB+ cards.', pulls: '6M+', tags: ['27B', 'Vision', 'UD-Q4_K_XL', '18 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-UD-Q4_K_XL.gguf'), filename: 'Qwen3.8-27B-UD-Q4_K_XL.gguf', sizeGB: 17.6, ...IMAGE_PART['unsloth/Qwen3.8-27B-GGUF/mmproj-F16.gguf'] },
+    { name: 'Qwen 3.8 27B UD-Q5_K_M', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B · Q5 dynamic, higher quality. For 24 GB cards.', pulls: '6M+', tags: ['27B', 'Vision', 'UD-Q5_K_M', '20 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-UD-Q5_K_M.gguf'), filename: 'Qwen3.8-27B-UD-Q5_K_M.gguf', sizeGB: 19.8, ...IMAGE_PART['unsloth/Qwen3.8-27B-GGUF/mmproj-F16.gguf'] },
+    { name: 'Qwen 3.8 27B UD-Q6_K', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B · Q6 dynamic, near-lossless.', pulls: '6M+', tags: ['27B', 'Vision', 'UD-Q6_K', '22 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-UD-Q6_K.gguf'), filename: 'Qwen3.8-27B-UD-Q6_K.gguf', sizeGB: 22, ...IMAGE_PART['unsloth/Qwen3.8-27B-GGUF/mmproj-F16.gguf'] },
+    { name: 'Qwen 3.8 27B Q8_0', group: 'Qwen 3.8 27B', description: 'Qwen 3.8 27B · Q8, full quality. 32 GB+ or CPU with lots of RAM.', pulls: '6M+', tags: ['27B', 'Vision', 'Q8_0', '29 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('unsloth/Qwen3.8-27B-GGUF', 'Qwen3.8-27B-Q8_0.gguf'), filename: 'Qwen3.8-27B-Q8_0.gguf', sizeGB: 29, ...IMAGE_PART['unsloth/Qwen3.8-27B-GGUF/mmproj-F16.gguf'] },
     { name: 'Qwen 3.8 27B (Ollama)', description: 'Qwen 3.8 27B · one-command pull, projector included. Vision + tools + thinking out of the box.', pulls: '570K+', tags: ['27B', 'Vision', 'Tools', '18 GB'], updated: 'Hot', agent: true, released: '2026-08', ollamaModel: 'qwen3.8', sizeGB: 17.7 },
-    { name: 'Qwen 3.8 9B Distill', group: 'Qwen 3.8 9B Distill', description: 'Qwen 3.8 9B distill · the 27B reasoning in a size that fits an 8 GB card. Text only, the repo ships no vision projector.', pulls: '126K+', tags: ['9B', 'Q4_K_M', '6 GB'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('empero-ai/Qwen3.8-9B-Distill-GGUF', 'Qwen3.8-9B-Q4_K_M.gguf'), filename: 'Qwen3.8-9B-Q4_K_M.gguf', sizeGB: 5.8 },
-    { name: 'Qwen 3.8 9B Distill Q5_K_M', group: 'Qwen 3.8 9B Distill', description: 'Qwen 3.8 9B distill · Q5, higher quality. Text only.', pulls: '126K+', tags: ['9B', 'Q5_K_M', '7 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('empero-ai/Qwen3.8-9B-Distill-GGUF', 'Qwen3.8-9B-Q5_K_M.gguf'), filename: 'Qwen3.8-9B-Q5_K_M.gguf', sizeGB: 6.6 },
-    { name: 'Qwen 3.8 9B Distill Q6_K', group: 'Qwen 3.8 9B Distill', description: 'Qwen 3.8 9B distill · Q6, near-lossless. Text only.', pulls: '126K+', tags: ['9B', 'Q6_K', '8 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('empero-ai/Qwen3.8-9B-Distill-GGUF', 'Qwen3.8-9B-Q6_K.gguf'), filename: 'Qwen3.8-9B-Q6_K.gguf', sizeGB: 7.6 },
-    { name: 'Qwen 3.8 9B Distill Q8_0', group: 'Qwen 3.8 9B Distill', description: 'Qwen 3.8 9B distill · Q8, full quality. Text only.', pulls: '126K+', tags: ['9B', 'Q8_0', '10 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('empero-ai/Qwen3.8-9B-Distill-GGUF', 'Qwen3.8-9B-Q8_0.gguf'), filename: 'Qwen3.8-9B-Q8_0.gguf', sizeGB: 9.8 },
+    { name: 'Qwen 3.8 9B Distill', group: 'Qwen 3.8 9B Distill', description: 'Qwen 3.8 9B distill · the 27B reasoning in a size that fits an 8 GB card. Text only, the repo ships no vision projector.', pulls: '126K+', tags: ['9B', 'Q4_K_M', '6 GB'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('empero-ai/Qwen3.8-9B-Distill-GGUF', 'Qwen3.8-9B-Q4_K_M.gguf'), filename: 'Qwen3.8-9B-Q4_K_M.gguf', sizeGB: 5.8, noImagePart: NO_PART_UPSTREAM },
+    { name: 'Qwen 3.8 9B Distill Q5_K_M', group: 'Qwen 3.8 9B Distill', description: 'Qwen 3.8 9B distill · Q5, higher quality. Text only.', pulls: '126K+', tags: ['9B', 'Q5_K_M', '7 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('empero-ai/Qwen3.8-9B-Distill-GGUF', 'Qwen3.8-9B-Q5_K_M.gguf'), filename: 'Qwen3.8-9B-Q5_K_M.gguf', sizeGB: 6.6, noImagePart: NO_PART_UPSTREAM },
+    { name: 'Qwen 3.8 9B Distill Q6_K', group: 'Qwen 3.8 9B Distill', description: 'Qwen 3.8 9B distill · Q6, near-lossless. Text only.', pulls: '126K+', tags: ['9B', 'Q6_K', '8 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('empero-ai/Qwen3.8-9B-Distill-GGUF', 'Qwen3.8-9B-Q6_K.gguf'), filename: 'Qwen3.8-9B-Q6_K.gguf', sizeGB: 7.6, noImagePart: NO_PART_UPSTREAM },
+    { name: 'Qwen 3.8 9B Distill Q8_0', group: 'Qwen 3.8 9B Distill', description: 'Qwen 3.8 9B distill · Q8, full quality. Text only.', pulls: '126K+', tags: ['9B', 'Q8_0', '10 GB'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('empero-ai/Qwen3.8-9B-Distill-GGUF', 'Qwen3.8-9B-Q8_0.gguf'), filename: 'Qwen3.8-9B-Q8_0.gguf', sizeGB: 9.8, noImagePart: NO_PART_UPSTREAM },
     // ── Qwen 3.6 27B DENSE (April 21, 2026 · new release) ──
-    { name: 'Qwen 3.6 27B', group: 'Qwen 3.6 27B', description: 'Qwen 3.6 27B dense · vision + agentic coding + thinking preservation. 256K context. Recommended default.', pulls: 'New', tags: ['27B', 'Vision', 'Q4_K_M', '16 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('unsloth/Qwen3.6-27B-GGUF', 'Qwen3.6-27B-Q4_K_M.gguf'), filename: 'Qwen3.6-27B-Q4_K_M.gguf', sizeGB: 16 },
-    { name: 'Qwen 3.6 27B Q3_K_M', group: 'Qwen 3.6 27B', description: 'Qwen 3.6 27B · Q3 quant, fits 12GB VRAM completely. For GPU-only inference.', pulls: 'New', tags: ['27B', 'Vision', 'Q3_K_M', '13 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('unsloth/Qwen3.6-27B-GGUF', 'Qwen3.6-27B-Q3_K_M.gguf'), filename: 'Qwen3.6-27B-Q3_K_M.gguf', sizeGB: 13 },
-    { name: 'Qwen 3.6 27B UD-Q4_K_XL', group: 'Qwen 3.6 27B', description: 'Qwen 3.6 27B · Unsloth Dynamic 2.0 quant. Better quality per GB than Q4_K_M.', pulls: 'New', tags: ['27B', 'Vision', 'UD-Q4_K_XL', '16 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('unsloth/Qwen3.6-27B-GGUF', 'Qwen3.6-27B-UD-Q4_K_XL.gguf'), filename: 'Qwen3.6-27B-UD-Q4_K_XL.gguf', sizeGB: 16 },
-    { name: 'Qwen 3.6 27B UD-IQ2_XXS', group: 'Qwen 3.6 27B', description: 'Qwen 3.6 27B · smallest quant (8.7 GB). Runs on 8GB VRAM.', pulls: 'New', tags: ['27B', 'Vision', 'UD-IQ2_XXS', '9 GB'], updated: 'New', released: '2026-04', downloadUrl: HF('unsloth/Qwen3.6-27B-GGUF', 'Qwen3.6-27B-UD-IQ2_XXS.gguf'), filename: 'Qwen3.6-27B-UD-IQ2_XXS.gguf', sizeGB: 9 },
-    { name: 'Qwen 3.6 27B Q5_K_M', group: 'Qwen 3.6 27B', description: 'Qwen 3.6 27B · Q5 quant, higher quality. For 24GB+ VRAM.', pulls: 'New', tags: ['27B', 'Vision', 'Q5_K_M', '18 GB'], updated: 'New', agent: true, released: '2026-04', downloadUrl: HF('unsloth/Qwen3.6-27B-GGUF', 'Qwen3.6-27B-Q5_K_M.gguf'), filename: 'Qwen3.6-27B-Q5_K_M.gguf', sizeGB: 18 },
-    { name: 'Qwen 3.6 27B Q6_K', group: 'Qwen 3.6 27B', description: 'Qwen 3.6 27B · Q6 quant, near-lossless. For high-VRAM setups.', pulls: 'New', tags: ['27B', 'Vision', 'Q6_K', '21 GB'], updated: 'New', agent: true, released: '2026-04', downloadUrl: HF('unsloth/Qwen3.6-27B-GGUF', 'Qwen3.6-27B-Q6_K.gguf'), filename: 'Qwen3.6-27B-Q6_K.gguf', sizeGB: 21 },
-    { name: 'Qwen 3.6 27B Q8_0', group: 'Qwen 3.6 27B', description: 'Qwen 3.6 27B · Q8 quant, full quality. 24GB+ VRAM / CPU-friendly.', pulls: 'New', tags: ['27B', 'Vision', 'Q8_0', '27 GB'], updated: 'New', agent: true, released: '2026-04', downloadUrl: HF('unsloth/Qwen3.6-27B-GGUF', 'Qwen3.6-27B-Q8_0.gguf'), filename: 'Qwen3.6-27B-Q8_0.gguf', sizeGB: 27 },
+    { name: 'Qwen 3.6 27B', group: 'Qwen 3.6 27B', description: 'Qwen 3.6 27B dense · vision + agentic coding + thinking preservation. 256K context. Recommended default.', pulls: 'New', tags: ['27B', 'Vision', 'Q4_K_M', '16 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('unsloth/Qwen3.6-27B-GGUF', 'Qwen3.6-27B-Q4_K_M.gguf'), filename: 'Qwen3.6-27B-Q4_K_M.gguf', sizeGB: 16, ...IMAGE_PART['unsloth/Qwen3.6-27B-GGUF/mmproj-F16.gguf'] },
     // ── Qwen 3.6 35B MoE (April 2026) · power user MoE variants ──
+    // The NVFP4, MXFP8 and MLX tags are Ollama's MLX builds (labelled "MLX" on
+    // ollama.com/library/qwen3.6/tags, sizes from there, read 08.10.2026).
+    // Ollama's MLX announcement (ollama.com/blog/mlx, 30.03.2026) is about
+    // Apple Silicon and asks for a Mac with more than 32 GB of unified memory
+    // for the 35B-A3B NVFP4 build. Outside macOS the MLX engine is not
+    // officially supported (ollama/ollama issues 16019 and 16265): a standard
+    // Windows or Linux install has no MLX runtime and the pull is refused.
+    // The format names are NVIDIA's, the builds are not for NVIDIA cards.
     { name: 'Qwen 3.6 35B MoE', group: 'Qwen 3.6 35B MoE', description: 'Qwen 3.6 · 35B MoE (3B active), vision + agentic coding + thinking preservation. 256K context. Power users.', pulls: 'New', tags: ['35B MoE', 'Vision', 'Q4_K_M', '24 GB'], updated: 'Hot', agent: true, released: '2026-04', ollamaModel: 'qwen3.6', sizeGB: 24 },
-    { name: 'Qwen 3.6 35B MoE NVFP4', group: 'Qwen 3.6 35B MoE', description: 'Qwen 3.6 35B MoE · NVFP4 quant, smallest size. Best for RTX 40-series / Blackwell.', pulls: 'New', tags: ['35B MoE', 'Vision', 'NVFP4', '22 GB'], updated: 'Hot', agent: true, released: '2026-04', ollamaModel: 'qwen3.6:35b-a3b-nvfp4', sizeGB: 22 },
-    { name: 'Qwen 3.6 35B MoE Coding NVFP4', group: 'Qwen 3.6 35B MoE Coding', description: 'Qwen 3.6 coding-specialized · NVFP4 quant, smaller. Best coding benchmarks per GB.', pulls: 'New', tags: ['35B MoE', 'Coding', 'NVFP4', '22 GB'], updated: 'Hot', agent: true, released: '2026-04', ollamaModel: 'qwen3.6:35b-a3b-coding-nvfp4', sizeGB: 22 },
+    { name: 'Qwen 3.6 35B MoE NVFP4', group: 'Qwen 3.6 35B MoE', description: 'Qwen 3.6 35B MoE · NVFP4, an MLX build in Ollama made for Apple Silicon Macs. Ollama asks for a Mac with more than 32 GB of memory. Not officially supported on Windows or Linux, take Q4_K_M there.', pulls: 'New', tags: ['35B MoE', 'Vision', 'NVFP4', 'MLX', '24 GB'], updated: 'Hot', agent: true, released: '2026-04', ollamaModel: 'qwen3.6:35b-a3b-nvfp4', sizeGB: 24 },
+    { name: 'Qwen 3.6 35B MoE Coding NVFP4', group: 'Qwen 3.6 35B MoE Coding', description: 'Qwen 3.6 coding-specialized · NVFP4, an MLX build in Ollama made for Apple Silicon Macs. Ollama asks for a Mac with more than 32 GB of memory. Not officially supported on Windows or Linux.', pulls: 'New', tags: ['35B MoE', 'Coding', 'NVFP4', 'MLX', '24 GB'], updated: 'Hot', agent: true, released: '2026-04', ollamaModel: 'qwen3.6:35b-a3b-coding-nvfp4', sizeGB: 24 },
     { name: 'Qwen 3.6 35B MoE Q8_0', group: 'Qwen 3.6 35B MoE', description: 'Qwen 3.6 35B MoE · Q8 quant, near-lossless quality. For high-VRAM setups.', pulls: 'New', tags: ['35B MoE', 'Vision', 'Q8_0', '39 GB'], updated: 'New', agent: true, released: '2026-04', ollamaModel: 'qwen3.6:35b-a3b-q8_0', sizeGB: 39 },
-    { name: 'Qwen 3.6 35B MoE MXFP8', group: 'Qwen 3.6 35B MoE', description: 'Qwen 3.6 35B MoE · MXFP8 (MicroScaling FP8). Best precision on H100/MI300X.', pulls: 'New', tags: ['35B MoE', 'MXFP8', '38 GB'], updated: 'New', agent: true, released: '2026-04', ollamaModel: 'qwen3.6:35b-a3b-mxfp8', sizeGB: 38 },
-    { name: 'Qwen 3.6 35B MoE Coding MXFP8', group: 'Qwen 3.6 35B MoE Coding', description: 'Qwen 3.6 coding + MXFP8. Highest coding quality on datacenter GPUs.', pulls: 'New', tags: ['35B MoE', 'Coding', 'MXFP8', '38 GB'], updated: 'New', agent: true, released: '2026-04', ollamaModel: 'qwen3.6:35b-a3b-coding-mxfp8', sizeGB: 38 },
+    { name: 'Qwen 3.6 35B MoE MXFP8', group: 'Qwen 3.6 35B MoE', description: 'Qwen 3.6 35B MoE · MXFP8 (MicroScaling FP8), an MLX build in Ollama made for Apple Silicon Macs. The weights alone are 38 GB, so it needs a Mac with more memory than that. Not officially supported on Windows or Linux, take Q8_0 there.', pulls: 'New', tags: ['35B MoE', 'MXFP8', 'MLX', '38 GB'], updated: 'New', agent: true, released: '2026-04', ollamaModel: 'qwen3.6:35b-a3b-mxfp8', sizeGB: 38 },
+    { name: 'Qwen 3.6 35B MoE Coding MXFP8', group: 'Qwen 3.6 35B MoE Coding', description: 'Qwen 3.6 coding-specialized · MXFP8 (MicroScaling FP8), an MLX build in Ollama made for Apple Silicon Macs. The weights alone are 38 GB, so it needs a Mac with more memory than that. Not officially supported on Windows or Linux.', pulls: 'New', tags: ['35B MoE', 'Coding', 'MXFP8', 'MLX', '38 GB'], updated: 'New', agent: true, released: '2026-04', ollamaModel: 'qwen3.6:35b-a3b-coding-mxfp8', sizeGB: 38 },
     { name: 'Qwen 3.6 35B MoE BF16', group: 'Qwen 3.6 35B MoE', description: 'Qwen 3.6 35B MoE · BF16 full precision. Reference quality, big VRAM only.', pulls: 'New', tags: ['35B MoE', 'Vision', 'BF16', '71 GB'], updated: 'New', agent: true, released: '2026-04', ollamaModel: 'qwen3.6:35b-a3b-bf16', sizeGB: 71 },
     { name: 'Qwen 3.6 35B MoE Coding BF16', group: 'Qwen 3.6 35B MoE Coding', description: 'Qwen 3.6 coding specialist · BF16 full precision. Reference coding quality.', pulls: 'New', tags: ['35B MoE', 'Coding', 'BF16', '70 GB'], updated: 'New', agent: true, released: '2026-04', ollamaModel: 'qwen3.6:35b-a3b-coding-bf16', sizeGB: 70 },
-    { name: 'Qwen 3.6 35B MoE MLX BF16', group: 'Qwen 3.6 35B MoE', description: 'Qwen 3.6 35B MoE · MLX BF16. Optimized for Apple Silicon (M2/M3/M4).', pulls: 'New', tags: ['35B MoE', 'MLX', 'BF16', '70 GB'], updated: 'New', agent: true, released: '2026-04', ollamaModel: 'qwen3.6:35b-a3b-mlx-bf16', sizeGB: 70 },
+    { name: 'Qwen 3.6 35B MoE MLX BF16', group: 'Qwen 3.6 35B MoE', description: 'Qwen 3.6 35B MoE · MLX BF16. Optimized for Apple Silicon (M2/M3/M4).', pulls: 'New', tags: ['35B MoE', 'MLX', 'BF16', '72 GB'], updated: 'New', agent: true, released: '2026-04', ollamaModel: 'qwen3.6:35b-a3b-mlx-bf16', sizeGB: 72 },
     // ── Qwen 3.5 (March 2026) ──
-    { name: 'Qwen 3.5 35B MoE', description: 'Qwen 3.5 35B MoE · best agentic, 256K context. SWE-bench leader.', pulls: '100K+', tags: ['35B', 'Q4_K_M', '21 GB'], updated: 'Hot', agent: true, released: '2026-03', downloadUrl: HF('unsloth/Qwen3.5-35B-A3B-GGUF', 'Qwen3.5-35B-A3B-Q4_K_M.gguf'), filename: 'Qwen3.5-35B-A3B-Q4_K_M.gguf', sizeGB: 21 },
-    { name: 'Qwen 3.5 27B', description: 'Qwen 3.5 27B dense · strongest reasoning + coding.', pulls: '100K+', tags: ['27B', 'Q4_K_M', '16 GB'], updated: 'Hot', agent: true, released: '2026-03', downloadUrl: HF('unsloth/Qwen3.5-27B-GGUF', 'Qwen3.5-27B-Q4_K_M.gguf'), filename: 'Qwen3.5-27B-Q4_K_M.gguf', sizeGB: 16 },
-    { name: 'Qwen 3.5 9B', description: 'Qwen 3.5 9B · excellent balance of speed and quality.', pulls: '100K+', tags: ['9B', 'Q4_K_M', '5 GB'], updated: 'New', agent: true, released: '2026-03', downloadUrl: HF('unsloth/Qwen3.5-9B-GGUF', 'Qwen3.5-9B-Q4_K_M.gguf'), filename: 'Qwen3.5-9B-Q4_K_M.gguf', sizeGB: 5 },
+    { name: 'Qwen 3.5 9B', description: 'Qwen 3.5 9B · excellent balance of speed and quality.', pulls: '100K+', tags: ['9B', 'Vision', 'Q4_K_M', '5 GB'], updated: 'New', agent: true, released: '2026-03', downloadUrl: HF('unsloth/Qwen3.5-9B-GGUF', 'Qwen3.5-9B-Q4_K_M.gguf'), filename: 'Qwen3.5-9B-Q4_K_M.gguf', sizeGB: 5, ...IMAGE_PART['unsloth/Qwen3.5-9B-GGUF/mmproj-F16.gguf'] },
+    // ── Holo 3.1 (H Company) · the model that looks at the screen ──
+    // A Qwen 3.5 fine-tune for operating a computer from screenshots, for the
+    // `computer_task` tool (api/computer-executor.ts picks its output format by
+    // the name). Apache-2.0 on the model card and on this GGUF repo (read at
+    // the source on 06.10.2026). H Company publishes its own GGUF only for the
+    // 35B size (21 GB), which does not fit a 12 GB card, so the 9B comes from
+    // mradermacher's conversion. Run on 06.10.2026 in llama-server with the
+    // projector: 16 of 16 targets hit on the stored screens. On an RTX 3060
+    // with 12 GB (06.10.2026) it never fits next to a 9B chat model (7.7 GB
+    // plus 6.9 GB), so the entry says from when it is worth it.
+    { name: 'Holo 3.1 9B', description: 'H Company Holo 3.1 9B · for computer control. Looks at screenshots and picks the next click. Choose it in Settings under Computer control. Beta: in our test on Windows it finished a simple typing task in 1 of 3 runs. Recommended from 16 GB VRAM, or next to a small chat model: on 12 GB it does not fit next to a 9B chat model, LU swaps the two for every task and each swap takes about 20 seconds. The 0.6 GB vision projector comes with it. Apache-2.0.', pulls: 'New', tags: ['9B', 'Vision', 'Q4_K_M', '6 GB', 'Computer control', 'Beta'], updated: 'New', released: '2026-05', downloadUrl: HF('mradermacher/Holo-3.1-9B-GGUF', 'Holo-3.1-9B.Q4_K_M.gguf'), filename: 'Holo-3.1-9B.Q4_K_M.gguf', sizeGB: 5.24, sha256: 'e667aadce4ffd17cd351c5228bc5dd10bd4f362875c9bd4163ff2dee58249ff0', ...IMAGE_PART['mradermacher/Holo-3.1-9B-GGUF/Holo-3.1-9B.mmproj-Q8_0.gguf'] },
     // ── GPT-OSS (March 2026) ──
     { name: 'GPT-OSS 20B', description: 'OpenAI GPT-OSS · open-source GPT model, strong all-rounder.', pulls: '100K+', tags: ['20B', 'Q4_K_M', '11 GB'], updated: 'Hot', agent: true, released: '2026-03', downloadUrl: HF('unsloth/gpt-oss-20b-GGUF', 'gpt-oss-20b-Q4_K_M.gguf'), filename: 'gpt-oss-20b-Q4_K_M.gguf', sizeGB: 11 },
     // ── Qwen3-Coder (Feb-March 2026) ──
@@ -1205,49 +1411,21 @@ export function getMainstreamTextModels(): DiscoverModel[] {
     { name: 'GLM 4.7 Flash Q5', group: 'GLM 4.7 Flash', description: 'ZhipuAI GLM 4.7 Flash · 30B, high quality. 198K context.', pulls: '50K+', tags: ['30B', 'Q5_K_M', '22 GB'], updated: 'New', agent: true, released: '2026-04', downloadUrl: HF('bartowski/zai-org_GLM-4.7-Flash-GGUF', 'zai-org_GLM-4.7-Flash-Q5_K_M.gguf'), filename: 'zai-org_GLM-4.7-Flash-Q5_K_M.gguf', sizeGB: 22 },
     { name: 'GLM 4.7 Flash Q6', group: 'GLM 4.7 Flash', description: 'ZhipuAI GLM 4.7 Flash · 30B, near-lossless. 198K context.', pulls: '50K+', tags: ['30B', 'Q6_K', '25 GB'], updated: 'New', agent: true, released: '2026-04', downloadUrl: HF('bartowski/zai-org_GLM-4.7-Flash-GGUF', 'zai-org_GLM-4.7-Flash-Q6_K.gguf'), filename: 'zai-org_GLM-4.7-Flash-Q6_K.gguf', sizeGB: 25 },
     { name: 'GLM 4.7 Flash Q8', group: 'GLM 4.7 Flash', description: 'ZhipuAI GLM 4.7 Flash · 30B, maximum quality. 198K context.', pulls: '50K+', tags: ['30B', 'Q8_0', '32 GB'], updated: 'New', agent: true, released: '2026-04', downloadUrl: HF('bartowski/zai-org_GLM-4.7-Flash-GGUF', 'zai-org_GLM-4.7-Flash-Q8_0.gguf'), filename: 'zai-org_GLM-4.7-Flash-Q8_0.gguf', sizeGB: 32 },
-    // ── GLM 5.1 (April 2026) ──
-    { name: 'GLM 5.1 754B MoE', description: 'ZhipuAI GLM 5.1 · 754B MoE (40B active). Frontier agentic engineering model. MIT license. Needs multi-file download via CLI.', pulls: '50K+', tags: ['754B MoE', 'IQ2_M', '236 GB'], updated: 'Hot', agent: true, released: '2026-04', url: 'https://huggingface.co/unsloth/GLM-5.1-GGUF', canPull: false, sizeGB: 236 },
-    // ── DeepSeek R1 (Jan-Jun 2025) ──
-    { name: 'DeepSeek R1 Qwen3 8B', description: 'DeepSeek R1 distilled into Qwen3 8B · chain-of-thought reasoning.', pulls: '2M+', tags: ['8B', 'Q4_K_M', '5 GB'], updated: 'Popular', released: '2025-06', downloadUrl: HF('unsloth/DeepSeek-R1-0528-Qwen3-8B-GGUF', 'DeepSeek-R1-0528-Qwen3-8B-Q4_K_M.gguf'), filename: 'DeepSeek-R1-0528-Qwen3-8B-Q4_K_M.gguf', sizeGB: 5 },
-    { name: 'DeepSeek R1 Qwen 14B', description: 'DeepSeek R1 distilled into Qwen 14B · stronger reasoning.', pulls: '2M+', tags: ['14B', 'Q4_K_M', '9 GB'], updated: 'Popular', released: '2025-01', downloadUrl: HF('unsloth/DeepSeek-R1-Distill-Qwen-14B-GGUF', 'DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf'), filename: 'DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf', sizeGB: 9 },
-    { name: 'DeepSeek R1 Qwen 32B', description: 'DeepSeek R1 distilled into Qwen 32B · powerful reasoning.', pulls: '2M+', tags: ['32B', 'Q4_K_M', '19 GB'], updated: 'Popular', released: '2025-01', downloadUrl: HF('unsloth/DeepSeek-R1-Distill-Qwen-32B-GGUF', 'DeepSeek-R1-Distill-Qwen-32B-Q4_K_M.gguf'), filename: 'DeepSeek-R1-Distill-Qwen-32B-Q4_K_M.gguf', sizeGB: 19 },
-    { name: 'DeepSeek R1 Llama 70B', description: 'DeepSeek R1 distilled into Llama 70B · maximum reasoning.', pulls: '2M+', tags: ['70B', 'Q4_K_M', '42 GB'], updated: 'Popular', released: '2025-01', downloadUrl: HF('unsloth/DeepSeek-R1-Distill-Llama-70B-GGUF', 'DeepSeek-R1-Distill-Llama-70B-Q4_K_M.gguf'), filename: 'DeepSeek-R1-Distill-Llama-70B-Q4_K_M.gguf', sizeGB: 42 },
-    // ── Qwen 3 (May 2025) · 4B moved into the sub-4GB tool-caller group above ──
-    { name: 'Qwen 3 8B', description: 'Qwen 3 8B · top-tier reasoning and coding. Thinking mode.', pulls: '5M+', tags: ['8B', 'Q4_K_M', '5 GB'], updated: 'Popular', agent: true, released: '2025-05', downloadUrl: HF('unsloth/Qwen3-8B-GGUF', 'Qwen3-8B-Q4_K_M.gguf'), filename: 'Qwen3-8B-Q4_K_M.gguf', sizeGB: 5 },
-    { name: 'Qwen 3 14B', description: 'Qwen 3 14B · sweet spot of speed and quality.', pulls: '5M+', tags: ['14B', 'Q4_K_M', '9 GB'], updated: 'Popular', agent: true, released: '2025-05', downloadUrl: HF('unsloth/Qwen3-14B-GGUF', 'Qwen3-14B-Q4_K_M.gguf'), filename: 'Qwen3-14B-Q4_K_M.gguf', sizeGB: 9 },
-    { name: 'Qwen 3 32B', description: 'Qwen 3 32B · powerful reasoning and coding.', pulls: '5M+', tags: ['32B', 'Q4_K_XL', '20 GB'], updated: 'Popular', agent: true, released: '2025-05', downloadUrl: HF('unsloth/Qwen3-32B-GGUF', 'Qwen3-32B-UD-Q4_K_XL.gguf'), filename: 'Qwen3-32B-UD-Q4_K_XL.gguf', sizeGB: 20 },
-    // ── Llama 4 (April 2025) ──
-    { name: 'Llama 4 Scout', description: 'Meta Llama 4 Scout · 16x17B MoE. Massive context window.', pulls: '1M+', tags: ['Scout', 'Q2_K_XL', '40 GB'], updated: 'New', agent: true, released: '2025-04', downloadUrl: HF('unsloth/Llama-4-Scout-17B-16E-Instruct-GGUF', 'Llama-4-Scout-17B-16E-Instruct-UD-Q2_K_XL.gguf'), filename: 'Llama-4-Scout-17B-16E-Instruct-UD-Q2_K_XL.gguf', sizeGB: 40 },
-    // ── Gemma 3 (March 2025) ──
-    { name: 'Gemma 3 12B', description: 'Google Gemma 3 12B · vision support, great quality.', pulls: '100K+', tags: ['12B', 'Q4_K_M', '8 GB'], updated: 'Popular', released: '2025-03', downloadUrl: HF('unsloth/gemma-3-12b-it-GGUF', 'gemma-3-12b-it-Q4_K_M.gguf'), filename: 'gemma-3-12b-it-Q4_K_M.gguf', sizeGB: 8 },
-    { name: 'Gemma 3 27B', description: 'Google Gemma 3 27B · strong reasoning + vision.', pulls: '100K+', tags: ['27B', 'Q4_K_M', '17 GB'], updated: 'Popular', released: '2025-03', downloadUrl: HF('unsloth/gemma-3-27b-it-GGUF', 'gemma-3-27b-it-Q4_K_M.gguf'), filename: 'gemma-3-27b-it-Q4_K_M.gguf', sizeGB: 17 },
-    // ── Phi 4 (Dec 2024) ──
-    { name: 'Phi-4 14B', description: 'Microsoft Phi-4 · excellent at math, logic, structured tasks.', pulls: '500K+', tags: ['14B', 'Q4_K_M', '9 GB'], updated: 'Popular', agent: true, released: '2024-12', downloadUrl: HF('bartowski/phi-4-GGUF', 'phi-4-Q4_K_M.gguf'), filename: 'phi-4-Q4_K_M.gguf', sizeGB: 9 },
-    // ── Llama 3.3 / 3.1 ──
+    // ── Llama 3.3 ──
     { name: 'Llama 3.3 70B', description: 'Meta Llama 3.3 70B · maximum intelligence for high-end setups.', pulls: '1M+', tags: ['70B', 'Q4_K_M', '42 GB'], updated: 'Popular', agent: true, released: '2024-12', downloadUrl: HF('bartowski/Llama-3.3-70B-Instruct-GGUF', 'Llama-3.3-70B-Instruct-Q4_K_M.gguf'), filename: 'Llama-3.3-70B-Instruct-Q4_K_M.gguf', sizeGB: 42 },
-    { name: 'Llama 3.1 8B', description: 'Meta Llama 3.1 8B · fast, reliable, great entry point.', pulls: '1M+', tags: ['8B', 'Q4_K_M', '5 GB'], updated: 'Popular', agent: true, released: '2024-07', downloadUrl: HF('bartowski/Meta-Llama-3.1-8B-Instruct-GGUF', 'Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf'), filename: 'Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf', sizeGB: 5 },
-    // ── Mistral ──
-    { name: 'Mistral Small 24B', description: 'Mistral Small · fast, multilingual, native tool calling.', pulls: '300K+', tags: ['24B', 'Q4_K_M', '14 GB'], updated: 'Popular', agent: true, released: '2024-09', downloadUrl: HF('bartowski/Mistral-Small-24B-Instruct-2501-GGUF', 'Mistral-Small-24B-Instruct-2501-Q4_K_M.gguf'), filename: 'Mistral-Small-24B-Instruct-2501-Q4_K_M.gguf', sizeGB: 14 },
-    { name: 'Mistral Nemo 12B', description: 'Mistral Nemo 12B · multilingual powerhouse.', pulls: '300K+', tags: ['12B', 'Q4_K_M', '7 GB'], updated: 'Popular', released: '2024-07', downloadUrl: HF('bartowski/Mistral-Nemo-Instruct-2407-GGUF', 'Mistral-Nemo-Instruct-2407-Q4_K_M.gguf'), filename: 'Mistral-Nemo-Instruct-2407-Q4_K_M.gguf', sizeGB: 7 },
-    // ── Qwen 2.5 ──
-    { name: 'Qwen 2.5 7B', description: 'Qwen 2.5 7B · proven and reliable all-rounder.', pulls: '100K+', tags: ['7B', 'Q4_K_M', '5 GB'], updated: 'Popular', agent: true, released: '2024-09', downloadUrl: HF('bartowski/Qwen2.5-7B-Instruct-GGUF', 'Qwen2.5-7B-Instruct-Q4_K_M.gguf'), filename: 'Qwen2.5-7B-Instruct-Q4_K_M.gguf', sizeGB: 5 },
     // ── 2026-07-17 catalog refresh (May to July 2026 wave, HF-API-verified
     //    repos/filenames/sizes; DL counts from HF at research time).
     //    Negative findings from the same research pass: "Llama 5" and
     //    "Qwen 4" claims circulating in SEO blogs are fabrications (verified
     //    against the live meta-llama / Qwen HF orgs); Kimi K3 weights land
     //    July 27; Qwen 3.7 is API-only · all watchlist, not catalog. ──
-    { name: 'Ornith 1.0 9B', description: 'DeepReinforce Ornith 1.0 · 9B coding + agent model that learns its own RL scaffolds. The small-model hit of June 2026 (2M+ downloads). MIT.', pulls: '2.2M', tags: ['9B', 'Q4_K_M', '5.3 GB', 'Coding'], updated: 'Hot', agent: true, released: '2026-06', downloadUrl: HF('deepreinforce-ai/Ornith-1.0-9B-GGUF', 'ornith-1.0-9b-Q4_K_M.gguf'), filename: 'ornith-1.0-9b-Q4_K_M.gguf', sizeGB: 5.3 },
-    { name: 'Ornith 1.0 35B', description: 'Ornith 1.0 35B MoE (3B active) · agentic coding monster, beats far bigger models on Terminal-Bench. Runs like a 3B. MIT.', pulls: '1.8M', tags: ['35B MoE', 'Q5_K_M', '23 GB', 'Coding'], updated: 'Hot', agent: true, released: '2026-06', downloadUrl: HF('deepreinforce-ai/Ornith-1.0-35B-GGUF', 'ornith-1.0-35b-Q5_K_M.gguf'), filename: 'ornith-1.0-35b-Q5_K_M.gguf', sizeGB: 23 },
-    { name: 'Agents A1 35B', description: 'InternScience Agents-A1 · 35B MoE (3B active) built for long-horizon agent work. Apache-2.0.', pulls: '34K+', tags: ['35B MoE', 'Q4_K_M', '20 GB'], updated: 'Hot', agent: true, released: '2026-07', downloadUrl: HF('InternScience/Agents-A1-Q4_K_M-GGUF', 'Agents-A1-Q4_K_M.gguf'), filename: 'Agents-A1-Q4_K_M.gguf', sizeGB: 20 },
-    { name: 'Agents A1 4B', description: 'Agents-A1 distilled to 4B · small agentic model from the hyped 35B, fits tiny GPUs. Apache-2.0.', pulls: '10K+', tags: ['4B', 'Q4_K_M', '2.5 GB'], updated: 'New', agent: true, released: '2026-07', downloadUrl: HF('InternScience/Agents-A1-4B-Q4_K_M-GGUF', 'Agents-A1-4B-Q4_K_M.gguf'), filename: 'Agents-A1-4B-Q4_K_M.gguf', sizeGB: 2.5 },
+    { name: 'Agents A1 35B', description: 'InternScience Agents-A1 · 35B MoE (3B active) built for long-horizon agent work. Apache-2.0.', pulls: '34K+', tags: ['35B MoE', 'Vision', 'Q4_K_M', '20 GB'], updated: 'Hot', agent: true, released: '2026-07', downloadUrl: HF('InternScience/Agents-A1-Q4_K_M-GGUF', 'Agents-A1-Q4_K_M.gguf'), filename: 'Agents-A1-Q4_K_M.gguf', sizeGB: 20, ...IMAGE_PART['InternScience/Agents-A1-Q4_K_M-GGUF/Agents-A1-mmproj.gguf'] },
+    { name: 'Agents A1 4B', description: 'Agents-A1 distilled to 4B · small agentic model from the hyped 35B, fits tiny GPUs. Apache-2.0.', pulls: '10K+', tags: ['4B', 'Vision', 'Q4_K_M', '2.5 GB'], updated: 'New', agent: true, released: '2026-07', downloadUrl: HF('InternScience/Agents-A1-4B-Q4_K_M-GGUF', 'Agents-A1-4B-Q4_K_M.gguf'), filename: 'Agents-A1-4B-Q4_K_M.gguf', sizeGB: 2.5, ...IMAGE_PART['InternScience/Agents-A1-4B-Q4_K_M-GGUF/Agents-A1-4B-mmproj.gguf'] },
     { name: 'LFM 2.5 8B MoE', description: 'Liquid AI LFM 2.5 · 8B MoE (1.5B active), extremely fast on-device model. 128K context, native tools.', pulls: '50K+', tags: ['8B MoE', 'Q4_K_M', '4.8 GB', 'Fast'], updated: 'New', agent: true, released: '2026-05', downloadUrl: HF('LiquidAI/LFM2.5-8B-A1B-GGUF', 'LFM2.5-8B-A1B-Q4_K_M.gguf'), filename: 'LFM2.5-8B-A1B-Q4_K_M.gguf', sizeGB: 4.8 },
-    { name: 'IBM Granite 4.1 8B', description: 'IBM Granite 4.1 · 8B hybrid with 512K context and rock-solid tool calling. Apache-2.0.', pulls: '100K+', tags: ['8B', 'Q4_K_M', '5 GB', 'Tools'], updated: 'New', agent: true, released: '2026-04', downloadUrl: HF('unsloth/granite-4.1-8b-GGUF', 'granite-4.1-8b-Q4_K_M.gguf'), filename: 'granite-4.1-8b-Q4_K_M.gguf', sizeGB: 5 },
     { name: 'MiniCPM-V 4.6', description: 'MiniCPM-V 4.6 · pocket vision model (1.3B) that reads images and video in ~2 GB. Ollama pulls the vision projector automatically. Apache-2.0.', pulls: '100K+', tags: ['1.3B', 'Vision', '2 GB'], updated: 'New', released: '2026-05', ollamaModel: 'openbmb/minicpm-v4.6', sizeGB: 2 },
     { name: 'Nemotron 3 Nano 4B', description: 'NVIDIA Nemotron 3 Nano · 4B hybrid reasoner for edge GPUs. Native tool calling.', pulls: '30K+', tags: ['4B', 'Q4_K_M', '2.7 GB', 'Tools'], updated: 'New', agent: true, released: '2026-01', downloadUrl: HF('unsloth/NVIDIA-Nemotron-3-Nano-4B-GGUF', 'NVIDIA-Nemotron-3-Nano-4B-Q4_K_M.gguf'), filename: 'NVIDIA-Nemotron-3-Nano-4B-Q4_K_M.gguf', sizeGB: 2.7 },
-    { name: 'Qwen 3.5 9B DeepSeek V4 Distill', description: 'DeepSeek V4-Flash reasoning distilled into Qwen 3.5 9B · the "R1 moment" for V4, in 6 GB. Apache-2.0.', pulls: '118K+', tags: ['9B', 'Q4_K_M', '5.3 GB', 'Reasoning'], updated: 'Hot', agent: true, released: '2026-05', downloadUrl: HF('Jackrong/Qwen3.5-9B-DeepSeek-V4-Flash-GGUF', 'Qwen3.5-9B-DeepSeek-V4-Flash-Q4_K_M.gguf'), filename: 'Qwen3.5-9B-DeepSeek-V4-Flash-Q4_K_M.gguf', sizeGB: 5.3 },
-    { name: 'Nemotron 3 Nano Omni 30B', description: 'NVIDIA Nemotron 3 Omni · 30B MoE (3B active) that reasons over text, images and audio. The only local omni model in its class.', pulls: '13K+', tags: ['30B MoE', 'UD-Q4_K_XL', '22.3 GB'], updated: 'New', agent: true, released: '2026-05', downloadUrl: HF('unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF', 'NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf'), filename: 'NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf', sizeGB: 22.3 },
-    { name: 'Mistral Medium 3.5 128B', description: 'Mistral Medium 3.5 · frontier-class 128B dense drop with reasoning-effort control. Custom Mistral license (check terms for commercial use).', pulls: '222K+', tags: ['128B', 'UD-Q2_K_XL', '45 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('unsloth/Mistral-Medium-3.5-128B-GGUF', 'Mistral-Medium-3.5-128B-UD-Q2_K_XL.gguf'), filename: 'Mistral-Medium-3.5-128B-UD-Q2_K_XL.gguf', sizeGB: 45 },
+    { name: 'Qwen 3.5 9B DeepSeek V4 Distill', description: 'DeepSeek V4-Flash reasoning distilled into Qwen 3.5 9B · the "R1 moment" for V4, in 6 GB. Apache-2.0.', pulls: '118K+', tags: ['9B', 'Vision', 'Q4_K_M', '5.3 GB', 'Reasoning'], updated: 'Hot', agent: true, released: '2026-05', downloadUrl: HF('Jackrong/Qwen3.5-9B-DeepSeek-V4-Flash-GGUF', 'Qwen3.5-9B-DeepSeek-V4-Flash-Q4_K_M.gguf'), filename: 'Qwen3.5-9B-DeepSeek-V4-Flash-Q4_K_M.gguf', sizeGB: 5.3, ...IMAGE_PART['Jackrong/Qwen3.5-9B-DeepSeek-V4-Flash-GGUF/mmproj.gguf'] },
+    { name: 'Mistral Medium 3.5 128B', description: 'Mistral Medium 3.5 · frontier-class 128B dense drop with reasoning-effort control. Custom Mistral license (check terms for commercial use).', pulls: '222K+', tags: ['128B', 'Vision', 'UD-Q2_K_XL', '45 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('unsloth/Mistral-Medium-3.5-128B-GGUF', 'Mistral-Medium-3.5-128B-UD-Q2_K_XL.gguf'), filename: 'Mistral-Medium-3.5-128B-UD-Q2_K_XL.gguf', sizeGB: 45, ...IMAGE_PART['unsloth/Mistral-Medium-3.5-128B-GGUF/mmproj-F16.gguf'] },
     // 2026-08-01: 0731 replaces the April preview build. deepseek-ai calls
     // 0731 the official V4-Flash release (beats V4-Pro Preview on agentic
     // benchmarks at 13B active). Repos/paths/sizes HF-verified 2026-08-01;
@@ -1286,7 +1464,7 @@ export function getMainstreamTextModels(): DiscoverModel[] {
     // jetzt selbst; seine Gegenprobe wird GRUEN-nach-ROT, sobald llama.cpp
     // glm5next kennt. Dann gehoert Flash hier hinein.
     //
-    // NACHGEPRUEFT am 02.09.2026, weil David gesagt hatte „such mehr nach
+    // NACHGEPRUEFT am 02.09.2026, weil der Inhaber gesagt hatte „such mehr nach
     // uncensored, irgendwas muss es geben". Das war berechtigt — nur nicht
     // hier: an GLM 5.3 hat sich nichts geaendert. Neu erhoben statt erinnert:
     //
@@ -1321,7 +1499,7 @@ export function getMainstreamTextModels(): DiscoverModel[] {
     // TAG UND COMMIT und prueft beides bei jedem Lauf; ein Sprung ist kein
     // Einzeiler, sondern ein Engine-Wechsel. Der Windows-Sidecar, den das
     // Release wirklich ausliefert, ist ausserdem ein 2.6.3-Build und gar nicht
-    // b9949 (EXPERIMENT-CHANGELOG.md) — ein gehobener Tag im Skript haette den
+    // b9949 — ein gehobener Tag im Skript haette den
     // Architektur-Waechter gruen gemacht, waehrend der Nutzer weiterhin
     // 170 GB umsonst laedt. Und der Qwen-3.8-27B-Eintrag oben begruendet sich
     // ausdruecklich damit, dass sein MTP-Kopf "loads fine on the pinned
@@ -1332,8 +1510,130 @@ export function getMainstreamTextModels(): DiscoverModel[] {
     // __tests__/katalog-architektur.live.test.ts.
     { name: 'GLM 5.3 744B IQ1', group: 'GLM 5.3 744B', description: 'ZhipuAI GLM 5.3 · same base as 5.2; the whole jump comes from post-training: +50% on Z.ai Code Bench, open-weights SOTA on Terminal Bench 3.0. 744B MoE (40B active), 1M context. Smallest quant, multi-part.', pulls: '74K+', tags: ['744B MoE', 'UD-IQ1_S', '217 GB', 'Multi-part'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('unsloth/GLM-5.3-GGUF', 'UD-IQ1_S/GLM-5.3-UD-IQ1_S-00001-of-00006.gguf'), filename: 'GLM-5.3-UD-IQ1_S-00001-of-00006.gguf', sizeGB: 216.7 },
     { name: 'GLM 5.3 744B Q2', group: 'GLM 5.3 744B', description: 'ZhipuAI GLM 5.3 · Unsloth Dynamic Q2_K_XL, the quality/size sweet spot for this MoE. 744B MoE (40B active), 1M context, GLM-5.3 licence. Multi-part.', pulls: '74K+', tags: ['744B MoE', 'UD-Q2_K_XL', '254 GB', 'Multi-part'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('unsloth/GLM-5.3-GGUF', 'UD-Q2_K_XL/GLM-5.3-UD-Q2_K_XL-00001-of-00007.gguf'), filename: 'GLM-5.3-UD-Q2_K_XL-00001-of-00007.gguf', sizeGB: 253.9 },
-    { name: 'GLM 5.2 744B MoE', description: 'ZhipuAI GLM 5.2 · 744B MoE (40B active), 1M context, MIT. The agentic-coding successor to GLM 5.1. Multi-part, ~304 GB.', pulls: '50K+', tags: ['744B MoE', 'UD-Q2_K_XL', '304 GB', 'Multi-part'], updated: 'Hot', agent: true, released: '2026-06', downloadUrl: HF('unsloth/GLM-5.2-GGUF', 'UD-Q2_K_XL/GLM-5.2-UD-Q2_K_XL-00001-of-00007.gguf'), filename: 'GLM-5.2-UD-Q2_K_XL-00001-of-00007.gguf', sizeGB: 304 },
-    { name: 'Kimi K2.7 Code 1T', description: 'Moonshot Kimi K2.7-Code · 1T MoE (32B active) coding flagship. Even the 2-bit quant is ~370 GB · multi-GPU / Mac-cluster territory.', pulls: '392K+', tags: ['1T MoE', 'UD-Q2_K_XL', '371 GB', 'Multi-part'], updated: 'Hot', agent: true, released: '2026-06', downloadUrl: HF('unsloth/Kimi-K2.7-Code-GGUF', 'UD-Q2_K_XL/Kimi-K2.7-Code-UD-Q2_K_XL-00001-of-00008.gguf'), filename: 'Kimi-K2.7-Code-UD-Q2_K_XL-00001-of-00008.gguf', sizeGB: 371 },
+    // Kimi K3 2.8T: fertig in api/kimi-k3-catalog.ts, erscheint aber erst, wenn
+    // die gepinnte Engine die Architektur `kimi-k3` oeffnet (b9949 kann es nicht).
+    ...kimiK3CatalogEntries(),
+    { name: 'Kimi K2.7 Code 1T', description: 'Moonshot Kimi K2.7-Code · 1T MoE (32B active) coding flagship. Even the 2-bit quant is ~370 GB · multi-GPU / Mac-cluster territory. The newer Kimi K3 uses an architecture the LU Engine cannot open yet.', pulls: '392K+', tags: ['1T MoE', 'Vision', 'UD-Q2_K_XL', '371 GB', 'Multi-part'], updated: 'Hot', agent: true, released: '2026-06', downloadUrl: HF('unsloth/Kimi-K2.7-Code-GGUF', 'UD-Q2_K_XL/Kimi-K2.7-Code-UD-Q2_K_XL-00001-of-00008.gguf'), filename: 'Kimi-K2.7-Code-UD-Q2_K_XL-00001-of-00008.gguf', sizeGB: 371, ...IMAGE_PART['unsloth/Kimi-K2.7-Code-GGUF/mmproj-F16.gguf'] },
+    // 2026-10-08 catalog refresh. Repos, file names and sizes read from the
+    // Hugging Face tree API on that day; every architecture is one the pinned
+    // llama.cpp lists. Nothing here was loaded in the engine. The download
+    // takes the file named here (`selectGgufFromTree`, exactPath).
+    // Ornith 1.5 (August 2026), successor to Ornith 1.0
+    { name: 'Ornith 1.5 9B', group: 'Ornith 1.5 9B', description: 'Ornith 1.5 9B · successor to Ornith 1.0, a coding and agent model with vision and tool calling. Recommended quant. The 0.9 GB vision projector comes with it. MIT.', pulls: '5.1M', tags: ['9B', 'Vision', 'Q4_K_M', '5.8 GB', 'Coding'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('ornith-ai/Ornith-1.5-9B-GGUF', 'Ornith-1.5-9B-Q4_K_M.gguf'), filename: 'Ornith-1.5-9B-Q4_K_M.gguf', sizeGB: 5.78, ...IMAGE_PART['ornith-ai/Ornith-1.5-9B-GGUF/mmproj-Ornith-1.5-9B-BF16.gguf'] },
+    { name: 'Ornith 1.5 9B Q6_K', group: 'Ornith 1.5 9B', description: 'Ornith 1.5 9B · higher quality quant.', pulls: '5.1M', tags: ['9B', 'Vision', 'Q6_K', '7.6 GB', 'Coding'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('ornith-ai/Ornith-1.5-9B-GGUF', 'Ornith-1.5-9B-Q6_K.gguf'), filename: 'Ornith-1.5-9B-Q6_K.gguf', sizeGB: 7.56, ...IMAGE_PART['ornith-ai/Ornith-1.5-9B-GGUF/mmproj-Ornith-1.5-9B-BF16.gguf'] },
+    { name: 'Ornith 1.5 9B Q8_0', group: 'Ornith 1.5 9B', description: 'Ornith 1.5 9B · largest quant, closest to the original weights.', pulls: '5.1M', tags: ['9B', 'Vision', 'Q8_0', '9.8 GB', 'Coding'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('ornith-ai/Ornith-1.5-9B-GGUF', 'Ornith-1.5-9B-Q8_0.gguf'), filename: 'Ornith-1.5-9B-Q8_0.gguf', sizeGB: 9.79, ...IMAGE_PART['ornith-ai/Ornith-1.5-9B-GGUF/mmproj-Ornith-1.5-9B-BF16.gguf'] },
+    { name: 'Ornith 1.5 35B MoE', group: 'Ornith 1.5 35B MoE', description: 'Ornith 1.5 35B MoE · the larger Ornith 1.5, 3B active parameters. Vision and tool calling. Recommended quant. The 0.9 GB vision projector comes with it. MIT.', pulls: '3.7M', tags: ['35B MoE', 'Vision', 'Q4_K_M', '22 GB', 'Coding'], updated: 'Hot', agent: true, released: '2026-08', downloadUrl: HF('ornith-ai/Ornith-1.5-35B-A3B-GGUF', 'Ornith-1.5-35B-Q4_K_M.gguf'), filename: 'Ornith-1.5-35B-Q4_K_M.gguf', sizeGB: 21.71, ...IMAGE_PART['ornith-ai/Ornith-1.5-35B-A3B-GGUF/mmproj-Ornith-1.5-35B-BF16.gguf'] },
+    { name: 'Ornith 1.5 35B MoE Q6_K', group: 'Ornith 1.5 35B MoE', description: 'Ornith 1.5 35B MoE · higher quality quant.', pulls: '3.7M', tags: ['35B MoE', 'Vision', 'Q6_K', '29 GB', 'Coding'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('ornith-ai/Ornith-1.5-35B-A3B-GGUF', 'Ornith-1.5-35B-Q6_K.gguf'), filename: 'Ornith-1.5-35B-Q6_K.gguf', sizeGB: 29.21, ...IMAGE_PART['ornith-ai/Ornith-1.5-35B-A3B-GGUF/mmproj-Ornith-1.5-35B-BF16.gguf'] },
+    { name: 'Ornith 1.5 35B MoE Q8_0', group: 'Ornith 1.5 35B MoE', description: 'Ornith 1.5 35B MoE · largest quant, closest to the original weights.', pulls: '3.7M', tags: ['35B MoE', 'Vision', 'Q8_0', '38 GB', 'Coding'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('ornith-ai/Ornith-1.5-35B-A3B-GGUF', 'Ornith-1.5-35B-Q8_0.gguf'), filename: 'Ornith-1.5-35B-Q8_0.gguf', sizeGB: 37.8, ...IMAGE_PART['ornith-ai/Ornith-1.5-35B-A3B-GGUF/mmproj-Ornith-1.5-35B-BF16.gguf'] },
+    // Qwen 3.8 35B MoE distill: community build (empero-ai), sibling of the 9B
+    // distill above. Unlike the 9B this repo ships a vision projector.
+    { name: 'Qwen 3.8 35B MoE Distill', group: 'Qwen 3.8 35B MoE Distill', description: 'Qwen 3.8 35B MoE distill · community distill by empero-ai, not an official Qwen release. 3B active parameters, vision and tool calling. Recommended quant. The 0.9 GB vision projector comes with it. Apache-2.0.', pulls: '717K+', tags: ['35B MoE', 'Vision', 'Q4_K_M', '22 GB'], updated: 'Hot', agent: true, released: '2026-09', downloadUrl: HF('empero-ai/Qwen3.8-35B-A3B-Distill-GGUF', 'Qwen3.8-35B-A3B-Q4_K_M.gguf'), filename: 'Qwen3.8-35B-A3B-Q4_K_M.gguf', sizeGB: 21.71, ...IMAGE_PART['empero-ai/Qwen3.8-35B-A3B-Distill-GGUF/mmproj-Qwen3.8-35B-A3B-F16.gguf'] },
+    { name: 'Qwen 3.8 35B MoE Distill IQ2_M', group: 'Qwen 3.8 35B MoE Distill', description: 'Qwen 3.8 35B MoE distill · smallest quant, for 16 GB machines.', pulls: '717K+', tags: ['35B MoE', 'Vision', 'IQ2_M', '13 GB'], updated: 'New', agent: true, released: '2026-09', downloadUrl: HF('empero-ai/Qwen3.8-35B-A3B-Distill-GGUF', 'Qwen3.8-35B-A3B-IQ2_M.gguf'), filename: 'Qwen3.8-35B-A3B-IQ2_M.gguf', sizeGB: 12.56, ...IMAGE_PART['empero-ai/Qwen3.8-35B-A3B-Distill-GGUF/mmproj-Qwen3.8-35B-A3B-F16.gguf'] },
+    { name: 'Qwen 3.8 35B MoE Distill Q8_0', group: 'Qwen 3.8 35B MoE Distill', description: 'Qwen 3.8 35B MoE distill · largest quant, closest to the original weights.', pulls: '717K+', tags: ['35B MoE', 'Vision', 'Q8_0', '38 GB'], updated: 'New', agent: true, released: '2026-09', downloadUrl: HF('empero-ai/Qwen3.8-35B-A3B-Distill-GGUF', 'Qwen3.8-35B-A3B-Q8_0.gguf'), filename: 'Qwen3.8-35B-A3B-Q8_0.gguf', sizeGB: 37.8, ...IMAGE_PART['empero-ai/Qwen3.8-35B-A3B-Distill-GGUF/mmproj-Qwen3.8-35B-A3B-F16.gguf'] },
+    // IBM Granite 4.2 (August 2026), successor to Granite 4.0 Micro and 4.1 8B.
+    // IBM publishes no GGUF of the 3B, so that one comes from lmstudio-community.
+    { name: 'IBM Granite 4.2 3B', group: 'IBM Granite 4.2 3B', description: 'IBM Granite 4.2 3B · small model with native tool calling, successor to Granite 4.0 Micro. Fits 8 GB machines. Apache-2.0.', pulls: '700+', tags: ['3B', 'Q4_K_M', '2.2 GB', 'Tools'], updated: 'New', agent: true, lightweight: true, released: '2026-08', downloadUrl: HF('lmstudio-community/granite-4.2-3b-GGUF', 'granite-4.2-3b-Q4_K_M.gguf'), filename: 'granite-4.2-3b-Q4_K_M.gguf', sizeGB: 2.24 },
+    { name: 'IBM Granite 4.2 3B Q8_0', group: 'IBM Granite 4.2 3B', description: 'IBM Granite 4.2 3B · largest quant, closest to the original weights.', pulls: '700+', tags: ['3B', 'Q8_0', '3.9 GB', 'Tools'], updated: 'New', agent: true, lightweight: true, released: '2026-08', downloadUrl: HF('lmstudio-community/granite-4.2-3b-GGUF', 'granite-4.2-3b-Q8_0.gguf'), filename: 'granite-4.2-3b-Q8_0.gguf', sizeGB: 3.89 },
+    { name: 'IBM Granite 4.2 8B', group: 'IBM Granite 4.2 8B', description: 'IBM Granite 4.2 8B · enterprise model with native tool calling, successor to Granite 4.1 8B. Recommended quant. Apache-2.0.', pulls: '282K+', tags: ['8B', 'Q4_K_M', '5.3 GB', 'Tools'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('ibm-granite/granite-4.2-8b-GGUF', 'granite-4.2-8b-Q4_K_M.gguf'), filename: 'granite-4.2-8b-Q4_K_M.gguf', sizeGB: 5.35 },
+    { name: 'IBM Granite 4.2 8B Q2_K', group: 'IBM Granite 4.2 8B', description: 'IBM Granite 4.2 8B · smallest quant, for 8 GB machines.', pulls: '282K+', tags: ['8B', 'Q2_K', '3.4 GB', 'Tools'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('ibm-granite/granite-4.2-8b-GGUF', 'granite-4.2-8b-Q2_K.gguf'), filename: 'granite-4.2-8b-Q2_K.gguf', sizeGB: 3.41 },
+    { name: 'IBM Granite 4.2 8B Q8_0', group: 'IBM Granite 4.2 8B', description: 'IBM Granite 4.2 8B · largest quant, closest to the original weights.', pulls: '282K+', tags: ['8B', 'Q8_0', '9.3 GB', 'Tools'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('ibm-granite/granite-4.2-8b-GGUF', 'granite-4.2-8b-Q8_0.gguf'), filename: 'granite-4.2-8b-Q8_0.gguf', sizeGB: 9.35 },
+    { name: 'IBM Granite 4.2 30B', group: 'IBM Granite 4.2 30B', description: 'IBM Granite 4.2 30B · the largest Granite 4.2. Native tool calling. Recommended quant. Apache-2.0.', pulls: '270K+', tags: ['30B', 'Q4_K_M', '18 GB', 'Tools'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('ibm-granite/granite-4.2-30b-GGUF', 'granite-4.2-30b-Q4_K_M.gguf'), filename: 'granite-4.2-30b-Q4_K_M.gguf', sizeGB: 17.72 },
+    { name: 'IBM Granite 4.2 30B Q2_K', group: 'IBM Granite 4.2 30B', description: 'IBM Granite 4.2 30B · smallest quant, for 16 GB machines.', pulls: '270K+', tags: ['30B', 'Q2_K', '11 GB', 'Tools'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('ibm-granite/granite-4.2-30b-GGUF', 'granite-4.2-30b-Q2_K.gguf'), filename: 'granite-4.2-30b-Q2_K.gguf', sizeGB: 10.86 },
+    { name: 'IBM Granite 4.2 30B Q8_0', group: 'IBM Granite 4.2 30B', description: 'IBM Granite 4.2 30B · largest quant, closest to the original weights.', pulls: '270K+', tags: ['30B', 'Q8_0', '31 GB', 'Tools'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('ibm-granite/granite-4.2-30b-GGUF', 'granite-4.2-30b-Q8_0.gguf'), filename: 'granite-4.2-30b-Q8_0.gguf', sizeGB: 31.11 },
+    // Nemotron 3.5 Lightning (August 2026), successor to Nemotron 3 Nano Omni
+    { name: 'Nemotron 3.5 Lightning 30B', group: 'Nemotron 3.5 Lightning 30B', description: 'NVIDIA Nemotron 3.5 Lightning · 30B MoE with 3B active parameters, tool calling and thinking, 1M context. Successor to Nemotron 3 Nano Omni. NVIDIA license, check the terms for commercial use.', pulls: '55K+', tags: ['30B MoE', 'UD-Q4_K_M', '25 GB', 'Tools'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF', 'NVIDIA-Nemotron-3.5-Lightning-30B-A3B-UD-Q4_K_M.gguf'), filename: 'NVIDIA-Nemotron-3.5-Lightning-30B-A3B-UD-Q4_K_M.gguf', sizeGB: 25.27 },
+    { name: 'Nemotron 3.5 Lightning 30B UD-IQ2_M', group: 'Nemotron 3.5 Lightning 30B', description: 'NVIDIA Nemotron 3.5 Lightning · smallest dynamic quant.', pulls: '55K+', tags: ['30B MoE', 'UD-IQ2_M', '19 GB', 'Tools'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF', 'NVIDIA-Nemotron-3.5-Lightning-30B-A3B-UD-IQ2_M.gguf'), filename: 'NVIDIA-Nemotron-3.5-Lightning-30B-A3B-UD-IQ2_M.gguf', sizeGB: 19.43 },
+    { name: 'Nemotron 3.5 Lightning 30B Q8_0', group: 'Nemotron 3.5 Lightning 30B', description: 'NVIDIA Nemotron 3.5 Lightning · largest quant, closest to the original weights.', pulls: '55K+', tags: ['30B MoE', 'Q8_0', '35 GB', 'Tools'], updated: 'New', agent: true, released: '2026-08', downloadUrl: HF('unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF', 'NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q8_0.gguf'), filename: 'NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q8_0.gguf', sizeGB: 35 },
+    // Gemma 4 12B QAT: Google's own quantization-aware file, one quant only
+    { name: 'Gemma 4 12B QAT', description: 'Gemma 4 12B QAT · Google\'s own Q4 file from quantization-aware training, which is meant to hold quality at this size. Vision and tool calling. The 0.2 GB vision projector comes with it.', pulls: '780K+', tags: ['12B', 'Vision', 'QAT Q4_0', '7 GB'], updated: 'New', agent: true, released: '2026-06', downloadUrl: HF('google/gemma-4-12B-it-qat-q4_0-gguf', 'gemma-4-12b-it-qat-q4_0.gguf'), filename: 'gemma-4-12b-it-qat-q4_0.gguf', sizeGB: 6.98, ...IMAGE_PART['google/gemma-4-12B-it-qat-q4_0-gguf/mmproj-gemma-4-12b-it-qat-q4_0.gguf'] },
+    // Small models for 8 GB machines (all below the 7B chat minimum)
+    // LFM3 (Liquid AI, 28.10.2026): Text, VL, Omni and Audio as Ollama tags,
+    // and below as GGUF for the LU Engine and LM Studio. The GGUF
+    // header says `general.architecture = lfm3`, which llama.cpp knows from
+    // b11960 on, the pin since E1 (scripts/build-llama.sh); before it a GGUF
+    // entry would download and then not open
+    // (src/api/__tests__/lfm3-nur-was-laeuft.test.ts holds that line). Ollama
+    // runs it from 0.40.13 on all platforms (0.40.12 was Apple only; the
+    // manifest config says `"requires":"0.40.13"`). The lfm3:1.7b model layer
+    // is byte for byte LiquidAI/LFM3-1.7B-GGUF Q4_K_M (sha256 3793e1e6…).
+    // Sizes are the manifest layer sums, read 30.10.2026. LFM Open License
+    // v1.0, like LFM 2.5: commercial use is licensed below 10 million revenue a year.
+    // GGUF for the LU Engine and LM Studio (N1 after E1): llama.cpp knows
+    // `lfm3` from b11960, the pin E1 set. Bytes and SHA-256 are the LFS values
+    // of the LiquidAI repositories, read 30.10.2026. LFM3 Audio and Omni hear
+    // and speak in the engine too: llama-server b11960 answers
+    // /v1/audio/transcriptions and /tts (lib/speech-route.ts).
+    { name: 'LFM3 1.7B', group: 'LFM3 1.7B', blurb: "very small, fast model for quick answers, summaries and simple tool calls", description: 'Liquid AI LFM3 1.7B · very small, fast model for quick answers, summaries, extraction and simple tool calls, 256K context. Weaker at long reasoning than 7B+ models. Runs in the LU Engine from 3.0.9 (llama.cpp b11960) and in LM Studio with its llama.cpp runtime 2.65.1 or newer. LFM Open License: commercial use is licensed only below a revenue limit of 10 million a year.', pulls: '97K+', tags: ['1.7B', 'Q4_K_M', '1.0 GB', 'Tools'], updated: 'New', agent: true, released: '2026-10', downloadUrl: HF('LiquidAI/LFM3-1.7B-GGUF', 'LFM3-1.7B-Q4_K_M.gguf'), filename: 'LFM3-1.7B-Q4_K_M.gguf', sizeGB: 1.02, sizeBytes: 1099627808, sha256: '3793e1e6e2266919d6e015287221b41100175a98eddaba92e111aed3b05c93c4' },
+    { name: 'LFM3 1.7B QAD Q4_0', group: 'LFM3 1.7B', blurb: "very small, fast model for quick answers, summaries and simple tool calls", description: 'Liquid AI LFM3 1.7B · Q4_0 from quantization-aware distillation, trained by Liquid AI to keep the quality of the full model at 4 bits.', pulls: '97K+', tags: ['1.7B', 'QAD Q4_0', '1.0 GB', 'Tools'], updated: 'New', agent: true, released: '2026-10', downloadUrl: HF('LiquidAI/LFM3-1.7B-GGUF', 'LFM3-1.7B-QAD-Q4_0.gguf'), filename: 'LFM3-1.7B-QAD-Q4_0.gguf', sizeGB: 0.98, sizeBytes: 1049615680, sha256: '43a7d09a0e9cba91b63eb7052488b9564569bddfd65754d2e426465e572a7452' },
+    { name: 'LFM3 1.7B Q8_0', group: 'LFM3 1.7B', blurb: "very small, fast model for quick answers, summaries and simple tool calls", description: 'Liquid AI LFM3 1.7B · Q8_0, closest to the original weights.', pulls: '97K+', tags: ['1.7B', 'Q8_0', '1.7 GB', 'Tools'], updated: 'New', agent: true, released: '2026-10', downloadUrl: HF('LiquidAI/LFM3-1.7B-GGUF', 'LFM3-1.7B-Q8_0.gguf'), filename: 'LFM3-1.7B-Q8_0.gguf', sizeGB: 1.72, sizeBytes: 1846238496, sha256: '8f6b24182258205e9e01e21f1f24a1f208c1e8115578825d202ce39976af20b6' },
+    { name: 'LFM3 VL 2B', group: 'LFM3 VL 2B', blurb: "small model with image input: photos, screenshots, documents", description: 'Liquid AI LFM3 VL 2B · LFM3 with image input: describe photos, read screenshots and documents. Small, so expect short and simple answers. The 0.2 GB image part comes with it. Runs in the LU Engine from 3.0.9 (llama.cpp b11960) and in LM Studio with its llama.cpp runtime 2.65.1 or newer. LFM Open License: commercial use is licensed only below a revenue limit of 10 million a year.', pulls: '36K+', tags: ['2B', 'Vision', 'Q4_K_M', '1.0 GB'], updated: 'New', released: '2026-10', downloadUrl: HF('LiquidAI/LFM3-VL-2B-GGUF', 'LFM3-VL-2B-Q4_K_M.gguf'), filename: 'LFM3-VL-2B-Q4_K_M.gguf', sizeGB: 1.02, sizeBytes: 1099627808, sha256: '56dac2e192ff0d9ab8507f4f1aeb4aed0463449bbbefaac79497f041c95f21eb', ...IMAGE_PART['LiquidAI/LFM3-VL-2B-GGUF/mmproj-LFM3-VL-2B-Q8_0.gguf'] },
+    { name: 'LFM3 VL 2B Q8_0', group: 'LFM3 VL 2B', blurb: "small model with image input: photos, screenshots, documents", description: 'Liquid AI LFM3 VL 2B · Q8_0, closest to the original weights. The 0.2 GB image part comes with it.', pulls: '36K+', tags: ['2B', 'Vision', 'Q8_0', '1.7 GB'], updated: 'New', released: '2026-10', downloadUrl: HF('LiquidAI/LFM3-VL-2B-GGUF', 'LFM3-VL-2B-Q8_0.gguf'), filename: 'LFM3-VL-2B-Q8_0.gguf', sizeGB: 1.72, sizeBytes: 1846238496, sha256: 'e138e54189a751d90ea8c0b236360490613ecd465d28d68fa6094d3db7fa6727', ...IMAGE_PART['LiquidAI/LFM3-VL-2B-GGUF/mmproj-LFM3-VL-2B-Q8_0.gguf'] },
+    { name: 'LFM3 Omni 2B', group: 'LFM3 Omni 2B', blurb: "text, images and sound in one small model", description: 'Liquid AI LFM3 Omni 2B · text, images and sound in one small model. Chats with image input; in the LU Engine it also hears and speaks (Settings, Voice, "LU Engine" for dictation and read-aloud). The 0.5 GB image and sound part comes with it. Runs in the LU Engine from 3.0.9 (llama.cpp b11960) and in LM Studio with its llama.cpp runtime 2.65.1 or newer. LFM Open License: commercial use is licensed only below a revenue limit of 10 million a year.', pulls: 'New', tags: ['2B', 'Vision', 'Q4_K_M', '1.0 GB'], updated: 'New', released: '2026-10', downloadUrl: HF('LiquidAI/LFM3-Omni-2B-GGUF', 'LFM3-Omni-2B-Q4_K_M.gguf'), filename: 'LFM3-Omni-2B-Q4_K_M.gguf', sizeGB: 1.02, sizeBytes: 1099630080, sha256: '9f8d30e9d4fd7a9349d586e077988229b3ca0a0e4ad730897563d1eccc9893e2', ...IMAGE_PART['LiquidAI/LFM3-Omni-2B-GGUF/mmproj-LFM3-Omni-2B-Q8_0.gguf'] },
+    { name: 'LFM3 Audio 2B', group: 'LFM3 Audio 2B', blurb: "speech in and out for LU's dictation and read-aloud, 18 languages", description: 'Liquid AI LFM3 Audio 2B · speech recognition, translation and text-to-speech. Load it in the LU Engine and pick "LU Engine" for dictation and read-aloud in Settings, Voice. The 0.3 GB sound part comes with it. Runs in the LU Engine from 3.0.9 (llama.cpp b11960). LFM Open License: commercial use is licensed only below a revenue limit of 10 million a year.', pulls: 'New', tags: ['2B', 'Audio', 'Q4_K_M', '1.0 GB'], updated: 'New', released: '2026-10', downloadUrl: HF('LiquidAI/LFM3-Audio-2B-GGUF', 'LFM3-Audio-2B-Q4_K_M.gguf'), filename: 'LFM3-Audio-2B-Q4_K_M.gguf', sizeGB: 1.02, sizeBytes: 1099626016, sha256: '9a773289bd321ed879cd3a76545f6aca506e403851a45fb315420aee45625be2', ...IMAGE_PART['LiquidAI/LFM3-Audio-2B-GGUF/mmproj-LFM3-Audio-2B-Q8_0.gguf'] },
+    { name: 'LFM3 1.7B (Ollama)', group: 'LFM3 1.7B (Ollama)', blurb: "very small, fast model for quick answers, summaries and simple tool calls", description: 'Liquid AI LFM3 1.7B · very small, fast model for quick answers, summaries, extraction and simple tool calls, 256K context. Weaker at long reasoning than 7B+ models. Needs Ollama 0.40.13 or newer. LFM Open License: commercial use is licensed only below a revenue limit of 10 million a year.', pulls: 'New', tags: ['1.7B', 'Q4_K_M', '1.0 GB', 'Tools'], updated: 'New', agent: true, released: '2026-10', ollamaModel: 'lfm3:1.7b', sizeGB: 1.02 },
+    { name: 'LFM3 1.7B (Ollama) NVFP4', group: 'LFM3 1.7B (Ollama)', blurb: "very small, fast model for quick answers, summaries and simple tool calls", description: 'Liquid AI LFM3 1.7B · NVFP4, an MLX build in Ollama made for Apple Silicon Macs. Needs Ollama 0.40.13 or newer. Not officially supported on Windows or Linux, take the Q4_K_M tag there.', pulls: 'New', tags: ['1.7B', 'NVFP4', 'MLX', '1.6 GB', 'Tools'], updated: 'New', agent: true, released: '2026-10', ollamaModel: 'lfm3:1.7b-nvfp4', sizeGB: 1.57 },
+    { name: 'LFM3 VL 2B (Ollama)', group: 'LFM3 VL 2B (Ollama)', blurb: "small model with image input: photos, screenshots, documents", description: 'Liquid AI LFM3 VL 2B · LFM3 with image input: describe photos, read screenshots and documents. Small, so expect short and simple answers. Projector included. Needs Ollama 0.40.13 or newer. LFM Open License: commercial use is licensed only below a revenue limit of 10 million a year.', pulls: 'New', tags: ['2B', 'Vision', 'Q4_K_M', '1.4 GB'], updated: 'New', released: '2026-10', ollamaModel: 'lfm3-vl:2b', sizeGB: 1.38 },
+    { name: 'LFM3 VL 2B (Ollama) NVFP4', group: 'LFM3 VL 2B (Ollama)', blurb: "small model with image input: photos, screenshots, documents", description: 'Liquid AI LFM3 VL 2B · NVFP4, an MLX build in Ollama made for Apple Silicon Macs. Needs Ollama 0.40.13 or newer. Not officially supported on Windows or Linux, take the Q4_K_M tag there.', pulls: 'New', tags: ['2B', 'Vision', 'NVFP4', 'MLX', '1.6 GB'], updated: 'New', released: '2026-10', ollamaModel: 'lfm3-vl:2b-nvfp4', sizeGB: 1.63 },
+    // Omni and Audio take sound as well. Ollama hears through its
+    // /v1/audio/transcriptions route and speaks through /v1/audio/speech, not
+    // through chat, so in LU the sound side runs in Settings, Voice
+    // ("Use LFM3 Audio in Ollama"). The Omni manifest names the capabilities
+    // vision, audio, speech and tools; Audio names audio, speech and tools.
+    { name: 'LFM3 Omni 2B (Ollama)', group: 'LFM3 Omni 2B (Ollama)', blurb: "text, images and sound in one small model", description: 'Liquid AI LFM3 Omni 2B · text, images and sound in one small model. Chats with image input, and can also transcribe the microphone and read answers aloud (set it in Settings, Voice). Needs Ollama 0.40.13 or newer. LFM Open License: commercial use is licensed only below a revenue limit of 10 million a year.', pulls: 'New', tags: ['2B', 'Vision', 'Audio', 'Q4_K_M', '1.9 GB'], updated: 'New', released: '2026-10', ollamaModel: 'lfm3-omni:2b', sizeGB: 1.91 },
+    { name: 'LFM3 Omni 2B (Ollama) NVFP4', group: 'LFM3 Omni 2B (Ollama)', blurb: "text, images and sound in one small model", description: 'Liquid AI LFM3 Omni 2B · NVFP4, an MLX build in Ollama made for Apple Silicon Macs. Needs Ollama 0.40.13 or newer. Not officially supported on Windows or Linux, take the Q4_K_M tag there.', pulls: 'New', tags: ['2B', 'Vision', 'Audio', 'NVFP4', 'MLX', '2.2 GB'], updated: 'New', released: '2026-10', ollamaModel: 'lfm3-omni:2b-nvfp4', sizeGB: 2.23 },
+    { name: 'LFM3 Audio 2B (Ollama)', group: 'LFM3 Audio 2B (Ollama)', blurb: "speech in and out for LU's dictation and read-aloud, 18 languages", description: 'Liquid AI LFM3 Audio 2B · speech recognition, translation and text-to-speech in 18 languages. In LU it is the voice and the ear: Settings, Voice, "Use LFM3 Audio in Ollama" for dictation and read-aloud. Needs Ollama 0.40.13 or newer. LFM Open License: commercial use is licensed only below a revenue limit of 10 million a year.', pulls: 'New', tags: ['2B', 'Audio', 'Q4_K_M', '1.6 GB'], updated: 'New', released: '2026-10', ollamaModel: 'lfm3-audio:2b', sizeGB: 1.56 },
+    { name: 'LFM3 Audio 2B (Ollama) NVFP4', group: 'LFM3 Audio 2B (Ollama)', blurb: "speech in and out for LU's dictation and read-aloud, 18 languages", description: 'Liquid AI LFM3 Audio 2B · NVFP4, an MLX build in Ollama made for Apple Silicon Macs. Needs Ollama 0.40.13 or newer. Not officially supported on Windows or Linux, take the Q4_K_M tag there.', pulls: 'New', tags: ['2B', 'Audio', 'NVFP4', 'MLX', '1.9 GB'], updated: 'New', released: '2026-10', ollamaModel: 'lfm3-audio:2b-nvfp4', sizeGB: 1.92 },
+    { name: 'LFM 2.5 2.6B', group: 'LFM 2.5 2.6B', description: 'Liquid AI LFM 2.5 2.6B · small on-device model with native tool calling, fits 8 GB machines. Liquid AI license, check the terms for commercial use.', pulls: '1.0M', tags: ['2.6B', 'Q4_K_M', '1.7 GB', 'Tools'], updated: 'New', agent: true, lightweight: true, released: '2026-08', downloadUrl: HF('LiquidAI/LFM2.5-2.6B-GGUF', 'LFM2.5-2.6B-Q4_K_M.gguf'), filename: 'LFM2.5-2.6B-Q4_K_M.gguf', sizeGB: 1.67 },
+    { name: 'LFM 2.5 2.6B Q8_0', group: 'LFM 2.5 2.6B', description: 'Liquid AI LFM 2.5 2.6B · largest quant, closest to the original weights.', pulls: '1.0M', tags: ['2.6B', 'Q8_0', '2.9 GB', 'Tools'], updated: 'New', agent: true, lightweight: true, released: '2026-08', downloadUrl: HF('LiquidAI/LFM2.5-2.6B-GGUF', 'LFM2.5-2.6B-Q8_0.gguf'), filename: 'LFM2.5-2.6B-Q8_0.gguf', sizeGB: 2.87 },
+    { name: 'FrogNano 4B', group: 'FrogNano 4B', description: 'Microsoft FrogNano 4B · Microsoft\'s small model from September 2026, successor to Phi-4 Mini. Vision. The 0.7 GB vision projector comes with it. MIT.', pulls: '21K+', tags: ['4B', 'Vision', 'Q4_K_M', '2.8 GB'], updated: 'New', lightweight: true, released: '2026-09', downloadUrl: HF('bartowski/FrogNano-4B-2609-GGUF', 'FrogNano-4B-2609-Q4_K_M.gguf'), filename: 'FrogNano-4B-2609-Q4_K_M.gguf', sizeGB: 2.8, ...IMAGE_PART['bartowski/FrogNano-4B-2609-GGUF/mmproj-FrogNano-4B-2609-f16.gguf'] },
+    { name: 'FrogNano 4B IQ2_M', group: 'FrogNano 4B', description: 'Microsoft FrogNano 4B · smallest quant.', pulls: '21K+', tags: ['4B', 'Vision', 'IQ2_M', '1.6 GB'], updated: 'New', lightweight: true, released: '2026-09', downloadUrl: HF('bartowski/FrogNano-4B-2609-GGUF', 'FrogNano-4B-2609-IQ2_M.gguf'), filename: 'FrogNano-4B-2609-IQ2_M.gguf', sizeGB: 1.65, ...IMAGE_PART['bartowski/FrogNano-4B-2609-GGUF/mmproj-FrogNano-4B-2609-f16.gguf'] },
+    { name: 'FrogNano 4B Q8_0', group: 'FrogNano 4B', description: 'Microsoft FrogNano 4B · largest quant, closest to the original weights.', pulls: '21K+', tags: ['4B', 'Vision', 'Q8_0', '4.6 GB'], updated: 'New', lightweight: true, released: '2026-09', downloadUrl: HF('bartowski/FrogNano-4B-2609-GGUF', 'FrogNano-4B-2609-Q8_0.gguf'), filename: 'FrogNano-4B-2609-Q8_0.gguf', sizeGB: 4.62, ...IMAGE_PART['bartowski/FrogNano-4B-2609-GGUF/mmproj-FrogNano-4B-2609-f16.gguf'] },
+    { name: 'Qwen 3.5 4B', group: 'Qwen 3.5 4B', description: 'Qwen 3.5 4B · small Qwen 3.5 with vision, tool calling and switchable thinking, successor to Qwen3 4B. The 0.7 GB vision projector comes with it. Apache-2.0.', pulls: '1.1M', tags: ['4B', 'Vision', 'Q4_K_M', '2.7 GB', 'Tools'], updated: 'Hot', agent: true, lightweight: true, released: '2026-03', downloadUrl: HF('unsloth/Qwen3.5-4B-GGUF', 'Qwen3.5-4B-Q4_K_M.gguf'), filename: 'Qwen3.5-4B-Q4_K_M.gguf', sizeGB: 2.74, ...IMAGE_PART['unsloth/Qwen3.5-4B-GGUF/mmproj-F16.gguf'] },
+    { name: 'Qwen 3.5 4B UD-IQ2_M', group: 'Qwen 3.5 4B', description: 'Qwen 3.5 4B · smallest dynamic quant.', pulls: '1.1M', tags: ['4B', 'Vision', 'UD-IQ2_M', '1.8 GB', 'Tools'], updated: 'New', agent: true, lightweight: true, released: '2026-03', downloadUrl: HF('unsloth/Qwen3.5-4B-GGUF', 'Qwen3.5-4B-UD-IQ2_M.gguf'), filename: 'Qwen3.5-4B-UD-IQ2_M.gguf', sizeGB: 1.76, ...IMAGE_PART['unsloth/Qwen3.5-4B-GGUF/mmproj-F16.gguf'] },
+    { name: 'Qwen 3.5 4B Q8_0', group: 'Qwen 3.5 4B', description: 'Qwen 3.5 4B · largest quant, closest to the original weights.', pulls: '1.1M', tags: ['4B', 'Vision', 'Q8_0', '4.5 GB', 'Tools'], updated: 'New', agent: true, lightweight: true, released: '2026-03', downloadUrl: HF('unsloth/Qwen3.5-4B-GGUF', 'Qwen3.5-4B-Q8_0.gguf'), filename: 'Qwen3.5-4B-Q8_0.gguf', sizeGB: 4.48, ...IMAGE_PART['unsloth/Qwen3.5-4B-GGUF/mmproj-F16.gguf'] },
+    // MiMo V2.6 distill (Xiaomi, September 2026). The model card names no license.
+    { name: 'MiMo V2.6 Distill 9B', group: 'MiMo V2.6 Distill 9B', description: 'Xiaomi MiMo V2.6 Distill 9B · MiMo V2.6 distilled onto a Qwen 9B base, with vision. The 0.9 GB vision projector comes with it. The model card states no license, check before commercial use.', pulls: '496K+', tags: ['9B', 'Vision', 'Q4_K_M', '5.8 GB'], updated: 'New', released: '2026-09', downloadUrl: HF('bartowski/MiMo-V2.6-Distill-Qwen-9B-GGUF', 'MiMo-V2.6-Distill-Qwen-9B-Q4_K_M.gguf'), filename: 'MiMo-V2.6-Distill-Qwen-9B-Q4_K_M.gguf', sizeGB: 5.84, ...IMAGE_PART['bartowski/MiMo-V2.6-Distill-Qwen-9B-GGUF/mmproj-MiMo-V2.6-Distill-Qwen-9B-f16.gguf'] },
+    { name: 'MiMo V2.6 Distill 9B IQ2_M', group: 'MiMo V2.6 Distill 9B', description: 'Xiaomi MiMo V2.6 Distill 9B · smallest quant.', pulls: '496K+', tags: ['9B', 'Vision', 'IQ2_M', '3.5 GB'], updated: 'New', released: '2026-09', downloadUrl: HF('bartowski/MiMo-V2.6-Distill-Qwen-9B-GGUF', 'MiMo-V2.6-Distill-Qwen-9B-IQ2_M.gguf'), filename: 'MiMo-V2.6-Distill-Qwen-9B-IQ2_M.gguf', sizeGB: 3.54, ...IMAGE_PART['bartowski/MiMo-V2.6-Distill-Qwen-9B-GGUF/mmproj-MiMo-V2.6-Distill-Qwen-9B-f16.gguf'] },
+    { name: 'MiMo V2.6 Distill 9B Q8_0', group: 'MiMo V2.6 Distill 9B', description: 'Xiaomi MiMo V2.6 Distill 9B · largest quant, closest to the original weights.', pulls: '496K+', tags: ['9B', 'Vision', 'Q8_0', '9.6 GB'], updated: 'New', released: '2026-09', downloadUrl: HF('bartowski/MiMo-V2.6-Distill-Qwen-9B-GGUF', 'MiMo-V2.6-Distill-Qwen-9B-Q8_0.gguf'), filename: 'MiMo-V2.6-Distill-Qwen-9B-Q8_0.gguf', sizeGB: 9.55, ...IMAGE_PART['bartowski/MiMo-V2.6-Distill-Qwen-9B-GGUF/mmproj-MiMo-V2.6-Distill-Qwen-9B-f16.gguf'] },
+    // Mistral: Ministral 3 (December 2025) takes the place of Mistral Nemo,
+    // Devstral Small 2 that of Mistral Small 24B (2501). Mistral Small 4 is the
+    // newest general model. Its UD-Q4_K_M is split into three parts; the
+    // multi-part download path fetches no vision projector, so that quant is
+    // listed as text only.
+    { name: 'Ministral 3 3B', group: 'Ministral 3 3B', description: 'Mistral Ministral 3 3B · small Mistral model from December 2025 with vision and tool calling. Fits 8 GB machines. The 0.8 GB vision projector comes with it. Apache-2.0.', pulls: '41K+', tags: ['3B', 'Vision', 'Q4_K_M', '2.1 GB'], updated: 'New', agent: true, lightweight: true, released: '2025-12', downloadUrl: HF('mistralai/Ministral-3-3B-Instruct-2512-GGUF', 'Ministral-3-3B-Instruct-2512-Q4_K_M.gguf'), filename: 'Ministral-3-3B-Instruct-2512-Q4_K_M.gguf', sizeGB: 2.15, ...IMAGE_PART['mistralai/Ministral-3-3B-Instruct-2512-GGUF/Ministral-3-3B-Instruct-2512-BF16-mmproj.gguf'] },
+    { name: 'Ministral 3 3B Q8_0', group: 'Ministral 3 3B', description: 'Mistral Ministral 3 3B · largest quant, closest to the original weights.', pulls: '41K+', tags: ['3B', 'Vision', 'Q8_0', '3.6 GB'], updated: 'New', agent: true, lightweight: true, released: '2025-12', downloadUrl: HF('mistralai/Ministral-3-3B-Instruct-2512-GGUF', 'Ministral-3-3B-Instruct-2512-Q8_0.gguf'), filename: 'Ministral-3-3B-Instruct-2512-Q8_0.gguf', sizeGB: 3.65, ...IMAGE_PART['mistralai/Ministral-3-3B-Instruct-2512-GGUF/Ministral-3-3B-Instruct-2512-BF16-mmproj.gguf'] },
+    { name: 'Ministral 3 8B', group: 'Ministral 3 8B', description: 'Mistral Ministral 3 8B · small Mistral model from December 2025 with vision and tool calling. Successor to Mistral Nemo 12B. The 0.9 GB vision projector comes with it. Apache-2.0.', pulls: '38K+', tags: ['8B', 'Vision', 'Q4_K_M', '5.2 GB'], updated: 'New', agent: true, released: '2025-12', downloadUrl: HF('mistralai/Ministral-3-8B-Instruct-2512-GGUF', 'Ministral-3-8B-Instruct-2512-Q4_K_M.gguf'), filename: 'Ministral-3-8B-Instruct-2512-Q4_K_M.gguf', sizeGB: 5.2, ...IMAGE_PART['mistralai/Ministral-3-8B-Instruct-2512-GGUF/Ministral-3-8B-Instruct-2512-BF16-mmproj.gguf'] },
+    { name: 'Ministral 3 8B Q8_0', group: 'Ministral 3 8B', description: 'Mistral Ministral 3 8B · largest quant, closest to the original weights.', pulls: '38K+', tags: ['8B', 'Vision', 'Q8_0', '9 GB'], updated: 'New', agent: true, released: '2025-12', downloadUrl: HF('mistralai/Ministral-3-8B-Instruct-2512-GGUF', 'Ministral-3-8B-Instruct-2512-Q8_0.gguf'), filename: 'Ministral-3-8B-Instruct-2512-Q8_0.gguf', sizeGB: 9.03, ...IMAGE_PART['mistralai/Ministral-3-8B-Instruct-2512-GGUF/Ministral-3-8B-Instruct-2512-BF16-mmproj.gguf'] },
+    { name: 'Ministral 3 14B', group: 'Ministral 3 14B', description: 'Mistral Ministral 3 14B · small Mistral model from December 2025 with vision and tool calling. The largest Ministral 3. The 0.9 GB vision projector comes with it. Apache-2.0.', pulls: '44K+', tags: ['14B', 'Vision', 'Q4_K_M', '8.2 GB'], updated: 'New', agent: true, released: '2025-12', downloadUrl: HF('mistralai/Ministral-3-14B-Instruct-2512-GGUF', 'Ministral-3-14B-Instruct-2512-Q4_K_M.gguf'), filename: 'Ministral-3-14B-Instruct-2512-Q4_K_M.gguf', sizeGB: 8.24, ...IMAGE_PART['mistralai/Ministral-3-14B-Instruct-2512-GGUF/Ministral-3-14B-Instruct-2512-BF16-mmproj.gguf'] },
+    { name: 'Ministral 3 14B Q8_0', group: 'Ministral 3 14B', description: 'Mistral Ministral 3 14B · largest quant, closest to the original weights.', pulls: '44K+', tags: ['14B', 'Vision', 'Q8_0', '14 GB'], updated: 'New', agent: true, released: '2025-12', downloadUrl: HF('mistralai/Ministral-3-14B-Instruct-2512-GGUF', 'Ministral-3-14B-Instruct-2512-Q8_0.gguf'), filename: 'Ministral-3-14B-Instruct-2512-Q8_0.gguf', sizeGB: 14.36, ...IMAGE_PART['mistralai/Ministral-3-14B-Instruct-2512-GGUF/Ministral-3-14B-Instruct-2512-BF16-mmproj.gguf'] },
+    { name: 'Devstral Small 2 24B', group: 'Devstral Small 2 24B', description: 'Mistral Devstral Small 2 · 24B coding model with tool calling and vision. Recommended quant. The 0.9 GB vision projector comes with it. Check the license terms for commercial use.', pulls: '50K+', tags: ['24B', 'Vision', 'Q4_K_M', '14 GB', 'Coding'], updated: 'New', agent: true, released: '2025-12', downloadUrl: HF('unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF', 'Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf'), filename: 'Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf', sizeGB: 14.33, ...IMAGE_PART['unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF/mmproj-F16.gguf'] },
+    { name: 'Devstral Small 2 24B UD-IQ2_M', group: 'Devstral Small 2 24B', description: 'Mistral Devstral Small 2 · smallest dynamic quant.', pulls: '50K+', tags: ['24B', 'Vision', 'UD-IQ2_M', '8.2 GB', 'Coding'], updated: 'New', agent: true, released: '2025-12', downloadUrl: HF('unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF', 'Devstral-Small-2-24B-Instruct-2512-UD-IQ2_M.gguf'), filename: 'Devstral-Small-2-24B-Instruct-2512-UD-IQ2_M.gguf', sizeGB: 8.24, ...IMAGE_PART['unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF/mmproj-F16.gguf'] },
+    { name: 'Devstral Small 2 24B Q8_0', group: 'Devstral Small 2 24B', description: 'Mistral Devstral Small 2 · largest quant, closest to the original weights.', pulls: '50K+', tags: ['24B', 'Vision', 'Q8_0', '25 GB', 'Coding'], updated: 'New', agent: true, released: '2025-12', downloadUrl: HF('unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF', 'Devstral-Small-2-24B-Instruct-2512-Q8_0.gguf'), filename: 'Devstral-Small-2-24B-Instruct-2512-Q8_0.gguf', sizeGB: 25.06, ...IMAGE_PART['unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF/mmproj-F16.gguf'] },
+    { name: 'Mistral Small 4 119B', group: 'Mistral Small 4 119B', description: 'Mistral Small 4 · 119B, Mistral\'s newest general model (March 2026), with tool calling and vision. Single 40 GB file, for 64 GB machines. The 0.9 GB vision projector comes with it. Apache-2.0.', pulls: '14K+', tags: ['119B', 'Vision', 'UD-Q2_K_XL', '40 GB'], updated: 'New', agent: true, released: '2026-03', downloadUrl: HF('unsloth/Mistral-Small-4-119B-2603-GGUF', 'Mistral-Small-4-119B-2603-UD-Q2_K_XL.gguf'), filename: 'Mistral-Small-4-119B-2603-UD-Q2_K_XL.gguf', sizeGB: 40.2, ...IMAGE_PART['unsloth/Mistral-Small-4-119B-2603-GGUF/mmproj-F16.gguf'] },
+    { name: 'Mistral Small 4 119B UD-IQ2_M', group: 'Mistral Small 4 119B', description: 'Mistral Small 4 · smallest dynamic quant, single file.', pulls: '14K+', tags: ['119B', 'Vision', 'UD-IQ2_M', '38 GB'], updated: 'New', agent: true, released: '2026-03', downloadUrl: HF('unsloth/Mistral-Small-4-119B-2603-GGUF', 'Mistral-Small-4-119B-2603-UD-IQ2_M.gguf'), filename: 'Mistral-Small-4-119B-2603-UD-IQ2_M.gguf', sizeGB: 37.57, ...IMAGE_PART['unsloth/Mistral-Small-4-119B-2603-GGUF/mmproj-F16.gguf'] },
+    { name: 'Mistral Small 4 119B UD-Q4_K_M', group: 'Mistral Small 4 119B', description: 'Mistral Small 4 · higher quality quant for 96 GB machines and up. Multi-part download, text only: LU fetches no vision projector for split files.', pulls: '14K+', tags: ['119B', 'UD-Q4_K_M', '74 GB', 'Multi-part'], updated: 'New', agent: true, released: '2026-03', downloadUrl: HF('unsloth/Mistral-Small-4-119B-2603-GGUF', 'UD-Q4_K_M/Mistral-Small-4-119B-2603-UD-Q4_K_M-00001-of-00003.gguf'), filename: 'Mistral-Small-4-119B-2603-UD-Q4_K_M-00001-of-00003.gguf', sizeGB: 73.76 },
+    // GPT-OSS 120B: still OpenAI's newest open model. Two parts, 63 GB in all.
+    { name: 'GPT-OSS 120B', description: 'OpenAI GPT-OSS 120B · the large open-weight GPT model, with tool calling and thinking. Multi-part download, about 63 GB, for 96 GB machines and up. Apache-2.0.', pulls: '73K+', tags: ['120B', 'Q4_K_M', '63 GB', 'Multi-part'], updated: 'New', agent: true, released: '2025-08', downloadUrl: HF('unsloth/gpt-oss-120b-GGUF', 'Q4_K_M/gpt-oss-120b-Q4_K_M-00001-of-00002.gguf'), filename: 'gpt-oss-120b-Q4_K_M-00001-of-00002.gguf', sizeGB: 62.77 },
+    // Hermes 3 3B: an official NousResearch model, not abliterated, so it lists with Hermes 4.3
+    // Bug Z/b v2.5.0 · GH #48. Pre-v2.5.0 these pointed at
+    // `bartowski/Hermes-3-Llama-*-GGUF`. leon's 2026-05-26 CLI repro
+    // `ollama pull hf.co/bartowski/Hermes-3-Llama-3.1-8B-GGUF:Q4_K_M`
+    // returned HTTP 400 "Repository is not GGUF or is not compatible with
+    // llama.cpp" on current Ollama. Switched to `mradermacher/...-GGUF`
+    // mirrors which produce llama.cpp-compatible quants (verified all
+    // three repos host Q4_K_M files of the expected size). Note the
+    // filename convention: mradermacher uses `.` between model name and
+    // quant (e.g. `Hermes-3-Llama-3.1-8B.Q4_K_M.gguf`), bartowski uses `-`.
+    { name: 'Hermes 3 Llama 3.2 3B', description: 'NousResearch Hermes 3 · small and fast with native tool calling. Runs on 8 GB RAM, CPU-only.', pulls: '500K+', tags: ['3B', 'Q4_K_M', '2 GB'], updated: 'Hot', agent: true, lightweight: true, released: '2024-08', downloadUrl: HF('mradermacher/Hermes-3-Llama-3.2-3B-GGUF', 'Hermes-3-Llama-3.2-3B.Q4_K_M.gguf'), filename: 'Hermes-3-Llama-3.2-3B.Q4_K_M.gguf', sizeGB: 2 },
+    // Hermes 4.3 36B (NousResearch, November 2025), on the Seed-OSS 36B base
+    { name: 'Hermes 4.3 36B', group: 'Hermes 4.3 36B', description: 'NousResearch Hermes 4.3 · 36B on the Seed-OSS base, the successor to Hermes 3. Native tool calling. Recommended quant. Apache-2.0.', pulls: '16K+', tags: ['36B', 'Q4_K_M', '22 GB', 'Tools'], updated: 'New', agent: true, released: '2025-11', downloadUrl: HF('NousResearch/Hermes-4.3-36B-GGUF', 'hermes-4_3_36b-Q4_K_M.gguf'), filename: 'hermes-4_3_36b-Q4_K_M.gguf', sizeGB: 21.76 },
+    { name: 'Hermes 4.3 36B Q3_K_M', group: 'Hermes 4.3 36B', description: 'NousResearch Hermes 4.3 · smaller quant.', pulls: '16K+', tags: ['36B', 'Q3_K_M', '18 GB', 'Tools'], updated: 'New', agent: true, released: '2025-11', downloadUrl: HF('NousResearch/Hermes-4.3-36B-GGUF', 'hermes-4_3_36b-Q3_K_M.gguf'), filename: 'hermes-4_3_36b-Q3_K_M.gguf', sizeGB: 17.62 },
+    { name: 'Hermes 4.3 36B Q8_0', group: 'Hermes 4.3 36B', description: 'NousResearch Hermes 4.3 · largest quant, closest to the original weights.', pulls: '16K+', tags: ['36B', 'Q8_0', '38 GB', 'Tools'], updated: 'New', agent: true, released: '2025-11', downloadUrl: HF('NousResearch/Hermes-4.3-36B-GGUF', 'hermes-4_3_36b-Q8_0.gguf'), filename: 'hermes-4_3_36b-Q8_0.gguf', sizeGB: 38.42 },
+    // Holo4 (H Company, September 2026), successor to Holo 3.1. Not run in LU:
+    // the measurements in the Holo 3.1 entry above do not carry over.
+    { name: 'Holo4 35B MoE', group: 'Holo4 35B MoE', description: 'H Company Holo4 35B MoE · successor to Holo 3.1 for computer control, 3B active parameters. Looks at screenshots and picks the next click. Beta: not yet tested in LU. The 0.9 GB vision projector comes with it. Apache-2.0.', pulls: '3K+', tags: ['35B MoE', 'Vision', 'Q4_K_M', '22 GB', 'Computer control', 'Beta'], updated: 'New', released: '2026-09', downloadUrl: HF('bartowski/Hcompany_Holo4-35B-A3B-GGUF', 'Hcompany_Holo4-35B-A3B-Q4_K_M.gguf'), filename: 'Hcompany_Holo4-35B-A3B-Q4_K_M.gguf', sizeGB: 22.32, ...IMAGE_PART['bartowski/Hcompany_Holo4-35B-A3B-GGUF/mmproj-Hcompany_Holo4-35B-A3B-f16.gguf'] },
+    { name: 'Holo4 35B MoE IQ2_M', group: 'Holo4 35B MoE', description: 'H Company Holo4 35B MoE · smallest quant. Beta: not yet tested in LU.', pulls: '3K+', tags: ['35B MoE', 'Vision', 'IQ2_M', '13 GB', 'Computer control', 'Beta'], updated: 'New', released: '2026-09', downloadUrl: HF('bartowski/Hcompany_Holo4-35B-A3B-GGUF', 'Hcompany_Holo4-35B-A3B-IQ2_M.gguf'), filename: 'Hcompany_Holo4-35B-A3B-IQ2_M.gguf', sizeGB: 13.23, ...IMAGE_PART['bartowski/Hcompany_Holo4-35B-A3B-GGUF/mmproj-Hcompany_Holo4-35B-A3B-f16.gguf'] },
+    { name: 'Holo4 35B MoE Q8_0', group: 'Holo4 35B MoE', description: 'H Company Holo4 35B MoE · largest quant, closest to the original weights. Beta: not yet tested in LU.', pulls: '3K+', tags: ['35B MoE', 'Vision', 'Q8_0', '37 GB', 'Computer control', 'Beta'], updated: 'New', released: '2026-09', downloadUrl: HF('bartowski/Hcompany_Holo4-35B-A3B-GGUF', 'Hcompany_Holo4-35B-A3B-Q8_0.gguf'), filename: 'Hcompany_Holo4-35B-A3B-Q8_0.gguf', sizeGB: 36.91, ...IMAGE_PART['bartowski/Hcompany_Holo4-35B-A3B-GGUF/mmproj-Hcompany_Holo4-35B-A3B-f16.gguf'] },
   ])
 }
 
@@ -1408,7 +1708,32 @@ export function deriveQ4FilenameFromRepo(repoName: string): string {
   return QUANT_SUFFIX.test(baseName) ? `${baseName}.gguf` : `${baseName}-Q4_K_M.gguf`
 }
 
+/**
+ * The HuggingFace search could not answer: no connection, the free rate limit,
+ * or a reply that is not a list of repos. Thrown instead of an empty list so
+ * the page can tell "nothing matches" from "nobody answered".
+ */
+export class HfSearchError extends Error {
+  readonly kind: 'offline' | 'rate-limit'
+  constructor(kind: 'offline' | 'rate-limit', detail: string) {
+    super(detail)
+    this.name = 'HfSearchError'
+    this.kind = kind
+  }
+}
+
+/** The sentence the user reads when the HuggingFace search failed. */
+export function hfSearchFailureText(err: unknown): string {
+  if (err instanceof HfSearchError && err.kind === 'rate-limit') {
+    return 'Hugging Face is limiting searches right now. Wait a minute and search again.'
+  }
+  return 'Hugging Face could not be reached. Check the connection and search again.'
+}
+
+const RATE_LIMIT = /rate.?limit|too many requests|\b429\b/i
+
 export async function searchHuggingFaceModels(query: string): Promise<DiscoverModel[]> {
+  let repos: Array<{ id: string; downloads?: number; modelId?: string }>
   try {
     // Case-insensitive · HF repos almost always end in `-GGUF` (uppercase),
     // and the previous case-sensitive `includes('gguf')` missed those, so a
@@ -1424,43 +1749,56 @@ export async function searchHuggingFaceModels(query: string): Promise<DiscoverMo
     } else {
       const res = await fetch(url)
       json = await res.text()
+      if (res.status === 429) throw new HfSearchError('rate-limit', `HTTP 429: ${json.slice(0, 200)}`)
     }
 
-    const repos: Array<{ id: string; downloads?: number; modelId?: string }> = JSON.parse(json)
-
-    const models: DiscoverModel[] = []
-    for (const repo of repos) {
-      const repoName = repo.id.split('/').pop() || ''
-      const q4File = deriveQ4FilenameFromRepo(repoName)
-      const downloadUrl = `https://huggingface.co/${repo.id}/resolve/main/${q4File}`
-
-      // Display name = repo basename without the GGUF suffix. The previous
-      // version referenced an undefined `baseName` here, throwing a
-      // ReferenceError that the catch silently turned into an empty array
-      // · the user-facing P11 search was returning "No models found" for
-      // every query, even ones that match plenty of HF results.
-      const displayName = repoName.replace(/-GGUF$/i, '').replace(/-gguf$/i, '')
-
-      const downloads = repo.downloads || 0
-      const pullsStr = downloads > 1000000 ? `${(downloads / 1000000).toFixed(1)}M` :
-        downloads > 1000 ? `${Math.round(downloads / 1000)}K` : `${downloads}`
-
-      models.push({
-        name: displayName,
-        description: repo.id,
-        pulls: pullsStr,
-        tags: ['Q4_K_M', 'GGUF'],
-        updated: '',
-        downloadUrl,
-        filename: q4File,
-        url: `https://huggingface.co/${repo.id}`,
-      })
+    const parsed: unknown = JSON.parse(json)
+    if (!Array.isArray(parsed)) {
+      // HF answers a limit or an outage with {"error": "..."} instead of a list.
+      const said = isRecord(parsed) && typeof parsed.error === 'string' ? parsed.error : json.slice(0, 200)
+      throw new HfSearchError(RATE_LIMIT.test(said) ? 'rate-limit' : 'offline', said)
     }
-    return models
+    repos = parsed
   } catch (err) {
     log.warn('[discover] HF search failed', { err })
-    return []
+    if (err instanceof HfSearchError) throw err
+    throw new HfSearchError(RATE_LIMIT.test(String(err)) ? 'rate-limit' : 'offline', String(err))
   }
+
+  const models: DiscoverModel[] = []
+  for (const repo of repos) {
+    if (typeof repo?.id !== 'string') continue
+    const repoName = repo.id.split('/').pop() || ''
+    const q4File = deriveQ4FilenameFromRepo(repoName)
+    // D7: the repo name named no quant, so Q4_K_M is only a guess.
+    const quantGuessed = q4File !== `${repoName.replace(/-GGUF$/i, '')}.gguf`
+    const downloadUrl = `https://huggingface.co/${repo.id}/resolve/main/${q4File}`
+
+    // Display name = repo basename without the GGUF suffix. The previous
+    // version referenced an undefined `baseName` here, throwing a
+    // ReferenceError that the catch silently turned into an empty array
+    // · the user-facing P11 search was returning "No models found" for
+    // every query, even ones that match plenty of HF results.
+    const displayName = repoName.replace(/-GGUF$/i, '').replace(/-gguf$/i, '')
+
+    const downloads = repo.downloads || 0
+    const pullsStr = downloads > 1000000 ? `${(downloads / 1000000).toFixed(1)}M` :
+      downloads > 1000 ? `${Math.round(downloads / 1000)}K` : `${downloads}`
+
+    models.push({
+      name: displayName,
+      description: repo.id,
+      pulls: pullsStr,
+      // D7: a guessed quant is no promise, the download picks it by size.
+      tags: quantGuessed ? ['GGUF'] : ['Q4_K_M', 'GGUF'],
+      updated: '',
+      downloadUrl,
+      filename: q4File,
+      url: `https://huggingface.co/${repo.id}`,
+      ...(quantGuessed ? { quantGuessed: true } : {}),
+    })
+  }
+  return models
 }
 
 // ─── HuggingFace file-tree resolution (sharded / multi-part GGUF) ───
@@ -1500,6 +1838,19 @@ export interface HfGgufResolution {
   files: HfGgufFile[]
   totalBytes: number
   quant?: string
+  /** The image part the same repository ships, when it ships one. For a model
+   *  the catalog does not know, this is what is offered with it. */
+  imagePart?: ImagePartSource
+  /** D7: the guessed quant did not fit the memory budget and this smaller one
+   *  was taken instead. `from` is what the guess would have fetched. */
+  fitSwap?: { from: string; fromBytes: number }
+  /** D7: even the chosen file is bigger than the memory budget (no quant of
+   *  the repository fits). It downloads and runs, partly on the CPU. */
+  overBudget?: boolean
+  /** Set when the chosen file is a split set the repository holds only some
+   *  parts of (an upload still running). `files` is empty then: llama.cpp
+   *  cannot load the set, so nothing of it is downloaded. */
+  incomplete?: ShardGap
 }
 
 // 5-digit llama.cpp split convention: `<name>-00001-of-00002.gguf`. A few
@@ -1510,24 +1861,62 @@ const GGUF_SHARD_RE = /-(\d{4,5})-of-(\d{4,5})\.gguf$/i
 // and PICK a group · grouping itself never depends on it.
 const GGUF_QUANT_TOKEN = /(IQ\d_[A-Z0-9]+|Q\d_K(?:_[A-Z]+)?|Q\d_[01]|BF16|F16|F32)/i
 
+/** One downloadable unit of a repo tree: a single file, or every part of a
+ *  split set. */
+interface GgufGroup { key: string; quant?: string; parts: HfTreeEntry[]; gap?: ShardGap | null }
+
+/**
+ * The group that holds the file the caller named, or undefined.
+ *
+ * The full path decides first. Only when no entry has that path does the bare
+ * file name count, and then only if exactly one entry carries it: a repo that
+ * moved the file into a folder still resolves, and two folders with the same
+ * leaf name stay undecided and go to the quant fallback.
+ */
+function groupOfNamedFile(groups: GgufGroup[], exactPath?: string): GgufGroup | undefined {
+  if (!exactPath) return undefined
+  const byPath = groups.find(g => g.parts.some(p => p.path === exactPath))
+  if (byPath) return byPath
+  const leaf = exactPath.split('/').pop()
+  const byLeaf = groups.filter(g => g.parts.some(p => p.path.split('/').pop() === leaf))
+  return byLeaf.length === 1 ? byLeaf[0] : undefined
+}
+
 /**
  * Pure: given a HuggingFace repo file tree, pick the GGUF file-set to download.
  * Returns every part of a sharded set (sorted) or the single matching file.
  * Exported for unit testing without a network round-trip.
+ *
+ * `exactPath` is the file the caller already names (the path behind
+ * `/resolve/main/` of a catalog address). When the tree holds that file, its
+ * group is the answer and the quant is never consulted. The quant is only a
+ * way to find a file nobody named, and it is a lossy one: it cannot tell two
+ * model families in one repo apart (`RVN-...-Q4_K_M-multilingual.gguf` next to
+ * an older `...-Heretic-Q4_K_M.gguf`), and it reads nothing from names that do
+ * not end on the quant (`...-Q4_K-0731.gguf`, `...-Q4_K_P.gguf`). Until
+ * 2026-10-08 the quant was the only key, so those cards fetched a neighbour.
  */
 export function selectGgufFromTree(
   entries: HfTreeEntry[],
   repoId: string,
   preferredQuant?: string,
+  exactPath?: string,
+  /** D7: the most a guessed quant may weigh, in bytes (`quantBudgetBytes`).
+   *  Only for a quant nobody chose; a named file is never swapped. */
+  budgetBytes?: number,
 ): HfGgufResolution | null {
-  const ggufs = entries.filter(e => e.type === 'file' && /\.gguf$/i.test(e.path))
+  const allGguf = entries.filter(e => e.type === 'file' && /\.gguf$/i.test(e.path))
+  // An image part is a GGUF too and carries a quant token of its own
+  // (`mmproj-F16.gguf`), so it has to leave before the groups are formed: a
+  // repository without a Q4_K_M would otherwise hand the part out as the model.
+  const ggufs = allGguf.filter(e => !isUpstreamImagePart(e.path))
   if (ggufs.length === 0) return null
+  const upstreamPart = pickUpstreamImagePart(allGguf)
 
   // Group by the path with the shard suffix stripped. Single files keep their
   // full path (their own group of one); all parts of a split set collapse to
   // the same key regardless of whether the quant sits in the folder or the leaf.
-  interface Group { key: string; quant?: string; parts: HfTreeEntry[] }
-  const groups = new Map<string, Group>()
+  const groups = new Map<string, GgufGroup>()
   for (const f of ggufs) {
     const key = f.path.replace(GGUF_SHARD_RE, '')
     const leaf = (f.path.split('/').pop() || '').replace(GGUF_SHARD_RE, '.gguf')
@@ -1538,13 +1927,50 @@ export function selectGgufFromTree(
   }
 
   const all = [...groups.values()]
+  for (const g of all) g.gap = shardSetGap(g.parts.map(p => p.path))
+  // A split set with parts missing never loads. A loadable group is taken
+  // over it wherever the choice is ours; when the caller's own file or quant
+  // is only there incomplete, the answer says so instead of fetching another.
+  const complete = all.filter(g => !g.gap)
   const wanted = preferredQuant?.toUpperCase()
-  const picked =
-    (wanted ? all.find(g => g.quant === wanted) : undefined) ||
-    (wanted ? all.find(g => g.key.toUpperCase().includes(wanted)) : undefined) ||
-    all.find(g => g.quant === 'Q4_K_M') ||
+  const byQuant = (g: GgufGroup) => g.quant === wanted
+  const byKey = (g: GgufGroup) => !!wanted && g.key.toUpperCase().includes(wanted)
+  const named = groupOfNamedFile(all, exactPath)
+  let picked =
+    named ||
+    (wanted ? complete.find(byQuant) || all.find(byQuant) : undefined) ||
+    (wanted ? complete.find(byKey) || all.find(byKey) : undefined) ||
+    complete.find(g => g.quant === 'Q4_K_M') ||
+    // A file without a quant in its name (`…-imatrix1.gguf`, 26 MB of
+    // calibration data) is no model to fall back on while a quant is there.
+    complete.find(g => g.quant) ||
+    complete[0] ||
     all[0]
   if (!picked) return null
+  // D7 (GitHub #215): a 16 GB card got the 15.8 GB Q4_K_M, which leaves no
+  // room for the context and runs mostly on the CPU. A quant nobody chose is
+  // taken from the list by size instead: the largest one that fits.
+  let fitSwap: HfGgufResolution['fitSwap']
+  let overBudget = false
+  // The image part loads next to the model, so it takes from the same room.
+  const room = budgetBytes ? budgetBytes - (upstreamPart?.size || upstreamPart?.lfs?.size || 0) : 0
+  if (!named && room > 0 && !picked.gap) {
+    const pickedBytes = groupBytes(picked)
+    if (pickedBytes > room || !picked.quant) {
+      const fitting = complete
+        .filter(g => g.quant && groupBytes(g) > 0 && groupBytes(g) <= room)
+        .sort((a, b) => groupBytes(b) - groupBytes(a))[0]
+      if (fitting) {
+        if (pickedBytes > room) fitSwap = { from: picked.quant ?? picked.key, fromBytes: pickedBytes }
+        picked = fitting
+      } else if (pickedBytes > room) {
+        overBudget = true
+      }
+    }
+  }
+  if (picked.gap) {
+    return { sharded: true, files: [], totalBytes: 0, quant: picked.quant, incomplete: picked.gap }
+  }
 
   const sorted = [...picked.parts].sort((a, b) => {
     const ai = parseInt(a.path.match(GGUF_SHARD_RE)?.[1] || '0', 10)
@@ -1562,7 +1988,163 @@ export function selectGgufFromTree(
     files,
     totalBytes: files.reduce((s, f) => s + f.sizeBytes, 0),
     quant: picked.quant,
+    ...(fitSwap ? { fitSwap } : {}),
+    ...(overBudget ? { overBudget } : {}),
+    ...(upstreamPart
+      ? {
+          imagePart: {
+            url: `https://huggingface.co/${repoId}/resolve/main/${upstreamPart.path}`,
+            sizeBytes: upstreamPart.size || undefined,
+            sha256: lfsSha256(upstreamPart),
+          },
+        }
+      : {}),
   }
+}
+
+/** C21: one downloadable choice of a repository, a single file or a whole
+ *  split set. */
+export interface GgufChoice {
+  /** The path of the file (of the first part, for a split set). */
+  path: string
+  /** The file name the download is known by. */
+  filename: string
+  quant?: string
+  parts: number
+  totalBytes: number
+  /** A split set the repository holds only some parts of. Not offered as a
+   *  download: llama.cpp cannot load it. */
+  incomplete: boolean
+}
+
+/**
+ * C21 (Discord, 31.10. and 01.11.2026): every GGUF a repository offers,
+ * so the user can pick the quant instead of LU picking it. Pure; the image
+ * part is no choice of its own (it comes with the model). Sorted small to
+ * large, which is the order a quant table reads in.
+ */
+export function listGgufChoices(entries: HfTreeEntry[]): GgufChoice[] {
+  const ggufs = entries.filter(e => e.type === 'file' && /\.gguf$/i.test(e.path) && !isUpstreamImagePart(e.path))
+  const groups = new Map<string, GgufGroup>()
+  for (const f of ggufs) {
+    const key = f.path.replace(GGUF_SHARD_RE, '')
+    const leaf = (f.path.split('/').pop() || '').replace(GGUF_SHARD_RE, '.gguf')
+    const quant = (GGUF_QUANT_TOKEN.exec(leaf)?.[1] || GGUF_QUANT_TOKEN.exec(f.path)?.[1])?.toUpperCase()
+    let g = groups.get(key)
+    if (!g) { g = { key, quant, parts: [] }; groups.set(key, g) }
+    g.parts.push(f)
+  }
+  return [...groups.values()]
+    .map((g) => {
+      const first = [...g.parts].sort((a, b) => a.path.localeCompare(b.path))[0]
+      return {
+        path: first.path,
+        filename: first.path.split('/').pop() as string,
+        quant: g.quant,
+        parts: g.parts.length,
+        totalBytes: groupBytes(g),
+        incomplete: !!shardSetGap(g.parts.map(p => p.path)),
+      }
+    })
+    .sort((a, b) => a.totalBytes - b.totalBytes || a.path.localeCompare(b.path))
+}
+
+/** C21: the GGUF choices of a Hugging Face repository, or null when its file
+ *  list cannot be read (offline, rate limited, gated). */
+export async function fetchGgufChoices(repoId: string): Promise<GgufChoice[] | null> {
+  try {
+    const url = `https://huggingface.co/api/models/${repoId}/tree/main?recursive=true`
+    const { isTauri, fetchExternal } = await import('./backend')
+    const json = isTauri() ? await fetchExternal(url) : await (await fetch(url)).text()
+    const entries = JSON.parse(json)
+    return Array.isArray(entries) ? listGgufChoices(entries as HfTreeEntry[]) : null
+  } catch (err) {
+    log.warn('[discover] HF tree listing failed', { repoId, err })
+    return null
+  }
+}
+
+/** C21: a catalog or search entry, made to fetch the file the user picked.
+ *  The picked path is named, so the download resolves exactly that file (and
+ *  every part of it) and never swaps it for another quant. */
+export function discoverModelForChoice(model: DiscoverModel, repoId: string, choice: GgufChoice): DiscoverModel {
+  const sizeGB = choice.totalBytes > 0 ? Math.round(choice.totalBytes / 1_073_741_824 * 10) / 10 : undefined
+  return {
+    ...model,
+    downloadUrl: `https://huggingface.co/${repoId}/resolve/main/${choice.path}`,
+    filename: choice.filename,
+    sizeGB,
+    sizeBytes: choice.parts === 1 && choice.totalBytes > 0 ? choice.totalBytes : undefined,
+    quantGuessed: false,
+    // Its own checksum, not the one of the catalog's file.
+    sha256: undefined,
+  }
+}
+
+function groupBytes(g: GgufGroup): number {
+  return g.parts.reduce((s, p) => s + (p.size || p.lfs?.size || 0), 0)
+}
+
+/**
+ * D7: how much a quant LU picks by itself may weigh. The model shares the
+ * graphics memory with its context (KV cache) and with the system, so the
+ * file gets the memory minus max(1.5 GB, 10 %). 16 GB leaves 14.4 GB. The
+ * memory arrives in GiB (MiB / 1024), the file sizes in bytes.
+ */
+export function quantBudgetBytes(memoryGb: number | null | undefined): number | undefined {
+  if (!memoryGb || memoryGb <= 0) return undefined
+  const headroom = Math.max(1.5, memoryGb * 0.1)
+  const gb = memoryGb - headroom
+  return gb > 0 ? Math.floor(gb * 1_073_741_824) : undefined
+}
+
+/** What the download asks the repo tree for one entry. */
+export interface GgufRequest {
+  repoId: string
+  /** The path the entry's address names. Decides when the tree holds it. */
+  exactPath?: string
+  /** Read from the file name. Only the fallback, see `selectGgufFromTree`. */
+  preferredQuant?: string
+  /** D7: the quant is a guess, so it may be swapped for one that fits. */
+  quantGuessed?: boolean
+}
+
+/**
+ * The question a catalog or search entry puts to its repo tree, or null when
+ * its address is not a HuggingFace file address. One place, so the Models tab
+ * and the test that walks the whole catalog ask the same thing.
+ */
+export function ggufRequestFor(model: Pick<DiscoverModel, 'downloadUrl' | 'filename' | 'quantGuessed'>): GgufRequest | null {
+  if (!model.downloadUrl) return null
+  const parsed = parseHfUrl(model.downloadUrl)
+  if (!parsed) return null
+  return {
+    repoId: `${parsed.user}/${parsed.repo}`,
+    // A guessed file name is no choice: it must not pin the Q4_K_M (D7).
+    exactPath: model.quantGuessed ? undefined : hfUrlToTreePath(model.downloadUrl) ?? undefined,
+    preferredQuant: model.filename ? extractGgufQuant(model.filename) : undefined,
+    ...(model.quantGuessed ? { quantGuessed: true } : {}),
+  }
+}
+
+/**
+ * The image part to fetch with `model`: the catalog's when the entry names one,
+ * otherwise the one its repository ships, for a model the catalog does not
+ * know. A catalog entry without a part stays without one, whatever the
+ * repository lists today: the catalog is where a part is checked before it is
+ * offered.
+ */
+export function imagePartFor(model: DiscoverModel, resolution: HfGgufResolution | null | undefined): ImagePartSource | null {
+  const own = imagePartOf(model)
+  if (own) return own
+  if (model.noImagePart || isCatalogChatModel(model)) return null
+  return resolution?.imagePart ?? null
+}
+
+/** Is this the address of a chat model the catalog lists? */
+function isCatalogChatModel(model: DiscoverModel): boolean {
+  if (!model.downloadUrl) return false
+  return [...getUncensoredTextModels(), ...getMainstreamTextModels()].some((m) => m.downloadUrl === model.downloadUrl)
 }
 
 /**
@@ -1573,6 +2155,8 @@ export function selectGgufFromTree(
 export async function resolveHfGgufFiles(
   repoId: string,
   preferredQuant?: string,
+  exactPath?: string,
+  budgetBytes?: number,
 ): Promise<HfGgufResolution | null> {
   try {
     const url = `https://huggingface.co/api/models/${repoId}/tree/main?recursive=true`
@@ -1586,26 +2170,38 @@ export async function resolveHfGgufFiles(
     }
     const entries = JSON.parse(json)
     if (!Array.isArray(entries)) return null
-    return selectGgufFromTree(entries as HfTreeEntry[], repoId, preferredQuant)
+    return selectGgufFromTree(entries as HfTreeEntry[], repoId, preferredQuant, exactPath, budgetBytes)
   } catch (err) {
     log.warn('[discover] HF tree resolve failed', { repoId, err })
     return null
   }
 }
 
+/** A model folder, or why there is none (the backend's own sentence). */
+export interface ModelFolder {
+  path: string | null
+  reason: string | null
+}
+
+/** Detect the model directory for the active local provider, with the reason when there is none. */
+export async function providerModelFolder(providerName: string): Promise<ModelFolder> {
+  try {
+    const path = await backendCall<string | null>('detect_model_path', { provider: providerName })
+    return { path: path || null, reason: null }
+  } catch (err) {
+    return { path: null, reason: err instanceof Error ? err.message : String(err ?? '') || null }
+  }
+}
+
 /** Detect the model directory for the active local provider */
 export async function detectProviderModelPath(providerName: string): Promise<string | null> {
-  try {
-    return await backendCall('detect_model_path', { provider: providerName })
-  } catch {
-    return null
-  }
+  return (await providerModelFolder(providerName)).path
 }
 
 /**
  * Wohin eine frisch heruntergeladene GGUF fuer die LU Engine gehoert.
  *
- * Der Ordner, den der Nutzer unter Model Storage gesetzt hat, wenn er einen
+ * Der Ordner, den der Nutzer unter Storage gesetzt hat, wenn er einen
  * gesetzt hat, sonst der eigene der Anwendung.
  *
  * Persona P2, 04.09.2026: der Text im Panel verspricht "LU downloads GGUFs
@@ -1619,14 +2215,50 @@ export async function detectProviderModelPath(providerName: string): Promise<str
  * den eigenen Ordner UND den gesetzten, vier Ebenen tief.
  */
 export async function luEngineDownloadDir(): Promise<string | null> {
+  return (await luEngineDownloadFolder()).path
+}
+
+/** `luEngineDownloadDir` with the reason when the folder cannot be had. */
+export async function luEngineDownloadFolder(): Promise<ModelFolder> {
   const gesetzt = customModelDirs()[0]
-  if (gesetzt) return gesetzt
-  return await detectProviderModelPath(BUILTIN_BACKEND_ID)
+  if (gesetzt) return { path: gesetzt, reason: null }
+  return await providerModelFolder(BUILTIN_BACKEND_ID)
+}
+
+/**
+ * Phone only: how a download is called in the notification of the system.
+ * The shell of the phone sets this once at its start (mobile/boot), with the
+ * name its pages show for the file. Nobody sets it on a desktop, so the call
+ * below carries exactly what it always carried there.
+ */
+let downloadTitleOf: ((filename: string) => string | undefined) | null = null
+export function setDownloadTitleResolver(resolver: ((filename: string) => string | undefined) | null): void {
+  downloadTitleOf = resolver
+}
+
+/** The name as an argument of the call, or nothing at all (every desktop). */
+function titleArg(filename: string): { title?: string } {
+  try {
+    const title = downloadTitleOf?.(filename)?.trim()
+    return title ? { title } : {}
+  } catch {
+    // A name is a nicety. Without one the notification shows the file name.
+    return {}
+  }
 }
 
 /** Download a GGUF model to a specific directory (for non-Ollama providers) */
 export async function startModelDownloadToPath(url: string, destDir: string, filename: string, expectedBytes?: number, sha256?: string): Promise<{ status: string; id: string; error?: string }> {
-  return backendCall('download_model_to_path', { url, destDir, filename, expectedBytes: expectedBytes ?? null, expectedSha256: sha256 ?? null })
+  // The CivitAI key goes along for a CivitAI address and no other (a LoRA
+  // from the CivitAI search into the Mac's LoRA folder). Every other caller
+  // sends what it sent before.
+  const authToken = civitaiAuthToken(url)
+  recordSourceFromDownload(filename, url)
+  return backendCall('download_model_to_path', {
+    url, destDir, filename, expectedBytes: expectedBytes ?? null, expectedSha256: sha256 ?? null,
+    ...(authToken ? { authToken } : {}),
+    ...titleArg(filename),
+  })
 }
 
 /** What the catalog knows about one downloadable file. */
@@ -1641,7 +2273,7 @@ export interface FileMeta {
  *  and text models alike. One walk, so the lookups below cannot drift apart. */
 function catalogEntries(): DiscoverModel[] {
   const out: DiscoverModel[] = []
-  for (const bundle of [...getImageBundles(), ...getVideoBundles(), ...getAudioBundles(), ...getLipsyncBundles(), ...getMotionBundles()]) {
+  for (const bundle of [...getImageBundles(), ...getVideoBundles(), ...getAudioBundles(), ...getLipsyncBundles(), ...getMotionBundles(), ...getUpscaleBundles(), ...getThreeDBundles()]) {
     out.push(...bundle.files)
   }
   out.push(...getUncensoredTextModels(), ...getMainstreamTextModels())
@@ -1655,12 +2287,20 @@ export function lookupFileMeta(filename: string): FileMeta | null {
       return {
         url: m.downloadUrl,
         subfolder: m.subfolder,
-        expectedBytes: m.sizeGB ? Math.round(m.sizeGB * GIB) : undefined,
+        expectedBytes: m.sizeGB ? Math.round(m.sizeGB * 1_073_741_824) : undefined,
         sha256: m.sha256,
       }
     }
   }
   return null
+}
+
+/** The catalog's digest and byte count for `filename`, but only when the catalog
+ *  names the SAME address. For callers that build a download from a registry
+ *  entry and would otherwise start it without the digest. */
+export function catalogDigestFor(filename: string, url: string): { sha256?: string; expectedBytes?: number } {
+  const cat = lookupFileMeta(filename)
+  return cat && cat.url === url ? { sha256: cat.sha256, expectedBytes: cat.expectedBytes } : {}
 }
 
 /** Every filename the catalog can name. Used to turn an orphaned partial's
@@ -1746,6 +2386,8 @@ export function catalogAddresses(): CatalogAddress[] {
     add(req.vae?.downloadUrl, `COMPONENT_REGISTRY.${type}.vae`)
     add(req.clip?.downloadUrl, `COMPONENT_REGISTRY.${type}.clip`)
     add(req.clipSecondary?.downloadUrl, `COMPONENT_REGISTRY.${type}.clipSecondary`)
+    add(req.audioVae?.downloadUrl, `COMPONENT_REGISTRY.${type}.audioVae`)
+    add(req.upscaler?.downloadUrl, `COMPONENT_REGISTRY.${type}.upscaler`)
   }
 
   return [...byUrl].map(([url, where]) => ({ url, where: [...where] }))
@@ -1789,9 +2431,43 @@ export interface CivitAIModelResult {
   filename?: string
   subfolder?: string
   sizeGB?: number
+  /** The file's byte count as CivitAI states it (sizeKB times 1024), for the
+   *  Installed check. `sizeGB` is rounded to a tenth and says nothing exact. */
+  sizeBytes?: number
   stats?: { downloads: number; likes: number }
   creator?: string
   sourceUrl: string
+  /** C18: the whole description as text, paragraphs kept, for the Details
+   *  dialog. `description` above stays the one short line of the hit row. */
+  fullDescription?: string
+  /** C21: every version of the hit with its model files, in CivitAI's order (the first is the one Download takes), so the
+   *  user can fetch another version or another precision than the default. */
+  versions?: CivitaiVersionChoice[]
+  /** The id of the version the default download takes (the newest). */
+  versionId?: number
+}
+
+/** One downloadable model file of a CivitAI version (C21). */
+export interface CivitaiFileChoice {
+  name: string
+  sizeBytes?: number
+  downloadUrl: string
+  /** CivitAI's own words for the file: fp16 / bf16 / fp8, pruned / full,
+   *  SafeTensor / GGUF. Shown as they are. */
+  fp?: string
+  size?: string
+  format?: string
+  /** The file CivitAI downloads for the version by default. */
+  primary: boolean
+  sha256?: string
+}
+
+export interface CivitaiVersionChoice {
+  id: number
+  name: string
+  baseModel?: string
+  published?: string
+  files: CivitaiFileChoice[]
 }
 
 export const CIVITAI_DEFAULT_HOST = 'civitai.com'
@@ -1806,6 +2482,48 @@ export const CIVITAI_DEFAULT_HOST = 'civitai.com'
 export function civitaiHostSwap(url: string | undefined, host: string): string | undefined {
   if (!url || !host || host === CIVITAI_DEFAULT_HOST) return url
   return url.replace(/^(https?:\/\/)civitai\.com/i, `$1${host}`)
+}
+
+/**
+ * Das Vorschaubild eines CivitAI-Treffers als kleines Standbild.
+ *
+ * Discord #bug-reports, 29.10.2026 (Ubuntu): „when searching for models in app
+ * from civitai searchbox, the app crashes". Die API nennt als erstes Bild einer
+ * Version die Originaldatei (`…/original=true/123.mp4`). Gemessen für „wan“,
+ * 20 Treffer mit 19 Vorschaubildern: 13 davon MP4-Videos, zusammen 68 MB (das größte 15,9 MB) für
+ * Kärtchen von 56 px. Auf Linux dekodiert WebKitGTK ein Video im `<img>` mit
+ * GStreamer (WebView2 unter Windows zeigt es gar nicht), also
+ * zwanzig Videodekoder auf einmal, mit echter GPU über VA-API/GL.
+ *
+ * Der Bild-CDN von CivitAI liefert dieselbe Datei verkleinert, und mit
+ * `anim=false` auch ein Video als einzelnes JPEG (gemessen: 111 KB statt
+ * 695 KB bis 16 MB, image/jpeg statt video/mp4; alle 19 zusammen
+ * 1,89 MB). Dieselbe Angabe benutzt die CivitAI-Seite selbst. Ein Video, das
+ * nicht auf diesem CDN liegt, bekommt KEIN Vorschaubild: ein Video gehört nicht
+ * in ein `<img>`.
+ */
+const CIVITAI_THUMB_PARAMS = 'anim=false,width=450,optimized=true'
+
+export function civitaiThumbUrl(url: string | undefined, type?: string): string | undefined {
+  if (!url) return undefined
+  const isVideo = type === 'video' || /\.(mp4|webm|mov|m4v)(\?|#|$)/i.test(url)
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return undefined
+  }
+  if (parsed.protocol !== 'https:' || parsed.hostname !== 'image.civitai.com') {
+    return isVideo ? undefined : url
+  }
+  // /<Schlüssel>/<uuid>/<Angaben>/<Name>, ältere Antworten ohne Angaben-Teil.
+  const segs = parsed.pathname.split('/').filter(Boolean)
+  if (segs.length === 4 && segs[2].includes('=')) segs[2] = CIVITAI_THUMB_PARAMS
+  else if (segs.length === 3) segs.splice(2, 0, CIVITAI_THUMB_PARAMS)
+  else return isVideo ? undefined : url
+  // `pathname` ist schon kodiert, die Teile gehen unverändert zurück.
+  parsed.pathname = '/' + segs.join('/')
+  return parsed.toString()
 }
 
 /**
@@ -1836,11 +2554,192 @@ export function civitaiDescriptionToText(html: string): string {
     .trim()
 }
 
+/**
+ * C18: the full description of a CivitAI hit as readable text. The HTML is
+ * reduced to its paragraphs and list items; no markup survives, so nothing of
+ * CivitAI's page is ever rendered as HTML inside the app.
+ */
+export function civitaiDescriptionToParagraphs(html: string): string {
+  const withBreaks = html
+    .replace(/<\s*br\s*\/?>/gi, '\n')
+    .replace(/<\s*li[^>]*>/gi, '\n• ')
+    .replace(/<\/\s*(p|div|h[1-6]|li|ul|ol|blockquote|pre|tr)\s*>/gi, '\n')
+  return civitaiDescriptionToText(withBreaks)
+    .split('\n')
+    .map((line) => line.replace(/[ \t]+/g, ' ').trim())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+/** Files that load as a model. Pickle files (.ckpt, .pt, .bin) can run code
+ *  when they are opened, and training data, archives and configs are no
+ *  model, so neither is offered as a choice. */
+const CIVITAI_MODEL_FILE = /\.(safetensors|sft|gguf)$/i
+
+/** C21: the versions of one CivitAI item and their model files, pure. */
+export function civitaiVersionChoices(item: unknown, host: string = CIVITAI_DEFAULT_HOST): CivitaiVersionChoice[] {
+  return asRecordArray(prop(item, 'modelVersions')).map((v) => {
+    const files = asRecordArray(prop(v, 'files'))
+      .filter((f) => CIVITAI_MODEL_FILE.test(asString(prop(f, 'name')) ?? ''))
+      .map((f): CivitaiFileChoice | null => {
+        const url = civitaiHostSwap(asString(prop(f, 'downloadUrl')), host)
+        const name = asString(prop(f, 'name'))
+        if (!url || !name) return null
+        const kb = asNumber(prop(f, 'sizeKB'))
+        const sha = asString(propPath(f, 'hashes', 'SHA256'))?.toLowerCase()
+        return {
+          name,
+          downloadUrl: url,
+          sizeBytes: kb && kb > 0 ? Math.round(kb * 1024) : undefined,
+          fp: asString(propPath(f, 'metadata', 'fp')) ?? undefined,
+          size: asString(propPath(f, 'metadata', 'size')) ?? undefined,
+          format: asString(propPath(f, 'metadata', 'format')) ?? undefined,
+          primary: prop(f, 'primary') === true,
+          sha256: sha && /^[0-9a-f]{64}$/.test(sha) ? sha : undefined,
+        }
+      })
+      .filter((f): f is CivitaiFileChoice => f !== null)
+    return {
+      id: asNumber(prop(v, 'id')) ?? 0,
+      name: asString(prop(v, 'name')) ?? 'Version',
+      baseModel: asString(prop(v, 'baseModel')) ?? undefined,
+      published: (asString(prop(v, 'publishedAt')) ?? asString(prop(v, 'createdAt')))?.slice(0, 10),
+      files,
+    }
+  }).filter((v) => v.files.length > 0)
+}
+
+/** Which models folder a CivitAI file goes to. One rule for the default hit
+ *  and for a file the user picked (C21). */
+export function civitaiSubfolder(type: string, itemName: string, filename: string): string {
+  if (type === 'LORA') return 'loras'
+  if (type === 'VAE') return 'vae'
+  if (type === 'TextualInversion') return 'embeddings'
+  // Only for a checkpoint search: the name of a LORA, a VAE or an embedding
+  // says which base model it was trained against, not what kind of file it
+  // is, so "Flux Realism LoRA" used to be written into diffusion_models.
+  // A GGUF quant is a bare diffusion model whatever its name says, and the
+  // only loader that lists .gguf (ComfyUI-GGUF's UnetLoaderGGUF) reads
+  // diffusion_models/unet (a user, Discord 2026-09-23).
+  const name = itemName.toLowerCase()
+  if (name.includes('flux') || name.includes('wan') || name.includes('hunyuan') || isGgufFile(filename)) return 'diffusion_models'
+  return 'checkpoints'
+}
+
+/** C21: the hit as it downloads with the file the user picked. */
+export function civitaiHitWithFile(hit: CivitAIModelResult, version: CivitaiVersionChoice, file: CivitaiFileChoice): CivitAIModelResult {
+  return {
+    ...hit,
+    downloadUrl: file.downloadUrl,
+    filename: file.name,
+    subfolder: civitaiSubfolder(hit.type, hit.name, file.name),
+    sizeBytes: file.sizeBytes,
+    sizeGB: file.sizeBytes ? Math.round(file.sizeBytes / 1_073_741_824 * 10) / 10 : undefined,
+    versionId: version.id,
+  }
+}
+
+/** A GGUF quant, read by the ComfyUI-GGUF pack and by nothing else. */
+export function isGgufFile(filename: string | undefined): boolean {
+  return /\.gguf$/i.test(filename ?? '')
+}
+
+/**
+ * Download a CivitAI hit, and for a GGUF quant make sure ComfyUI can read it.
+ *
+ * A curated bundle installs the ComfyUI-GGUF pack along with its files; a
+ * CivitAI hit had no such step, so a GGUF from the search downloaded fine and
+ * stayed invisible. The pack is installed only when this ComfyUI lacks its
+ * loader (installing restarts ComfyUI, which a running render would not
+ * survive), in the background so the download is never held up, and never
+ * for a ComfyUI on another machine, whose packs this one cannot touch.
+ */
+export async function startCivitaiDownload(model: { downloadUrl?: string; filename?: string; subfolder?: string }): Promise<void> {
+  if (!model.downloadUrl || !model.filename || !model.subfolder) return
+  // A27: the folder came from the title; the header of the file decides.
+  await startModelDownload(model.downloadUrl, model.subfolder, model.filename, undefined, undefined, { sniffFolder: folderIsAGuess(model.subfolder) })
+  if (!isGgufFile(model.filename)) return
+  const target = await comfyModelTarget()
+  if (target.remote) return
+  const nodes = await getAllNodeInfo().catch(() => null)
+  if (nodes && 'UnetLoaderGGUF' in nodes) return
+  void installCustomNodes(['gguf'], { keepGoing: true, restart: true })
+    .catch((err) => log.warn('[discover] ComfyUI-GGUF install for a CivitAI GGUF failed', { err }))
+}
+
+/** How far a file on disk may be off CivitAI's sizeKB and still be that file.
+ *  sizeKB is a fraction of a KiB, so the byte count it gives is exact up to a
+ *  rounding of the last digits; another version is megabytes apart. */
+const CIVITAI_SIZE_SLACK = 1024
+
+/** Is this file on disk the CivitAI hit? The same name in the folder the
+ *  download writes to (that much is the caller's question) and, where CivitAI
+ *  states a size, that size. A file of the same name and another size is
+ *  another version or another upload, so Download stays offered for it. */
+function civitaiFileMatches(model: { sizeBytes?: number }, actualBytes: number): boolean {
+  if (actualBytes <= 0) return false
+  return model.sizeBytes == null || Math.abs(actualBytes - model.sizeBytes) <= CIVITAI_SIZE_SLACK
+}
+
+/** The CivitAI hits whose file is already in its ComfyUI folder, by id
+ *  (Discord #feature-requests, 3.0.7: an installed model offered Download).
+ *  One question to `check_model_sizes`, the per-file check the bundle cards
+ *  use, which looks in exactly the folder `download_model` writes into: a file
+ *  of that name in another folder does not count. When the check cannot run,
+ *  nothing counts as installed and every hit keeps its button. */
+export async function checkCivitaiInstalled(models: readonly CivitAIModelResult[]): Promise<Set<number>> {
+  const installed = new Set<number>()
+  const asked = models.filter((m) => m.filename && m.subfolder)
+  if (asked.length === 0) return installed
+  // A27: a download from here may have been moved by its header to the other
+  // main model folder; the hit is installed there too.
+  const sibling = (f: string) => (f === 'checkpoints' ? 'diffusion_models' : 'checkpoints')
+  const pairs = asked.flatMap((m) => (folderIsAGuess(m.subfolder!) ? [m.subfolder!, sibling(m.subfolder!)] : [m.subfolder!]).map((subfolder) => ({ m, subfolder })))
+  try {
+    const results: Array<{ filename: string; exists: boolean; actualBytes: number }> = await backendCall('check_model_sizes', {
+      files: pairs.map(({ m, subfolder }) => ({ subfolder, filename: m.filename!, expectedBytes: m.sizeBytes ?? 0 })),
+    })
+    // One answer per file and in order: two hits may share a file name and
+    // differ only in their folder, so the name alone cannot pair them up.
+    pairs.forEach(({ m }, i) => {
+      const r = results[i]
+      if (r && r.filename === m.filename && r.exists && civitaiFileMatches(m, r.actualBytes)) installed.add(m.id)
+    })
+  } catch (err) {
+    log.warn('[discover] CivitAI installed check failed', { err })
+  }
+  return installed
+}
+
+/** The same question for a folder the caller has listed already, the Mac's
+ *  LoRA folder (`useMlxLoras`). A download lands at the top of that folder, so
+ *  a file of that name in a subfolder of it is not the hit. */
+export function civitaiInstalledInFolder(
+  models: readonly CivitAIModelResult[],
+  files: readonly { name: string; sizeBytes: number }[],
+): Set<number> {
+  const byName = new Map(files.map((f) => [f.name.toLowerCase(), f.sizeBytes]))
+  const installed = new Set<number>()
+  for (const m of models) {
+    const bytes = m.filename ? byName.get(m.filename.toLowerCase()) : undefined
+    if (bytes != null && civitaiFileMatches(m, bytes)) installed.add(m.id)
+  }
+  return installed
+}
+
 export async function searchCivitaiModels(
   query: string,
   type: 'Checkpoint' | 'LORA' | 'VAE' | 'TextualInversion' = 'Checkpoint',
   apiKey?: string,
-  host: string = CIVITAI_DEFAULT_HOST
+  host: string = CIVITAI_DEFAULT_HOST,
+  /** For the Mac's LoRA folder. `baseModel` narrows the search to LoRAs made
+   *  for one base model, by CivitAI's own name for it ("Qwen 2.1").
+   *  `safetensorsOnly` takes the first .safetensors file of a hit, since that
+   *  is the one kind the folder lists, and leaves out a hit that has none
+   *  (some carry a ComfyUI workflow as their first file). Without it nothing
+   *  about the search changes. */
+  only?: { baseModel?: string; safetensorsOnly?: boolean },
 ): Promise<CivitAIModelResult[]> {
   try {
     const params = new URLSearchParams({
@@ -1854,6 +2753,7 @@ export async function searchCivitaiModels(
       // back near-empty for users who expected to find e.g. unfiltered SDXL forks.
       nsfw: 'true',
     })
+    if (only?.baseModel) params.set('baseModels', only.baseModel)
     // The user's API key unlocks the full catalog and lifts the per-IP rate
     // limit. It travels as an Authorization header, NOT as `&token=` in the
     // URL: the URL is what the error text and the log line quote, and the log
@@ -1868,11 +2768,22 @@ export async function searchCivitaiModels(
     // the catch below.
     const items = asRecordArray(prop(data, 'items'))
 
-    return items.map((item) => {
+    const isSafetensors = (f: Record<string, unknown>) => /\.safetensors$/i.test(asString(prop(f, 'name')) ?? '')
+    const wanted = only?.safetensorsOnly
+      ? items.filter((item) => asRecordArray(prop(asRecordArray(prop(item, 'modelVersions'))[0], 'files')).some(isSafetensors))
+      : items
+
+    return wanted.map((item) => {
       const version = asRecordArray(prop(item, 'modelVersions'))[0]
-      const file = asRecordArray(prop(version, 'files'))[0]
-      const thumb = asString(propPath(asRecordArray(prop(version, 'images'))[0], 'url'))
-      const downloadUrl = asString(prop(version, 'downloadUrl')) ?? asString(prop(file, 'downloadUrl'))
+      const files = asRecordArray(prop(version, 'files'))
+      const file = only?.safetensorsOnly ? files.find(isSafetensors) : files[0]
+      const firstImage = asRecordArray(prop(version, 'images'))[0]
+      const thumb = civitaiThumbUrl(asString(prop(firstImage, 'url')), asString(prop(firstImage, 'type')))
+      // The version's own address is that of its first file. Where a later
+      // file was picked, only that file's address fetches it.
+      const downloadUrl = only?.safetensorsOnly
+        ? asString(prop(file, 'downloadUrl')) ?? asString(prop(version, 'downloadUrl'))
+        : asString(prop(version, 'downloadUrl')) ?? asString(prop(file, 'downloadUrl'))
       const sizeKB = asNumber(prop(file, 'sizeKB')) ?? 0
       const itemName = asString(prop(item, 'name'))
       const itemId = asNumber(prop(item, 'id')) ?? 0
@@ -1880,27 +2791,16 @@ export async function searchCivitaiModels(
       const downloadCount = asNumber(prop(stats, 'downloadCount'))
       const creator = asString(propPath(item, 'creator', 'username'))
 
-      // Determine subfolder based on model type
-      let subfolder = 'checkpoints'
-      if (type === 'LORA') subfolder = 'loras'
-      else if (type === 'VAE') subfolder = 'vae'
-      else if (type === 'TextualInversion') subfolder = 'embeddings'
-      // Check if it's a diffusion model (FLUX, Wan, etc.). Only for a
-      // checkpoint search: the name of a LORA, a VAE or an embedding says
-      // which base model it was trained against, not what kind of file it is,
-      // so "Flux Realism LoRA" used to be written into diffusion_models, where
-      // the LoRA loader does not look and the LoRA stack in Create could never
-      // offer it.
-      const name = (itemName ?? '').toLowerCase()
-      if (type === 'Checkpoint' && (name.includes('flux') || name.includes('wan') || name.includes('hunyuan'))) {
-        subfolder = 'diffusion_models'
-      }
-
       const filename = asString(prop(file, 'name'))
         || `${(itemName ?? '').replace(/[^a-zA-Z0-9._-]/g, '_')}.safetensors`
+      // The folder follows from the type, see civitaiSubfolder.
+      const subfolder = civitaiSubfolder(type, itemName ?? '', filename)
 
       const descParts: string[] = []
-      const rawDesc = civitaiDescriptionToText(asString(prop(item, 'description')) ?? '')
+      const rawHtml = asString(prop(item, 'description')) ?? ''
+      const rawDesc = civitaiDescriptionToText(rawHtml)
+      // The row shows one line of it; the whole text goes to the Details
+      // dialog (C18), where it used to be lost to this cut.
       if (rawDesc) descParts.push(rawDesc.slice(0, 120))
       if (downloadCount) descParts.push(`${formatCount(downloadCount)} downloads`)
       if (creator) descParts.push(`by ${creator}`)
@@ -1915,11 +2815,15 @@ export async function searchCivitaiModels(
         filename,
         subfolder,
         sizeGB: sizeKB > 0 ? Math.round(sizeKB / 1024 / 1024 * 10) / 10 : undefined,
+        sizeBytes: sizeKB > 0 ? Math.round(sizeKB * 1024) : undefined,
         stats: isRecord(stats)
           ? { downloads: downloadCount ?? 0, likes: asNumber(prop(stats, 'thumbsUpCount')) ?? 0 }
           : undefined,
         creator,
         sourceUrl: `https://${host}/models/${itemId}`,
+        fullDescription: rawHtml ? civitaiDescriptionToParagraphs(rawHtml) : undefined,
+        versions: civitaiVersionChoices(item, host),
+        versionId: asNumber(prop(version, 'id')) ?? undefined,
       }
     })
   } catch (err) {

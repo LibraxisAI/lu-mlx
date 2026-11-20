@@ -1,7 +1,7 @@
 /**
  * Das Promptfenster und die drei Leisten darueber sind GENAU gleich breit.
  *
- * David, 03.09.2026, am echten Windows-Build: das Fenster im Chat und im
+ * 03.09.2026, am echten Windows-Build: das Fenster im Chat und im
  * Coding-Bereich war ihm zu gross und soll so breit sein wie im Create-Tab,
  * eventuell minimal groesser, "so dass jedes UI Button platz dafuer hat".
  *

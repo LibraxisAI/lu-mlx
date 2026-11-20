@@ -8,7 +8,7 @@
  * im LAN-Satz der Local API, den der Tester nicht zu sehen bekam.
  *
  * Der Wachposten haelt genau diese drei Quelldateien. Ein Durchgang ueber das
- * ganze Repo ist ausdruecklich nicht gewollt (David hat ihn am 08.09. gestoppt,
+ * ganze Repo ist ausdruecklich nicht gewollt (der Inhaber hat ihn am 08.09. gestoppt,
  * GitHub #163), und ein Waechter, der mehr behauptet als er traegt, ist
  * schlimmer als keiner. Kommentare bleiben draussen: sie erreichen keinen
  * Leser. Dasselbe Muster haelt im Web-Repo die drei Marketing-Seiten

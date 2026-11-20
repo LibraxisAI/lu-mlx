@@ -1,11 +1,15 @@
 // Dynamic Tool Registry — MCP-shaped, replaces hardcoded AGENT_TOOL_DEFS
 
+import { turnCaps, capCategory } from '../../lib/remote-turn-caps'
 import type { MCPToolDefinition, PermissionMap, PermissionLevel, ToolArgs } from './types'
 import type { OllamaTool } from '../../types/agent-mode'
 import type { ToolDefinition } from '../providers/types'
 import { MUTATING_TOOLS } from '../../lib/mutating-tools'
 import { RETIRED_TOOL_NAMES, retiredPermissionLevel } from '../../lib/retired-tools'
+import { retiredToolRunsOnThisDevice } from '../../lib/mobile-tools'
+import { toolOfferedToChatModel, SUB_AGENTS_NEED_CLOUD_FOR_MODEL } from '../../lib/phone-sub-agents'
 import type { AgentRunContext } from '../agent-context'
+import { externalSecretAccessOf, secretAccessOf, secretRefusal, type SecretHit } from '../../lib/secret-paths'
 
 /**
  * The optional second argument is the run this call belongs to (plan 2.6.6 C1).
@@ -99,6 +103,15 @@ export class ToolRegistry {
     this.tools.set(tool.name, { definition: tool, executor })
   }
 
+  /**
+   * Take an app tool out of the catalog while a setting has it switched off
+   * (computer control). The name stays reserved: an MCP server still cannot
+   * register under it, on or off.
+   */
+  withdrawBuiltin(name: string) {
+    if (this.builtinNames.has(name)) this.tools.delete(name)
+  }
+
   /** Is this name owned by the app (and thus off-limits to MCP servers)? */
   isBuiltinName(name: string): boolean {
     return this.builtinNames.has(name)
@@ -122,7 +135,9 @@ export class ToolRegistry {
   registerExternal(
     serverId: string,
     tools: MCPToolDefinition[],
-    executor: ExternalToolExecutor | LegacyToolExecutor
+    executor: ExternalToolExecutor | LegacyToolExecutor,
+    /** The name the user gave the server, shown as `<server>: <tool>`. */
+    serverName?: string,
   ) {
     const isTwoArg = executor.length >= 2
     for (const tool of tools) {
@@ -139,12 +154,25 @@ export class ToolRegistry {
         )
         continue
       }
-      const bound: ToolExecutor = isTwoArg
+      const call: LegacyToolExecutor = isTwoArg
         ? (args: ToolArgs) =>
             (executor as ExternalToolExecutor)(name, args)
         : (executor as LegacyToolExecutor)
+      // The secret floor of the built-in tools (builtin-tools guardSecrets),
+      // for a third-party server too (M1): a call that names a secret path
+      // anywhere in its arguments is refused before it leaves the app, in
+      // every mode, Bypass included.
+      const bound: ToolExecutor = async (args: ToolArgs) => {
+        const hit = externalSecretAccessOf(args)
+        if (hit) return secretRefusal(hit)
+        return call(args)
+      }
+      const shownServer = serverName?.trim() || tool.serverName
       this.tools.set(name, {
-        definition: { ...tool, source: 'external', serverId },
+        // Whatever category a definition claims, an external tool sits in
+        // 'mcp' (B12): a server must not file its own shell tool under a row
+        // the user set to Auto.
+        definition: { ...tool, category: 'mcp', source: 'external', serverId, ...(shownServer ? { serverName: shownServer } : {}) },
         executor: bound,
       })
     }
@@ -163,8 +191,15 @@ export class ToolRegistry {
 
   // ── Query ─────────────────────────────────────────────────────
 
+  /**
+   * Every tool a run may be offered. On a phone whose chat model runs on the
+   * phone itself the sub agent tools are left out (lib/phone-sub-agents.ts);
+   * every other device and model gets the whole registry, as before.
+   */
   getAll(): MCPToolDefinition[] {
-    return Array.from(this.tools.values()).map(t => t.definition)
+    return Array.from(this.tools.values())
+      .map(t => t.definition)
+      .filter(t => toolOfferedToChatModel(t.name))
   }
 
   getAvailableTools(permissions: PermissionMap): MCPToolDefinition[] {
@@ -173,6 +208,28 @@ export class ToolRegistry {
 
   getToolByName(name: string): MCPToolDefinition | undefined {
     return this.tools.get(name)?.definition
+  }
+
+  /**
+   * The name a person reads for this tool: `<server>: <tool>` for a tool of
+   * an external server, so an approval says whose tool asks (M1). The
+   * registered name the model calls stays the bare tool name.
+   */
+  displayName(name: string): string {
+    const def = this.tools.get(name)?.definition
+    if (def?.source === 'external') return `${def.serverName || def.serverId || 'MCP server'}: ${name}`
+    return name
+  }
+
+  /**
+   * The secret path a call names, with the checker its tool uses: every
+   * string that reads like a path for an external tool, the known keys for
+   * an app tool. For the notice in the run; the refusal itself sits in the
+   * executor.
+   */
+  secretHitOf(name: string, args: Record<string, unknown> | undefined): SecretHit | null {
+    if (this.tools.get(name)?.definition.source === 'external') return externalSecretAccessOf(args)
+    return secretAccessOf(name, args)
   }
 
   /**
@@ -185,13 +242,16 @@ export class ToolRegistry {
   resolveExecutable(name: string): { name: string; inputSchema?: MCPToolDefinition['inputSchema'] } | undefined {
     const td = this.tools.get(name)?.definition
     if (td) return { name: td.name, inputSchema: td.inputSchema }
-    if (RETIRED_TOOL_NAMES.has(name)) return { name }
+    // Not on a phone, apart from the clock: a stub here would carry the old
+    // shell names all the way to an approval dialog for a tool that cannot run.
+    if (RETIRED_TOOL_NAMES.has(name) && retiredToolRunsOnThisDevice(name)) return { name }
     return undefined
   }
 
   getPermissionLevel(toolName: string, permissions: PermissionMap): PermissionLevel {
     const tool = this.tools.get(toolName)?.definition
-    if (tool) return permissions[tool.category]
+    // A map from before a category existed has no key for it: ask.
+    if (tool) return permissions[tool.category] ?? 'confirm'
     // A9: a retired name has no definition to read a category off, and the
     // 'confirm' below meant Agent mode opened an approval dialog for
     // `git_status`, whose executor is one fixed read. Read-only retired names
@@ -233,6 +293,9 @@ export class ToolRegistry {
     // must not start. The executor checks this too, but the registry is also
     // reached directly (sub-agents, retired-name redirects).
     if (abort?.aborted) return `Error: cancelled by the user before "${name}" started.`
+    // Not offered means not runnable either: a restored chat or a model that
+    // writes the name from memory must not start what the list left out.
+    if (!toolOfferedToChatModel(name)) return SUB_AGENTS_NEED_CLOUD_FOR_MODEL
     const entry = this.tools.get(name)
     if (!entry) {
       // Retired names (2.6.6 tool merge) still run: a restored session or a
@@ -242,6 +305,11 @@ export class ToolRegistry {
       const redirected = this.retiredRunner ? await this.retiredRunner(name, args, run, abort) : null
       if (redirected !== null) return redirected
       return `Error: Unknown tool "${name}"`
+    }
+    // A turn from the paired phone never uses more than the device may
+    // (lib/remote-turn-caps), whatever the permissions or the Code preset say.
+    if (turnCaps(run?.conversationId ?? undefined)?.[capCategory(entry.definition)] === 'blocked') {
+      return `Error: ${name} is not allowed for the phone that started this turn. Its rights on this computer leave it out. Continue without it.`
     }
 
     // Audit B2: a retry re-RUNS the tool. For a side-effecting tool that is a

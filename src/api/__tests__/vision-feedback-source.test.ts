@@ -23,7 +23,7 @@ const PNG_B64 = 'iVBORw=='
 
 beforeEach(() => {
   fetchLocalhostBytes.mockReset()
-  vi.stubGlobal('fetch', vi.fn(async () => ({ arrayBuffer: async () => PNG.buffer })))
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(new Blob([PNG], { type: 'image/png' }))))
 })
 
 describe('fetchComfyImageBase64 — where the bytes come from', () => {
@@ -39,6 +39,8 @@ describe('fetchComfyImageBase64 — where the bytes come from', () => {
     const b64 = await fetchComfyImageBase64('data:image/png;base64,iVBORw==')
     expect(b64).toBe(PNG_B64)
     expect(fetchLocalhostBytes).not.toHaveBeenCalled()
+    // Decoded, not fetched: the webview's content policy refuses data:.
+    expect(fetch).not.toHaveBeenCalled()
   })
 
   it('still proxies a real ComfyUI /view URL', async () => {

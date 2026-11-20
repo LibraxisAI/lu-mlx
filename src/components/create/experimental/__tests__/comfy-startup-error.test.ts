@@ -6,6 +6,8 @@ import {
   COMFY_INSTALLED_BUT_DEAD,
   COMFY_START_FAILED,
   comfyStartThrowText,
+  nodePackImportFailure,
+  nodePackLoadError,
 } from '../comfyError'
 
 // GH #98: "did not come up" used to be a dead end. The error must carry the
@@ -36,7 +38,7 @@ describe('comfyStartupError', () => {
     expect(msg).not.toContain('line 40\n')
   })
 
-  // Ticket 007 (falcon bob): unter der Ausgabe stand immer derselbe allgemeine
+  // Ticket 007 (a user): unter der Ausgabe stand immer derselbe allgemeine
   // Satz, obwohl der Einordner des Installers wusste, was WinError 1114
   // bedeutet. Jetzt reicht Rust den konkreten Rat mit, und er gewinnt.
   it('haengt den mitgelieferten Rat unter die Ausgabe', () => {
@@ -157,5 +159,52 @@ describe('comfyStartThrowText', () => {
     const deutsch = 'OSError: [WinError 126] Das angegebene Modul wurde nicht gefunden.'
     expect(comfyStartThrowText(deutsch)).toBe(deutsch)
     expect(comfyStartupError(COMFY_START_FAILED, [deutsch])).toContain(deutsch)
+  })
+})
+
+// The box, 03.10.2026: ComfyUI-RMBG was installed and ComfyUI still had no
+// RMBG node. The message pointed at "the ComfyUI console"; these are the lines
+// that console held, as ComfyUI printed them.
+describe('a node pack ComfyUI could not load', () => {
+  const lines = [
+    "ModuleNotFoundError: No module named 'accelerate'",
+    "\u001b[1m\u001b[33m[WARNING]\u001b[0m Cannot import C:\\Users\\d\\ComfyUI\\custom_nodes\\ComfyUI-FramePackWrapper module for custom nodes: No module named 'accelerate'",
+    "ModuleNotFoundError: No module named 'triton'",
+    "NameError: name 'module_name' is not defined",
+    "\u001b[1m\u001b[33m[WARNING]\u001b[0m Cannot import C:\\Users\\d\\ComfyUI\\custom_nodes\\ComfyUI-RMBG module for custom nodes: name 'module_name' is not defined",
+    'Import times for custom nodes:',
+    '\u001b[32m[INFO]\u001b[0m    0.0 seconds (IMPORT FAILED): C:\\Users\\d\\ComfyUI\\custom_nodes\\ComfyUI-FramePackWrapper',
+    '\u001b[32m[INFO]\u001b[0m    4.9 seconds (IMPORT FAILED): C:\\Users\\d\\ComfyUI\\custom_nodes\\ComfyUI-RMBG',
+  ]
+
+  it('names the reason ComfyUI gave for this pack, not for another one', () => {
+    expect(nodePackImportFailure(lines, 'ComfyUI-RMBG')).toBe(
+      "Cannot import C:\\Users\\d\\ComfyUI\\custom_nodes\\ComfyUI-RMBG module for custom nodes: name 'module_name' is not defined",
+    )
+  })
+
+  it('falls back to the IMPORT FAILED line when the reason has scrolled out', () => {
+    expect(nodePackImportFailure(lines.slice(5), 'ComfyUI-RMBG')).toBe(
+      '[INFO]    4.9 seconds (IMPORT FAILED): C:\\Users\\d\\ComfyUI\\custom_nodes\\ComfyUI-RMBG',
+    )
+  })
+
+  it('is empty when ComfyUI said nothing about the pack', () => {
+    expect(nodePackImportFailure(lines, 'ComfyUI-GGUF')).toBe('')
+    expect(nodePackImportFailure(undefined, 'ComfyUI-RMBG')).toBe('')
+  })
+
+  it('puts that line into the message instead of sending the user to a console', () => {
+    const msg = nodePackLoadError('ComfyUI-RMBG', 'RMBG', lines)
+    expect(msg).toContain("name 'module_name' is not defined")
+    expect(msg).not.toMatch(/console/i)
+    expect(msg).not.toContain('\u001b')
+  })
+
+  it('says so when there is no such line, and names a step the app has', () => {
+    const msg = nodePackLoadError('ComfyUI-RMBG', 'RMBG', [])
+    expect(msg).toContain("still isn't listing the RMBG node")
+    expect(msg).toContain('Settings, AI Backends')
+    expect(msg).not.toMatch(/console|Model Manager/i)
   })
 })

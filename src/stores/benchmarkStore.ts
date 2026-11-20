@@ -173,7 +173,7 @@ export function getAverageSpeed(results: Record<string, BenchmarkResult[]>, mode
  * not a session-wide running average that quietly drifts as more samples
  * cancel noise.
  *
- * nightmare13740 (Discord 2026-05-23/24) flagged this on a Bug M retest:
+ * A user (Discord 2026-05-23/24) flagged this on a Bug M retest:
  * gemma4:e4b read 15.2 tok/s on the first run and climbed to 17.9 after ten
  * runs. They thought previous results were affecting new ones — they were,
  * but only because the UI was averaging instead of showing the last sample.
@@ -209,7 +209,7 @@ export function getLatestSpeed(results: Record<string, BenchmarkResult[]>, model
  *
  * Pre-v2.4.7 we used (tokenCount / totalTime), which lumped stream-init +
  * connection-setup + TTFT into the denominator and undercounted local model
- * speed. nightmare13740 (Discord 2026-05-19) caught this on RTX 4070 Laptop:
+ * speed. A user (Discord 2026-05-19) caught this on RTX 4070 Laptop:
  * benchmark showed 12 tok/s, manual chat measurement 23-25 tok/s, ollama CLI
  * baseline 30 tok/s. Generation-phase rate (post-first-token) matches the CLI
  * within run-to-run noise, so we drop TTFT from the denominator and surface
@@ -228,7 +228,7 @@ export function computeGenerationTps(
 /**
  * Average total tokens (thinking included) a model spent per prompt. This is
  * the axis a speed-only board is blind to: two models can tie on tok/s and
- * still differ by half again in tokens spent for the same answers (David
+ * still differ by half again in tokens spent for the same answers (the owner
  * 2026-08-05). Null for a model whose runs predate the field.
  */
 export function getAverageTokens(results: Record<string, BenchmarkResult[]>, modelName: string): number | null {
@@ -270,7 +270,7 @@ export function getTruncatedCount(results: Record<string, BenchmarkResult[]>, mo
 
 /**
  * Runs the emergency brake stopped: a model looping instead of answering
- * (ElBiggus, issue #106). Separate from `truncated`, which is an honest run
+ * (issue #106). Separate from `truncated`, which is an honest run
  * that met the token budget with the answer still coming.
  */
 export function getRunawayCount(results: Record<string, BenchmarkResult[]>, modelName: string): number {
@@ -294,7 +294,7 @@ export interface LeaderboardEntry {
 /**
  * Speed weighted by how often the answer was right, in tokens per second.
  *
- * Ordering by raw tok/s alone was the second half of ElBiggus's report
+ * Ordering by raw tok/s alone was the second half of a user's report
  * (issue #106): it puts a model that answers wrong twice as fast above one
  * that answers correctly, and the number carries no hint that correctness was
  * even measured. Multiplying is the honest reading of "useful throughput": at

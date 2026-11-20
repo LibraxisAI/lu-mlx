@@ -2,7 +2,7 @@
  * The port the managed built-in engine actually runs on, and the base URL the
  * `openai` slot has to carry so requests reach it.
  *
- * GH #118 (nayffy, 2026-08-27, Windows 11): the engine port was a constant in
+ * GH #118 (2026-08-27, Windows 11): the engine port was a constant in
  * two places, `http://127.0.0.1:8127/v1` in the provider slot and 8127 in Rust,
  * and nothing could move. Since the Rust side may now take the next free port
  * when 8127 is held (a leftover llama-server, or one of the port ranges Windows

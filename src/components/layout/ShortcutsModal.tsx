@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { SHORTCUTS } from '../../hooks/useKeyboardShortcuts'
+import { SHORTCUTS, platformKeys } from '../../hooks/useKeyboardShortcuts'
 import { Modal } from '../ui/Modal'
 
 export function ShortcutsModal() {
@@ -18,7 +18,7 @@ export function ShortcutsModal() {
           <div key={s.keys} className="flex items-center justify-between py-1.5">
             <span className="text-[0.65rem] text-gray-600 dark:text-gray-300">{s.description}</span>
             <kbd className="text-[0.6rem] font-mono px-2 py-0.5 rounded bg-gray-100 dark:bg-white/10 text-gray-800 dark:text-gray-200 border border-gray-200 dark:border-white/15">
-              {s.keys}
+              {platformKeys(s.keys)}
             </kbd>
           </div>
         ))}

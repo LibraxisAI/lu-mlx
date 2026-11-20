@@ -1,9 +1,9 @@
 /**
  * Bug A1 (2.6.7), the two halves the 2.6.5 fix left standing.
  *
- * aldrich_ironhart on 2.6.5, Discord #general 18.08.: "has anyone lost their
+ * A user on 2.6.5, Discord #general 18.08.: "has anyone lost their
  * chats after a restart??", then "My code chats are vaporised", a coding chat
- * around 230k tokens. sockenmonster on the same build lost nothing.
+ * around 230k tokens. A user on the same build lost nothing.
  *
  * The update path already flushes the coalesced stores before it hands the
  * process to the installer. Two things were still wrong with that.
@@ -159,8 +159,8 @@ describe('the update waits for the chats to be written, but not forever', () => 
     expect(before).not.toContain('backup')
     // install_method is the one backend call that legitimately runs before
     // install(): it asks which package manager owns the running binary and
-    // calls the update off on a copy LU must not replace in place (Zen, Arch,
-    // UPDATER-LINUX-BEFUND.md). It reads, it never writes.
+    // calls the update off on a copy LU must not replace in place (Zen, Arch).
+    // It reads, it never writes.
     expect(
       before.filter((c) => c.startsWith('backend:') && c !== 'backend:install_method'),
     ).toHaveLength(0)

@@ -1,95 +1,95 @@
 {
   "flux-schnell": {
-    "t2": "wavespeed-ai/flux-schnell"
+    "t2": "base/flux-schnell"
   },
   "flux-dev": {
-    "t2": "wavespeed-ai/flux-dev",
-    "i2": "wavespeed-ai/flux-dev"
+    "t2": "base/flux-dev",
+    "i2": "base/flux-dev"
   },
   "qwen-image": {
-    "t2": "wavespeed-ai/qwen-image/text-to-image"
+    "t2": "base/qwen-image/text-to-image"
   },
   "hidream": {
-    "t2": "wavespeed-ai/hidream-i1-dev"
+    "t2": "base/hidream-i1-dev"
   },
   "flux-2-dev": {
-    "t2": "wavespeed-ai/flux-2-dev/text-to-image"
+    "t2": "base/flux-2-dev/text-to-image"
   },
   "z-image-turbo": {
-    "t2": "wavespeed-ai/z-image/turbo"
+    "t2": "base/z-image/turbo"
   },
   "chroma": {
-    "t2": "wavespeed-ai/chroma"
+    "t2": "base/chroma"
   },
   "prefect-pony": {
-    "t2": "wavespeed-ai/prefect-pony-xl"
+    "t2": "base/prefect-pony-xl"
   },
   "hunyuan-image": {
-    "t2": "wavespeed-ai/hunyuan-image-2.1"
+    "t2": "base/hunyuan-image-2.1"
   },
   "neta-lumina": {
-    "t2": "wavespeed-ai/neta-lumina"
+    "t2": "base/neta-lumina"
   },
   "wan-2.2-720p": {
-    "t2": "wavespeed-ai/wan-2.2/t2v-720p",
-    "i2": "wavespeed-ai/wan-2.2/i2v-720p",
-    "t2Lora": "wavespeed-ai/wan-2.2/t2v-720p-lora",
-    "i2Lora": "wavespeed-ai/wan-2.2/i2v-720p-lora"
+    "t2": "base/wan-2.2/t2v-720p",
+    "i2": "base/wan-2.2/i2v-720p",
+    "t2Lora": "base/wan-2.2/t2v-720p-lora",
+    "i2Lora": "base/wan-2.2/i2v-720p-lora"
   },
   "wan-2.2-fast": {
-    "t2": "wavespeed-ai/wan-2.2/t2v-5b-720p-lora",
-    "i2": "wavespeed-ai/wan-2.2/i2v-5b-720p-lora",
-    "t2Lora": "wavespeed-ai/wan-2.2/t2v-5b-720p-lora",
-    "i2Lora": "wavespeed-ai/wan-2.2/i2v-5b-720p-lora"
+    "t2": "base/wan-2.2/t2v-5b-720p-lora",
+    "i2": "base/wan-2.2/i2v-5b-720p-lora",
+    "t2Lora": "base/wan-2.2/t2v-5b-720p-lora",
+    "i2Lora": "base/wan-2.2/i2v-5b-720p-lora"
   },
   "hunyuan-video": {
-    "t2": "wavespeed-ai/hunyuan-video-1.5/text-to-video",
-    "i2": "wavespeed-ai/hunyuan-video-1.5/image-to-video"
+    "t2": "base/hunyuan-video-1.5/text-to-video",
+    "i2": "base/hunyuan-video-1.5/image-to-video"
   },
   "ltx-2": {
-    "t2": "wavespeed-ai/ltx-2-19b/text-to-video",
-    "i2": "wavespeed-ai/ltx-2-19b/image-to-video",
-    "t2Lora": "wavespeed-ai/ltx-2-19b/text-to-video-lora",
-    "i2Lora": "wavespeed-ai/ltx-2-19b/image-to-video-lora"
+    "t2": "base/ltx-2-19b/text-to-video",
+    "i2": "base/ltx-2-19b/image-to-video",
+    "t2Lora": "base/ltx-2-19b/text-to-video-lora",
+    "i2Lora": "base/ltx-2-19b/image-to-video-lora"
   },
   "ltx-2.3": {
-    "t2": "wavespeed-ai/ltx-2.3/text-to-video",
-    "i2": "wavespeed-ai/ltx-2.3/image-to-video",
-    "t2Lora": "wavespeed-ai/ltx-2.3/text-to-video-lora",
-    "i2Lora": "wavespeed-ai/ltx-2.3/image-to-video-lora"
+    "t2": "base/ltx-2.3/text-to-video",
+    "i2": "base/ltx-2.3/image-to-video",
+    "t2Lora": "base/ltx-2.3/text-to-video-lora",
+    "i2Lora": "base/ltx-2.3/image-to-video-lora"
   },
   "flux-lora-trainer": {
-    "t2": "wavespeed-ai/flux-dev-lora-trainer"
+    "t2": "base/flux-dev-lora-trainer"
   },
   "z-image-lora-trainer": {
-    "t2": "wavespeed-ai/z-image-lora-trainer"
+    "t2": "base/z-image-lora-trainer"
   },
   "qwen-image-lora-trainer": {
-    "t2": "wavespeed-ai/qwen-image-lora-trainer"
+    "t2": "base/qwen-image-lora-trainer"
   },
   "ltx-2-video-lora-trainer": {
-    "t2": "wavespeed-ai/ltx-2-19b/video-lora-trainer"
+    "t2": "base/ltx-2-19b/video-lora-trainer"
   },
   "flux-schnell-lora": {
-    "t2": "wavespeed-ai/flux-schnell-lora"
+    "t2": "base/flux-schnell-lora"
   },
   "flux-dev-lora-ultra-fast": {
-    "t2": "wavespeed-ai/flux-dev-lora-ultra-fast"
+    "t2": "base/flux-dev-lora-ultra-fast"
   },
   "z-image-turbo-lora": {
-    "t2": "wavespeed-ai/z-image/turbo-lora"
+    "t2": "base/z-image/turbo-lora"
   },
   "z-image-base-lora": {
-    "t2": "wavespeed-ai/z-image/base-lora"
+    "t2": "base/z-image/base-lora"
   },
   "qwen-image-lora": {
-    "t2": "wavespeed-ai/qwen-image/text-to-image-lora"
+    "t2": "base/qwen-image/text-to-image-lora"
   },
   "infinitetalk-fast": {
-    "t2": "wavespeed-ai/infinitetalk-fast"
+    "t2": "base/infinitetalk-fast"
   },
   "latentsync": {
-    "t2": "wavespeed-ai/latentsync"
+    "t2": "base/latentsync"
   },
   "lipsync-2": {
     "t2": "sync/lipsync-2"
@@ -98,34 +98,34 @@
     "t2": "pruna-ai/p-video/avatar"
   },
   "qwen3-tts": {
-    "t2": "wavespeed-ai/qwen3-tts/text-to-speech"
+    "t2": "base/qwen3-tts/text-to-speech"
   },
   "qwen3-tts-clone": {
-    "t2": "wavespeed-ai/qwen3-tts/voice-clone"
+    "t2": "base/qwen3-tts/voice-clone"
   },
   "qwen3-tts-design": {
-    "t2": "wavespeed-ai/qwen3-tts/voice-design"
+    "t2": "base/qwen3-tts/voice-design"
   },
   "ace-step": {
-    "t2": "wavespeed-ai/ace-step/prompt-to-audio"
+    "t2": "base/ace-step/prompt-to-audio"
   },
   "ace-step-1.5": {
-    "t2": "wavespeed-ai/ace-step-1.5"
+    "t2": "base/ace-step-1.5"
   },
   "sonilo-music": {
     "t2": "sonilo/text-to-music"
   },
   "wan-2.2-spicy-extend": {
-    "t2": "wavespeed-ai/wan-2.2-spicy/video-extend",
-    "t2Lora": "wavespeed-ai/wan-2.2-spicy/video-extend-lora"
+    "t2": "base/wan-2.2-spicy/video-extend",
+    "t2Lora": "base/wan-2.2-spicy/video-extend-lora"
   },
   "wan-2.2-spicy": {
-    "i2": "wavespeed-ai/wan-2.2-spicy/image-to-video",
-    "i2Lora": "wavespeed-ai/wan-2.2-spicy/image-to-video-lora"
+    "i2": "base/wan-2.2-spicy/image-to-video",
+    "i2Lora": "base/wan-2.2-spicy/image-to-video-lora"
   },
   "ltx-2.3-spicy": {
-    "i2": "wavespeed-ai/ltx-2.3-spicy/image-to-video",
-    "i2Lora": "wavespeed-ai/ltx-2.3-spicy/image-to-video-lora"
+    "i2": "base/ltx-2.3-spicy/image-to-video",
+    "i2Lora": "base/ltx-2.3-spicy/image-to-video-lora"
   },
   "wan-2.6-spicy": {
     "i2": "alibaba/wan-2.6/image-to-video-spicy"
@@ -134,7 +134,7 @@
     "i2": "alibaba/wan-2.7/image-to-video-spicy"
   },
   "minimax-h3-spicy": {
-    "i2": "wavespeed-ai/minimax-h3/image-to-video-spicy"
+    "i2": "base/minimax-h3/image-to-video-spicy"
   },
   "seedance-1.5-pro-spicy": {
     "i2": "bytedance/seedance-v1.5-pro/image-to-video-spicy"
@@ -148,20 +148,23 @@
   "seedance-2.0-fast-spicy": {
     "i2": "bytedance/seedance-2.0-fast/image-to-video-spicy"
   },
+  "seedance-2.0-mini-spicy": {
+    "i2": "bytedance/seedance-2.0-mini/image-to-video-spicy"
+  },
   "vidu-q3-spicy": {
     "i2": "vidu/q3/image-to-video-spicy"
   },
   "ltx-2-extend": {
-    "t2": "wavespeed-ai/ltx-2/video-extend"
+    "t2": "base/ltx-2/video-extend"
   },
   "pixverse-extend": {
     "t2": "pixverse/pixverse-v6/extend"
   },
   "wan-2.2-animate": {
-    "t2": "wavespeed-ai/wan-2.2/animate"
+    "t2": "base/wan-2.2/animate"
   },
   "steady-dancer": {
-    "t2": "wavespeed-ai/steady-dancer"
+    "t2": "base/steady-dancer"
   },
   "p-video-animate": {
     "t2": "pruna-ai/p-video/animate"
@@ -170,6 +173,6 @@
     "t2": "bytedance/dreamactor-v2"
   },
   "qwen-image-edit": {
-    "t2": "wavespeed-ai/qwen-image/edit"
+    "t2": "base/qwen-image/edit"
   }
 }

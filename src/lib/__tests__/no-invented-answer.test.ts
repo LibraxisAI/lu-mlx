@@ -1,7 +1,7 @@
 /**
  * The answer bubble carries the MODEL'S words or nothing.
  *
- * David, 2026-08-07, reading "Done: 3 file(s) written, 20 other operation(s)
+ * 2026-08-07, reading "Done: 3 file(s) written, 20 other operation(s)
  * completed." on the running build: "Das ist ja keine LLM Antwort. Ich moechte
  * nur die LLM Antwort am Ende sehen, Bro. Kein generischer Text von uns."
  * And on the cloud side, after a reasoning-only round: "dann stand da, ja, die

@@ -1,10 +1,11 @@
 import { expect, test } from '@playwright/test'
+import { appModules, type AppWindow } from './support/ui'
 
 test('an aborted native transaction never reports a successful commit or backup event', async ({ page }) => {
   await page.goto('/e2e/memory-sensitive-proof.html')
+  await appModules(page, ['/src/lib/idbStorage.ts'])
   const result = await page.evaluate(async () => {
-    const path = '/src/lib/idbStorage.ts'
-    const { compareAndSetIdbItem, idbStorage, onIdbWrite } = await import(path)
+    const { compareAndSetIdbItem, idbStorage, onIdbWrite } = (window as unknown as AppWindow).__APP__['/src/lib/idbStorage.ts']
     const key = 'sync-abort-proof'
     await compareAndSetIdbItem(key, null, 'original', () => true)
     let events = 0
@@ -27,9 +28,9 @@ test('an aborted native transaction never reports a successful commit or backup 
 
 test('atomic sync storage has one race winner and survives reload with its baseline', async ({ page }) => {
   await page.goto('/e2e/memory-sensitive-proof.html')
+  await appModules(page, ['/src/lib/idbStorage.ts'])
   const result = await page.evaluate(async () => {
-    const path = '/src/lib/idbStorage.ts'
-    const { compareAndSetIdbItem, idbStorage, onIdbWrite } = await import(path)
+    const { compareAndSetIdbItem, idbStorage, onIdbWrite } = (window as unknown as AppWindow).__APP__['/src/lib/idbStorage.ts']
     const key = 'sync-atomic-proof'
     const first = JSON.stringify({ entries: ['first'], baseline: 1 })
     const second = JSON.stringify({ entries: ['second'], baseline: 2 })
@@ -54,18 +55,18 @@ test('atomic sync storage has one race winner and survives reload with its basel
   expect(result.aborted).toBe(true)
   expect(result.final).toBe(result.stored)
   await page.reload()
-  const restored = await page.evaluate(async () => {
-    const path = '/src/lib/idbStorage.ts'
-    return (await import(path)).idbStorage.getItem('sync-atomic-proof')
+  await appModules(page, ['/src/lib/idbStorage.ts'])
+  const restored = await page.evaluate(() => {
+    return (window as unknown as AppWindow).__APP__['/src/lib/idbStorage.ts'].idbStorage.getItem('sync-atomic-proof')
   })
   expect(restored).toBe(result.stored)
 })
 
 test('sync storage refuses legacy and malformed stored data without replacing it', async ({ page }) => {
   await page.goto('/e2e/memory-sensitive-proof.html')
+  await appModules(page, ['/src/lib/idbStorage.ts'])
   const result = await page.evaluate(async () => {
-    const path = '/src/lib/idbStorage.ts'
-    const { compareAndSetIdbItem } = await import(path)
+    const { compareAndSetIdbItem } = (window as unknown as AppWindow).__APP__['/src/lib/idbStorage.ts']
     localStorage.setItem('sync-legacy-proof', 'legacy data')
     let legacyRejected = false
     try { await compareAndSetIdbItem('sync-legacy-proof', null, 'replacement', () => true) } catch { legacyRejected = true }

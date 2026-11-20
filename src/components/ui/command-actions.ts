@@ -14,10 +14,15 @@
 
 import type { ShortcutId } from '../../hooks/useKeyboardShortcuts'
 import type { View } from '../../stores/uiStore'
+import { useNeuronIntroRequest } from '../../stores/neuronIntroStore'
+import { NEURONS_ENABLED } from '../../lib/features'
+import { useNeuronWindow } from '../../stores/neuronWindowStore'
+import { useSettingsStore } from '../../stores/settingsStore'
 // Das Blattmodul und nicht die Sammelstelle `api/providers`: diese Datei laeuft
 // im Test ohne DOM und soll dabei keine Provider-Klassen und keinen Store
 // mitziehen. `model-name.ts` ist reine Zeichenkettenarbeit ohne Laufzeit-Import.
 import { displayModelName } from '../../api/providers/model-name'
+import { modelMark, type ModelMark } from '../../lib/unfiltered-mark'
 
 export interface Command {
   readonly id: string
@@ -27,6 +32,9 @@ export interface Command {
   /** Beschriftung des Kürzels, falls es eins gibt (rechte Spalte). */
   readonly keys?: string
   readonly run: () => void
+  /** Die Marke eines Modelleintrags (lib/unfiltered-mark), dieselbe wie in
+   *  jeder Modellauswahl. Nur Modelleinträge tragen eine. */
+  readonly mark?: ModelMark
   /**
    * Erst sichtbar, wenn wirklich gesucht wurde. Genau ein Eintrag trägt das:
    * „Quit LU". Er steht sonst in einer Liste, in der man mit Pfeil-hoch und
@@ -56,16 +64,40 @@ export interface CommandContext {
   /** `useModelStore.setActiveModel` — dieselbe Funktion wie `ModelCard.onSelect`. */
   readonly setActiveModel: (name: string) => void
   /** Installierte Modelle, für je einen „Use …"-Eintrag. */
-  readonly models: readonly { readonly name: string }[]
+  readonly models: readonly {
+    readonly name: string
+    /** Der Anzeigename, den die Wolke mitschickt (lib/cloud-model-row). */
+    readonly displayName?: string
+    readonly unfiltered?: 'full' | 'partial'
+    readonly unrestricted?: boolean
+  }[]
   readonly activeModel: string | null
-  /** Cloud-Modus blendet Models/Benchmark aus (`Header.tsx:301`), die Palette
+  /** Cloud-Modus blendet Voice/Models/Benchmark aus (`Header.tsx:301`), die Palette
    *  darf dann nicht dorthin führen. */
   readonly localViewsAvailable: boolean
-  /** Der zweite Tray-Eintrag (`src-tauri/src/main.rs:502`) über dieselbe
+  /** Der zweite Tray-Eintrag (`src-tauri/src/lib.rs`) über dieselbe
    *  Backend-Aktion wie der Updater (`stores/updateStore.ts:338`).
    *  `null` außerhalb von Tauri — dort gibt es die Aktion nicht, und ein
    *  Eintrag ohne Aktion dahinter wäre eine Attrappe. */
   readonly quit: (() => void) | null
+}
+
+/**
+ * The models the palette may offer a "Use ..." entry for.
+ *
+ * The store holds local and LU Cloud models side by side; the chat model
+ * picker shows one kind per mode (`hooks/useModels.ts`). The palette read
+ * the store whole, so in Cloud mode it offered "Use
+ * qwen2.5-7b-instruct-q4_k_m", a local model, while the Models tab was gone
+ * (persona walk, 09.10.2026, Fund 27). In Cloud mode it offers what the
+ * picker offers, on every platform.
+ */
+export function paletteModels<M extends { readonly name: string; readonly provider?: string }>(
+  models: readonly M[],
+  host: { readonly cloud: boolean },
+): readonly M[] {
+  if (!host.cloud) return models
+  return models.filter((m) => m.provider === 'lu-cloud')
 }
 
 const GROUP_CHAT = 'Chat'
@@ -95,7 +127,15 @@ export function buildCommands(ctx: CommandContext): Command[] {
   ]
 
   if (ctx.localViewsAvailable) {
+    out.push({ id: 'view-voice', label: 'Voice', group: GROUP_VIEW, run: () => ctx.setView('voice') })
     out.push({ id: 'view-benchmark', label: 'Benchmark', group: GROUP_VIEW, run: () => ctx.setView('benchmark') })
+    // Neurons is a plugin (3.1.0): its window, once the plugin is on.
+    if (NEURONS_ENABLED && useSettingsStore.getState().settings.neuronsPluginEnabled === true) {
+      const openWindow = () => { ctx.setView('chat'); useNeuronWindow.getState().show() }
+      out.push({ id: 'neuron-window', label: 'Neurons: open window', group: GROUP_VIEW, run: openWindow })
+      // N2 (3.0.9): the Neurons introduction again, after its one showing.
+      out.push({ id: 'neuron-intro', label: 'Neurons: how it works', group: GROUP_VIEW, run: () => { openWindow(); useNeuronIntroRequest.getState().show() } })
+    }
     out.push({ id: 'view-models', label: 'Models', group: GROUP_VIEW, run: () => ctx.setView('models') })
   }
   out.push({ id: 'view-settings', label: 'Settings', group: GROUP_VIEW, run: () => ctx.setView('settings') })
@@ -111,10 +151,13 @@ export function buildCommands(ctx: CommandContext): Command[] {
       // Palette dem Nutzer unsere interne Steckplatzadresse vor,
       // "Use openai::Phi-4-mini-instruct-Q4_K_M". Das Praefix sagt ihm nichts
       // und schiebt den einzigen Teil, den er sucht, nach hinten.
+      // Ein Modell, das die Wolke als `unrestricted` meldet, steht unter
+      // einer neutralen Kennung ("direct/..."). Sein Name ist der Anzeigename.
       id: `model:${m.name}`,
-      label: `Use ${displayModelName(m.name)}`,
+      label: `Use ${m.unrestricted === true && m.displayName ? m.displayName : displayModelName(m.name)}`,
       group: GROUP_MODEL,
       run: () => ctx.setActiveModel(m.name),
+      ...(modelMark(m) ? { mark: modelMark(m) } : {}),
     })
   }
 

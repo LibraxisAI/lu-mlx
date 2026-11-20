@@ -257,7 +257,7 @@ pub(crate) fn probe_targets(requirements: &str) -> Vec<ProbeTarget> {
 
 /// The Python program the probe runs. It announces each module BEFORE trying
 /// it and flushes, so an import that takes the whole interpreter down with it
-/// (0xC0000005, reported by petermanmancusso) still leaves its name in the
+/// (0xC0000005, reported by a user) still leaves its name in the
 /// output instead of an empty log and an exit code.
 pub(crate) fn import_probe_script(modules: &[&str]) -> String {
     let list = modules
@@ -808,9 +808,9 @@ pub(crate) fn run_python_bounded(
 
 // ── Bug j: "repaired" has to mean "it starts" ──────────────────────────────
 //
-// anglefire (Discord help-chat, 2026-09-02, Windows 10, RTX 3050, 2.6.7): the
+// A user (Discord help-chat, 2026-09-02, Windows 10, RTX 3050, 2.6.7): the
 // repair ran to the end, said the environment was ready, and the next start
-// failed. artoriuskurokami (same day, RX 9070 XT) is the other half of the
+// failed. A user (same day, RX 9070 XT) is the other half of the
 // same hole from the GPU side: everything imports, and the first call that
 // touches the card dies with hipErrorInvalidValue.
 //
@@ -964,7 +964,7 @@ fn is_missing_kernel(why: &str) -> bool {
 }
 
 /// `hipErrorInvalidValue`, which is NOT the missing-kernel error and is the one
-/// artoriuskurokami reported.
+/// A user reported.
 ///
 /// HIP's error reference calls it a bad launch parameter: a grid dimension of
 /// zero, or a shared memory size over the limit. On gfx120X it has also come
@@ -983,7 +983,7 @@ fn is_bad_launch_value(why: &str) -> bool {
 fn rocm_index_for_this_os() -> String {
     if cfg!(target_os = "windows") {
         format!(
-            "{} with the device extra (torch[device-all])",
+            "{} with your card's device extra (torch[device-gfx...] and torchvision[device-gfx...])",
             torch_wheels::ROCM_WINDOWS_CHANNELS[0]
         )
     } else {
@@ -1322,7 +1322,7 @@ fn is_warning_line(line: &str) -> bool {
 /// `--quick-test-for-ci` is a flag ComfyUI ships for exactly this: `main.py`
 /// parses its arguments, opens its database, imports `execution`, `server`,
 /// `nodes` and `comfy.model_management`, loads the custom nodes, and then exits
-/// 0 without binding a port. Everything anglefire's start died on happens in
+/// 0 without binding a port. Everything a user's start died on happens in
 /// that stretch, and none of it is visible to an import probe that only knows
 /// the names in requirements.txt.
 ///
@@ -1468,6 +1468,21 @@ pub(super) fn verify_and_heal_environment(
     verify_imports(python_bin, requirements, install_status, cancel)?;
     verify_environment_really_starts(python_bin, comfy_dir, install_status, cancel)
 }
+
+/// PYTHONPATH is process wide and the test runner is threaded, so every test
+/// in this file that sets it takes this one lock. Without it they steal each
+/// other's module folder and fail for a reason that has nothing to do with the
+/// probe.
+///
+/// There used to be two locks, one in `tests` and one in `start_tests`, and
+/// each only kept its own module in line. A test of the one cleared the
+/// variable between the moment a test of the other had set it and the moment
+/// its interpreter started, and the probe then reported "No module named
+/// lu_probe_hang". Linux, 08.10.2026: seen in 1 of 100 full runs, and
+/// 09.10.2026 in 1 of 300 runs of `commands::install::` with a fake torch
+/// that was gone the same way.
+#[cfg(test)]
+static PYTHONPATH_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Ein Ordner oder eine Datei unter `temp_dir()`, die kein zweiter Testlauf
 /// wegraeumen kann.
@@ -1876,7 +1891,7 @@ mod tests {
         // `os_error::tests`.
         let raw = "PROBE_FAIL torch :: OSError: [WinError 126] Das angegebene Modul wurde nicht \
                    gefunden. Error loading \
-                   \"C:\\Users\\ddrob\\ComfyUI\\venv\\Lib\\site-packages\\torch\\lib\\c10_cuda.dll\" \
+                   \"C:\\Users\\alice\\ComfyUI\\venv\\Lib\\site-packages\\torch\\lib\\c10_cuda.dll\" \
                    or one of its dependencies.";
         // Genau der Griff, den der stdout-Leser der Probe tut.
         let line = os_error::english_child_text(raw).into_owned();
@@ -1896,7 +1911,7 @@ mod tests {
 
     #[test]
     fn an_interpreter_that_dies_mid_import_names_the_module_that_killed_it() {
-        // petermanmancusso: "Process exited with code 0xC0000005". No
+        // A user: "Process exited with code 0xC0000005". No
         // traceback, no last line, just a dead process. The PROBE_TRY line
         // written before the import is the only thing left.
         let report = parse_import_probe("PROBE_VENV 1\nPROBE_TRY torch\n", false);
@@ -2024,11 +2039,6 @@ mod tests {
         assert_eq!(probe_progress_line("PROBE_DONE"), None);
     }
 
-    /// PYTHONPATH is process wide and the test runner is threaded, so the live
-    /// probe tests take turns. Without this they steal each other's module
-    /// folder and fail for a reason that has nothing to do with the probe.
-    static PROBE_ENV_LOCK: Mutex<()> = Mutex::new(());
-
     /// Write a throwaway python module and put its folder on PYTHONPATH, so
     /// the probe can be driven against a real interpreter with a module that
     /// behaves exactly like the customer reports. Returns the module name.
@@ -2068,7 +2078,7 @@ mod tests {
     /// nothing about Windows, only that the program we emit is valid Python.
     #[test]
     fn the_generated_script_is_valid_python_and_speaks_the_parsers_protocol() {
-        let _turn = PROBE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _turn = PYTHONPATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let Some(python) = probe_python() else {
             eprintln!("no usable Python on this box, skipping the live probe check");
             return;
@@ -2085,7 +2095,7 @@ mod tests {
     /// that warns and then dies without a traceback.
     #[test]
     fn a_real_child_that_warns_then_dies_keeps_its_crash_unexplained() {
-        let _turn = PROBE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _turn = PYTHONPATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let Some(python) = probe_python() else {
             eprintln!("no usable Python on this box, skipping the live probe check");
             return;
@@ -2110,7 +2120,7 @@ mod tests {
     /// And the same child whose last words DO name a cause.
     #[test]
     fn a_real_child_that_names_a_dll_before_it_dies_gets_that_cause() {
-        let _turn = PROBE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _turn = PYTHONPATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let Some(python) = probe_python() else {
             eprintln!("no usable Python on this box, skipping the live probe check");
             return;
@@ -2138,7 +2148,7 @@ mod tests {
     /// click that never comes.
     #[test]
     fn a_probe_that_hangs_is_killed_at_the_deadline_and_never_passes() {
-        let _turn = PROBE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _turn = PYTHONPATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let Some(python) = probe_python() else {
             eprintln!("no usable Python on this box, skipping the live probe check");
             return;
@@ -2159,7 +2169,7 @@ mod tests {
     /// at 4/4.
     #[test]
     fn cancel_stops_the_probe_instead_of_waiting_it_out() {
-        let _turn = PROBE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _turn = PYTHONPATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let Some(python) = probe_python() else {
             eprintln!("no usable Python on this box, skipping the live probe check");
             return;
@@ -2186,10 +2196,6 @@ mod tests {
 #[cfg(test)]
 mod start_tests {
     use super::*;
-    use std::sync::Mutex as StdMutex;
-
-    /// PYTHONPATH is process-global, exactly as in the import-probe tests.
-    static FAKE_ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
     fn probe_python() -> Option<String> {
         let bin = crate::python::get_python_bin();
@@ -2256,7 +2262,7 @@ mod start_tests {
 
     #[test]
     fn a_torch_that_will_not_import_is_named_and_never_called_healthy() {
-        let _turn = FAKE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _turn = PYTHONPATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let Some(python) = probe_python() else {
             eprintln!("no usable Python on this box, skipping the live runtime probe");
             return;
@@ -2283,7 +2289,7 @@ mod start_tests {
 
     #[test]
     fn a_torch_without_a_card_is_a_processor_run_and_not_a_failure() {
-        let _turn = FAKE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _turn = PYTHONPATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let Some(python) = probe_python() else {
             eprintln!("no usable Python on this box, skipping the live runtime probe");
             return;
@@ -2300,9 +2306,9 @@ mod start_tests {
 
     #[test]
     fn the_first_call_to_an_rdna4_card_failing_names_the_real_cause() {
-        // artoriuskurokami, 2026-09-02, RX 9070 XT: everything imports, the
+        // A user, 2026-09-02, RX 9070 XT: everything imports, the
         // card answers, and the first HIP call comes back invalid.
-        let _turn = FAKE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _turn = PYTHONPATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let Some(python) = probe_python() else {
             eprintln!("no usable Python on this box, skipping the live runtime probe");
             return;
@@ -2334,7 +2340,7 @@ mod start_tests {
 
     #[test]
     fn a_card_that_works_is_the_only_thing_that_passes() {
-        let _turn = FAKE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _turn = PYTHONPATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let Some(python) = probe_python() else {
             eprintln!("no usable Python on this box, skipping the live runtime probe");
             return;
@@ -2350,7 +2356,7 @@ mod start_tests {
 
     #[test]
     fn a_card_the_wheel_does_not_carry_fails_even_when_one_tensor_survived() {
-        let _turn = FAKE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _turn = PYTHONPATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let Some(python) = probe_python() else {
             eprintln!("no usable Python on this box, skipping the live runtime probe");
             return;
@@ -2379,7 +2385,7 @@ mod start_tests {
 
     #[test]
     fn a_start_that_dies_reports_the_line_that_says_why() {
-        // anglefire, 2026-09-02: the repair ran to the end and the start still
+        // A user, 2026-09-02: the repair ran to the end and the start still
         // failed. Every package imported; the start imports more than the
         // packages requirements.txt names.
         let Some(python) = probe_python() else {

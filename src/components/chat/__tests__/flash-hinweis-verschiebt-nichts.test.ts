@@ -1,12 +1,12 @@
 /**
- * David, 19.09.2026: das Flash-Band stand dauerhaft ueber dem Eingabefeld und
+ * 19.09.2026: das Flash-Band stand dauerhaft ueber dem Eingabefeld und
  * schob den Agent-Schalter, die Kontextanzeige und Memories nach oben. Der
  * Hinweis ist jetzt ein einzeiliges Etikett in der Sitzungsleiste, direkt
  * neben `AgentModeToggle`, mit einem Popup ausserhalb des Layoutflusses, genau
  * wie `SamplingControls` (der Sampling-Regler).
  *
- * Nachtrag, selber Tag: David wollte danach auch die zweite Zeile ueber dem
- * Eingabefeld weg, `ModelMarks` ("No refusals" und, vor der ersten
+ * Nachtrag, selber Tag: der Inhaber wollte danach auch die zweite Zeile ueber dem
+ * Eingabefeld weg, `ModelMarks` ("No Filter" und, vor der ersten
  * Nachbesserung, auch "No credits"). Die Komponente ist geloescht (toter Code,
  * nicht nur entkoppelt), `ChatInput.tsx` kennt sie nicht mehr. Was sie zeigte,
  * lebt an zwei Stellen weiter: "No credits"/"Using credits" im Etikett neben
@@ -38,12 +38,12 @@ describe('kein Element des Flash-Hinweises oberhalb des Eingabefelds', () => {
   })
 })
 
-// Nachtrag: ModelMarks (die "No refusals"/"No credits"-Zeile ueber dem
+// Nachtrag: ModelMarks (die "No Filter"/"No credits"-Zeile ueber dem
 // Eingabefeld) ist nicht nur entkoppelt, sondern geloescht. Dieser Block wird
 // rot, falls sie oder ein Nachfolger wieder auftaucht: das war der Fund, den
 // die 3.0.0-Waechter (marken-ein-bauteil.test.tsx im Web) bisher in die
 // GEGENRICHTUNG absicherten ("dieselben Marken auch ueber der Eingabezeile"),
-// bevor David das umgedreht hat.
+// bevor der Inhaber das umgedreht hat.
 describe('keine Marke jeder Art oberhalb des Eingabefelds', () => {
   it('die Komponente ist wirklich weg, nicht nur entkoppelt', () => {
     expect(existsSync(resolve(COMPONENTS, 'chat/ModelMarks.tsx'))).toBe(false)

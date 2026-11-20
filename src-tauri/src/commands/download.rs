@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
@@ -11,13 +12,14 @@ use tauri::State;
 use tokio_util::sync::CancellationToken;
 
 use crate::commands::comfy_folders;
+use crate::commands::comfy_user_paths;
 use crate::state::{AppState, DownloadProgress};
 
 /// Reduce a download filename to a safe basename — no path separators, no
 /// drive letter, no `..` — so a crafted `filename` (e.g. "..\\..\\Start
 /// Menu\\Programs\\Startup\\x.bat") can't escape the target directory and drop
 /// an autostart payload. Falls back to "download" if nothing usable remains.
-fn sanitize_filename(name: &str) -> String {
+pub(crate) fn sanitize_filename(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or("");
     let cleaned: String = base.chars().filter(|c| !matches!(c, '/' | '\\' | ':' | '\0')).collect();
     let cleaned = cleaned.trim();
@@ -30,7 +32,7 @@ fn sanitize_filename(name: &str) -> String {
 
 /// Reject a subfolder that tries to escape the base (absolute path, drive
 /// letter, or any `..` segment). Returns the subfolder unchanged when safe.
-fn safe_subfolder(subfolder: &str) -> Result<(), String> {
+pub(crate) fn safe_subfolder(subfolder: &str) -> Result<(), String> {
     let norm = subfolder.replace('\\', "/");
     let p = std::path::Path::new(&norm);
     // `starts_with('/')` also catches Windows drive-relative roots like `/x`,
@@ -104,7 +106,7 @@ mod delete_message_tests {
 
 /// The write target, held against the engine that has to find the file.
 ///
-/// .__nothing_, Discord help-chat 2026-09-02: FramePack F1 and Wan 2.1 both
+/// Discord help-chat 2026-09-02: FramePack F1 and Wan 2.1 both
 /// downloaded through the Get button and appeared in no picker, and moving the
 /// files into a different ComfyUI folder by hand fixed it. That sentence is
 /// this test: the download went where LU guessed, the picker reads what the
@@ -195,6 +197,81 @@ mod model_folder_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// GH #143: a ComfyUI on another machine. Which hosts are this machine,
+    /// and where its files go instead: the storage folder, ComfyUI's layout.
+    #[test]
+    fn a_remote_comfyui_gets_its_files_in_comfyui_layout_here() {
+        for local in ["", "localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0", "127.0.0.2", " LOCALHOST "] {
+            assert!(super::host_is_this_machine(local), "{local}");
+        }
+        for remote in ["192.168.1.20", "comfy.lan", "10.0.0.5", "ai-box"] {
+            assert!(!super::host_is_this_machine(remote), "{remote}");
+        }
+
+        let root = scratch("remote-root");
+        let dest = super::remote_models_dir(&root, "loras").unwrap();
+        assert_eq!(dest, root.join("loras"));
+        assert!(dest.is_dir());
+        let pack = super::remote_models_dir(&root, "custom_nodes/ComfyUI-AnimateDiff-Evolved/models").unwrap();
+        assert_eq!(pack, root.join("custom_nodes/ComfyUI-AnimateDiff-Evolved/models"));
+        for bad in ["../../etc", "a/../../b", "/abs/path", "C:/x"] {
+            assert!(super::remote_models_dir(&root, bad).is_err(), "{bad}");
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// GH #183: a shared folder in `extra_model_paths.yaml` is where the
+    /// download goes, with ComfyUI shut down and with ComfyUI running (whose
+    /// answer lists the instance folder of the same name first).
+    #[test]
+    fn the_configured_shared_folder_wins_over_the_instance() {
+        let root = scratch("issue-183");
+        let comfy = root.join("Comfy").join("ComfyUI");
+        let shared = root.join("model");
+        std::fs::create_dir_all(&comfy).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(
+            comfy.join("extra_model_paths.yaml"),
+            format!("# mine\ncomfyui:\n  base_path: '{}'\n  loras: loras/\n  checkpoints: checkpoints/\n", shared.display()),
+        )
+        .unwrap();
+        let cp = Some(comfy.to_string_lossy().to_string());
+
+        let dest = models_dir_in(None, &cp, "loras").unwrap();
+        assert_eq!(dest, shared.join("loras"));
+        assert!(dest.is_dir());
+
+        let engine = ComfyFolders::parse(&json!({
+            "loras": [comfy.join("models").join("loras").to_string_lossy(), shared.join("loras").to_string_lossy()],
+        }));
+        assert_eq!(models_dir_in(Some(&engine), &cp, "loras").unwrap(), shared.join("loras"));
+        // A key the user did not configure keeps the old rule.
+        assert_eq!(models_dir_in(None, &cp, "vae").unwrap(), comfy.join("models").join("vae"));
+        // A pack folder is never redirected.
+        assert_eq!(
+            models_dir_in(None, &cp, "custom_nodes/x/models").unwrap(),
+            comfy.join("custom_nodes/x/models"),
+        );
+
+        // A LoRA downloaded before this fix is still found in the instance.
+        std::fs::create_dir_all(comfy.join("models").join("loras")).unwrap();
+        std::fs::write(comfy.join("models").join("loras").join("old.safetensors"), b"x").unwrap();
+        let user = crate::commands::comfy_user_paths::for_comfy(&cp);
+        assert_eq!(
+            super::existing_elsewhere(&user, None, &cp, "loras", "old.safetensors"),
+            Some(comfy.join("models").join("loras").join("old.safetensors")),
+        );
+        // Neither the name nor the folder may climb out.
+        assert_eq!(super::existing_elsewhere(&user, None, &cp, "loras", "../../old.safetensors"), None);
+        assert_eq!(super::existing_elsewhere(&user, None, &cp, "../loras", "old.safetensors"), None);
+
+        // A broken file costs only itself.
+        std::fs::write(comfy.join("extra_model_paths.yaml"), "comfyui:\n  base_path: \"D:\\comfy\"\n").unwrap();
+        assert_eq!(models_dir_in(None, &cp, "loras").unwrap(), comfy.join("models").join("loras"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// The jail is unchanged, and it runs BEFORE anything the engine said.
     #[test]
     fn an_escaping_subfolder_is_still_refused() {
@@ -205,6 +282,86 @@ mod model_folder_tests {
                 "{bad}",
             );
         }
+    }
+
+    /// Checking whether a model file is there creates none of its folders.
+    #[test]
+    fn checking_for_a_model_creates_no_folder() {
+        use super::{check_one_file, CheckFileRequest};
+        use crate::commands::comfy_user_paths::{Env, UserComfyPaths};
+        let ask = |subfolder: &str, filename: &str, expected_bytes: u64| CheckFileRequest {
+            subfolder: subfolder.to_string(),
+            filename: filename.to_string(),
+            expected_bytes,
+        };
+        let root = scratch("look-only");
+        let comfy = root.join("ComfyUI");
+        let shared = root.join("shared");
+        std::fs::create_dir_all(&comfy).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(
+            comfy.join("extra_model_paths.yaml"),
+            format!("comfyui:\n  base_path: '{}'\n  loras: loras/\n", shared.display()),
+        )
+        .unwrap();
+        let cp = Some(comfy.to_string_lossy().to_string());
+        let env = Env { home: None, appdata: None, localappdata: None, var: Box::new(|_| None) };
+        let user = UserComfyPaths::discover_with(&comfy, &env);
+        let engine_dir = root.join("engine").join("checkpoints");
+        let engine = ComfyFolders::parse(&json!({"checkpoints": [engine_dir.to_string_lossy()]}));
+        let remote = root.join("remote");
+        std::fs::create_dir_all(&remote).unwrap();
+
+        // Every way a folder is resolved, asked about a file that is not there.
+        let pack = "custom_nodes/ComfyUI-AnimateDiff-Evolved/models";
+        for (subfolder, folders, remote_root, made) in [
+            (pack, None, None, comfy.join(pack)),
+            ("vae", None, None, comfy.join("models").join("vae")),
+            ("loras", None, None, shared.join("loras")),
+            ("checkpoints", Some(&engine), None, engine_dir.clone()),
+            ("loras", None, Some(remote.as_path()), remote.join("loras")),
+            (pack, None, Some(remote.as_path()), remote.join(pack)),
+        ] {
+            let r = check_one_file(&ask(subfolder, "missing.safetensors", 0), remote_root, &user, folders, &cp);
+            assert!(!r.exists, "{subfolder}");
+            assert!(!made.exists(), "the check created {}", made.display());
+        }
+        assert!(!comfy.join("custom_nodes").exists(), "the check created custom_nodes");
+        assert!(!comfy.join("models").exists(), "the check created models");
+        assert!(!root.join("engine").exists(), "the check created the engine folder");
+
+        // POSITIVE CONTROL: a file that is there is still found, with its bytes.
+        for (subfolder, remote_root, dir) in [
+            (pack, None, comfy.join(pack)),
+            ("vae", None, comfy.join("models").join("vae")),
+            ("loras", None, shared.join("loras")),
+            ("loras", Some(remote.as_path()), remote.join("loras")),
+        ] {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("there.safetensors"), b"12345").unwrap();
+            let r = check_one_file(&ask(subfolder, "there.safetensors", 8), remote_root, &user, None, &cp);
+            assert!(r.exists, "{subfolder} in {}", dir.display());
+            assert_eq!(r.actual_bytes, 5, "{subfolder}");
+            assert!(r.complete, "{subfolder}");
+        }
+        std::fs::create_dir_all(&engine_dir).unwrap();
+        std::fs::write(engine_dir.join("there.safetensors"), b"1").unwrap();
+        let r = check_one_file(&ask("checkpoints", "there.safetensors", 0), None, &user, Some(&engine), &cp);
+        assert!(r.exists && r.actual_bytes == 1);
+
+        // NEGATIVE CONTROL: a refused subfolder is still refused, and makes nothing.
+        let r = check_one_file(&ask("../escape", "there.safetensors", 0), None, &user, None, &cp);
+        assert!(!r.exists);
+        assert!(!root.join("escape").exists());
+
+        // Check files and Repair resolve their file the same look-only way.
+        let src = include_str!("download.rs");
+        let verify = &src[src.find(concat!("pub(crate) async fn model_", "file_path(")).expect("model_file_path exists")..];
+        let verify = &verify[..verify.find("\n}\n").expect("the function ends")];
+        assert!(verify.contains("comfy_models_path(state"), "{verify}");
+        assert!(!verify.contains("comfy_models_dir("), "{verify}");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }
 
@@ -343,9 +500,52 @@ mod civitai_auth_tests {
         assert_eq!(outgoing_token("https://example.test/m.gguf", Some("k"), Some("hf_x")), None);
     }
 
+    /// The hub answers a `resolve` address with a redirect to a storage host
+    /// whose address is already signed. v3.0.5 let reqwest follow it, and
+    /// reqwest drops `Authorization` on every change of host. The redirects
+    /// followed by hand have to do the same: a sub-domain of the hub is
+    /// another host and gets no token.
+    #[test]
+    fn the_hub_token_does_not_follow_a_redirect_to_another_host() {
+        use super::{key_stays_on_hop, RidingKey};
+        let first = "https://huggingface.co/org/repo/resolve/main/m.gguf";
+        let key = RidingKey::new(first, Some("hf_x".to_string()));
+        assert_eq!(key.for_hop(first), Some("hf_x"));
+        // A relative redirect on the hub itself keeps it.
+        assert_eq!(key.for_hop("https://huggingface.co/api/resolve-cache/models/org/repo/abc/m.gguf"), Some("hf_x"));
+        assert_eq!(key.for_hop("https://HuggingFace.co/x"), Some("hf_x"));
+        // The signed storage hosts, old and new, get nothing.
+        for hop in [
+            "https://cdn-lfs.huggingface.co/repos/ab/cd/ef?X-Amz-Signature=1",
+            "https://cdn-lfs-us-1.huggingface.co/repos/ab/cd/ef?Signature=1",
+            "https://cas-bridge.xethub.hf.co/xet-bridge-us/abc?X-Amz-Signature=1",
+            "https://evil.test/m.gguf",
+        ] {
+            let key = RidingKey::new(first, Some("hf_x".to_string()));
+            assert_eq!(key.for_hop(first), Some("hf_x"));
+            assert_eq!(key.for_hop(hop), None, "{hop}");
+            // Asked again for the same hop (a retried connection): still nothing.
+            assert_eq!(key.for_hop(hop), None, "{hop}");
+            // Gone for the rest of the chain, also on the way back.
+            assert_eq!(key.for_hop(first), None, "back from {hop}");
+        }
+        // Another port is another server, and https never steps down.
+        assert!(!key_stays_on_hop("https://huggingface.co/a", "https://huggingface.co:8443/a"));
+        assert!(!key_stays_on_hop("https://huggingface.co/a", "http://huggingface.co/a"));
+        assert!(key_stays_on_hop("https://huggingface.co/a", "https://huggingface.co:443/b"));
+        assert!(!key_stays_on_hop("not a url", "https://huggingface.co/a"));
+        assert!(!key_stays_on_hop("https://huggingface.co/a", "not a url"));
+        // The same rule for the CivitAI key.
+        let civitai = RidingKey::new("https://civitai.com/api/download/models/1", Some("k".to_string()));
+        assert_eq!(civitai.for_hop("https://civitai.com/api/download/models/1"), Some("k"));
+        assert_eq!(civitai.for_hop("https://civitai-delivery-worker-prod.5ac0637cfd0766c97916cefa3764fbdf.r2.cloudflarestorage.com/m?sig=1"), None);
+        // No token stored: nothing rides anywhere.
+        assert_eq!(RidingKey::new(first, None).for_hop(first), None);
+    }
+
     #[test]
     fn a_refused_civitai_download_names_the_field_instead_of_a_bare_number() {
-        // goonerforporn, 2026-08-28: the download died on a bare HTTP 400 and
+        // A user, 2026-08-28: the download died on a bare HTTP 400 and
         // the field it was asking for was not in the interface at all.
         for status in [400u16, 401, 403] {
             let msg = download_http_error(
@@ -513,7 +713,7 @@ mod download_security_tests {
 /// Split a ComfyUI enum name ("wan/x.safetensors" or plain "x.safetensors")
 /// into its relative dir + basename so both halves can go through the same
 /// jail checks the downloader uses.
-fn split_model_ref(name: &str) -> (String, String) {
+pub(crate) fn split_model_ref(name: &str) -> (String, String) {
     let norm = name.replace('\\', "/");
     match norm.rsplit_once('/') {
         Some((dir, base)) => (dir.to_string(), base.to_string()),
@@ -530,6 +730,12 @@ const MODEL_SUBDIRS: &[&str] = &[
     "checkpoints", "diffusion_models", "unet", "vae", "loras",
     "text_encoders", "clip", "clip_vision", "audio_encoders",
     "controlnet", "upscale_models", "embeddings", "style_models",
+    // LTX 2.5's x2 latent upscaler (LatentUpscaleModelLoader reads this folder).
+    "latent_upscale_models",
+    // Local 3D (3.1.0): BiRefNet, the cutout model in front of TRELLIS.2.
+    // LoadBackgroundRemovalModel reads it (ComfyUI v0.42.4, folder_paths.py
+    // key "background_removal").
+    "background_removal",
 ];
 
 /// Why a file ComfyUI listed is not in the ComfyUI models tree.
@@ -557,13 +763,61 @@ pub(crate) fn not_ours_to_delete(filename: &str, base: &str, extra_dirs: &[Strin
     format!("{} was not found in the ComfyUI models folders", filename)
 }
 
+/// Every copy of one ComfyUI model file in the folders LU downloads into and
+/// ComfyUI enumerates from. Delete and Details look a file up the same way,
+/// so the two buttons beside a row can never disagree about which file it is.
+async fn comfy_model_hits(
+    state: &State<'_, AppState>,
+    comfy_path: &str,
+    sub: &str,
+    base: &str,
+) -> Vec<PathBuf> {
+    let models_root = PathBuf::from(comfy_path).join("models");
+    // Both trees, because the download may have written into either: the
+    // engine's own folders when it was running and could be asked, the classic
+    // guess when it could not (see models_dir_in). A file the app put there is
+    // a file the app has to be able to take away again.
+    //
+    // R1-4: asked fresh via engine_folders (a running ComfyUI's own answer),
+    // not the stale process-wide cache from before this ComfyUI ever
+    // started, a model the running engine had just remapped to a custom
+    // folder looked like a foreign file and refused to delete.
+    let mut roots: Vec<PathBuf> = MODEL_SUBDIRS.iter().map(|d| models_root.join(d)).collect();
+    if let Some(folders) = engine_folders(state).await {
+        for dir in folders.all_dirs() {
+            if !roots.contains(&dir) {
+                roots.push(dir);
+            }
+        }
+    }
+    // GH #183: the folders the user configured for ComfyUI, where a download
+    // writes now even while ComfyUI is shut down.
+    for dir in comfy_user_paths::for_comfy(&Some(comfy_path.to_string())).all_dirs() {
+        if !roots.contains(&dir) {
+            roots.push(dir);
+        }
+    }
+    let mut hits: Vec<PathBuf> = Vec::new();
+    for root in &roots {
+        let cand = if sub.is_empty() {
+            root.join(base)
+        } else {
+            root.join(sub).join(base)
+        };
+        if cand.is_file() && !hits.contains(&cand) {
+            hits.push(cand);
+        }
+    }
+    hits
+}
+
 /// Delete one installed model file from the ComfyUI models tree (the Model
-/// Hub's trash action — cpl.sardinas7489, Discord 2026-07-19: a 27 GB video
+/// Hub's trash action — Discord 2026-07-19: a 27 GB video
 /// model his PC couldn't run had no in-app way back out). The name is the
 /// ComfyUI enum entry; we jail-check it and look for the single file match
 /// across the known model subdirs.
 ///
-/// `extraDirs` is the folder the user named under Model Storage. LU tells
+/// `extraDirs` is the folder the user named under Storage. LU tells
 /// ComfyUI about the ComfyUI-shaped subfolders in it (GH #122), so ComfyUI now
 /// lists files that are NOT ours to delete. It stays that way on purpose: a
 /// folder the user keeps by hand is his. The button used to end in a flat
@@ -574,8 +828,15 @@ pub(crate) fn not_ours_to_delete(filename: &str, base: &str, extra_dirs: &[Strin
 pub async fn delete_comfy_model(
     filename: String,
     extraDirs: Option<Vec<String>>,
+    trash: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
+    if let Some(remote) = remote_comfy(&state) {
+        return Err(format!(
+            "{} is on the ComfyUI machine ({}), and LU cannot delete files there. Remove it from the models folder of ComfyUI on that machine.",
+            filename, remote.host
+        ));
+    }
     let comfy_path = state
         .comfy_path
         .lock()
@@ -587,35 +848,7 @@ pub async fn delete_comfy_model(
         safe_subfolder(&sub)?;
     }
     let base = sanitize_filename(&base);
-    let models_root = PathBuf::from(&comfy_path).join("models");
-    // Both trees, because the download may have written into either: the
-    // engine's own folders when it was running and could be asked, the classic
-    // guess when it could not (see models_dir_in). A file the app put there is
-    // a file the app has to be able to take away again.
-    //
-    // R1-4: asked fresh via engine_folders (a running ComfyUI's own answer),
-    // not the stale process-wide cache from before this ComfyUI ever
-    // started, a model the running engine had just remapped to a custom
-    // folder looked like a foreign file and refused to delete.
-    let mut roots: Vec<PathBuf> = MODEL_SUBDIRS.iter().map(|d| models_root.join(d)).collect();
-    if let Some(folders) = engine_folders(&state).await {
-        for dir in folders.all_dirs() {
-            if !roots.contains(&dir) {
-                roots.push(dir);
-            }
-        }
-    }
-    let mut hits: Vec<PathBuf> = Vec::new();
-    for root in &roots {
-        let cand = if sub.is_empty() {
-            root.join(&base)
-        } else {
-            root.join(&sub).join(&base)
-        };
-        if cand.is_file() && !hits.contains(&cand) {
-            hits.push(cand);
-        }
-    }
+    let hits = comfy_model_hits(&state, &comfy_path, &sub, &base).await;
     match hits.len() {
         0 => Err(not_ours_to_delete(
             &filename,
@@ -625,6 +858,15 @@ pub async fn delete_comfy_model(
         1 => {
             let f = &hits[0];
             let bytes = fs::metadata(f).map(|m| m.len()).unwrap_or(0);
+            if trash.unwrap_or(false) {
+                let file = f.clone();
+                let name = base.clone();
+                return tauri::async_runtime::spawn_blocking(move || {
+                    to_the_bin(&file, &name, bytes, crate::commands::os_trash::system_trash)
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            }
             fs::remove_file(f).map_err(|e| format!("Delete failed: {}", os_error::english(&e)))?;
             // Sweep a stale resume-partial next to it (the timeout/abort case
             // leaves both the file and its .download twin behind).
@@ -639,6 +881,198 @@ pub async fn delete_comfy_model(
     }
 }
 
+/// Details for one ComfyUI model file (D1, a user on Discord,
+/// 01.11.2026: the ⓘ beside the bin did nothing for an image model or a
+/// LoRA, because it asked Ollama, which knows no ComfyUI file). Found the
+/// way Delete finds it; a file in the user's own Storage folder is shown
+/// too, since reading is not deleting. Never a path outside those folders.
+#[allow(non_snake_case)]
+#[tauri::command]
+pub async fn comfy_model_info(
+    filename: String,
+    extraDirs: Option<Vec<String>>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    if let Some(remote) = remote_comfy(&state) {
+        return Err(format!(
+            "{} is on the ComfyUI machine ({}). LU cannot read files there.",
+            filename, remote.host
+        ));
+    }
+    let comfy_path = state
+        .comfy_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("ComfyUI path not set. Please set it in settings or install ComfyUI first.")?;
+    let (sub, base) = split_model_ref(&filename);
+    if !sub.is_empty() {
+        safe_subfolder(&sub)?;
+    }
+    let base = sanitize_filename(&base);
+    let mut hits = comfy_model_hits(&state, &comfy_path, &sub, &base).await;
+    let mut own_folder = false;
+    if hits.is_empty() {
+        hits = own_folder_hits(&base, &extraDirs.unwrap_or_default());
+        own_folder = !hits.is_empty();
+    }
+    let file = hits
+        .first()
+        .ok_or_else(|| format!("{} was not found in the ComfyUI models folders", filename))?;
+    let mut facts = file_facts(file, own_folder, hits.len());
+    // A27: a file in the wrong main model folder is named, never moved.
+    let found_in = main_folder_of(file);
+    let path = file.clone();
+    let belongs = match found_in {
+        Some(f) => tauri::async_runtime::spawn_blocking(move || crate::commands::model_sniff::belongs_elsewhere(&path, f))
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    if let (Some(target), Some(obj)) = (belongs, facts.as_object_mut()) {
+        obj.insert("belongsIn".into(), serde_json::json!(target));
+        obj.insert("foundIn".into(), serde_json::json!(found_in));
+    }
+    Ok(facts)
+}
+
+/// The main model folder (checkpoints, diffusion_models or unet) a file sits
+/// in, also below a subfolder of it (`checkpoints/flux/x.safetensors`).
+pub(crate) fn main_folder_of(file: &Path) -> Option<&'static str> {
+    file.ancestors().skip(1).find_map(|d| match d.file_name()?.to_str()? {
+        "checkpoints" => Some("checkpoints"),
+        "diffusion_models" => Some("diffusion_models"),
+        "unet" => Some("unet"),
+        _ => None,
+    })
+}
+
+/// C41: show a ComfyUI model file (a LoRA, a checkpoint) in the file
+/// manager. Found the way Details finds it, so it can only ever point at a
+/// file in the models folders or the user's own Storage folder.
+#[cfg(desktop)]
+#[allow(non_snake_case)]
+#[tauri::command]
+pub async fn comfy_model_reveal(
+    filename: String,
+    extraDirs: Option<Vec<String>>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    if let Some(remote) = remote_comfy(&state) {
+        return Err(format!(
+            "{} is on the ComfyUI machine ({}). Open the models folder there.",
+            filename, remote.host
+        ));
+    }
+    let comfy_path = state
+        .comfy_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("ComfyUI path not set. Please set it in settings or install ComfyUI first.")?;
+    let (sub, base) = split_model_ref(&filename);
+    if !sub.is_empty() {
+        safe_subfolder(&sub)?;
+    }
+    let base = sanitize_filename(&base);
+    let mut hits = comfy_model_hits(&state, &comfy_path, &sub, &base).await;
+    if hits.is_empty() {
+        hits = own_folder_hits(&base, &extraDirs.unwrap_or_default());
+    }
+    let file = hits
+        .first()
+        .ok_or_else(|| format!("{} was not found in the ComfyUI models folders", filename))?;
+    reveal_in_file_manager(file)?;
+    Ok(serde_json::json!({ "path": file.to_string_lossy() }))
+}
+
+/// The file selected in Finder or Explorer; on Linux, where there is no
+/// common way to select a file, its folder.
+#[cfg(desktop)]
+pub(crate) fn reveal_in_file_manager(file: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(file);
+        c
+    };
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        // One argument, the comma belongs to it.
+        let mut c = std::process::Command::new("explorer");
+        let mut arg = std::ffi::OsString::from("/select,");
+        arg.push(file.as_os_str());
+        c.arg(arg);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = crate::process_util::foreign_system_command("xdg-open");
+        c.arg(file.parent().unwrap_or(file));
+        c
+    };
+    crate::process_util::suppress_window(&mut cmd);
+    // explorer.exe answers 1 even when it worked, so only a failed spawn counts.
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("Could not open the folder: {}", os_error::english(&e)))
+}
+
+/// A file of that name in the user's own model folder (Storage), the place
+/// `not_ours_to_delete` names.
+fn own_folder_hits(base: &str, extra_dirs: &[String]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for raw in extra_dirs {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        for (_, folder) in crate::commands::custom_models::comfy_shaped_subdirs(Path::new(trimmed)) {
+            let cand = folder.join(base);
+            if cand.is_file() && !out.contains(&cand) {
+                out.push(cand);
+            }
+        }
+    }
+    out
+}
+
+/// What the Details dialog shows about a file on disk.
+fn file_facts(file: &Path, own_folder: bool, copies: usize) -> serde_json::Value {
+    let meta = fs::metadata(file).ok();
+    let modified = meta
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs());
+    serde_json::json!({
+        "path": file.to_string_lossy(),
+        "folder": file.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+        "bytes": meta.map(|m| m.len()).unwrap_or(0),
+        "modified": modified,
+        "ownFolder": own_folder,
+        "copies": copies,
+    })
+}
+
+/// The delete with `trash`: the file goes to the system's Trash and can be
+/// put back from there. A trained character is the user's own work and hours
+/// of training, so its delete on the Create page takes this way, the same one
+/// the gallery and the Mac's LoRA folder take. Where the Trash refuses, the
+/// file stays and the answer says why.
+fn to_the_bin(
+    file: &Path,
+    name: &str,
+    bytes: u64,
+    bin: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<serde_json::Value, String> {
+    let bin_name = if cfg!(windows) { "Recycle Bin" } else { "Trash" };
+    bin(file).map_err(|e| format!("Could not move {} to the {}: {}", name, bin_name, e))?;
+    println!("[Models] Moved {} to the {} ({} bytes)", file.display(), bin_name, bytes);
+    Ok(serde_json::json!({"status": "trashed", "bytes": bytes}))
+}
+
 /// Where a file of `subfolder` goes, and where every other path in this module
 /// looks for it afterwards. THE definition, which is the whole point: the
 /// download, the size probe, the space check and the delete all come through
@@ -647,7 +1081,7 @@ pub async fn delete_comfy_model(
 /// `folders` is what the RUNNING ComfyUI says about its own model folders
 /// (see commands/comfy_folders.rs). It wins whenever it has an answer, because
 /// the picker is built from that same process: a file written anywhere else is
-/// a file no picker can ever offer (.__nothing_, 2026-09-02: FramePack F1 and
+/// a file no picker can ever offer (2026-09-02: FramePack F1 and
 /// Wan 2.1 downloaded fine and showed up nowhere until he moved them into the
 /// other ComfyUI folder by hand).
 ///
@@ -655,14 +1089,46 @@ pub async fn delete_comfy_model(
 /// better: ComfyUI is not running (the Model Manager downloads with the engine
 /// shut down all the time), and the pack folders under `custom_nodes`, which
 /// are not a ComfyUI `folder_paths` key at all.
+///
+/// GH #183: above the engine sits what the user configured for ComfyUI
+/// itself (`extra_model_paths.yaml`, the start script, ComfyUI Desktop; see
+/// comfy_user_paths.rs). The engine lists a shared folder too, but behind the
+/// instance folder of the same name, and says nothing while it is shut down.
 fn models_dir_in(
     folders: Option<&comfy_folders::ComfyFolders>,
     comfy_path: &Option<String>,
     subfolder: &str,
 ) -> Result<PathBuf, String> {
+    let user = comfy_user_paths::for_comfy(comfy_path);
+    models_dir_with(&user, folders, comfy_path, subfolder)
+}
+
+/// `models_dir_in` with the user's folders read once, for the loops that ask
+/// for many files at a time.
+fn models_dir_with(
+    user: &comfy_user_paths::UserComfyPaths,
+    folders: Option<&comfy_folders::ComfyFolders>,
+    comfy_path: &Option<String>,
+    subfolder: &str,
+) -> Result<PathBuf, String> {
+    let dir = models_path_with(user, folders, comfy_path, subfolder)?;
+    fs::create_dir_all(&dir).map_err(|e| format!("Create models dir: {}", os_error::english(&e)))?;
+    Ok(dir)
+}
+
+/// The folder `models_dir_with` writes into, resolved without creating it.
+fn models_path_with(
+    user: &comfy_user_paths::UserComfyPaths,
+    folders: Option<&comfy_folders::ComfyFolders>,
+    comfy_path: &Option<String>,
+    subfolder: &str,
+) -> Result<PathBuf, String> {
     safe_subfolder(subfolder)?;
+    let plain = !subfolder.contains('/') && !subfolder.contains('\\');
+    if let Some(dir) = plain.then(|| user.write_dir(subfolder)).flatten() {
+        return Ok(dir);
+    }
     if let Some(dir) = folders.and_then(|f| f.dir_for(subfolder)) {
-        fs::create_dir_all(&dir).map_err(|e| format!("Create models dir: {}", os_error::english(&e)))?;
         return Ok(dir);
     }
     let base = comfy_path.as_ref().ok_or("ComfyUI path not set. Please set it in settings or install ComfyUI first.")?;
@@ -672,12 +1138,107 @@ fn models_dir_in(
     } else {
         PathBuf::from(base).join("models").join(subfolder)
     };
-    fs::create_dir_all(&dir).map_err(|e| format!("Create models dir: {}", os_error::english(&e)))?;
     Ok(dir)
 }
 
+/// A ComfyUI on another machine (GH #143: Ollama and ComfyUI as
+/// services on a LAN box, LU on a Windows PC). Its model folders are on THAT
+/// machine and nothing here can write into them: the folder names it reports
+/// are paths over there, and a ComfyUI install found on this PC is not the one
+/// rendering. Downloads went to one or the other and ended in "Create models
+/// dir: permission denied (os error 5)" or "ComfyUI path not set". They land
+/// in the Storage folder now, in ComfyUI's own layout (`loras/...`,
+/// `checkpoints/...`), so copying its folders into the `models` folder over
+/// there, or sharing the folder with that machine, is all it takes.
+pub(crate) struct RemoteComfy {
+    pub host: String,
+    pub root: PathBuf,
+}
+
+pub(crate) fn remote_comfy(state: &State<'_, AppState>) -> Option<RemoteComfy> {
+    let host = state.comfy_host.lock().map(|h| h.clone()).unwrap_or_default();
+    if host_is_this_machine(&host) {
+        return None;
+    }
+    Some(RemoteComfy { host, root: remote_models_root() })
+}
+
+fn host_is_this_machine(host: &str) -> bool {
+    let h = host.trim().trim_matches(|c| c == '[' || c == ']');
+    crate::commands::process::is_local_host(h)
+        || h.parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback() || ip.is_unspecified())
+            .unwrap_or(false)
+}
+
+/// The Storage folder when one is set, else a folder in Downloads.
+fn remote_models_root() -> PathBuf {
+    use crate::commands::custom_models::{remembered_root, RememberedRoot};
+    match remembered_root() {
+        RememberedRoot::Folder(dir) => PathBuf::from(dir),
+        _ => dirs::download_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(std::env::temp_dir)
+            .join("LU ComfyUI models"),
+    }
+}
+
+fn remote_models_dir(root: &Path, subfolder: &str) -> Result<PathBuf, String> {
+    let dir = remote_models_path(root, subfolder)?;
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Create models dir {}: {}", dir.display(), os_error::english(&e)))?;
+    Ok(dir)
+}
+
+/// The folder `remote_models_dir` writes into, resolved without creating it.
+fn remote_models_path(root: &Path, subfolder: &str) -> Result<PathBuf, String> {
+    safe_subfolder(subfolder)?;
+    Ok(root.join(subfolder))
+}
+
+/// Where a ComfyUI model of `subfolder` goes: `models_dir_in`, plus the one
+/// case its arguments cannot show, a ComfyUI on another machine.
+async fn comfy_models_dir(
+    state: &State<'_, AppState>,
+    comfy_path: &Option<String>,
+    subfolder: &str,
+) -> Result<PathBuf, String> {
+    if let Some(remote) = remote_comfy(state) {
+        return remote_models_dir(&remote.root, subfolder);
+    }
+    models_dir_in(engine_folders(state).await.as_ref(), comfy_path, subfolder)
+}
+
+/// The folder `comfy_models_dir` writes into, resolved without creating it.
+async fn comfy_models_path(
+    state: &State<'_, AppState>,
+    comfy_path: &Option<String>,
+    subfolder: &str,
+) -> Result<PathBuf, String> {
+    if let Some(remote) = remote_comfy(state) {
+        return remote_models_path(&remote.root, subfolder);
+    }
+    let user = comfy_user_paths::for_comfy(comfy_path);
+    models_path_with(&user, engine_folders(state).await.as_ref(), comfy_path, subfolder)
+}
+
+/// For the frontend: whether ComfyUI models land on this machine only, and
+/// where. The Model Manager and Create say so instead of waiting for a
+/// ComfyUI that can never see the file.
+#[tauri::command]
+pub fn comfy_model_target(state: State<'_, AppState>) -> serde_json::Value {
+    match remote_comfy(&state) {
+        Some(r) => serde_json::json!({
+            "remote": true,
+            "host": r.host,
+            "root": r.root.to_string_lossy(),
+        }),
+        None => serde_json::json!({ "remote": false }),
+    }
+}
+
 /// The engine's answer, asked fresh, for the paths that can await it.
-async fn engine_folders(state: &State<'_, AppState>) -> Option<comfy_folders::ComfyFolders> {
+pub(crate) async fn engine_folders(state: &State<'_, AppState>) -> Option<comfy_folders::ComfyFolders> {
     let host = state.comfy_host.lock().map(|h| h.clone()).unwrap_or_default();
     let port = state.comfy_port.lock().map(|p| *p).unwrap_or(0);
     if port == 0 {
@@ -689,7 +1250,123 @@ async fn engine_folders(state: &State<'_, AppState>) -> Option<comfy_folders::Co
     }
 }
 
-#[allow(non_snake_case)]
+/// The model folders a download from the chat may write to (C60).
+const CHAT_DOWNLOAD_FOLDERS: [&str; 10] = [
+    "checkpoints", "diffusion_models", "unet", "loras", "vae", "text_encoders",
+    "clip", "clip_vision", "upscale_models", "controlnet",
+];
+
+/// The hosts a link from the user may point at, for a download the chat
+/// starts (C60, David's decision 3 of 09.11.2026). Exact names: a subdomain is
+/// not the host. The SSRF guard still checks every redirect on the way.
+const CHAT_DOWNLOAD_HOSTS: [&str; 2] = ["huggingface.co", "civitai.com"];
+
+/// May the chat start this download? Pure, so it is under test.
+pub(crate) fn chat_download_allowed(url: &str, subfolder: &str, filename: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|_| "refused: not a valid link".to_string())?;
+    if parsed.scheme() != "https" {
+        return Err("refused: a download from the chat needs an https link".into());
+    }
+    let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+    if !CHAT_DOWNLOAD_HOSTS.contains(&host.as_str()) {
+        return Err(format!("refused: from the chat only links to {} are downloaded", CHAT_DOWNLOAD_HOSTS.join(" or ")));
+    }
+    if parsed.username() != "" || parsed.password().is_some() || parsed.port().is_some() {
+        return Err("refused: a link with a login or a port is not downloaded from the chat".into());
+    }
+    let name = sanitize_filename(filename).to_ascii_lowercase();
+    if !(name.ends_with(".safetensors") || name.ends_with(".gguf")) {
+        return Err("refused: from the chat only .safetensors and .gguf files are downloaded".into());
+    }
+    if !CHAT_DOWNLOAD_FOLDERS.contains(&subfolder) {
+        return Err(format!("refused: '{subfolder}' is not a model folder"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod chat_download_tests {
+    use super::chat_download_allowed;
+
+    #[test]
+    fn a_link_to_huggingface_or_civitai_for_a_safetensors_file_is_allowed() {
+        assert!(chat_download_allowed("https://huggingface.co/a/b/resolve/main/m.safetensors", "loras", "m.safetensors").is_ok());
+        assert!(chat_download_allowed("https://civitai.com/api/download/models/123", "checkpoints", "x.safetensors").is_ok());
+        assert!(chat_download_allowed("https://huggingface.co/a/b/resolve/main/m.gguf", "unet", "m.gguf").is_ok());
+    }
+
+    #[test]
+    fn everything_else_is_refused() {
+        for (u, f, n) in [
+            ("http://huggingface.co/a/m.safetensors", "loras", "m.safetensors"),
+            ("https://evil.example/m.safetensors", "loras", "m.safetensors"),
+            ("https://huggingface.co.evil.example/m.safetensors", "loras", "m.safetensors"),
+            ("https://cdn.huggingface.co/m.safetensors", "loras", "m.safetensors"),
+            ("https://user:pw@huggingface.co/m.safetensors", "loras", "m.safetensors"),
+            ("https://huggingface.co:8443/m.safetensors", "loras", "m.safetensors"),
+            ("https://huggingface.co/a/m.ckpt", "checkpoints", "m.ckpt"),
+            ("https://huggingface.co/a/m.pt", "checkpoints", "m.pt"),
+            ("https://huggingface.co/a/m.safetensors", "custom_nodes", "m.safetensors"),
+            ("https://huggingface.co/a/m.safetensors", "../../etc", "m.safetensors"),
+            ("not a link", "loras", "m.safetensors"),
+        ] {
+            assert!(chat_download_allowed(u, f, n).is_err(), "{u} {f} {n}");
+        }
+    }
+}
+
+/// A27: the directories the header may send a main model file to, for a
+/// download whose folder came from a title. None for any other folder (a
+/// LoRA, a VAE, an upscaler: their search type says what they are) and for
+/// a ComfyUI on another machine, whose files LU does not read back.
+async fn header_folder_dirs(
+    state: &State<'_, AppState>,
+    comfy_path: &Option<String>,
+    subfolder: &str,
+) -> Option<HashMap<String, PathBuf>> {
+    if !["checkpoints", "diffusion_models", "unet"].contains(&subfolder) || remote_comfy(state).is_some() {
+        return None;
+    }
+    let mut dirs = HashMap::new();
+    // Look-only (PR #218): settle_by_header creates the one folder a file
+    // moves into, no other main folder is made by a download.
+    for key in crate::commands::model_sniff::HEADER_FOLDERS {
+        if let Ok(d) = comfy_models_path(state, comfy_path, key).await {
+            dirs.insert(key.to_string(), d);
+        }
+    }
+    Some(dirs)
+}
+
+/// A27: the file of this name in another main model folder, where an earlier
+/// download of it was moved by its header.
+fn already_settled(dirs: &HashMap<String, PathBuf>, subfolder: &str, dest_file: &Path) -> Option<PathBuf> {
+    let name = dest_file.file_name()?;
+    dirs.iter()
+        .filter(|(k, _)| k.as_str() != subfolder)
+        .map(|(_, d)| d.join(name))
+        .find(|p| p.is_file() && !p.with_extension("download").exists())
+}
+
+/// A27: after a finished transfer, move the file to the folder its header
+/// names. The new path when it moved.
+async fn settle_finished(dest_file: &Path, subfolder: &str, dirs: Option<HashMap<String, PathBuf>>) -> Option<PathBuf> {
+    let dirs = dirs?;
+    let file = dest_file.to_path_buf();
+    let guessed = subfolder.to_string();
+    let moved = tauri::async_runtime::spawn_blocking(move || {
+        crate::commands::model_sniff::settle_by_header(&file, &guessed, &dirs)
+    })
+    .await
+    .ok()
+    .flatten()?;
+    println!("[Download] {} is a {} file by its header, moved to {}", dest_file.display(), moved.0, moved.1.display());
+    Some(moved.1)
+}
+
+// Eight arguments since C60's chatOrigin; a Tauri command takes them flat
+// from the frontend's object, so they stay arguments.
+#[allow(non_snake_case, clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn download_model(
     url: String,
@@ -701,8 +1378,21 @@ pub async fn download_model(
     // and ONLY to a CivitAI host (see do_download). Absent for every other
     // catalog, which is every other download in the app.
     authToken: Option<String>,
+    // C60 (3.1.0): set when the chat agent starts this download from a link
+    // the user sent. Then only https on huggingface.co or civitai.com, only a
+    // .safetensors or .gguf file, only a model folder of ComfyUI; checked here
+    // and not only in the frontend, which a prompt-injected run could reach.
+    chatOrigin: Option<bool>,
+    // A27 (3.1.0, GitHub #234): the folder was picked from a title (the
+    // CivitAI search, a chat link), not from a catalog. Then the header of
+    // the finished file decides between checkpoints, diffusion_models, vae
+    // and text_encoders, and the file moves there (`settle_by_header`).
+    sniffFolder: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
+    if chatOrigin == Some(true) {
+        chat_download_allowed(&url, &subfolder, &filename)?;
+    }
     let expected_bytes = expectedBytes;
     let auth_token = authToken;
     let comfy_path = {
@@ -716,13 +1406,20 @@ pub async fn download_model(
         p.clone()
     };
 
-    let dest_dir = models_dir_in(engine_folders(&state).await.as_ref(), &comfy_path, &subfolder)?;
+    let dest_dir = comfy_models_dir(&state, &comfy_path, &subfolder).await?;
     let dest_file = dest_dir.join(sanitize_filename(&filename));
+    let header_dirs = if sniffFolder == Some(true) { header_folder_dirs(&state, &comfy_path, &subfolder).await } else { None };
 
     let expected_sha256 = match expectedSha256.as_deref() {
         Some(s) => Some(normalize_sha256(s)?),
         None => None,
     };
+
+    // A27: an earlier download of this file was moved by its header. It is
+    // there, complete (a finished transfer only gets its name at the end).
+    if let Some(found) = header_dirs.as_ref().and_then(|d| already_settled(d, &subfolder, &dest_file)) {
+        return Ok(serde_json::json!({"status": "exists", "path": found.to_string_lossy()}));
+    }
 
     if dest_file.exists() {
         let actual = dest_file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -794,9 +1491,13 @@ pub async fn download_model(
         match do_download(&url, &dest_file, &downloads_arc, &id_clone, token, resume_offset,
                         CatalogClaims { expected_bytes, expected_sha256, auth_token }).await {
             Ok(_) => {
+                let moved = settle_finished(&dest_file, &subfolder, header_dirs).await;
                 if let Ok(mut dl) = downloads_arc.lock() {
                     if let Some(p) = dl.get_mut(&id_clone) {
                         p.status = "complete".to_string();
+                        if let Some(path) = &moved {
+                            p.dest = path.to_string_lossy().into_owned();
+                        }
                     }
                 }
                 println!("[Download] Complete: {}", filename_clone);
@@ -889,11 +1590,76 @@ pub fn claim_download(
     Claim::Ok
 }
 
+/// A resume the host refuses with 416 (Range Not Satisfiable): the partial
+/// on disk is as long as the file or longer, so asking for the rest can never
+/// succeed. Only meaningful when a Range was sent at all.
+pub(crate) fn partial_cannot_continue(resume_offset: u64, status: u16) -> bool {
+    resume_offset > 0 && status == 416
+}
+
 /// Bytes already on disk that count toward this download. Only a 206 means the
 /// server honoured the Range request; a 200 carries the whole body, the partial
 /// file is truncated and restarted, and nothing may be counted.
 fn resumed_bytes(resume_offset: u64, status: u16) -> u64 {
     if resume_offset > 0 && status == 206 { resume_offset } else { 0 }
+}
+
+// ── Download speed limit (Discord 2026-09-23) ─────────────
+//
+// "is there a way to limit download speed that this app does whenever it
+// downloads anything?" Every model file LU fetches itself runs through
+// do_download, so the limit sits there, shared by all downloads at once:
+// two downloads under a 10 MB/s limit get 10 MB/s together, not 20. Ollama
+// pulls and package installs run in other programs and are not limited.
+
+/// Bytes per second, 0 for no limit. Set from Settings at boot and on change.
+static DOWNLOAD_LIMIT_BPS: AtomicU64 = AtomicU64::new(0);
+/// When the shared line is free again, across all running downloads.
+static DOWNLOAD_NEXT_SLOT: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// How far the shared line may lie behind the clock and still count. The time
+/// a read took is paid from it, so a line running at the limit arrives at the
+/// limit and a line slower than the limit is not slowed further. It is also
+/// the most a pause can turn into a burst afterwards.
+const THROTTLE_CREDIT: Duration = Duration::from_millis(100);
+
+/// How long the download that just received `bytes` waits before it reads
+/// on, so that everything together stays at `limit_bps`. The line is a
+/// schedule, not a pause after every piece: time already spent reading is
+/// credited, up to `THROTTLE_CREDIT`.
+fn throttle_wait(slot: &mut Option<Instant>, limit_bps: u64, bytes: u64, now: Instant) -> Duration {
+    if limit_bps == 0 {
+        *slot = None;
+        return Duration::ZERO;
+    }
+    let floor = now.checked_sub(THROTTLE_CREDIT).unwrap_or(now);
+    let start = match *slot {
+        Some(t) if t > floor => t,
+        Some(_) => floor,
+        None => now,
+    };
+    let done = start + Duration::from_secs_f64(bytes as f64 / limit_bps as f64);
+    *slot = Some(done);
+    done.saturating_duration_since(now)
+}
+
+/// The limit in bytes per second, or why the number is not one.
+pub(crate) fn download_limit_bps(mb_per_sec: f64) -> Result<u64, String> {
+    if !mb_per_sec.is_finite() || mb_per_sec < 0.0 {
+        return Err("The download limit has to be 0 or a positive number of MB/s.".to_string());
+    }
+    Ok((mb_per_sec * 1_000_000.0).round() as u64)
+}
+
+/// Settings, Storage: megabytes per second, 0 for no limit.
+///
+/// On a phone the command of the same name in download_mobile.rs answers:
+/// the transfer there belongs to the native layer, which keeps the limit.
+#[cfg_attr(desktop, tauri::command)]
+#[cfg_attr(mobile, allow(dead_code))]
+pub fn set_download_limit(mb_per_sec: f64) -> Result<(), String> {
+    DOWNLOAD_LIMIT_BPS.store(download_limit_bps(mb_per_sec)?, Ordering::Relaxed);
+    Ok(())
 }
 
 /// True when the body stopped before Content-Length was reached. `total == 0`
@@ -971,7 +1737,7 @@ fn total_from_content_range(v: &str) -> Option<u64> {
 /// Anything else is refused rather than quietly ignored: a mistyped digest that
 /// silently disables the check is worse than no digest at all, because it looks
 /// like the file was verified.
-fn normalize_sha256(v: &str) -> Result<String, String> {
+pub(crate) fn normalize_sha256(v: &str) -> Result<String, String> {
     let t = v.trim();
     if t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit()) {
         Ok(t.to_ascii_lowercase())
@@ -998,8 +1764,16 @@ fn normalize_sha256(v: &str) -> Result<String, String> {
 /// shape here breaks that decision there.
 pub fn http_error_message(status: u16, filename: &str) -> String {
     match status {
+        // The phone has no "Model Manager" and its copy carries no dash; the desktop sentence stays as it was.
+        #[cfg(mobile)]
         404 | 410 => format!(
-            "{filename} is not at this address any more (HTTP {status}). The repository was renamed, moved or taken down, so trying again cannot help. Look for a newer version of this model in the Model Manager, or update Locally Uncensored — the address is part of the app's catalog."
+            "{filename} is not at this address any more (HTTP {status}). The repository was renamed, moved or taken down, so trying again cannot help. Look for a newer version of this model under Models, or update {product}. The address is part of the app's catalog.",
+            product = crate::app_identity::PRODUCT_NAME
+        ),
+        #[cfg(not(mobile))]
+        404 | 410 => format!(
+            "{filename} is not at this address any more (HTTP {status}). The repository was renamed, moved or taken down, so trying again cannot help. Look for a newer version of this model in the Model Manager, or update {product} — the address is part of the app's catalog.",
+            product = crate::app_identity::PRODUCT_NAME
         ),
         401 | 403 => format!(
             "{filename} cannot be downloaded without a login at this host (HTTP {status}). The address is gated or private: open it in a browser, sign in, accept any licence, and put the file into the model folder by hand. Trying again here cannot help."
@@ -1031,24 +1805,51 @@ const SPACE_RESERVE: u64 = 1024 * 1024 * 1024;
 /// download big enough to fill a disk, so the check belongs here, where every
 /// download passes through, not in the caller that happens to know the sizes.
 fn space_shortfall(total: u64, already_on_disk: u64, available: Option<u64>) -> Option<(u64, u64)> {
+    space_shortfall_keeping(total, already_on_disk, available, SPACE_RESERVE)
+}
+
+/// `space_shortfall` with the headroom named by the caller.
+fn space_shortfall_keeping(total: u64, already_on_disk: u64, available: Option<u64>, reserve: u64) -> Option<(u64, u64)> {
     let available = available?;
     if total == 0 {
         return None;
     }
-    let needed = total.saturating_sub(already_on_disk).saturating_add(SPACE_RESERVE);
+    let needed = total.saturating_sub(already_on_disk).saturating_add(reserve);
     if available >= needed { None } else { Some((needed, available)) }
+}
+
+/// Headroom a whole bundle leaves free. Twice the single file's: a bundle is
+/// tens of gigabytes in several transfers, and its plan is made from catalog
+/// sizes before any server has stated a length (the box, 03.10.2026: 27.1 GB
+/// started onto 29.6 GB free without a word).
+const BUNDLE_SPACE_RESERVE: u64 = 2 * 1024 * 1024 * 1024;
+
+/// What the user is told when a bundle does not fit: how much is missing
+/// first, then the three numbers it comes from.
+fn bundle_space_message(required: u64, reserved: u64, needed: u64, free: u64) -> String {
+    format!(
+        "Not enough free space: {} short. The download is {}, LU keeps {} of the drive free, and the drive has {} free.{} Free up some space and start it again.",
+        gib(needed.saturating_sub(free)),
+        gib(required),
+        gib(BUNDLE_SPACE_RESERVE),
+        gib(free),
+        if reserved > 0 {
+            format!(" Another {} is already promised to downloads that are still running.", gib(reserved))
+        } else {
+            String::new()
+        },
+    )
 }
 
 /// Free bytes on the drive that holds `dest`. The longest matching mount point
 /// wins, so a model folder on a mounted volume is measured against that volume
 /// and not against the root it hangs under.
+///
+/// The lookup itself lives in `crate::disk`, because a phone needs a different
+/// one: inside an app sandbox sysinfo's disk list measures the wrong file
+/// system and refused every download (Android finding A11).
 pub(crate) fn available_space_for(dest: &Path) -> Option<u64> {
-    let disks = sysinfo::Disks::new_with_refreshed_list();
-    disks
-        .iter()
-        .filter(|d| dest.starts_with(d.mount_point()))
-        .max_by_key(|d| d.mount_point().as_os_str().len())
-        .map(|d| d.available_space())
+    crate::disk::available_bytes(dest)
 }
 
 /// Gibibyte, weil Windows und der Finder den freien Platz so anzeigen und der
@@ -1090,7 +1891,7 @@ pub(crate) fn is_huggingface_host(url: &str) -> bool {
 
 /// What the user reads when a download comes back refused.
 ///
-/// goonerforporn, Discord #bug-reports 2026-08-28: CivitAI downloads ended in a
+/// Discord #bug-reports 2026-08-28: CivitAI downloads ended in a
 /// bare `HTTP 400` with nothing to act on, because the API key field had gone
 /// missing from the interface and nobody could tell that a key was the point.
 /// A refusal from CivitAI names the field and the way to it. Everything else
@@ -1098,7 +1899,7 @@ pub(crate) fn is_huggingface_host(url: &str) -> bool {
 /// HuggingFace link would send people to the wrong setting.
 ///
 /// The section name is part of the message and it has to be the section that
-/// really holds the field. It did not: the key moved out of Model Storage into
+/// really holds the field. It did not: the key moved out of Storage into
 /// a section of its own (the A14 review found a tester saving a folder path as
 /// his API key, because the two fields sat under each other), and this text
 /// kept sending people to the folder settings, where the field they were
@@ -1151,7 +1952,7 @@ pub(crate) fn download_http_error(url: &str, status: u16, sent_token: bool, file
 
 /// Which credential, if any, rides on this request.
 ///
-/// goonerforporn, Discord #bug-reports 2026-08-28: CivitAI downloads died in
+/// Discord #bug-reports 2026-08-28: CivitAI downloads died in
 /// 400s because they went out anonymous. The key was in the store, read by the
 /// search and by nothing on the download path.
 ///
@@ -1177,20 +1978,77 @@ fn outgoing_token(url: &str, civitai_key: Option<&str>, hf_token: Option<&str>) 
     civitai.or(hub).map(|t| t.to_string())
 }
 
+/// Does a credential that went out with `first` still belong on `hop`?
+///
+/// The rule reqwest applies when it follows a redirect itself, and the rule
+/// every download of v3.0.5 lived by: `Authorization` survives a redirect only
+/// while host and port stay the same. A sub-domain is another host. That
+/// matters for the hub: `huggingface.co` answers a `resolve` address with a
+/// redirect to a storage host (`cdn-lfs.huggingface.co`, `*.hf.co`) whose
+/// address is already signed. A signed address that gets a Bearer header on
+/// top answers 400, so the download would fail exactly for the people who
+/// stored a token. Never down from https either.
+fn key_stays_on_hop(first: &str, hop: &str) -> bool {
+    let (a, b) = match (url::Url::parse(first), url::Url::parse(hop)) {
+        (Ok(a), Ok(b)) => (a, b),
+        _ => return false,
+    };
+    let host_a = a.host_str().unwrap_or("").to_ascii_lowercase();
+    let host_b = b.host_str().unwrap_or("").to_ascii_lowercase();
+    if host_a.is_empty() || host_a != host_b {
+        return false;
+    }
+    if a.port_or_known_default() != b.port_or_known_default() {
+        return false;
+    }
+    !(a.scheme() == "https" && b.scheme() != "https")
+}
+
+/// The credential of one download on its way through the redirects.
+///
+/// It rides while the hop is the address the download was started with (same
+/// host, same port). Once a redirect has left that host the credential is
+/// gone for the rest of the chain, even when a later hop comes back: reqwest
+/// removes the header from the request it carries along, it never puts it
+/// back.
+pub(crate) struct RidingKey {
+    first: String,
+    token: Option<String>,
+    dropped: std::sync::atomic::AtomicBool,
+}
+
+impl RidingKey {
+    pub(crate) fn new(first: &str, token: Option<String>) -> Self {
+        Self { first: first.to_string(), token, dropped: std::sync::atomic::AtomicBool::new(false) }
+    }
+
+    /// The token for this hop, or nothing. Asking twice for the same hop (a
+    /// connection that is tried again) gives the same answer.
+    pub(crate) fn for_hop(&self, hop: &str) -> Option<&str> {
+        use std::sync::atomic::Ordering;
+        if !key_stays_on_hop(&self.first, hop) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+        if self.dropped.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.token.as_deref()
+    }
+}
+
 /// One reqwest client, built the same way for every request this module makes.
 ///
 /// The SSRF guard is not optional and not a per-call decision: model downloads
 /// come from public catalogs, and a crafted catalog or model URL must not be
 /// able to reach an internal service or 169.254.169.254 — on the first hop or
 /// on any redirect.
-///
 /// `no_gzip`: a resumed download asks for `Range: bytes=<offset>-` and appends
 /// what comes back to the `.part` file, and the size probe trusts
 /// Content-Length. Both are byte counts of the file as stored, which an
 /// on-the-fly decoded body no longer is, so this client never asks for one.
-fn download_client(connect_secs: u64, read_secs: u64) -> Result<reqwest::Client, String> {
+pub(crate) fn download_client(connect_secs: u64, read_secs: u64) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
-        .user_agent("LocallyUncensored/1.5")
+        .user_agent(crate::app_identity::outgoing_agent!("1.5"))
         .no_gzip()
         .redirect(crate::commands::proxy::ssrf_safe_redirect_policy(10))
         .connect_timeout(std::time::Duration::from_secs(connect_secs))
@@ -1210,7 +2068,7 @@ fn download_client(connect_secs: u64, read_secs: u64) -> Result<reqwest::Client,
 /// no network must cost the user a moment, not half a minute — the answer for
 /// an unreachable host is "cannot tell", and arriving at it slowly helps
 /// nobody.
-async fn exact_remote_size(url: &str) -> Option<u64> {
+pub(crate) async fn exact_remote_size(url: &str) -> Option<u64> {
     crate::commands::proxy::validate_public_url(url).ok()?;
     let client = download_client(8, 15).ok()?;
 
@@ -1296,20 +2154,20 @@ async fn do_download(
     // civitai, ollama). Block private/loopback/metadata hosts and re-validate
     // every redirect hop so a crafted catalog/model URL can't pull from an
     // internal service or 169.254.169.254.
-    crate::commands::proxy::validate_public_url(url)?;
+    // The gate itself runs inside `send_download_request`, once per hop and
+    // with the patient resolver: a slow line gets three lookups with growing
+    // time instead of one of five seconds, and when the network really is
+    // gone the row says so in a sentence of its own (models 26c).
 
     // A deadline on the whole request punishes people for having a slow line
     // rather than a broken one: the 2 hour cap this replaces killed any
     // download that legitimately took longer, and the catalog offers single
-    // files of 40 GB and sets of 155 GB. bob80817-dev, Discord 2026-07-29,
+    // files of 40 GB and sets of 155 GB. Discord 2026-07-29,
     // after giving up: "all of your downloads have a habit of timing out".
     // What we actually want to catch is a stalled transfer, so the limits are
     // per-connect and per-read. A dead socket now fails in two minutes and
     // resumes from the partial on the next attempt; a slow one is left to
     // finish.
-    let client = download_client(30, 120)?;
-
-    let mut request = client.get(url);
 
     // The Hugging Face token from Settings goes to the hub and to no other
     // host: gated repos answer 401 without it, and anonymous hub traffic is
@@ -1318,20 +2176,62 @@ async fn do_download(
     // Kept as a value: weiter unten fragt die Fehlermeldung noch einmal, ob
     // ein Schluessel mitgegangen ist.
     let sent_token: Option<String> = outgoing_token(url, auth_token.as_deref(), hf_token.as_deref());
-    if let Some(t) = sent_token.as_deref() {
-        request = request.bearer_auth(t);
-    }
 
-    // Resume support: request only remaining bytes
-    if resume_offset > 0 {
-        request = request.header("Range", format!("bytes={}-", resume_offset));
-        println!("[Download] Resuming from byte {}", resume_offset);
-    }
+    let mut resume_offset = resume_offset;
+    let riding_key = RidingKey::new(url, sent_token.clone());
+    let response = loop {
+        if resume_offset > 0 {
+            println!("[Download] Resuming from byte {}", resume_offset);
+        }
+        let offset = resume_offset;
+        let response = crate::commands::proxy::send_download_request(url, 30, 120, 10, |client, hop| {
+            let mut request = client.get(hop);
+            // Asked again for every hop: a key follows a redirect only while the
+            // hop is still the host the download was started with, as reqwest
+            // did it in v3.0.5. The file itself usually comes from a signed
+            // storage address that must not see it, see `key_stays_on_hop`.
+            if let Some(t) = riding_key.for_hop(hop) {
+                request = request.bearer_auth(t);
+            }
+            // Resume support: request only remaining bytes
+            if offset > 0 {
+                request = request.header("Range", format!("bytes={}-", offset));
+            }
+            request
+        })
+        .await?;
 
-    let response = request
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {}", os_error::english(&e)))?;
+        // GH #113: a partial that already holds the whole file (the rename
+        // after the last byte failed, or the app ended right there) or more
+        // than the host now serves is answered 416 on every resume, so every
+        // Retry ended in the same "HTTP 416" and the bundle hung for good.
+        // The partial goes to the Trash, never deleted, and the transfer
+        // starts over once.
+        if partial_cannot_continue(resume_offset, response.status().as_u16()) {
+            let tmp = dest.with_extension("download");
+            println!(
+                "[Download] {} cannot be resumed from byte {} (HTTP 416), moving the partial to the Trash and starting over",
+                id, resume_offset
+            );
+            let moved = tmp.clone();
+            tokio::task::spawn_blocking(move || crate::commands::os_trash::system_trash(&moved))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| format!(
+                    "The partial download {} cannot be continued and could not be moved to the Trash ({}). Remove it, then start the download again.",
+                    tmp.display(),
+                    e
+                ))?;
+            resume_offset = 0;
+            if let Ok(mut dl) = downloads.lock() {
+                if let Some(p) = dl.get_mut(id) {
+                    p.progress = 0;
+                }
+            }
+            continue;
+        }
+        break response;
+    };
 
     let status = response.status();
     if !status.is_success() && status.as_u16() != 206 {
@@ -1449,6 +2349,19 @@ async fn do_download(
                         if let Some(h) = hasher.as_mut() { h.update(&bytes); }
                         downloaded += bytes.len() as u64;
 
+                        let wait = {
+                            let mut slot = DOWNLOAD_NEXT_SLOT.lock().unwrap_or_else(|p| p.into_inner());
+                            throttle_wait(&mut slot, DOWNLOAD_LIMIT_BPS.load(Ordering::Relaxed), bytes.len() as u64, Instant::now())
+                        };
+                        if !wait.is_zero() {
+                            // Pause and Cancel still answer at once: the
+                            // outer select sees the token on the next turn.
+                            tokio::select! {
+                                _ = token.cancelled() => {}
+                                _ = tokio::time::sleep(wait) => {}
+                            }
+                        }
+
                         // Update progress every 500ms
                         if last_update.elapsed().as_millis() > 500 {
                             last_update = Instant::now();
@@ -1540,7 +2453,10 @@ async fn do_download(
     Ok(())
 }
 
-#[tauri::command]
+// Phone builds register the lu-native variant from download_mobile.rs under
+// the same name, and one name can carry only one command macro.
+#[cfg_attr(desktop, tauri::command)]
+#[cfg_attr(mobile, allow(dead_code))]
 pub fn pause_download(id: String, state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     // Set status to "pausing" so the download loop knows it's a pause, not cancel
     if let Ok(mut dl) = state.downloads.lock() {
@@ -1574,7 +2490,10 @@ pub fn pause_download(id: String, state: State<'_, AppState>) -> Result<serde_js
 /// text promised "start it again to resume", the user pressed the button the UI
 /// offered, and the button deleted the 36 GB it was about to resume from. On a
 /// bad line that never converges.
-#[tauri::command]
+// Phone builds register the lu-native variant from download_mobile.rs under
+// the same name, and one name can carry only one command macro.
+#[cfg_attr(desktop, tauri::command)]
+#[cfg_attr(mobile, allow(dead_code))]
 pub fn cancel_download(id: String, state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     // Cancel the token
     if let Ok(tokens) = state.download_tokens.lock() {
@@ -1586,7 +2505,7 @@ pub fn cancel_download(id: String, state: State<'_, AppState>) -> Result<serde_j
     // If paused or errored (no active token), clean up directly. Errored
     // entries otherwise live in the map forever and resurrect the bundle
     // card's error state on every Models-tab remount after the user hit
-    // Clear (the_mr_pickles) — refresh() re-reads this map on mount.
+    // Clear — refresh() re-reads this map on mount.
     // Take the recorded destination out with the entry: guessing five
     // subfolders missed every other one (controlnet, upscale_models, clip_vision)
     // and every download_model_to_path target outside the ComfyUI tree, so those
@@ -1621,19 +2540,108 @@ pub fn cancel_download(id: String, state: State<'_, AppState>) -> Result<serde_j
     Ok(serde_json::json!({"status": "cancelled"}))
 }
 
+/// Which file goes when the download of a model is cancelled after its image
+/// part already finished: the part, and only the part.
+///
+/// A model with image input is two files and one download. The part is the
+/// small one, so it is usually complete long before the model is, and a cancel
+/// that only stopped the model left a file of several hundred megabytes behind
+/// that belongs to nothing and that no list in the app shows.
+///
+/// Three things have to hold, or nothing is deleted: the name is one this app
+/// gives an image part (`<model>.mmproj.gguf`, no path in it), the file lies
+/// directly in `dir`, and the model it belongs to is NOT there. The last one is
+/// what keeps this from ever taking the part of an installed model.
+pub(crate) fn image_part_to_remove(dir: &Path, filename: &str) -> Result<Option<PathBuf>, String> {
+    let lower = filename.to_ascii_lowercase();
+    if sanitize_filename(filename) != filename || !lower.ends_with(".mmproj.gguf") {
+        return Err("Only the image part of a model can be removed here.".to_string());
+    }
+    let part = dir.join(filename);
+    if !part.is_file() {
+        return Ok(None);
+    }
+    let stem = &filename[..filename.len() - ".mmproj.gguf".len()];
+    let model_is_there = std::fs::read_dir(dir)
+        .map_err(|e| format!("Could not read the model folder: {}", os_error::english(&e)))?
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .any(|name| name.eq_ignore_ascii_case(&format!("{stem}.gguf")));
+    if model_is_there {
+        return Err("The model this image part belongs to is installed, so the part stays.".to_string());
+    }
+    Ok(Some(part))
+}
+
+/// Remove the finished image part of a model whose download was cancelled.
+/// See `image_part_to_remove` for what it refuses.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn remove_image_part(destDir: String, filename: String) -> Result<serde_json::Value, String> {
+    match image_part_to_remove(Path::new(&destDir), &filename)? {
+        Some(part) => {
+            std::fs::remove_file(&part)
+                .map_err(|e| format!("Could not delete {}: {}", part.display(), os_error::english(&e)))?;
+            Ok(serde_json::json!({ "removed": true }))
+        }
+        None => Ok(serde_json::json!({ "removed": false })),
+    }
+}
+
+#[cfg(test)]
+mod image_part_removal_tests {
+    use super::image_part_to_remove;
+
+    #[test]
+    fn the_finished_part_of_a_cancelled_model_goes_and_nothing_else_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("Qwen3.5-9B-abliterated.Q4_K_M.mmproj.gguf");
+        std::fs::write(&part, b"part").unwrap();
+        // The model was cancelled: its partial is gone, the model never landed.
+        assert_eq!(
+            image_part_to_remove(dir.path(), "Qwen3.5-9B-abliterated.Q4_K_M.mmproj.gguf").unwrap(),
+            Some(part)
+        );
+        // Nothing there is not an error, there is simply nothing to remove.
+        assert_eq!(image_part_to_remove(dir.path(), "other.mmproj.gguf").unwrap(), None);
+    }
+
+    #[test]
+    fn the_part_of_an_installed_model_is_never_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("m.Q4_K_M.gguf"), b"model").unwrap();
+        std::fs::write(dir.path().join("m.Q4_K_M.mmproj.gguf"), b"part").unwrap();
+        let refused = image_part_to_remove(dir.path(), "m.Q4_K_M.mmproj.gguf").unwrap_err();
+        assert!(refused.contains("installed"), "{refused}");
+        assert!(dir.path().join("m.Q4_K_M.mmproj.gguf").is_file());
+    }
+
+    #[test]
+    fn a_model_or_a_path_is_refused_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("m.gguf"), b"model").unwrap();
+        for name in ["m.gguf", "../m.mmproj.gguf", "sub/m.mmproj.gguf", "mmproj-F16.gguf"] {
+            assert!(image_part_to_remove(dir.path(), name).is_err(), "{name}");
+        }
+    }
+}
+
 /// Take a SETTLED entry out of the progress map and leave the disk alone.
 ///
 /// The counterpart to `cancel_download`. The frontend has to clear the Rust
 /// entry before a retry, or `download_model` short-circuits on the file that is
 /// already there, never touches the map, and the next poll resurrects the error
-/// row the user just retried (the_mr_pickles). Doing that through cancel meant
+/// row the user just retried. Doing that through cancel meant
 /// paying for the bookkeeping with the partial file — several gigabytes for a
 /// map key.
 ///
 /// Refuses to touch a transfer that is still live: "connecting", "downloading"
 /// and "pausing" own their entry, and dropping it under them would leave a
 /// running tokio task writing into a file nothing knows about.
-#[tauri::command]
+// Phone builds register the lu-native variant from download_mobile.rs under
+// the same name, and one name can carry only one command macro.
+#[cfg_attr(desktop, tauri::command)]
+#[cfg_attr(mobile, allow(dead_code))]
 pub fn clear_download_entry(id: String, state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let mut dl = state
         .downloads
@@ -1706,7 +2714,7 @@ pub async fn check_download_space(
             // reading a cache that can predate it, a cold cache pointed the
             // very first space check of a session at the wrong drive (K5's
             // customer-visible half of the same bug).
-            models_dir_in(engine_folders(&state).await.as_ref(), &comfy_path, &sub)?
+            comfy_models_path(&state, &comfy_path, &sub).await?
         }
         _ => return Err("check_download_space needs a subfolder or a destDir".to_string()),
     };
@@ -1717,7 +2725,7 @@ pub async fn check_download_space(
         .map(|dl| reserved_bytes(&dl))
         .unwrap_or(0);
     let available = available_space_for(&dir);
-    let shortfall = space_shortfall(requiredBytes.saturating_add(reserved), 0, available);
+    let shortfall = space_shortfall_keeping(requiredBytes.saturating_add(reserved), 0, available, BUNDLE_SPACE_RESERVE);
 
     Ok(match shortfall {
         None => serde_json::json!({
@@ -1731,16 +2739,7 @@ pub async fn check_download_space(
             "requiredBytes": requiredBytes,
             "reservedBytes": reserved,
             "availableBytes": available,
-            "message": format!(
-                "Not enough free space. This needs {} and the drive has {} free.{} Free up some space and start it again.",
-                gib(needed),
-                gib(free),
-                if reserved > 0 {
-                    format!(" {} of that is already promised to downloads that are still running.", gib(reserved))
-                } else {
-                    String::new()
-                },
-            ),
+            "message": bundle_space_message(requiredBytes, reserved, needed, free),
         }),
     })
 }
@@ -1767,7 +2766,7 @@ pub struct OrphanDownload {
 
 /// Basename minus its extension. The one place the `.download` naming rule is
 /// read, so the orphan scan and the id matching cannot drift apart.
-fn file_stem_of(name: &str) -> String {
+pub(crate) fn file_stem_of(name: &str) -> String {
     match name.rsplit_once('.') {
         Some((stem, _)) if !stem.is_empty() => stem.to_string(),
         _ => name.to_string(),
@@ -1781,10 +2780,16 @@ fn file_stem_of(name: &str) -> String {
 /// turn the sweeper into a "delete any file" command.
 fn orphan_roots(state: &State<'_, AppState>, extra: &[String]) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
-    if let Ok(p) = state.comfy_path.lock() {
-        if let Some(ref path) = *p {
-            roots.push(PathBuf::from(path).join("models"));
-            roots.push(PathBuf::from(path).join("custom_nodes"));
+    let comfy_path = state.comfy_path.lock().map(|p| p.clone()).unwrap_or(None);
+    if let Some(ref path) = comfy_path {
+        roots.push(PathBuf::from(path).join("models"));
+        roots.push(PathBuf::from(path).join("custom_nodes"));
+        // GH #183: downloads write into the configured shared folders now,
+        // so a partial left there must be found and may be swept.
+        for dir in comfy_user_paths::for_comfy(&comfy_path).all_dirs() {
+            if !roots.contains(&dir) {
+                roots.push(dir);
+            }
         }
     }
     if let Ok(p) = crate::commands::engine::builtin_models_dir() {
@@ -1815,7 +2820,10 @@ fn orphan_roots(state: &State<'_, AppState>, extra: &[String]) -> Vec<PathBuf> {
 /// Entries the running app is already working on are left out: those are not
 /// orphans, they have a row.
 #[allow(non_snake_case)]
-#[tauri::command]
+// Phone builds register the lu-native variant from download_mobile.rs under
+// the same name, and one name can carry only one command macro.
+#[cfg_attr(desktop, tauri::command)]
+#[cfg_attr(mobile, allow(dead_code))]
 pub async fn find_orphan_downloads(
     extraDirs: Option<Vec<String>>,
     state: State<'_, AppState>,
@@ -1842,7 +2850,7 @@ pub async fn find_orphan_downloads(
 /// Skipping them is what keeps the startup scan off the user's clock.
 const SCAN_SKIP: &[&str] = &[".git", "__pycache__", "node_modules", ".venv", "venv", ".cache"];
 
-fn scan_for_partials(roots: Vec<PathBuf>, live: Vec<String>) -> Vec<OrphanDownload> {
+pub(crate) fn scan_for_partials(roots: Vec<PathBuf>, live: Vec<String>) -> Vec<OrphanDownload> {
     let mut out: Vec<OrphanDownload> = Vec::new();
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for root in roots {
@@ -1912,7 +2920,11 @@ pub fn delete_orphan_download(
 }
 
 #[allow(non_snake_case)]
-#[tauri::command]
+// Phone builds register the lu-native variant from download_mobile.rs under
+// the same name, and one name can carry only one command macro.
+#[cfg_attr(desktop, tauri::command)]
+#[cfg_attr(mobile, allow(dead_code))]
+#[allow(clippy::too_many_arguments)]
 pub async fn resume_download(
     id: String,
     url: String,
@@ -1920,6 +2932,8 @@ pub async fn resume_download(
     expectedBytes: Option<u64>,
     expectedSha256: Option<String>,
     authToken: Option<String>,
+    // A27: as in `download_model`.
+    sniffFolder: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let expected_bytes = expectedBytes;
@@ -1933,8 +2947,9 @@ pub async fn resume_download(
         p.clone()
     };
 
-    let dest_dir = models_dir_in(engine_folders(&state).await.as_ref(), &comfy_path, &subfolder)?;
+    let dest_dir = comfy_models_dir(&state, &comfy_path, &subfolder).await?;
     let dest_file = dest_dir.join(&id);
+    let header_dirs = if sniffFolder == Some(true) { header_folder_dirs(&state, &comfy_path, &subfolder).await } else { None };
     let tmp_path = dest_file.with_extension("download");
 
     let resume_offset = if tmp_path.exists() {
@@ -1976,9 +2991,13 @@ pub async fn resume_download(
         match do_download(&url, &dest_file, &downloads_arc, &id_clone, token, resume_offset,
                         CatalogClaims { expected_bytes, expected_sha256, auth_token }).await {
             Ok(_) => {
+                let moved = settle_finished(&dest_file, &subfolder, header_dirs).await;
                 if let Ok(mut dl) = downloads_arc.lock() {
                     if let Some(p) = dl.get_mut(&id_clone) {
                         p.status = "complete".to_string();
+                        if let Some(path) = &moved {
+                            p.dest = path.to_string_lossy().into_owned();
+                        }
                     }
                 }
                 println!("[Download] Complete: {}", id_clone);
@@ -2012,7 +3031,10 @@ pub async fn resume_download(
     Ok(serde_json::json!({"status": "resuming", "offset": resume_offset}))
 }
 
-#[tauri::command]
+// Phone builds register the lu-native variant from download_mobile.rs under
+// the same name, and one name can carry only one command macro.
+#[cfg_attr(desktop, tauri::command)]
+#[cfg_attr(mobile, allow(dead_code))]
 pub fn download_progress(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let downloads = state.downloads.lock().unwrap();
     let map: HashMap<String, DownloadProgress> = downloads.clone();
@@ -2021,10 +3043,34 @@ pub fn download_progress(state: State<'_, AppState>) -> Result<serde_json::Value
 
 // ─── HuggingFace GGUF Downloads (to provider model dirs) ───
 
+/// The names the built-in engine goes by. The Discover tab passes the display
+/// name (`providers.openai.name`), not the internal id.
+///
+/// Written as a `match` with the arm on one line: the sweep for the old name
+/// on screen exempts exactly that line (`no-built-in-engine-left-on-screen`).
+#[allow(clippy::match_like_matches_macro)]
+pub(crate) fn is_builtin_provider(provider_lower: &str) -> bool {
+    match provider_lower {
+        "builtin" | "lu engine" | "built-in engine" | "built in engine" => true,
+        _ => false,
+    }
+}
+
 #[tauri::command]
 pub fn detect_model_path(provider: String) -> Result<serde_json::Value, String> {
-    let home = dirs::home_dir().ok_or("Cannot find home directory")?;
     let provider_lower = provider.to_lowercase();
+
+    // The built-in engine is answered BEFORE anyone asks for a home folder.
+    // A phone has none (Android: no HOME, no XDG, cwd `/`), and with the
+    // home lookup in front this command failed with "Cannot find home
+    // directory" for the one provider a phone has, so the first model could
+    // never be downloaded (Android finding A14).
+    if is_builtin_provider(&provider_lower) {
+        return crate::commands::engine::builtin_models_dir()
+            .map(|p| serde_json::json!(p.to_string_lossy()));
+    }
+
+    let home = dirs::home_dir().ok_or("Cannot find home directory")?;
 
     // Providers with managed model directories. Checked in order, first
     // existing path wins. Falls through to LU fallback dir if none match —
@@ -2041,10 +3087,9 @@ pub fn detect_model_path(provider: String) -> Result<serde_json::Value, String> 
         // Accept the display name too ("Built-in Engine") — the Discover tab
         // passes `providers.openai.name`, not the internal id, so without these
         // aliases a built-in-active install couldn't add a second chat model.
-        "builtin" | "lu engine" | "built-in engine" | "built in engine" => {
-            return crate::commands::engine::builtin_models_dir()
-                .map(|p| serde_json::json!(p.to_string_lossy()));
-        }
+        //
+        // That answer is given at the top of this function now, before the
+        // home lookup, so no arm for those names is left in this match.
         // Ollama manages its own blob store — treat as a pointer so LU can
         // later auto-create a Modelfile pointing at the downloaded GGUF.
         "ollama" => vec![
@@ -2094,7 +3139,7 @@ pub fn detect_model_path(provider: String) -> Result<serde_json::Value, String> 
         // dir. Fall through to LU's fallback.
         //
         // Cloud providers (OpenRouter, Groq, Together, DeepSeek, Mistral,
-        // OpenAI, Anthropic, Custom) don't use a local model dir at all.
+        // OpenAI, Custom) don't use a local model dir at all.
         _ => vec![],
     };
 
@@ -2113,7 +3158,7 @@ pub fn detect_model_path(provider: String) -> Result<serde_json::Value, String> 
     //
     // The previous `~/locally-uncensored/models` fallback was unreachable
     // by any backend and produced the "downloaded but invisible" bug
-    // (Discord drdeath9669, kmmorr23, GH disc #35). We remove it: if a
+    // (Discord, GH disc #35). We remove it: if a
     // user picked a backend with no conventional dir, return an explicit
     // error so the UI can show a real message instead of silently writing
     // into a junk folder.
@@ -2192,16 +3237,25 @@ pub fn lmstudio_dir_in(home: &Path) -> Option<PathBuf> {
 }
 
 #[allow(non_snake_case)]
-#[tauri::command]
+// Phone builds register the lu-native variant from download_mobile.rs under
+// the same name, and one name can carry only one command macro.
+#[cfg_attr(desktop, tauri::command)]
+#[cfg_attr(mobile, allow(dead_code))]
 pub async fn download_model_to_path(
     url: String,
     destDir: String,
     filename: String,
     expectedBytes: Option<u64>,
     expectedSha256: Option<String>,
+    // The CivitAI API key, when the caller has one: a LoRA from the CivitAI
+    // search into the Mac's LoRA folder. Sent ONLY to a CivitAI host (see
+    // do_download). Absent for the text-model lane, which is every other
+    // caller.
+    authToken: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let dest_dir = destDir;
+    let auth_token = authToken;
     let expected_bytes = expectedBytes;
     let expected_sha256 = match expectedSha256.as_deref() {
         Some(s) => Some(normalize_sha256(s)?),
@@ -2269,10 +3323,11 @@ pub async fn download_model_to_path(
     let filename_clone = filename.clone();
 
     tokio::spawn(async move {
-        // No auth token here: download_model_to_path serves the text-model
-        // lane (HuggingFace GGUFs into the app models dir), never CivitAI.
+        // The token is there only for a CivitAI LoRA on the Mac. The
+        // text-model lane (HuggingFace GGUFs into the app models dir) sends
+        // none, and do_download hands one to a CivitAI host alone.
         match do_download(&url, &dest_file, &downloads_arc, &id_clone, token, resume_offset,
-                        CatalogClaims { expected_bytes, expected_sha256, auth_token: None }).await {
+                        CatalogClaims { expected_bytes, expected_sha256, auth_token }).await {
             Ok(_) => {
                 if let Ok(mut dl) = downloads_arc.lock() {
                     if let Some(p) = dl.get_mut(&id_clone) {
@@ -2349,6 +3404,64 @@ fn checked_model_path(dest_dir: &Path, filename: &str) -> Option<PathBuf> {
     }
 }
 
+/// Where `download_model` puts `filename` of `subfolder`: the same ComfyUI
+/// folder (the running engine's own answer first, a ComfyUI on another machine
+/// in the Storage folder) and the same jail as `check_model_sizes`. Used
+/// by Check files and Repair (model_verify.rs), so the check can never look in
+/// another tree than the download wrote into. `None` for a name that has to be
+/// refused.
+pub(crate) async fn model_file_path(
+    state: &State<'_, AppState>,
+    subfolder: &str,
+    filename: &str,
+) -> Result<Option<PathBuf>, String> {
+    let comfy_path = {
+        let mut p = state.comfy_path.lock().unwrap();
+        if p.is_none() {
+            if let Some(found) = crate::commands::process::find_comfyui_path() {
+                *p = Some(found);
+            }
+        }
+        p.clone()
+    };
+    let dir = comfy_models_path(state, &comfy_path, subfolder).await?;
+    let target = checked_model_path(&dir, filename);
+    if target.as_ref().map(|p| p.exists()).unwrap_or(true) || remote_comfy(state).is_some() {
+        return Ok(target);
+    }
+    // GH #183: a file from before the configured folder was honoured is still
+    // in the instance folder. Check that one rather than calling it missing.
+    let user = comfy_user_paths::for_comfy(&comfy_path);
+    let folders = engine_folders(state).await;
+    Ok(existing_elsewhere(&user, folders.as_ref(), &comfy_path, subfolder, filename).or(target))
+}
+
+/// Every other folder a file of `subfolder` may already sit in: the user's
+/// configured ones, the engine's, and the instance's own `models/<key>`. In
+/// that order, the first existing file wins. The write target is not in here;
+/// the caller has looked there already.
+fn existing_elsewhere(
+    user: &comfy_user_paths::UserComfyPaths,
+    folders: Option<&comfy_folders::ComfyFolders>,
+    comfy_path: &Option<String>,
+    subfolder: &str,
+    filename: &str,
+) -> Option<PathBuf> {
+    if safe_subfolder(subfolder).is_err() || subfolder.contains('/') || subfolder.contains('\\') {
+        return None;
+    }
+    let mut dirs: Vec<PathBuf> = user.dirs_for(subfolder);
+    if let Some(f) = folders {
+        dirs.extend(f.dirs_for(subfolder));
+    }
+    if let Some(base) = comfy_path {
+        dirs.push(PathBuf::from(base).join("models").join(subfolder));
+    }
+    dirs.iter()
+        .filter_map(|d| checked_model_path(d, filename))
+        .find(|p| p.is_file())
+}
+
 #[tauri::command]
 pub async fn check_model_sizes(
     files: Vec<CheckFileRequest>,
@@ -2366,74 +3479,198 @@ pub async fn check_model_sizes(
     // The same folders the download wrote into. Asking the old way here would
     // measure a tree nothing was written to and report every file as missing.
     let folders = engine_folders(&state).await;
+    // A ComfyUI on another machine: the files are measured where they were
+    // written, in the Storage folder (GH #143).
+    let remote = remote_comfy(&state);
+    // Read once for the whole list (GH #183).
+    let user = comfy_user_paths::for_comfy(&comfy_path);
 
-    let mut results = Vec::with_capacity(files.len());
+    Ok(files
+        .iter()
+        .map(|file| check_one_file(file, remote.as_ref().map(|r| r.root.as_path()), &user, folders.as_ref(), &comfy_path))
+        .collect())
+}
 
-    for file in &files {
-        let dest_dir = match models_dir_in(folders.as_ref(), &comfy_path, &file.subfolder) {
-            Ok(d) => d,
-            Err(_) => {
-                results.push(CheckFileResult {
-                    filename: file.filename.clone(),
-                    exists: false,
-                    actual_bytes: 0,
-                    complete: false,
-                });
-                continue;
-            }
-        };
-
-        let dest_file = match checked_model_path(&dest_dir, &file.filename) {
-            Some(p) => p,
-            None => {
-                results.push(CheckFileResult {
-                    filename: file.filename.clone(),
-                    exists: false,
-                    actual_bytes: 0,
-                    complete: false,
-                });
-                continue;
-            }
-        };
-        if dest_file.exists() {
-            let actual = dest_file.metadata().map(|m| m.len()).unwrap_or(0);
-            // Use 50% threshold for install checks — sizeGB values are rough estimates
-            // (e.g. sizeGB: 0.9 for an 800 MB file), so no tighter bound is possible
-            // from a catalog number alone. This answers "is there a plausible file
-            // here" for the card, NOT "is this the whole file".
-            //
-            // The exact question is settled where it can be: download_model asks the
-            // host for the byte count and compares to the byte (`judge_existing`), and
-            // do_download verifies the digest when the entry carries one. The 90 %
-            // rule that used to live there is gone — a threshold may size a card, it
-            // may never certify a model.
-            let threshold = if file.expected_bytes > 0 {
-                (file.expected_bytes as f64 * 0.5) as u64
-            } else {
-                0
-            };
-            let complete = file.expected_bytes == 0 || actual >= threshold;
-            results.push(CheckFileResult {
-                filename: file.filename.clone(),
-                exists: true,
-                actual_bytes: actual,
-                complete,
-            });
-        } else {
-            results.push(CheckFileResult {
+/// One entry of `check_model_sizes`, measured without the command's state.
+fn check_one_file(
+    file: &CheckFileRequest,
+    remote_root: Option<&Path>,
+    user: &comfy_user_paths::UserComfyPaths,
+    folders: Option<&comfy_folders::ComfyFolders>,
+    comfy_path: &Option<String>,
+) -> CheckFileResult {
+    let dest = match remote_root {
+        Some(root) => remote_models_path(root, &file.subfolder),
+        None => models_path_with(user, folders, comfy_path, &file.subfolder),
+    };
+    let dest_dir = match dest {
+        Ok(d) => d,
+        Err(_) => {
+            return CheckFileResult {
                 filename: file.filename.clone(),
                 exists: false,
                 actual_bytes: 0,
                 complete: false,
-            });
+            };
+        }
+    };
+
+    let dest_file = match checked_model_path(&dest_dir, &file.filename) {
+        // GH #183: a model downloaded before the configured folder was
+        // honoured still counts as installed where it is.
+        Some(p) if !p.exists() && remote_root.is_none() => {
+            existing_elsewhere(user, folders, comfy_path, &file.subfolder, &file.filename).unwrap_or(p)
+        }
+        Some(p) => p,
+        None => {
+            return CheckFileResult {
+                filename: file.filename.clone(),
+                exists: false,
+                actual_bytes: 0,
+                complete: false,
+            };
+        }
+    };
+    if dest_file.exists() {
+        let actual = dest_file.metadata().map(|m| m.len()).unwrap_or(0);
+        // Use 50% threshold for install checks, since sizeGB values are rough estimates
+        // (e.g. sizeGB: 0.9 for an 800 MB file), so no tighter bound is possible
+        // from a catalog number alone. This answers "is there a plausible file
+        // here" for the card, NOT "is this the whole file".
+        //
+        // The exact question is settled where it can be: download_model asks the
+        // host for the byte count and compares to the byte (`judge_existing`), and
+        // do_download verifies the digest when the entry carries one. The 90 %
+        // rule that used to live there is gone: a threshold may size a card, it
+        // may never certify a model.
+        let threshold = if file.expected_bytes > 0 {
+            (file.expected_bytes as f64 * 0.5) as u64
+        } else {
+            0
+        };
+        let complete = file.expected_bytes == 0 || actual >= threshold;
+        CheckFileResult {
+            filename: file.filename.clone(),
+            exists: true,
+            actual_bytes: actual,
+            complete,
+        }
+    } else {
+        CheckFileResult {
+            filename: file.filename.clone(),
+            exists: false,
+            actual_bytes: 0,
+            complete: false,
         }
     }
-
-    Ok(results)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_model_subdirs_are_plain_folder_names_and_cover_the_ltx_upscaler() {
+        // Delete searches exactly these folders under models/. Each must be a single
+        // lowercase path segment (no separators, so the join behaves the same on
+        // every platform) and the LTX 2.5 upscaler folder must be among them, or a
+        // file the Get button wrote there could never be deleted from the list.
+        assert!(MODEL_SUBDIRS.contains(&"latent_upscale_models"));
+        for d in MODEL_SUBDIRS {
+            assert!(!d.is_empty() && !d.contains('/') && !d.contains('\\') && !d.contains(".."), "{d}");
+            assert_eq!(*d, d.to_lowercase(), "{d}");
+        }
+        let mut sorted: Vec<&&str> = MODEL_SUBDIRS.iter().collect();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), MODEL_SUBDIRS.len(), "duplicate entry");
+    }
+
+    #[test]
+    fn the_3d_folders_are_model_subdirs_and_safe_targets() {
+        // The TRELLIS.2 bundle (src/api/model-bundles.ts getThreeDBundles)
+        // writes into these four folders. Each has to be a target the
+        // downloader accepts and a folder delete searches, or the 3D files
+        // could be fetched but never removed from the Installed list.
+        for d in ["diffusion_models", "vae", "clip_vision", "background_removal"] {
+            assert!(super::MODEL_SUBDIRS.contains(&d), "{d} missing from MODEL_SUBDIRS");
+            assert!(super::safe_subfolder(d).is_ok(), "{d} refused as a download target");
+        }
+    }
+
+    /// GH #113: a partial as long as the file is answered 416 on every
+    /// resume. That and only that sends the partial to the Trash and starts
+    /// over; a fresh transfer or any other status never does.
+    #[test]
+    fn only_a_refused_resume_gives_up_the_partial() {
+        assert!(super::partial_cannot_continue(1_000, 416));
+        assert!(!super::partial_cannot_continue(0, 416), "no Range was sent");
+        for status in [200u16, 206, 404, 500] {
+            assert!(!super::partial_cannot_continue(1_000, status), "{status}");
+        }
+        let src = include_str!("download.rs");
+        let body = &src[src.find("async fn do_download(").unwrap()..];
+        let body = &body[..body.find("let already_on_disk").unwrap()];
+        assert!(body.contains("partial_cannot_continue(resume_offset"), "the check sits in the transfer");
+        assert!(body.contains("system_trash"), "the partial goes to the Trash");
+        assert!(!body.contains("remove_file"), "and is never deleted there");
+    }
+
+    #[test]
+    fn the_download_limit_is_shared_and_off_at_zero() {
+        let now = Instant::now();
+        let mut slot = None;
+        // 1 MB at 1 MB/s takes a second.
+        assert_eq!(throttle_wait(&mut slot, 1_000_000, 1_000_000, now), Duration::from_secs(1));
+        // A second download in the same instant queues behind the first.
+        assert_eq!(throttle_wait(&mut slot, 1_000_000, 500_000, now), Duration::from_millis(1500));
+        // After an idle stretch the line owes at most the credit, never the
+        // whole pause.
+        let later = now + Duration::from_secs(10);
+        assert_eq!(throttle_wait(&mut slot, 1_000_000, 250_000, later), Duration::from_millis(150));
+        // 0 means no limit and clears the queue.
+        assert_eq!(throttle_wait(&mut slot, 0, 1_000_000, later), Duration::ZERO);
+        assert_eq!(slot, None);
+        assert!(set_download_limit(-1.0).is_err());
+        assert!(set_download_limit(f64::NAN).is_err());
+    }
+
+    /// A read takes time. That time counts toward the limit instead of being
+    /// added on top of it, or a 1 MB/s limit delivers well under 1 MB/s.
+    #[test]
+    fn the_time_a_read_took_is_paid_from_the_limit() {
+        let limit = 1_000_000;
+        let piece = 8 * 1024u64;
+        let read = Duration::from_millis(3);
+        let begin = Instant::now();
+        let mut now = begin;
+        let mut slot = None;
+        let pieces = 2_000u64;
+        for _ in 0..pieces {
+            now += read;
+            now += throttle_wait(&mut slot, limit, piece, now);
+        }
+        let rate = (pieces * piece) as f64 / (now - begin).as_secs_f64();
+        assert!(rate > 0.98 * limit as f64 && rate <= 1.01 * limit as f64, "rate {rate}");
+    }
+
+    /// A line that is slower than the limit is never made to wait.
+    #[test]
+    fn a_line_below_the_limit_is_not_slowed_further() {
+        let limit = 1_000_000;
+        let piece = 8 * 1024u64;
+        // 8 KiB every 10 ms is about 0.8 MB/s.
+        let read = Duration::from_millis(10);
+        let mut now = Instant::now();
+        let mut slot = None;
+        let mut waited = Duration::ZERO;
+        for i in 0..2_000 {
+            now += read;
+            let w = throttle_wait(&mut slot, limit, piece, now);
+            if i > 0 { waited += w; }
+            now += w;
+        }
+        assert_eq!(waited, Duration::ZERO);
+    }
+
     use super::*;
 
     /// Der Rueckfall, den dieser Test verhindert, ist im Zusammenschluss des
@@ -2467,6 +3704,128 @@ mod tests {
         panic!("unbalanced braces after {signature}");
     }
 
+    /// B3 of the check "the desktop must not break". The frontend resumes a
+    /// file that was downloaded by path (every GGUF of the built-in engine)
+    /// through `download_model_to_path` now, where v3.0.5 called
+    /// `resume_download`. That is only allowed to stay if the two continue a
+    /// transfer the same way, so this holds them next to each other: both
+    /// read the offset from `<target>.download`, both claim the row with it,
+    /// both hand the same offset to the same `do_download`, both finish and
+    /// fail into the same row states. What differs is where the target is:
+    /// `resume_download` resolves a ComfyUI subfolder (for a GGUF by path
+    /// that folder never held the partial, and without ComfyUI it is an
+    /// error), the start by path takes the folder the file really went to.
+    #[test]
+    fn a_start_by_path_continues_a_partial_exactly_like_resume_download() {
+        let src = include_str!("download.rs");
+        let resume = fn_body(src, "pub async fn resume_download(");
+        let by_path = fn_body(src, "pub async fn download_model_to_path(");
+        let squeezed = |body: &str| body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let (resume, by_path) = (squeezed(resume), squeezed(by_path));
+        for step in [
+            // The partial sits next to the target, with this suffix.
+            r#"let tmp_path = dest_file.with_extension("download");"#,
+            // Its length is where the transfer goes on.
+            "let resume_offset = if tmp_path.exists() { tmp_path.metadata().map(|m| m.len()).unwrap_or(0) } else { 0 };",
+            // One writer per file, the row starts at the offset.
+            "&dest_file, resume_offset) {",
+            "Claim::AlreadyRunning => {",
+            "Claim::NameConflict(other) => {",
+            // The same transfer function with the same offset and the same claims of the catalog.
+            "match do_download(&url, &dest_file, &downloads_arc, &id_clone, token, resume_offset, CatalogClaims { expected_bytes, expected_sha256, auth_token",
+            // The same ends.
+            r#"p.status = "complete".to_string();"#,
+            r#"if e == "paused" {"#,
+            r#"} else if e == "cancelled" { let tmp = dest_file.with_extension("download"); let _ = std::fs::remove_file(&tmp);"#,
+            r#"p.status = "error".to_string(); p.error = Some(e.clone());"#,
+        ] {
+            assert!(resume.contains(step), "resume_download lost: {step}");
+            assert!(by_path.contains(step), "download_model_to_path lost: {step}");
+        }
+        // The one difference, named: the folder.
+        assert!(resume.contains("comfy_models_dir(&state, &comfy_path, &subfolder)"));
+        assert!(by_path.contains("PathBuf::from(&dest_dir)"));
+        assert!(!by_path.contains("comfy_models_dir"));
+    }
+
+    #[test]
+    fn a_delete_with_trash_puts_the_file_in_the_bin_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let loras = dir.path().join("loras");
+        let bin_dir = dir.path().join("bin");
+        fs::create_dir_all(&loras).unwrap();
+        fs::create_dir_all(&bin_dir).unwrap();
+        let file = loras.join("char_anna_zimage.safetensors");
+        fs::write(&file, b"weights").unwrap();
+        let other = loras.join("style.safetensors");
+        fs::write(&other, b"other").unwrap();
+        let bin = |f: &Path| fs::rename(f, bin_dir.join(f.file_name().unwrap())).map_err(|e| os_error::english(&e));
+
+        let answer = to_the_bin(&file, "char_anna_zimage.safetensors", 7, bin).unwrap();
+
+        assert_eq!(answer["status"], "trashed");
+        assert_eq!(answer["bytes"], 7);
+        assert!(!file.exists(), "the file left the loras folder");
+        assert_eq!(fs::read(bin_dir.join("char_anna_zimage.safetensors")).unwrap(), b"weights");
+        assert!(other.exists(), "no other file goes with it");
+    }
+
+    #[test]
+    fn a_bin_that_refuses_leaves_the_file_and_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("char_anna_zimage.safetensors");
+        fs::write(&file, b"weights").unwrap();
+
+        let err = to_the_bin(&file, "char_anna_zimage.safetensors", 7, |_| Err("no bin here".to_string()))
+            .unwrap_err();
+
+        assert!(err.contains("Could not move char_anna_zimage.safetensors to the "), "{err}");
+        assert!(err.contains("no bin here"), "{err}");
+        assert!(file.exists(), "the file stays where the bin refused it");
+    }
+
+    #[test]
+    fn d1_details_read_a_file_in_the_users_own_folder_and_nothing_outside() {
+        let dir = std::env::temp_dir().join(format!("lu-d1-own-{}", std::process::id()));
+        let loras = dir.join("loras");
+        fs::create_dir_all(&loras).unwrap();
+        fs::write(loras.join("style.safetensors"), b"12345").unwrap();
+        fs::write(dir.join("outside.safetensors"), b"x").unwrap();
+        let extra = vec![dir.to_string_lossy().to_string()];
+        let hits = own_folder_hits("style.safetensors", &extra);
+        assert_eq!(hits, vec![loras.join("style.safetensors")]);
+        // A file beside the model folders is not a model of that folder.
+        assert!(own_folder_hits("outside.safetensors", &extra).is_empty());
+        let facts = file_facts(&hits[0], true, 1);
+        assert_eq!(facts["bytes"], 5);
+        assert_eq!(facts["ownFolder"], true);
+        assert_eq!(facts["folder"], loras.to_string_lossy().to_string());
+        assert!(facts["modified"].as_u64().is_some());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn d1_details_and_delete_find_a_file_the_same_way() {
+        let src = include_str!("download.rs");
+        let info = fn_body(src, "pub async fn comfy_model_info(");
+        assert!(info.contains("comfy_model_hits(&state"), "{info}");
+        assert!(info.contains("safe_subfolder(&sub)"), "{info}");
+        assert!(info.contains("sanitize_filename(&base)"), "{info}");
+    }
+
+    #[test]
+    fn the_trash_delete_never_removes_for_good() {
+        // Quelltextwaechter: der Zweig mit `trash` geht an den System-Papierkorb
+        // und kehrt zurueck, bevor das endgueltige remove_file erreicht wird.
+        let src = include_str!("download.rs");
+        let body = fn_body(src, "pub async fn delete_comfy_model(");
+        let branch = body.find("if trash.unwrap_or(false)").expect("trash branch");
+        let remove = body.find("fs::remove_file(f)").expect("remove branch");
+        assert!(branch < remove, "the trash branch comes before the delete for good");
+        assert!(body[branch..remove].contains("os_trash::system_trash"), "{body}");
+        assert!(body[branch..remove].contains("return "), "{body}");
+    }
+
     #[test]
     fn r1_4_delete_and_space_check_ask_the_engine_fresh_not_the_cache() {
         // R1-4: both commands used to read comfy_folders::cached(), a value
@@ -2485,8 +3844,18 @@ mod tests {
             !space_body.contains("comfy_folders::cached()"),
             "check_download_space still reads the stale cache instead of asking the engine"
         );
-        assert!(delete_body.contains("engine_folders(&state).await"), "{delete_body}");
-        assert!(space_body.contains("engine_folders(&state).await"), "{space_body}");
+        // Delete and Details share one lookup (D1), which asks the engine.
+        assert!(delete_body.contains("comfy_model_hits(&state"), "{delete_body}");
+        let hits_body = fn_body(src, "async fn comfy_model_hits(");
+        assert!(!hits_body.contains("comfy_folders::cached()"), "{hits_body}");
+        assert!(hits_body.contains("engine_folders(state).await"), "{hits_body}");
+        // The space check goes through comfy_models_path, the look-only half
+        // of comfy_models_dir (GH #143: a remote ComfyUI measures the Storage
+        // folder), and that one asks the engine fresh for everything else.
+        assert!(space_body.contains("comfy_models_path(&state"), "{space_body}");
+        let dir_body = fn_body(src, "async fn comfy_models_path(");
+        assert!(dir_body.contains("engine_folders(state).await"), "{dir_body}");
+        assert!(!dir_body.contains("comfy_folders::cached()"), "{dir_body}");
     }
 
     #[test]
@@ -2536,7 +3905,7 @@ mod tests {
 
     #[test]
     fn the_lm_studio_row_looks_and_never_creates() {
-        // A14: Model Storage has to be able to say "LM Studio is not
+        // A14: Storage has to be able to say "LM Studio is not
         // installed". detect_model_path cannot answer that, because it is a
         // download target and calls create_dir_all on the way out, so asking
         // it would conjure ~/.lmstudio/models on a machine that has never seen
@@ -2578,6 +3947,30 @@ mod tests {
         assert!(space_shortfall(modell, 0, Some(modell + SPACE_RESERVE)).is_none());
         // Exakt die Reserve zu wenig: das ist der Fall, der Windows lahmlegt.
         assert!(space_shortfall(modell, 0, Some(modell)).is_some());
+    }
+
+    #[test]
+    fn a_bundle_keeps_two_gigabytes_free_and_says_how_much_is_missing() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        // The box, 03.10.2026: 27.1 GB to fetch, 29.6 GB free. That fits, and
+        // it still does with the larger reserve.
+        let ltx: u64 = 29_066_057_328;
+        assert!(space_shortfall_keeping(ltx, 0, Some(31_782_000_000), BUNDLE_SPACE_RESERVE).is_none());
+        // One gigabyte less free and the single file's reserve would still let
+        // it start; the bundle's does not.
+        let free = ltx + GIB + GIB / 2;
+        assert!(space_shortfall(ltx, 0, Some(free)).is_none());
+        let (needed, got) = space_shortfall_keeping(ltx, 0, Some(free), BUNDLE_SPACE_RESERVE).expect("too tight for a bundle");
+        assert_eq!(needed, ltx + 2 * GIB);
+        let message = bundle_space_message(ltx, 0, needed, got);
+        assert!(message.starts_with("Not enough free space: 0.5 GB short."), "{message}");
+        assert!(message.contains("The download is 27.1 GB"), "{message}");
+        assert!(message.contains("keeps 2.0 GB of the drive free"), "{message}");
+        assert!(!message.contains("promised"), "{message}");
+        // Transfers still running are named, because their bytes are why.
+        let busy = bundle_space_message(ltx, 4 * GIB, needed + 4 * GIB, got);
+        assert!(busy.contains("Another 4.0 GB is already promised"), "{busy}");
+        assert!(busy.starts_with("Not enough free space: 4.5 GB short."), "{busy}");
     }
 
     #[test]
@@ -2845,6 +4238,44 @@ mod tests {
 /// the same `.download` file — one truncating it, the other appending at its
 /// own offset. The file still reached `total` bytes and was reported
 /// "complete": a silently corrupt model, several GB of it.
+/// Guard for Android finding A14: a phone has no home folder, and the one
+/// provider it has must not depend on one.
+#[cfg(test)]
+mod builtin_path_needs_no_home_tests {
+    use super::*;
+
+    #[test]
+    fn every_name_of_the_builtin_engine_gets_the_app_models_folder() {
+        let want = crate::commands::engine::builtin_models_dir().unwrap();
+        // The two old spellings are put together here, so the sweep for the
+        // old name on screen finds no string of it in this file.
+        let old_dashed = ["Built", "in Engine"].join("-");
+        let old_spaced = ["built", "in engine"].join(" ");
+        for name in ["builtin", "LU Engine", old_dashed.as_str(), old_spaced.as_str()] {
+            let got = detect_model_path(name.to_string()).unwrap();
+            assert_eq!(got, serde_json::json!(want.to_string_lossy()), "{name}");
+        }
+        assert!(!is_builtin_provider("ollama"));
+    }
+
+    #[test]
+    fn the_builtin_answer_comes_before_the_home_lookup() {
+        // Read from the source: HOME cannot be taken away from a test that
+        // shares its process with a thousand others. What matters is the
+        // order, because `?` on a missing home ends the function.
+        let src = include_str!("download.rs");
+        let f = &src[src.find("pub fn detect_model_path(").expect("exists")..];
+        let builtin = f.find("if is_builtin_provider(&provider_lower)").expect("the early answer exists");
+        let home = f.find("dirs::home_dir()").expect("the home lookup exists");
+        assert!(
+            builtin < home,
+            "detect_model_path must answer for the LU Engine before it asks for a home folder"
+        );
+        let early = &f[builtin..home];
+        assert!(early.contains("return crate::commands::engine::builtin_models_dir()"), "{early}");
+    }
+}
+
 #[cfg(test)]
 mod claim_tests {
     use super::*;

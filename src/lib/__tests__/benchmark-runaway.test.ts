@@ -1,5 +1,5 @@
 /**
- * The emergency brake and the ranking, both from ElBiggus (issue #106, RTX
+ * The emergency brake and the ranking, both from a user (issue #106, RTX
  * 5080 / Win11 25h2).
  *
  * He reported two things. `qwen3.5:9b` derails into a loop and produces two

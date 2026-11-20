@@ -213,8 +213,12 @@ describe('a longer gate must not mean a longer window at Latest', () => {
     // run when the build FAILED, which is when leaving the flag on would be
     // worst, and it is what holds the promise on a manual re-run.
     expect(late).not.toBe('')
-    expect(late).toMatch(/^\s*needs:\s*build-tauri\s*$/m)
-    expect(late).toMatch(/^\s*if:\s*always\(\)\s*$/m)
+    // Both build jobs: the macOS one may be skipped (the switch is off), and
+    // `always()` below covers that as it covers a failed lane.
+    expect(late).toMatch(/^\s*needs:\s*\[build-tauri, build-tauri-macos\]\s*$/m)
+    // `always()` is what makes it run after a failed build. The runs it
+    // stays out of are the dry runs, which belong to no release.
+    expect(late).toMatch(/^\s*if:\s*\$\{\{ always\(\) && !inputs\.mac_dry_run && !inputs\.dry_run \}\}\s*$/m)
     expect(late).toContain('node scripts/enforce-prerelease.mjs')
   })
 })
@@ -227,9 +231,12 @@ describe('the gate script is shaped so the exit code survives', () => {
   // read the script, not the explanation of the script.
   const script = withoutComments(read(GATE_SCRIPT_REL))
 
-  it('exists and is executable', () => {
+  it('exists and is executable', (ctx) => {
     expect(existsSync(GATE_SCRIPT)).toBe(true)
     if (process.platform === 'win32') {
+      // NTFS keeps no mode bits, the git index does. An unpacked source
+      // archive has neither, so there is nothing to read.
+      if (!existsSync(join(root, '.git'))) return ctx.skip()
       const mode = execFileSync('git', ['ls-files', '-s', GATE_SCRIPT_REL], { cwd: root, encoding: 'utf8' })
         .split(' ')[0]
       expect(mode).toBe('100755')

@@ -5,22 +5,31 @@
  * - Keep the last N messages intact (recent context matters most)
  * - Summarize older messages into compact one-liners
  * - Tool call + result pairs become: "Used tool_name('args') → result_snippet"
- * - Token estimation via heuristic: text.length / 4
+ * - Token estimation: script aware, see lib/token-estimate.ts (GH #167)
  */
 
 import { getModelContextCached } from '../api/ollama'
+import { isCompatProviderId } from '../api/providers/compat-id'
 import { getProviderForModel, getProviderIdFromModel } from '../api/providers'
 import { useModelStore } from '../stores/modelStore'
+import { useSettingsStore } from '../stores/settingsStore'
+import { ollamaWindowFor } from './context-window'
 import { truncateToolResult } from './truncate-tool-result'
+import { estimateTokens as estimateTokensByScript, charsPerToken } from './token-estimate'
 import type { OllamaChatMessage } from '../types/agent-mode'
 
 // ── Token Estimation ────────────────────────────────────────────
 
 /**
- * Rough token estimate. Ollama models typically tokenize ~4 chars per token.
+ * Token estimate of one string. GH #167: no longer chars / 4 for every
+ * script. Latin text keeps 4 characters per token to the token, Japanese,
+ * Chinese and Korean cost about 0.8 token per character, emoji and symbols
+ * more. The rules and their evidence live in lib/token-estimate.ts, a leaf
+ * module, so the provider layer can use the same function without an import
+ * cycle through this file.
  */
 export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4) + 1
+  return estimateTokensByScript(text)
 }
 
 /**
@@ -61,7 +70,7 @@ export async function getModelMaxTokens(modelName: string): Promise<number> {
       return await provider.getContextLength(modelId)
     }
 
-    if (providerId === 'openai' || providerId === 'anthropic') {
+    if (providerId === 'openai' || providerId === 'anthropic' || isCompatProviderId(providerId)) {
       // Use provider's getContextLength for cloud models
       const { provider, modelId } = getProviderForModel(modelName)
       return await provider.getContextLength(modelId)
@@ -83,6 +92,34 @@ export async function getModelMaxTokens(modelName: string): Promise<number> {
   }
 }
 
+/**
+ * The window a CHAT turn on this model runs in, for the history budget and
+ * the auto compact of plain chat, a group round and compare.
+ *
+ * On Ollama that is the num_ctx the request carries for `window: 'chat'`
+ * (`ollamaNumCtx` in api/ollama.ts asks `ollamaWindowFor` with the same three
+ * values), not the model's trained maximum. GH #166: the budget read
+ * `getModelMaxTokens`, so it ignored the user's "Context window (Ollama)".
+ * With 262144 set, num_ctx 262144 went out while the history was trimmed to a
+ * fraction of a stand in 4096, and a long chat lost its older turns without a
+ * word. The other direction was as wrong: a 128K model sent with num_ctx
+ * 16384 was budgeted at 0.8 of 128K, so Ollama cut the front itself.
+ *
+ * Every other backend: `getModelMaxTokens`, unchanged.
+ */
+export async function getChatWindowTokens(modelName: string): Promise<number> {
+  try {
+    if (getProviderIdFromModel(modelName) === 'ollama') {
+      const override = useSettingsStore.getState().settings.contextWindowOverride
+      if (override && override > 0) return override
+      return ollamaWindowFor('chat', await getModelContextCached(modelName))
+    }
+  } catch {
+    return 4096
+  }
+  return getModelMaxTokens(modelName)
+}
+
 // ── Message Compaction ──────────────────────────────────────────
 
 export const KEEP_RECENT = 4 // Always keep at least the last N messages untouched
@@ -91,7 +128,7 @@ export const KEEP_RECENT = 4 // Always keep at least the last N messages untouch
  * tokens. The LU Cloud proxy rejects anything above 400 messages, and a chat
  * of many SHORT turns sits under every token budget while the count keeps
  * growing — the token-only compaction never fired and the chat hard-400ed on
- * every send, permanently (yaserrieh, 2026-08-21: "[network] HTTP 400 too
+ * every send, permanently (2026-08-21: "[network] HTTP 400 too
  * many messages" after ~7 coding tasks in one chat). 380 mirrors the web
  * app's MAX_SEND_MESSAGES and leaves room for the pin and the trim notice. */
 export const MAX_SEND_MESSAGES = 380
@@ -101,9 +138,15 @@ export const MAX_SEND_MESSAGES = 380
  * of the ceiling. */
 const COUNT_BUDGET = MAX_SEND_MESSAGES - 3
 
+/** How many messages the count cap drops at a time (capMessageCount). */
+export const COUNT_DROP_BLOCK = 64
+
 /** How much of the pinned first user message survives compaction. Enough for
  * any real instruction; a pasted 200 KB file does not ride along forever. */
 const PINNED_TASK_MAX_CHARS = 8000
+
+/** The agent notice without its trail of done calls, to size its room. */
+const AGENT_NOTICE_SIZE_PROBE = '[999 earlier messages were trimmed to fit the context window. The original task still stands. Results you already saw still hold. If a detail is genuinely missing, re-read that specific file once; never repeat a call that already ran.]'
 
 /** How many already-done tool names the trim notice carries. */
 const DONE_TRAIL_MAX = 40
@@ -138,7 +181,17 @@ function toolNamesIn(msg: OllamaChatMessage): string[] {
  * shared /g regex carries lastIndex state between .test and .replace calls.
  */
 const trimNoticeRe = () =>
-  /\s*\[\d+ earlier messages? (?:was|were) trimmed to fit the context window\.[^\]]*\]\s*/g
+  /\s*\[(?:\d+ earlier messages? (?:was|were) trimmed to fit the context window\.|Note: \d+ earlier messages? of this conversation (?:is|are) not included here)[^\]]*\]\s*/g
+
+/**
+ * The trim notice for a CONVERSATION (GH #201): plain chat, a group round,
+ * compare. The agent's wording below talks about a task, results and files to
+ * re-read, which in a story only confuses the model. This one says what is
+ * true in a chat: the start is missing, carry on from what is here.
+ */
+export function chatTrimNotice(dropped: number): string {
+  return `[Note: ${dropped} earlier message${dropped === 1 ? ' of this conversation is' : 's of this conversation are'} not included here because they no longer fit the context window. Continue naturally from the messages you can see.]`
+}
 
 /** Remove an earlier trim notice from a message body, so repeated compaction
  *  rounds never stack notices inside the pinned task or the kept window. */
@@ -168,7 +221,7 @@ function isToolResultMessage(msg: OllamaChatMessage): boolean {
  * is instruction-shaped, so `role: 'system'` is the obvious home, and
  * `role: 'system'` is exactly what it may not be. A system message anywhere
  * but index 0 is refused outright by strict Jinja chat templates — "System
- * message must be at the beginning" (platorius, Discord #bug-reports
+ * message must be at the beginning" (Discord #bug-reports
  * 2026-08-21, and the reason it only showed up in LU was that compaction only
  * fires once a history is long).
  *
@@ -253,7 +306,13 @@ export function capMessageCount<T extends { role: string; content?: unknown }>(
   if (messages.length <= max) return messages
   const sys = messages[0]?.role === 'system' ? [messages[0]] : []
   const rest = sys.length ? messages.slice(1) : messages
-  const kept = rest.slice(-(max - sys.length))
+  // 3.1.1 (support case E8b): the oldest messages go in whole blocks counted
+  // from the start. "The newest 380" began one message later on every send,
+  // so a chat past the cap never sent the same beginning twice and nothing
+  // came out of the upstream cache.
+  const over = rest.length - (max - sys.length)
+  const drop = Math.min(rest.length, Math.ceil(over / COUNT_DROP_BLOCK) * COUNT_DROP_BLOCK)
+  const kept = rest.slice(drop)
   while (kept.length > 0 && isToolResultMessage(kept[0] as unknown as OllamaChatMessage)) {
     kept.shift()
   }
@@ -285,9 +344,82 @@ export const COMPACT_TARGET_RATIO = 0.7
  */
 export const COMPACT_DROP_BLOCK = 16
 
+/**
+ * Where a history over the trigger is cut (3.1.1, support case E8b).
+ *
+ * The hysteresis above keeps the prefix still only while the array it is
+ * handed was cut the step before. Every conversation surface hands it the
+ * FULL history on every send, and so does an agent run at the start of each
+ * turn. Once the full history is over the trigger it is over it for good, so
+ * every send dropped down to the target again, counted from the newest
+ * message: the cut moved with every message that arrived, the prefix was new
+ * every time and the upstream cache never hit. Measured on a paid model: a
+ * step at about 4,000 credits instead of 150 to 400.
+ *
+ * So the cut may only sit on fixed marks, and the marks are counted from the
+ * START of the history: every `block` tokens of it is one. The cut is the
+ * first mark behind which the rest fits the budget. New messages at the end
+ * move no mark, so the cut stands until the rest has grown past the budget
+ * again, and then it moves one mark on, back down towards the target. In
+ * between every request starts with the request before it, byte for byte,
+ * with nothing remembered anywhere.
+ *
+ * A history that was never cut still passes whole up to the trigger, as
+ * before. Once it has been cut it lives between target and budget.
+ */
+export const STABLE_BLOCK_FLOOR = 64
+
+/**
+ * The distance between two marks: the room between target and budget,
+ * rounded DOWN to a coarse step (a quarter of the power of two below it).
+ * Rounded, because an agent's budget is calibrated against the backend's own
+ * count on every step and moves by a few tokens; marks that moved with it
+ * would be no marks at all.
+ */
+export function stableDropBlock(budgetTokens: number): number {
+  const span = Math.floor(Math.max(0, budgetTokens) * (1 - COMPACT_TARGET_RATIO))
+  if (span <= STABLE_BLOCK_FLOOR) return STABLE_BLOCK_FLOOR
+  let power = STABLE_BLOCK_FLOOR
+  while (power * 2 <= span) power *= 2
+  const step = power / 4
+  return Math.floor(span / step) * step
+}
+
+/**
+ * The first mark at which `fits(cut)` holds, as an index into `sizes`:
+ * everything before it is dropped. `sizes` are the messages' own sizes, in
+ * order. Never past `maxCut`; when no mark up to there fits, the last mark
+ * before it is the answer (still a fixed place), or `maxCut` without one.
+ * Nothing is cut when the whole history fits.
+ */
+export function stableCutIndex(
+  sizes: number[],
+  block: number,
+  maxCut: number,
+  fits: (cut: number) => boolean,
+): number {
+  if (fits(0)) return 0
+  const step = Math.max(1, Math.floor(block))
+  let before = 0
+  let lastMark = -1
+  for (let i = 1; i <= maxCut && i <= sizes.length; i++) {
+    const after = before + sizes[i - 1]
+    // Message i-1 carried the history over the next multiple of the block.
+    if (Math.floor(after / step) > Math.floor(before / step)) {
+      lastMark = i
+      if (fits(i)) return i
+    }
+    before = after
+  }
+  return lastMark >= 0 ? lastMark : Math.max(0, maxCut)
+}
+
 export interface CompactOptions {
   /** Wait for budget × 1.15, then drop to budget × 0.7. */
   hysteresis?: boolean
+  /** Who reads the trim notice: an agent run (default) or a conversation,
+   *  which gets chatTrimNotice (GH #201). */
+  notice?: 'agent' | 'chat'
 }
 
 export function compactMessages(
@@ -295,13 +427,29 @@ export function compactMessages(
   maxTokens: number,
   opts: CompactOptions = {},
 ): OllamaChatMessage[] {
+  return compactMessagesWithCount(messages, maxTokens, opts).messages
+}
+
+/**
+ * compactMessages, and how many of the older messages it left out. The count
+ * is what the chat shows under an answer whose request was trimmed (GH #201),
+ * so nobody has to guess from a token counter that turns were dropped.
+ * `shortened` is 1 when the pinned first user message went out capped: it is
+ * not counted as dropped, and without the count it was cut without a word.
+ */
+export function compactMessagesWithCount(
+  messages: OllamaChatMessage[],
+  maxTokens: number,
+  opts: CompactOptions = {},
+): { messages: OllamaChatMessage[]; dropped: number; shortened: number } {
+  const unchanged = { messages, dropped: 0, shortened: 0 }
   const currentTokens = estimateMessageTokens(messages)
   const triggerTokens = opts.hysteresis ? Math.floor(maxTokens * COMPACT_TRIGGER_RATIO) : maxTokens
   const targetTokens = opts.hysteresis ? Math.floor(maxTokens * COMPACT_TARGET_RATIO) : maxTokens
 
   // Already within budget — BOTH budgets. A history that fits the token
   // window but exceeds the message-count ceiling still has to shrink.
-  if (currentTokens <= triggerTokens && messages.length <= MAX_SEND_MESSAGES) return messages
+  if (currentTokens <= triggerTokens && messages.length <= MAX_SEND_MESSAGES) return unchanged
 
   // Separate system prompt (always kept). A stray system message deeper in
   // the history that is only an old trim notice is dropped outright here:
@@ -314,7 +462,7 @@ export function compactMessages(
   )
 
   // If we have fewer messages than KEEP_RECENT, can't compact further
-  if (nonSystem.length <= KEEP_RECENT) return messages
+  if (nonSystem.length <= KEEP_RECENT) return unchanged
 
   const systemTokens = systemMsg ? estimateMessageTokens([systemMsg]) : 0
   const budget = Math.max(0, targetTokens - systemTokens)
@@ -327,11 +475,14 @@ export function compactMessages(
   // assistant text is never touched. The cap adapts to the budget (chars ≈
   // tokens × 4), floored so tiny budgets still keep a useful head+tail.
   const perResultCap = Math.max(4000, Math.min(32000, Math.floor(budget * 4 * 0.35)))
-  const capped = nonSystem.map((m) =>
-    isToolResultMessage(m) && typeof m.content === 'string' && m.content.length > perResultCap
-      ? { ...m, content: truncateToolResult(m.content, perResultCap) }
-      : m,
-  )
+  // GH #167: the cap is a token budget spelled in Latin characters. A
+  // Japanese result carries about three times the tokens per character, so
+  // its character cap shrinks by its own density; ASCII keeps exactly 4.
+  const capped = nonSystem.map((m) => {
+    if (!isToolResultMessage(m) || typeof m.content !== 'string') return m
+    const cap = Math.floor((perResultCap * charsPerToken(m.content)) / 4)
+    return m.content.length > cap ? { ...m, content: truncateToolResult(m.content, cap) } : m
+  })
 
   // Pin the TASK (audit C5). The oldest message is the user's actual
   // instruction, and the suffix window is precisely the mechanism that drops
@@ -360,18 +511,42 @@ export function compactMessages(
   // Accumulate a recent suffix that fits, newest-first. Keep at least
   // KEEP_RECENT messages even when that exceeds budget (recent context is the
   // most valuable), otherwise stop as soon as the next message would overflow.
-  const suffixBudget = Math.max(0, budget - pinnedTokens)
-  const kept: OllamaChatMessage[] = []
-  let used = 0
-  for (let i = capped.length - 1; i >= 0; i--) {
-    // Count bound first: it holds even where the token check would keep
-    // adding, otherwise a many-short-turns history fits every token budget
-    // and still trips the proxy's message-count cap.
-    if (kept.length >= COUNT_BUDGET) break
-    const t = estimateMessageTokens([capped[i]])
-    if (used + t > suffixBudget && kept.length >= KEEP_RECENT) break
-    kept.unshift(capped[i])
-    used += t
+  // The trim notice rides on top of the window, so its room comes off first.
+  // Without the hysteresis (a local chat, GH #201) nothing else leaves slack
+  // under the budget, and the notice alone pushed the payload past it.
+  const noticeTokens = estimateTokens(opts.notice === 'chat' ? chatTrimNotice(999) : AGENT_NOTICE_SIZE_PROBE) + 8
+  const suffixBudget = Math.max(0, budget - pinnedTokens - noticeTokens)
+  let kept: OllamaChatMessage[] = []
+  if (opts.hysteresis) {
+    // 3.1.1: the cut sits on a fixed mark counted from the start of the
+    // history (stableCutIndex above), not wherever the target falls counted
+    // from the newest message. The rest fills the room up to the budget, and
+    // one block further on it is back near the target.
+    const sizes = capped.map((m) => estimateMessageTokens([m]))
+    const restFrom: number[] = new Array(sizes.length + 1).fill(0)
+    for (let i = sizes.length - 1; i >= 0; i--) restFrom[i] = restFrom[i + 1] + sizes[i]
+    const room = Math.max(0, maxTokens - systemTokens - pinnedTokens - noticeTokens)
+    const maxCut = capped.length - KEEP_RECENT
+    const byTokens = stableCutIndex(sizes, stableDropBlock(maxTokens), maxCut, (at) => restFrom[at] <= room)
+    // A history of many short messages is over the message count long before
+    // it is over any token budget. Its marks are counted in messages, from
+    // the start as well, or the cut would fall on "the newest 377" again,
+    // one message further on every step (the shape of E8b).
+    const overCount = capped.length - COUNT_BUDGET
+    const byCount = overCount > 0 ? Math.ceil(overCount / COUNT_DROP_BLOCK) * COUNT_DROP_BLOCK : 0
+    kept = capped.slice(Math.min(maxCut, Math.max(byTokens, byCount)))
+  } else {
+    let used = 0
+    for (let i = capped.length - 1; i >= 0; i--) {
+      // Count bound first: it holds even where the token check would keep
+      // adding, otherwise a many-short-turns history fits every token budget
+      // and still trips the proxy's message-count cap.
+      if (kept.length >= COUNT_BUDGET) break
+      const t = estimateMessageTokens([capped[i]])
+      if (used + t > suffixBudget && kept.length >= KEEP_RECENT) break
+      kept.unshift(capped[i])
+      used += t
+    }
   }
 
   // Drop leading orphan tool results (their tool_call fell outside the window)
@@ -386,14 +561,16 @@ export function compactMessages(
 
   const droppedCount = capped.length - kept.length - (pinNeeded ? 1 : 0)
   let notice: string | null = null
-  if (droppedCount > 0) {
+  if (droppedCount > 0 && opts.notice === 'chat') {
+    notice = chatTrimNotice(droppedCount)
+  } else if (droppedCount > 0) {
     // What was dropped is exactly the record of the work already done, while
     // the pin keeps the instruction alive forever. Measured on the installed
     // build 2026-08-06, Coding + Ollama + hermes, a 30 step plan: the run
     // walked steps 1 to 18, compaction fired, and the very next call was
     // todo_write followed by get_current_time, system_info, process_list,
     // file_list. It had started the plan over from the top, because the only
-    // thing it could still see was the plan itself. David watching it: "es
+    // thing it could still see was the plan itself. The owner watching it: "es
     // wiederholt sich die ganze Zeit ... und er sagt immer dasselbe."
     //
     // So the notice carries the trail. Names only, no arguments and no
@@ -418,11 +595,82 @@ export function compactMessages(
   // between the pin and the window. Why that is forbidden, and where it goes
   // instead, is now documented once at attachNoteToUserMaterial above — the
   // written summary of 2.6.8 obeys the identical rule through the same call.
-  return attachNoteToUserMaterial<OllamaChatMessage>({
-    system: systemMsg,
-    pinned: pinNeeded ? pinnedTask : null,
-    kept,
-    note: notice,
-    strip: stripTrimNotice,
-  })
+  return {
+    messages: attachNoteToUserMaterial<OllamaChatMessage>({
+      system: systemMsg,
+      pinned: pinNeeded ? pinnedTask : null,
+      kept,
+      note: notice,
+      strip: stripTrimNotice,
+    }),
+    dropped: Math.max(0, droppedCount),
+    shortened: pinNeeded && rawTask !== null && rawTask.length > PINNED_TASK_MAX_CHARS ? 1 : 0,
+  }
+}
+
+/** The least a shortened turn keeps, in tokens: enough for its start and its end. */
+const SHORTENED_TURN_FLOOR = 256
+
+/**
+ * What a shortened turn keeps when the same history is sent again and again
+ * (3.1.1, support case E8b): the largest rung of a fixed ladder that still
+ * fits, each rung half as long again as the one below.
+ *
+ * Cut to the token, the longest turn of a history that sits at its limit came
+ * out a little shorter on every send, and the longest turn is often the first
+ * one: the request changed right behind the system prompt and the upstream
+ * cache had nothing to hit. On a rung the turn goes out with the same bytes
+ * until the history has grown by the whole distance to the next rung down.
+ */
+export function steadyKeep(exactTokens: number): number {
+  let rung = SHORTENED_TURN_FLOOR
+  while (rung * 1.5 <= exactTokens) rung = Math.floor(rung * 1.5)
+  return rung
+}
+
+/**
+ * Shorten the longest turns until the payload fits `maxTokens`, keeping the
+ * head and the tail of each. Never the system prompt (index 0), and never the
+ * message being answered: by default the last one, or whatever `isKept` names.
+ * A group round passes `isKept`, because there the last message is usually the
+ * speaker before this one, and that is exactly the turn that may be too long.
+ *
+ * compactMessages only drops whole older messages and always keeps the newest
+ * KEEP_RECENT, so one very long answer inside that window rode along whole. In
+ * a group round that is the speaker before this one: an 82K-character answer
+ * against a 16K model and every later speaker of the round was refused by the
+ * engine (T1 2026-10-29, GH #201 follow-up). The person's history keeps the
+ * full text; only this request carries the shortened copy.
+ */
+export function shortenLongTurns<T extends { role: string; content: string }>(
+  messages: T[],
+  maxTokens: number,
+  isKept: (m: T, index: number) => boolean = (_m, i) => i === messages.length - 1,
+  opts: { steady?: boolean } = {},
+): { messages: T[]; shortened: number } {
+  const size = (m: T) => estimateMessageTokens([m as unknown as OllamaChatMessage])
+  let total = estimateMessageTokens(messages as unknown as OllamaChatMessage[])
+  if (total <= maxTokens) return { messages, shortened: 0 }
+  const out = [...messages]
+  const touched = new Set<number>()
+  const first = out[0]?.role === 'system' ? 1 : 0
+  for (let round = 0; round < out.length && total > maxTokens; round++) {
+    let at = -1
+    let largest = SHORTENED_TURN_FLOOR
+    for (let i = first; i < out.length; i++) {
+      if (isKept(messages[i], i)) continue
+      const t = size(out[i])
+      if (t > largest) { largest = t; at = i }
+    }
+    if (at < 0) break
+    const exact = Math.max(SHORTENED_TURN_FLOOR, largest - (total - maxTokens) - 32)
+    const keep = opts.steady ? steadyKeep(exact) : exact
+    const text = out[at].content
+    const chars = Math.max(200, Math.floor((text.length * keep) / largest) - 40)
+    if (chars >= text.length) break
+    out[at] = { ...out[at], content: truncateToolResult(text, chars) }
+    touched.add(at)
+    total = estimateMessageTokens(out as unknown as OllamaChatMessage[])
+  }
+  return touched.size ? { messages: out, shortened: touched.size } : { messages, shortened: 0 }
 }

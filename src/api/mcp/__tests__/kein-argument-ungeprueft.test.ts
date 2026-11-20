@@ -28,6 +28,8 @@
  * Run: npx vitest run src/api/mcp/__tests__/kein-argument-ungeprueft.test.ts
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+// P-L (3.1.0): the address gate has its own tests (lib/__tests__/web-research-und-quellen.test.ts).
+vi.mock('../../../lib/web-url-provenance', () => ({ guardWebUrl: async () => null, rememberUrls: () => {} }))
 
 const backendCalls: { cmd: string; body: Record<string, unknown> }[] = []
 
@@ -65,10 +67,13 @@ registerBuiltinTools(registry)
 /** Jede Pflichtangabe vom Typ string, mit einem Wert, der durchginge. */
 const PFLICHT: Record<string, Record<string, string>> = {
   web_search: { query: 'lu experiment' },
+  web_research: { query: 'lu experiment' },
+  browser_open: { url: 'https://example.com/a' },
+  browser_click_link: { link: 'L1' },
   web_fetch: { url: 'https://example.com/a' },
   file_read: { path: 'a.ts' },
   file_write: { path: 'a.ts', content: 'neu' },
-  file_edit: { path: 'a.ts', old_string: 'alt', new_string: 'neu' },
+  file_edit: { path: 'a.ts' },
   file_list: { path: '.' },
   file_search: { path: '.', pattern: 'alt' },
   pr_resume: { url: 'https://github.com/o/r/pull/1' },
@@ -79,6 +84,27 @@ const PFLICHT: Record<string, Record<string, string>> = {
   // nur auf dem Papier. Der Ausgang ist hier ein Satz an das Modell statt ein
   // unterbundener Bridge-Aufruf, und genau das prueft die Reihe unten.
   message_agent: { task_id: 'task-1-abcdef', message: 'halte dich kurz' },
+  // A11: ohne Schluessel keine Karte und keine Aenderung.
+  set_setting: { key: 'theme' },
+  // C60: die Aktionen sagen ohne ihre Pflichtangabe, was fehlt, und beruehren
+  // dabei kein Backend.
+  lu_models: { action: 'list' },
+  lu_service: { service: 'comfyui', action: 'status' },
+  lu_download: { action: 'status' },
+  lu_open_settings: { area: 'keys' },
+  // C60-S5: ohne Fund keine Pruefung, ohne Fund und Modell keine Karte.
+  workflow_inspect: { id: 'civ1' },
+  workflow_install: { id: 'civ1' },
+  workflow_assign: { workflow: 'Flux Upscale', model: 'flux1-dev.safetensors' },
+  // Watchers: outside the desktop app a sentence, no card and no bridge call.
+  watcher_create: { name: 'Prices', task: 'Check the prices.', repeat: 'once' },
+  watcher_update: { watcher: 'Prices' },
+  watcher_delete: { watcher: 'Prices' },
+  // C59 A6–A8: a sentence to the model, no bridge call.
+  memory: { action: 'search' },
+  skill_view: { name: 'release-notes' },
+  skill_save: { name: 'release-notes', description: 'How to write them', body: '## Procedure\n1. Plain English.' },
+  session_search: { query: 'rabattcode' },
 }
 
 /**
@@ -119,7 +145,8 @@ describe('die Tabelle deckt den Katalog ab', () => {
 })
 
 describe('eine Anfrage ohne ihre Pflichtangabe geht gar nicht erst hinaus', () => {
-  for (const [tool, voll] of Object.entries(PFLICHT)) {
+  // The LU browser is registered only inside the app on macOS and Windows.
+  for (const [tool, voll] of Object.entries(PFLICHT).filter(([t]) => !t.startsWith('browser_') || registry.getToolByName(t))) {
     for (const fehlt of Object.keys(voll)) {
       it(`${tool} ohne \`${fehlt}\``, async () => {
         const args: Record<string, unknown> = { ...voll }
@@ -185,6 +212,18 @@ describe('die Pruefung sperrt nicht aus, was gemeint sein kann', () => {
     const call = backendCalls.find((c) => c.cmd === 'fs_write')
     expect(call?.body.content).toBe('')
     expect(call?.body.path).toBe('leer.txt')
+  })
+
+  // file_edit verlangt im Katalog nur `path`, weil `edits` die beiden Felder
+  // ersetzen kann. Ohne beides darf trotzdem nichts geschrieben werden.
+  it.each([
+    [{ path: 'a.ts', new_string: 'neu' }, 'old_string'],
+    [{ path: 'a.ts', old_string: 'alt' }, 'new_string'],
+    [{ path: 'a.ts', edits: [{ old_string: 'alt' }] }, 'new_string'],
+  ])('file_edit %j schreibt nichts und nennt %s', async (args, fehlt) => {
+    const out = await registry.execute('file_edit', args)
+    expect(out).toContain(fehlt)
+    expect(befehle()).not.toContain('fs_write')
   })
 
   it('new_string: "" loescht weiterhin Text', async () => {

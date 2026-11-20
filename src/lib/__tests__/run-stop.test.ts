@@ -125,7 +125,7 @@ describe('run-stop: both loop surfaces are wired to it', () => {
     // includes !abort.signal.aborted, so a Stop leaves through it), which meant a
     // run the user aborted mid-edit still wrote its half-finished changes to disk.
     expect(codex).toContain(
-      "settings.codexStageMode && settings.codexAutoApply && convId && !isRunStopped(convId)",
+      "knobs.stageWrites && settings.codexAutoApply && convId && !isRunStopped(convId)",
     )
   })
 })

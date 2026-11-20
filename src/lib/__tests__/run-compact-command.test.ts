@@ -36,6 +36,7 @@ const SUMME: CompactSummary = {
   task: 'Den Login reparieren.',
   requests: '', progress: 'auth.ts gelesen, Nullwert in Zeile 40 gefunden.',
   decisions: 'Kein Refactoring — der Rest ist getestet.',
+  files: '',
   facts: 'src/auth.ts:40, verifyToken.',
   open: 'Der Test fehlt.',
   rest: '',
@@ -50,10 +51,17 @@ const nachricht = (id: string, content: string, role: Role = 'user'): Message =>
   timestamp: 1,
 })
 
-/** N sichtbare Nachrichten, m0 … m(N-1), abwechselnd Nutzer und Modell. */
+/**
+ * Genug Text je Zug, dass eine Verdichtung etwas sparen KANN. Seit Befund H3
+ * (Box-Lauf 3) endet ein Lauf ueber zu kurze Zuege vor dem Modellaufruf, und
+ * diese Datei prueft den Schnitt, nicht diese Schwelle.
+ */
+const FUELLUNG = ' und weiter'.repeat(50)
+
+/** N sichtbare Nachrichten, m0 bis m(N-1), abwechselnd Nutzer und Modell. */
 const verlauf = (n: number): Message[] =>
   Array.from({ length: n }, (_, i) =>
-    nachricht(`m${i}`, `Zug ${i}: Inhalt`, i % 2 ? 'assistant' : 'user'),
+    nachricht(`m${i}`, `Zug ${i}: Inhalt${FUELLUNG}`, i % 2 ? 'assistant' : 'user'),
   )
 
 function chatMit(messages: Message[], compactions?: CompactionRecord[]): string {
@@ -89,11 +97,15 @@ function gesehene(): TranscriptTurn[] {
   return zusammenfasser.mock.calls[0][0].turns as TranscriptTurn[]
 }
 
+// Fenster 0 heisst unbekannt, und dann gilt die feste Zahl KEEP_AFTER_COMPACT,
+// um die es in dieser Datei geht. Das anpassbare Fenster (Issue #151) hat seine
+// eigene Datei: verdichtung-zusammengefuehrt.test.ts.
 const lauf = (extra: Record<string, unknown> = {}) =>
   runCompactForConversation({
     conversationId: CHAT_ID,
     activeModel: 'qwen:4b',
     trigger: 'manual',
+    window: 0,
     ...extra,
   })
 
@@ -268,14 +280,14 @@ describe('Eine gespeicherte Zusammenfassung ist kein Verlauf', () => {
   it('ein alter Block wird aus dem Zug entfernt, der Rest der Nachricht bleibt', async () => {
     const mitBlock = nachricht(
       'm0',
-      `${COMPACT_OPEN}\nTASK\nEtwas ganz Altes${COMPACT_CLOSE}\nZug 0: Inhalt`,
+      `${COMPACT_OPEN}\nTASK\nEtwas ganz Altes${COMPACT_CLOSE}\nZug 0: Inhalt${FUELLUNG}`,
     )
     chatMit([mitBlock, ...verlauf(19).slice(1)])
     const r = await lauf()
     expect(r.ok).toBe(true)
 
     const turns = gesehene()
-    expect(turns[0].content).toBe('Zug 0: Inhalt')
+    expect(turns[0].content).toBe(`Zug 0: Inhalt${FUELLUNG}`)
     const text = turns.map((t) => t.content).join('\n')
     expect(text).not.toContain(COMPACT_OPEN)
     expect(text).not.toContain('Etwas ganz Altes')
@@ -412,5 +424,46 @@ describe('nothing-to-compact sagt, WELCHER der beiden Faelle vorliegt', () => {
     expect(kurz).toMatch(/short enough/i)
     expect(schon).not.toMatch(/short enough/i)
     expect(schon).toMatch(/already covered/i)
+  })
+})
+
+// ── Jaeger A, A3: zu wenige Zuege, aber zu lang fuer das Fenster ──────────
+describe('nothing-to-compact over a chat that does not fit the window', () => {
+  // 16K window, one answer of about 20K tokens, two short turns after it.
+  const RIESIG = 'x'.repeat(82_500)
+  const kurzerChatMitRiesenantwort = () => chatMit([
+    nachricht('m0', 'Frage'),
+    nachricht('m1', RIESIG, 'assistant'),
+    nachricht('m2', 'Weiter'),
+    nachricht('m3', 'Gut', 'assistant'),
+  ])
+
+  it('says that one message alone is longer than the window, not "short enough"', async () => {
+    kurzerChatMitRiesenantwort()
+    const r = await lauf({ window: 16_384 })
+    expect(r).toEqual({ ok: false, reason: 'nothing-to-compact', detail: 'message-over-window' })
+    expect(zusammenfasser).not.toHaveBeenCalled()
+    const text = compactOutcomeMessage(r)
+    expect(text).not.toMatch(/short enough/i)
+    expect(text).toMatch(/too few turns/i)
+    expect(text).toMatch(/one message alone is longer than the model's context window/i)
+  })
+
+  it('names the case where only the few turns together overflow', async () => {
+    const viertel = 'y'.repeat(18_000)
+    chatMit([
+      nachricht('m0', viertel), nachricht('m1', viertel, 'assistant'),
+      nachricht('m2', viertel), nachricht('m3', viertel, 'assistant'),
+    ])
+    const r = await lauf({ window: 16_384 })
+    expect(r).toEqual({ ok: false, reason: 'nothing-to-compact', detail: 'over-window' })
+    expect(compactOutcomeMessage(r)).toMatch(/no longer fit the model's context window/i)
+  })
+
+  it('NEGATIVE CONTROL: the same short chat inside a large window is still "short enough"', async () => {
+    kurzerChatMitRiesenantwort()
+    const r = await lauf({ window: 131_072 })
+    expect(r).toEqual({ ok: false, reason: 'nothing-to-compact' })
+    expect(compactOutcomeMessage(r)).toMatch(/short enough/i)
   })
 })

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * Bug E, helpslowlydying 01.09.2026: der Agent stand in einem riesigen Baum,
+ * Bug E, a user 01.09.2026: der Agent stand in einem riesigen Baum,
  * "in dem er nichts zu suchen hat", und es gab keinen Weg hinaus. Ordner
  * wechseln half nicht, weil ein einmal gemerkter Vorgabeordner die Frage in
  * jedem neuen Agentenchat ueberspringt.

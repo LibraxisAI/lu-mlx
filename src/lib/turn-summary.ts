@@ -47,7 +47,7 @@ const NOTHING_AT_ALL =
 /**
  * Returns the text to show, or '' to leave the bubble empty (the tool block
  * already carries the picture, so a robotic "your video is above" only adds
- * noise · David 2026-06-16).
+ * noise · 2026-06-16).
  */
 export function summarizeTurn(input: TurnSummaryInput): string {
   const { calls, imageGenDone, videoGenDone, visionFeedbackGiven, planGap } = input

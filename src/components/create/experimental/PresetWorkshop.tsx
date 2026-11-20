@@ -3,7 +3,9 @@ import { Check, ChevronRight, Loader2, Plus, RotateCcw, SlidersHorizontal, Arrow
 import { CREATE_PRESETS, type CreatePreset } from '../../../lib/render/create-presets'
 import { STUDIO_MODELS, studioFields, studioSchema, studioOptions, studioPreviewCredits, supportsProviderField } from '../../../lib/render/studio-contract'
 import { classicCredits, modelHint, presetModel, presetModels, requiredRoleInputs, roleInputs, rolePrompts, roleHasChoice } from '../../../lib/render/preset-models'
+import { studioShownValue } from '../../../lib/render/create-studio'
 import { promptIdeas } from '../../../lib/render/prompt-ideas'
+import { groupForPicker, tierMarks } from '../../../lib/render/model-tier'
 import { humanRuntime, type ModelRuntime } from '../../../lib/render/runtime-format'
 import { selectedVideoSeconds, videoDurations } from '../../../lib/render/video-duration'
 import { studioQuote, modelRuntimes, StudioQuoteChangedError } from '../../../api/cloud/studio'
@@ -43,6 +45,10 @@ export function PresetWorkshop({preset,onClose,onGenerate}:{preset:CreatePreset;
   // clears `quote` for an unrelated reason (model switch, step change).
   const [rateLimited,setRateLimited]=useState(false)
   const lock=useRef(false),requestId=useRef<string|null>(null)
+  // Asks for a fresh quote although the inputs did not change: after a result
+  // is dropped (redo) the price key is the same, and Generate stayed disabled
+  // (bug hunt 01.10.2026, K3).
+  const [quoteRound,setQuoteRound]=useState(0)
   const previewsRef=useRef<Record<string,{url:string;type:'image'|'video'}>>({})
   const carried=useRef<number|null>(null)
   // Gemessene Laufzeiten, einmal pro geoeffnetem Fenster geholt. Fehlt das
@@ -235,7 +241,7 @@ export function PresetWorkshop({preset,onClose,onGenerate}:{preset:CreatePreset;
     return ()=>{clearTimeout(timer);controller.abort()}
     // The key contains every input affecting the quote.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[priceKey])
+  },[priceKey,quoteRound])
   // Review B5: usable when there is genuinely something to price, and it is
   // fresh for the CURRENT key, or the only thing between here and a fresh
   // confirmation is a rate limit (the last confirmed number stands in, see
@@ -254,6 +260,10 @@ export function PresetWorkshop({preset,onClose,onGenerate}:{preset:CreatePreset;
       const runLabel=index===preset.steps.length-1?preset.title:`${preset.title} · ${step.title}`
       const submitted=await submitCloudJob({kind:step.kind,model:step.model,prompt,params:{...params(),label:runLabel,max_credits:quote,client_request_id:requestId.current??undefined}})
       setActive(submitted.id)
+      // The id served its purpose once a job stands for it. A second Generate
+      // is a new request: with the old id the server handed back the failed or
+      // cancelled job instead of starting one (K3).
+      requestId.current=crypto.randomUUID()
       const job=await pollJob(submitted.id,{timeoutMs:125*60_000})
       if(job.status!=='succeeded')throw new Error(job.error??`Generation ${job.status}. Completed earlier steps remain in your gallery.`)
       // Prompt und Titel stehen hier im Browser; der Auftrag vom Server
@@ -276,10 +286,10 @@ export function PresetWorkshop({preset,onClose,onGenerate}:{preset:CreatePreset;
   /** Drop this step's result and stand where it was made, prompt and uploads
    *  still there. A second run of the same step is one word away, not a
    *  reopened preset that silently resumes on a finished picture. */
-  function redo(){setCompleted(c=>{const n={...c};delete n[index];return n});setError('');setQuote(null);setQuotedKey('');setRateLimited(false)}
+  function redo(){setCompleted(c=>{const n={...c};delete n[index];return n});setError('');setQuote(null);setQuotedKey('');setRateLimited(false);setQuoteRound(r=>r+1)}
   /** Back to an empty first step. Nothing carried over, model choice included.
    *  Everything already generated stays in the gallery. */
-  function startOver(){carried.current=null;setIndex(0);setPrompt('');setOptions({});setPaths({});dropPreviews();setCompleted({});setPicked({});setMeasurement(null);setError('');setQuote(null);setQuotedKey('');setAdvanced(false);setRateLimited(false)}
+  function startOver(){carried.current=null;setIndex(0);setPrompt('');setOptions({});setPaths({});dropPreviews();setCompleted({});setPicked({});setMeasurement(null);setError('');setQuote(null);setQuotedKey('');setAdvanced(false);setRateLimited(false);setQuoteRound(r=>r+1)}
   const touched=index>0||Object.keys(completed).length>0||!!prompt||Object.keys(paths).length>0
   const ideas=promptIdeas(raw.role,preset.category)
   const runtime=runtimes[step.model]
@@ -329,14 +339,14 @@ export function PresetWorkshop({preset,onClose,onGenerate}:{preset:CreatePreset;
           {key==='video_path'&&step.model==='preset-wan-2.2-spicy-extend'&&<select aria-label="Use a gallery clip" disabled={busy} value="" onChange={e=>{const item=gallery.find(g=>g.id===e.target.value);if(item)void adopt({id:item.id} as CloudJob,key)}} className={`${fieldClass} mt-2`}><option value="">Or use a gallery clip…</option>{gallery.filter(g=>g.type==='video'&&g.remoteUrl).map(g=><option key={g.id} value={g.id}>{galleryLabelShort(g,50)}</option>)}</select>}
         </div>)}
         {!model&&raw.role==='extend'&&<label className="block t-micro text-gray-400">Source clip<select disabled={busy} className={`${fieldClass} mt-1`} value={String(paths.source_url??'')} onChange={e=>setPaths({source_url:e.target.value})}><option value="">Choose from your gallery</option>{gallery.filter(g=>g.type==='video'&&g.remoteUrl).map(g=><option key={g.id} value={g.remoteUrl}>{g.model} · {new Date(g.createdAt).toLocaleString()}</option>)}</select></label>}
-        <div className="grid grid-cols-2 gap-2">{primaryFields.map(([key,schema])=><SchemaControl key={key} className={fieldClass} name={key} schema={schema} value={options[key]??model?.defaults[key]} disabled={busy} onChange={v=>setOptions(o=>{const next={...o};if(v===undefined)delete next[key];else next[key]=v;return next})}/>)}</div>
+        <div className="grid grid-cols-2 gap-2">{primaryFields.map(([key,schema])=><SchemaControl key={key} className={fieldClass} name={key} schema={schema} value={studioShownValue(step.model,options,key)} disabled={busy} onChange={v=>setOptions(o=>{const next={...o};if(v===undefined)delete next[key];else next[key]=v;return next})}/>)}</div>
         {!model&&raw.role==='animate'&&<><SchemaControl className={fieldClass} name="duration" schema={{type:'integer',enum:[...videoDurations(step.model)],default:5}} value={options.duration} disabled={busy} onChange={v=>setOptions(o=>({...o,duration:Number(v)}))}/>{supportsProviderField(step.model,'shot_type','animate')&&<SchemaControl className={fieldClass} name="shot_type" schema={{type:'string',enum:['single','multi'],default:'single'}} value={options.shot_type} disabled={busy} onChange={v=>setOptions(o=>({...o,shot_type:v}))}/>}{supportsProviderField(step.model,'negative_prompt','animate')&&<label className="block t-micro text-gray-400">Negative prompt<textarea disabled={busy} value={String(options.negative_prompt??'')} onChange={e=>setOptions(o=>({...o,negative_prompt:e.target.value}))} className={`${fieldClass} mt-1`} placeholder="Details to avoid…"/></label>}</>}
         {!model&&raw.role==='speech'&&step.model==='qwen3-tts'&&<SchemaControl className={fieldClass} name="voice" schema={{type:'string',enum:['Serena','Vivian','Ryan','Aiden','Dylan','Eric','Sohee','Ono_Anna','Uncle_Fu'],default:'Serena'}} value={options.voice} disabled={busy} onChange={v=>setOptions({voice:v})}/>}
         {!model&&raw.role==='speech'&&step.model==='qwen3-tts-design'&&<label className="block t-micro text-gray-400">Voice description<textarea disabled={busy} value={String(options.voice_description??'')} onChange={e=>setOptions(o=>({...o,voice_description:e.target.value}))} className={`${fieldClass} mt-1`} placeholder="A calm low voice, slight rasp…"/></label>}
         {(otherFields.length>0||optionalList.length>0)&&<><button onClick={()=>setAdvanced(!advanced)} className="t-micro text-gray-400 hover:text-gray-100">{advanced?'−':'+'} Advanced settings</button>{advanced&&<div className="space-y-2">{optionalList.map(([field,key])=><div key={field}>
           <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-dashed border-white/10 bg-black/25 px-3 py-2.5 t-control text-gray-400 hover:border-lu-accent/50 hover:text-gray-200"><input disabled={busy} type="file" className="sr-only" multiple={key==='image_paths'} accept={key.includes('audio')?'audio/*':key==='video_path'?'video/*':'image/png,image/jpeg,image/webp'} onChange={e=>void upload(key,e.target.files)}/>{paths[key]?<Check size={13} className="text-emerald-400"/>:<Plus size={13}/>}<span>{paths[key]?'Replace':'Add'} {label(field).toLowerCase()}</span></label>
           {paths[key]&&<button disabled={busy} onClick={()=>{setPaths(p=>{const next={...p};delete next[key];return next});setPreview(key,null)}} className="mt-1 t-micro text-gray-400">Remove input</button>}
-        </div>)}{otherFields.map(([key,schema])=><SchemaControl key={key} className={fieldClass} name={key} schema={schema} value={options[key]??model?.defaults[key]} disabled={busy} onChange={v=>setOptions(o=>{const next={...o};if(v===undefined)delete next[key];else next[key]=v;return next})}/>)}</div>}</>}
+        </div>)}{otherFields.map(([key,schema])=><SchemaControl key={key} className={fieldClass} name={key} schema={schema} value={studioShownValue(step.model,options,key)} disabled={busy} onChange={v=>setOptions(o=>{const next={...o};if(v===undefined)delete next[key];else next[key]=v;return next})}/>)}</div>}</>}
         {preset.note&&<p className="t-micro leading-4 text-gray-400">{preset.note}</p>}
       </aside>}
     </div>
@@ -346,7 +356,7 @@ export function PresetWorkshop({preset,onClose,onGenerate}:{preset:CreatePreset;
         {model&&studioSchema(step.model).properties?.prompt?.enum?<select className={fieldClass} aria-label="Visual style" disabled={busy} value={prompt} onChange={e=>setPrompt(e.target.value)} ><option value="">Choose a visual style…</option>{studioSchema(step.model).properties!.prompt.enum!.map(v=><option key={String(v)}>{String(v)}</option>)}</select>:<textarea aria-label="Preset prompt" disabled={busy||!!result} maxLength={4000} rows={2} value={prompt} onChange={e=>setPrompt(e.target.value)} placeholder={raw.role==='speech'?'What should your character say?':raw.role==='soundtrack'?'Describe the sounds you want…':raw.role==='animate'||raw.role==='extend'?'Describe the movement…':raw.role==='edit'?'Describe the new setting…':'Describe your scene…'} className="w-full resize-none bg-transparent t-control text-gray-200 outline-none placeholder:text-gray-400"/>}
         <div className="mt-2 flex flex-wrap items-center justify-between gap-2 md:flex-nowrap md:gap-3">
           <div className="flex min-w-0 items-center gap-2">{roleHasChoice(raw.role,preset.adult)&&!result
-            ?<Select size="sm" ariaLabel="Model" className="max-w-[220px]" value={step.model} onChange={choose} options={alternatives.map(m=>({value:m.id,label:m.label}))}/>
+            ?<Select size="sm" ariaLabel="Model" className="max-w-[220px]" value={step.model} onChange={choose} options={groupForPicker(alternatives).map(({model:m,group})=>({value:m.id,label:m.label,group,tags:tierMarks(m)}))}/>
             :<span className="truncate rounded-md border border-white/[0.08] px-2 py-1 t-micro text-gray-300">{choice.label} <span className="ml-2 text-gray-400">Cloud</span></span>}
           {ideas.length>0&&!result&&<Select size="sm" ariaLabel="Prompt ideas" className="max-w-[160px]" placeholder="+ Prompt idea" value="" onChange={v=>{const idea=ideas.find(i=>i.label===v);if(idea)setPrompt(t=>t.trim()?`${t.trim()}, ${idea.text}`:idea.text)}} options={ideas.map(i=>({value:i.label,label:i.label}))}/>}
           </div>

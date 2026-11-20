@@ -111,12 +111,27 @@ export interface AgentToolCall {
   parentToolCallId?: string
   /** True when args passed JSON-schema validation (Phase 4). */
   schemaValidated?: boolean
+  /** Where an "always allow here" rule for this shell call would be kept
+   *  (stores/commandRulesStore): set on a call that waits for approval. */
+  ruleScope?: string
   /** Unified diff for file_write/file_edit, rendered by ToolCallBlock
    *  (audit D5) instead of raw result text. */
   diff?: string
   /** Group key for serial execution within a parallel batch (Phase 5).
    *  Writes to the same file path or the singleton "shell" share a key. */
   sideEffectKey?: string
+  /** Set when a long generation went on in the background and the turn moved
+   *  on without waiting for it (lib/background-tools.ts). The result lands on
+   *  this same call when the job is done. */
+  background?: BackgroundToolState
+}
+
+/** Where a call that went on in the background stands. */
+export interface BackgroundToolState {
+  jobId: string
+  startedAt: number
+  state: 'running' | 'done' | 'failed' | 'cancelled' | 'interrupted'
+  finishedAt?: number
 }
 
 // Phases rendered as distinct UI blocks in chat
@@ -137,6 +152,18 @@ export interface AgentBlock {
   /** v2.4+ — array of tool calls attached to this block (enables parallel execution). */
   toolCalls?: AgentToolCall[]
   timestamp: number
+  /** Set on the block that marks a compaction in the middle of this run
+   *  (3.0.9): the payload estimate before and after, and how many step
+   *  messages the summary stands for. The block is a cut, not content: the
+   *  transcript draws it as the one line "Compacted, 28.9K → 17.9K" and
+   *  starts the current view there (lib/compact-layers.ts). Its phase is
+   *  'reflection' and `content` carries the sentence, so a reader that does
+   *  not know the field still shows something true. */
+  compaction?: { before: number; after: number; replaced: number }
+  /** A message the user wrote while the run was going (CA U2). Phase
+   *  'reflection', `content` is the user's own text; the transcript draws it as
+   *  a small user note at the point where the run read it. */
+  steer?: true
 }
 
 // Sandbox configuration
@@ -194,7 +221,7 @@ export interface MemoryFile {
 export interface MemorySettings {
   // Both ship ON: stores/memoryStore.ts sets them true for a fresh profile and
   // for the migration of an old one. Auto-extraction is opt-OUT, and it costs
-  // a second inference call. David decided that on 12.09.2026 (R2-48, R5-27),
+  // a second inference call. The owner decided that on 12.09.2026 (R2-48, R5-27),
   // together with the cloud gate that used to keep it silently dead on the
   // desktop (settings.memoryCloudOptIn, lib/constants.ts). What it costs
   // stands next to the switch that turns it off.
@@ -205,7 +232,7 @@ export interface MemorySettings {
   // User override for how many memories get injected into the prompt. null =
   // auto (derive from the model's context size via MEMORY_BUDGET_TIERS).
   // Set a number to take manual control instead of "32k ctx = 15 memories"
-  // (David 2026-06-07). The token budget scales with it so the extra entries
+  // (2026-06-07). The token budget scales with it so the extra entries
   // actually fit. Optional for back-compat with pre-2.5.1 persisted settings.
   maxMemoriesOverride?: number | null
 }

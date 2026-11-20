@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { resolve, isAbsolute } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 import { JSDOM } from 'jsdom'
 
@@ -12,7 +13,7 @@ const readWeb = (path) => readFileSync(resolve(webRoot, path), 'utf8')
 function source(path) {
   return ts.createSourceFile(path, readWeb(path), ts.ScriptTarget.Latest, true)
 }
-function objects(file) {
+function objects(file, root = file) {
   const out = []
   function visit(node) {
     if (ts.isObjectLiteralExpression(node)) {
@@ -25,12 +26,17 @@ function objects(file) {
         const key = prop.name.getText(file).replace(/^['"`]|['"`]$/g, '')
         if (ts.isStringLiteral(value)) row[key] = value.text
         if (ts.isNumericLiteral(value)) row[key] = Number(value.text.replaceAll('_', ''))
+        // Eine Liste aus Zeichenketten, etwa flashTiers: in welchen Plaenen
+        // ein Flash-Modell ohne Credits laeuft.
+        if (ts.isArrayLiteralExpression(value) && value.elements.length > 0 && value.elements.every((el) => ts.isStringLiteral(el))) {
+          row[key] = value.elements.map((el) => el.text)
+        }
       }
       out.push(row)
     }
     ts.forEachChild(node, visit)
   }
-  visit(file)
+  visit(root)
   return out
 }
 
@@ -43,10 +49,25 @@ function docsFiles(dir, out = []) {
   }
   return out
 }
-const docsRoot = new URL('../docs', import.meta.url).pathname
+// fileURLToPath, not .pathname: the URL keeps a space as %20, and a
+// checkout under "Locally Uncensored" then has no docs folder.
+const docsRoot = fileURLToPath(new URL('../docs', import.meta.url))
 
 const page = new JSDOM(readFileSync(new URL('../docs/cloud/index.html', import.meta.url), 'utf8')).window.document
 const catalog = objects(source('apps/web/lib/chat/tier-models.ts'))
+// Seit 3.0.8 (Kimi K3.1 Pro) spreizt CLOUD_CATALOG die Eintraege auf festem
+// Weg aus direct-catalog.ts hinein. Ohne sie zaehlte der Waechter ein Modell
+// zu wenig. Aeltere Web-Staende haben den Spread nicht und bleiben wie sie sind.
+if (readWeb('apps/web/lib/chat/tier-models.ts').includes('...FIXED_UPSTREAM_CATALOG')) {
+  const direct = source('apps/web/lib/chat/direct-catalog.ts')
+  let fixed
+  ts.forEachChild(direct, function find(node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(direct) === 'FIXED_UPSTREAM_CATALOG') fixed = node.initializer
+    else ts.forEachChild(node, find)
+  })
+  assert.ok(fixed, 'direct-catalog.ts: FIXED_UPSTREAM_CATALOG missing')
+  catalog.push(...objects(direct, fixed))
+}
 for (const element of page.querySelectorAll('[data-model-id]')) {
   const entry = catalog.find((item) => item.id === element.dataset.modelId)
   assert.ok(entry, `Model missing from catalog: ${element.dataset.modelId}`)
@@ -84,22 +105,51 @@ console.log('Cloud sales guard passed: model IDs/labels, Flash membership/limit 
 const pricingRaw = readFileSync(new URL('../docs/pricing/index.html', import.meta.url), 'utf8')
 const pricing = new JSDOM(pricingRaw).window.document
 const tiers = objects(source('apps/web/lib/pricing.ts'))
-const tierCredits = objects(source('apps/web/lib/billing/credits.ts'))
-  .find((row) => typeof row.hosted === 'number' && typeof row['hosted-max'] === 'number')
-assert.ok(tierCredits, 'TIER_CREDITS not found in credits.ts')
+// TIER_CREDITS beim Namen suchen: credits.ts traegt seit Oktober 2026 eine
+// zweite Tabelle mit denselben Plan-Schluesseln (TIER_TRAININGS), und die
+// Credits selbst stehen in tier-credits.ts. Die erste Tabelle mit "hosted"
+// waere die falsche.
+function namedObject(file, name) {
+  let found
+  function visit(node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(file) === name && node.initializer && ts.isObjectLiteralExpression(node.initializer)) {
+      found = objects(ts.createSourceFile('x.ts', `const x = ${node.initializer.getText(file)}`, ts.ScriptTarget.Latest, true))[0]
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return found
+}
+const tierCredits = ['apps/web/lib/billing/tier-credits.ts', 'apps/web/lib/billing/credits.ts']
+  .filter((path) => existsSync(resolve(webRoot, path)))
+  .map((path) => namedObject(source(path), 'TIER_CREDITS'))
+  .find(Boolean)
+assert.ok(tierCredits, 'TIER_CREDITS not found in tier-credits.ts or credits.ts')
 
-for (const cell of pricing.querySelectorAll('[data-plan-id]')) {
-  const tier = tiers.find((row) => row.id === cell.dataset.planId)
-  assert.ok(tier, `Plan missing from pricing.ts: ${cell.dataset.planId}`)
-  assert.equal(Number(cell.dataset.monthlyEur), tier.monthlyEUR, `${tier.id}: monthly price drift`)
-  assert.equal(cell.textContent, `EUR ${tier.monthlyEUR}`)
-  const row = cell.closest('[data-plan-row]')
-  const annual = row.querySelector('[data-annual-eur]')
-  assert.equal(Number(annual.dataset.annualEur), tier.annualEUR, `${tier.id}: annual price drift`)
-  assert.equal(annual.textContent, `EUR ${tier.annualEUR}`)
-  const credits = row.querySelector('[data-plan-credits]')
-  assert.equal(Number(credits.dataset.planCredits), tierCredits[cell.dataset.planId], `${tier.id}: credit drift`)
-  assert.equal(credits.textContent, tierCredits[cell.dataset.planId].toLocaleString('en-US'))
+// Seit dem Umbau der Seite auf Karten traegt die Karte selbst alle drei
+// Anker, und die Zahlen stehen in eigenen Elementen: der Preis als "€19" in
+// .luc-plan-price, das Jahr in .luc-plan-annual, das Guthaben in
+// .luc-plan-wallet. Geprueft wird der Anker gegen die Quelle UND der
+// sichtbare Text gegen den Anker, sonst kann die Karte etwas anderes zeigen,
+// als ihr Attribut sagt.
+const sichtbar = (card, selector, what) => {
+  const el = card.querySelector(selector)
+  assert.ok(el, `${card.dataset.planId ?? card.dataset.packId}: ${what} is not on the card (${selector})`)
+  return el.textContent
+}
+for (const card of pricing.querySelectorAll('[data-plan-id]')) {
+  const tier = tiers.find((row) => row.id === card.dataset.planId)
+  assert.ok(tier, `Plan missing from pricing.ts: ${card.dataset.planId}`)
+  assert.equal(Number(card.dataset.monthlyEur), tier.monthlyEUR, `${tier.id}: monthly price drift`)
+  assert.equal(sichtbar(card, '.luc-plan-price strong', 'the monthly price'), `€${tier.monthlyEUR}`, `${tier.id}: monthly price text drift`)
+  assert.equal(Number(card.dataset.annualEur), tier.annualEUR, `${tier.id}: annual price drift`)
+  assert.equal(sichtbar(card, '.luc-plan-annual', 'the annual price'), `€${tier.annualEUR}/year · billed annually`, `${tier.id}: annual price text drift`)
+  assert.equal(Number(card.dataset.planCredits), tierCredits[card.dataset.planId], `${tier.id}: credit drift`)
+  assert.equal(
+    sichtbar(card, '.luc-plan-wallet strong', 'the monthly credits'),
+    `${tierCredits[card.dataset.planId].toLocaleString('en-US')} credits/month`,
+    `${tier.id}: credit text drift`,
+  )
 }
 assert.equal(pricing.querySelectorAll('[data-plan-id]').length, tiers.filter((t) => typeof t.monthlyEUR === 'number').length,
   'Every paid plan must appear on the pricing page, and nothing else')
@@ -111,12 +161,13 @@ assert.equal(pricing.querySelectorAll('[data-plan-id]').length, tiers.filter((t)
 const verkaeuflich = (row) =>
   typeof row.credits === 'number' && typeof row.eurCents === 'number' && row.retiredOn === undefined
 const packs = objects(source('apps/web/lib/billing/topup.ts')).filter(verkaeuflich)
-for (const span of pricing.querySelectorAll('[data-pack-id]')) {
-  const entry = packs.find((row) => row.id === span.dataset.packId)
-  assert.ok(entry, `Pack missing from topup.ts: ${span.dataset.packId}`)
-  assert.equal(Number(span.dataset.eurCents), entry.eurCents)
-  assert.equal(Number(span.dataset.credits), entry.credits)
-  assert.equal(span.textContent, `EUR ${entry.eurCents / 100} for ${entry.credits.toLocaleString('en-US')} credits`)
+for (const card of pricing.querySelectorAll('[data-pack-id]')) {
+  const entry = packs.find((row) => row.id === card.dataset.packId)
+  assert.ok(entry, `Pack missing from topup.ts: ${card.dataset.packId}`)
+  assert.equal(Number(card.dataset.eurCents), entry.eurCents, `${entry.id}: pack price drift`)
+  assert.equal(Number(card.dataset.credits), entry.credits, `${entry.id}: pack credit drift`)
+  assert.equal(sichtbar(card, '.price', 'the pack price'), `€${entry.eurCents / 100}`, `${entry.id}: pack price text drift`)
+  assert.equal(sichtbar(card, 'strong', 'the pack credits'), `${entry.credits.toLocaleString('en-US')} credits`, `${entry.id}: pack credit text drift`)
 }
 assert.equal(pricing.querySelectorAll('[data-pack-id]').length, packs.length, 'Every pack must appear, and nothing else')
 
@@ -137,11 +188,22 @@ for (const doc of [pricing, page, handbookCloud]) {
   }
 }
 // Die Anzahl der Flash-Modelle war als Wort getippt und von nichts bewacht.
-const flashInCatalog = catalog.filter((row) => row.usageClass === 'flash').length
-const flashCount = pricing.querySelector('[data-flash-model-count]')
-assert.ok(flashCount, 'docs/pricing/index.html: the Flash model count carries no anchor')
-assert.equal(Number(flashCount.dataset.flashModelCount), flashInCatalog, 'flash model count drift')
-assert.equal(flashCount.textContent, String(flashInCatalog), 'flash model count text drift')
+const flashRows = catalog.filter((row) => row.usageClass === 'flash')
+const flashInCatalog = flashRows.length
+// Nicht jedes Flash-Modell laeuft in jedem Plan ohne Credits: der Katalog
+// fuehrt je Modell `flashTiers`. Die Seite nennt die Zahl deshalb je Plan,
+// und jeder Anker haengt an der Zahl SEINES Plans. Ein Anker ohne Plan meint
+// alle Flash-Modelle des Katalogs.
+const flashForTier = (tier) => flashRows.filter((row) => Array.isArray(row.flashTiers) && row.flashTiers.includes(tier)).length
+const flashCounts = pricing.querySelectorAll('[data-flash-model-count]')
+assert.ok(flashCounts.length > 0, 'docs/pricing/index.html: the Flash model count carries no anchor')
+for (const flashCount of flashCounts) {
+  const tier = flashCount.dataset.flashTier
+  if (tier !== undefined) assert.ok(tiers.some((row) => row.id === tier), `flash model count names an unknown plan: ${tier}`)
+  const expected = tier === undefined ? flashInCatalog : flashForTier(tier)
+  assert.equal(Number(flashCount.dataset.flashModelCount), expected, `flash model count drift${tier ? ` (${tier})` : ''}`)
+  assert.equal(flashCount.textContent, String(expected), `flash model count text drift${tier ? ` (${tier})` : ''}`)
+}
 assert.ok(
   !/\b(Twelve|Eleven|Thirteen) models are in that class/i.test(pricingRaw),
   'docs/pricing/index.html: the Flash model count is typed out again instead of anchored',
@@ -156,13 +218,20 @@ const unfilteredFull = catalog.filter((row) => row.unfiltered === 'full').length
 // Eine Seite allein zu aendern war bisher moeglich, weil nur die Preisseite
 // geprueft wurde.
 const zahlenseiten = [['docs/pricing/index.html', pricing], ['docs/cloud/index.html', page]]
-// Entscheid David R6-5 vom 12.09.2026: die Marke traegt nur, was in BEIDEN
+// Entscheid des Inhabers R6-5 vom 12.09.2026: die Marke traegt nur, was in BEIDEN
 // Laeufen nach der strengen Regel `full` war. Das sind 24, hergeleitet in
 // e2e/6-nachlauf/marken-nachmessung.md, Abschnitt 13.2 und Zeile "Sicher
 // `full` nach strenger Regel in beiden Laeufen | 24". Die Zahl steht hier
 // ausgeschrieben, weil sie ein Entscheid ist und keine Ableitung; abgeleitet
 // wird, was sie darf.
-const MARKED_MODELS = 24
+// Entscheid vom 05.10.2026: fuenf der 24 haben im Drei-Runden-Test in
+// Runde zwei oder drei abgelehnt und tragen die Marke nicht mehr, seither 19
+// (Bericht lu-305/mail/MARKIERUNGEN-TEST-2026-10-05.md).
+// 08.11.2026: sechs der 19 hat der Anbieter abgekuendigt und unter der alten
+// Id ein anderes Modell geliefert. Sie stehen im Web unter RETIRED_MODELS und
+// sind aus Katalog und Messtabelle heraus, seither 13. An der Messung der
+// uebrigen hat sich nichts geaendert.
+const MARKED_MODELS = 13
 // Strenger lesen kann die Menge nur verkleinern: ein Modell, das die lockere
 // Regel schon durchfallen liess, kommt unter der strengen nicht dazu. Sinkt
 // `unfiltered: 'full'` im Katalog unter die Entscheidzahl, ist der Entscheid
@@ -187,7 +256,8 @@ for (const [name, doc] of zahlenseiten) {
 // und das steht in der Messtabelle: die Zeilen VOR der Zaehlzeile.
 const factsTable = readWeb('apps/web/lib/chat/model-facts.md').split('\nCounts:')[0]
 const measuredSize = factsTable.split('\n').filter((line) => /^\|\s*\S+\/\S+\s*\|\s*(full|partial|none|unknown)\s*\|/.test(line)).length
-assert.ok(measuredSize > 40 && measuredSize <= catalogSize, `measured set ${measuredSize} out of range`)
+// Seit dem 08.11.2026 (acht abgekuendigte Zeilen heraus) 36.
+assert.ok(measuredSize > 30 && measuredSize <= catalogSize, `measured set ${measuredSize} out of range`)
 for (const [name, doc] of zahlenseiten) {
   const claimedMeasured = doc.querySelector('[data-measured-count]')
   assert.ok(claimedMeasured, `${name}: measured count anchor missing`)
@@ -200,7 +270,7 @@ for (const [name, doc] of zahlenseiten) {
 // verstecken: jede Stelle in docs/, die ein Verhaeltnis von Chatmodellen
 // nennt, muss genau dieser Satz sein.
 const MARK_SENTENCE =
-  `${MARKED_MODELS} of the ${measuredSize} cloud chat models we measured answer in full without refusing, and only those carry the No refusals mark.`
+  `${MARKED_MODELS} of the ${measuredSize} cloud chat models we measured answer in full without refusing, and only those carry the No Filter mark.`
 // Die Beschreibung im Kopf ist Kundentext wie der Fliesstext, steht aber IN
 // einem Element. Ohne das Herausziehen faellt sie beim Entfernen der
 // Auszeichnung weg, und genau dort stand der Satz mit der alten Zahl.
@@ -221,7 +291,10 @@ assert.equal(
 const markSentences = docsFiles(docsRoot)
   .map((file) => (plainText(readFileSync(file, 'utf8')).match(markRatio) ?? []).length)
   .reduce((a, b) => a + b, 0)
-assert.ok(markSentences >= 3, `the mark sentence stands in ${markSentences} place(s) in docs/, expected at least 3`)
+// Zwei Stellen: die Cloud-Seite und die Preisseite. Die dritte war die
+// Kopfbeschreibung der Cloud-Seite; die traegt seit dem Umbau vom 22.09.2026
+// (7db6aee6) keine Zahl mehr.
+assert.ok(markSentences >= 2, `the mark sentence stands in ${markSentences} place(s) in docs/, expected at least 2`)
 console.log(`Denominator guard passed: ${MARKED_MODELS} of ${measuredSize} measured and ${catalogSize} in the catalogue, identical on ${zahlenseiten.length} sales pages, and the mark sentence is word-identical in ${markSentences} place(s).`)
 // ── Der Wolkenschalter im Desktop ────────────────────────────────────
 //
@@ -248,39 +321,109 @@ const opsIds = new Set(
     .map((line) => /id: '([^']+)'/.exec(line)?.[1])
     .filter(Boolean),
 )
-const countKind = (kind) => mediaRows.filter((row) => row.kind === kind && !opsIds.has(row.id)).length
 assert.equal(pitch.chatModels, catalogSize, 'pitch: chat model count drift')
 assert.equal(pitch.measuredChatModels, measuredSize, 'pitch: measured set drift')
 assert.equal(pitch.unfilteredChatModels, unfilteredFull, 'pitch: unfiltered count drift')
 assert.equal(pitch.flashModels, catalog.filter((row) => row.usageClass === 'flash').length, 'pitch: flash count drift')
 assert.equal(pitch.flashDailyTokens, daily, 'pitch: daily ceiling drift')
-assert.equal(pitch.imageModels, countKind('image'), 'pitch: image model count drift')
+// Seit 24.10.2026 (Davids Entscheid) zaehlen Bild- und Videozahl des Panels
+// die Generatoren des Create-Studios mit, wie die offenen Zahlen. Die Menge
+// steht als Gruppe "Image generation" bzw. "Video generation" in der
+// Komplettliste der Preisseite. Hier wird gegen den Katalog gegengeprueft:
+// jede Id dort steht im Web-Katalog und ist nicht ausgemustert, jede
+// klassische Erzeugerzeile und jedes offene Studio-Modell der Gattung steht
+// dort, und das Panel nennt genau ihre Anzahl.
+const retiredPath = 'apps/web/lib/render/retired-models.ts'
+const retiredIds = new Set(existsSync(resolve(webRoot, retiredPath))
+  ? [...readWeb(retiredPath).matchAll(/^\s+'([^']+)': \{ since:/gm)].map((m) => m[1])
+  : [])
+const studioAll = existsSync(resolve(webRoot, 'apps/web/lib/render/studio-models.json'))
+  ? JSON.parse(readWeb('apps/web/lib/render/studio-models.json'))
+  : {}
+const generatorGroup = (title) => {
+  const group = [...pricing.querySelectorAll('details.luc-model-group')]
+    .find((el) => el.querySelector('summary')?.firstChild?.textContent.trim() === title)
+  assert.ok(group, `docs/pricing/index.html: the group ${title} is gone`)
+  const ids = [...group.querySelectorAll('[data-all-model-id]')].map((li) => li.dataset.allModelId)
+  assert.equal(Number(group.querySelector('summary span')?.textContent), ids.length, `docs/pricing/index.html: ${title} counts its list wrong`)
+  return ids
+}
+for (const [kind, title, field] of [['image', 'Image generation', 'imageModels'], ['video', 'Video generation', 'videoModels']]) {
+  const ids = generatorGroup(title)
+  for (const id of ids) {
+    const row = mediaRows.find((r) => r.id === id) ?? studioAll[id]
+    assert.ok(row, `docs/pricing/index.html: ${id} in ${title} is not in the web catalogue`)
+    assert.equal(row.kind, kind, `docs/pricing/index.html: ${id} in ${title} is no ${kind} model`)
+    assert.ok(!retiredIds.has(id), `docs/pricing/index.html: ${id} in ${title} is retired`)
+    assert.ok(!opsIds.has(id) && studioAll[id]?.sourceModel === undefined, `docs/pricing/index.html: ${id} in ${title} is a tool or a twin`)
+  }
+  const classicGenerators = mediaRows.filter((r) => r.kind === kind && !opsIds.has(r.id) && !retiredIds.has(r.id)).map((r) => r.id)
+  const openStudio = Object.entries(studioAll).filter(([id, r]) => r.adult === true && r.kind === kind && r.sourceModel === undefined && !/-extend$/.test(id) && !retiredIds.has(id)).map(([id]) => id)
+  for (const id of [...classicGenerators, ...openStudio]) {
+    assert.ok(ids.includes(id), `docs/pricing/index.html: the generator ${id} is missing from ${title}`)
+  }
+  assert.equal(pitch[field], ids.length, `pitch: ${kind} model count drift`)
+}
 // Absichtliche Abweichung: der Desktop nennt die volle Katalogliste, die
 // Kaufseite auf lu-labs.ai nennt weniger. publicMediaModels filtert dort ueber
-// keptOffThisDomain (apps/web/app/(marketing)/pricing/pricing-detail.ts), weil
+// keptOffThisDomain (the web app), weil
 // die erwachsenenfaehigen Videoendpunkte auf der Zahlungsdomain nicht beworben
 // werden. Hier wird deshalb gegen die UNGEFILTERTE Liste geprueft, und das ist
 // kein Versehen. Ob der Desktop weiter die volle Zahl nennen soll, waehrend
-// die Kaufseite eine kleinere nennt, ist Entscheid David.
-assert.equal(pitch.videoModels, countKind('video'), 'pitch: video model count drift')
+// die Kaufseite eine kleinere nennt, ist Entscheid des Inhabers.
+// Die Videozahl haengt seit 24.10.2026 an der Gruppe "Video generation", siehe oben.
 console.log(`Cloud switch guard passed: ${pitch.unfilteredChatModels}/${pitch.chatModels} chat, ${pitch.flashModels} flash, ${pitch.imageModels} image and ${pitch.videoModels} video match the web catalogue.`)
 
 console.log(`Pricing guard passed: ${tiers.filter((t) => typeof t.monthlyEUR === 'number').length} plans, ${packs.length} packs, ${unfilteredFull}/${catalogSize} models and the ${daily.toLocaleString('en-US')} token ceiling match the web source.`)
 
 // ── Die sechs Erwachsenen-Videomodelle auf der LUC-Preisseite ────────
 //
-// Entscheid David (R3-8, 12.09.2026): die sechs Endpunkte ohne eingebaute
+// Entscheid des Inhabers (R3-8, 12.09.2026): die sechs Endpunkte ohne eingebaute
 // Inhaltsbeschraenkung stehen mit Namen und Credit-Preis je Clip auf der
 // LUC-Preisseite. lu-labs.ai bleibt unberuehrt; dort haelt keptOffThisDomain
 // sie weiter von der Zahlungsdomain fern, und genau deshalb darf diese Seite
 // nicht von der Kaufseite abgeschrieben werden. Namen und Preise kommen aus
 // dem Katalog: cloud-models.ts liefert Id und Etikett, credits.ts den
 // Dollarsatz und den Credit-Kurs. Eine Tokenmenge je Geld steht nirgends.
-const mediaText = mediaSource.getFullText()
-const adultVideo = mediaText.split('\n')
+// Seit dem Web-Stand 3.0.6 ist ein Name mit Markenwort im Web-Repo einmal
+// geschrieben, als Vorlage um einen Platzhalter: `Wan 2.2 ${STATEMENT_MARK_LABEL}`,
+// seit Oktober 2026 `Wan 2.2 ${STATEMENT_NAME_WORD}`.
+// Die Zahlungsdomain fuellt ihn mit ihrem neutralen Wort, die Desktop-App und
+// diese Seiten mit dem Wort aus lib/render/desktop-names.ts (der Server gibt
+// es der App als native_label). Gelesen wird der Katalog hier deshalb in der
+// Schreibweise der App; ein aelterer Web-Stand ohne die Datei hat feste Namen
+// und bleibt, wie er ist.
+const desktopNamesPath = 'apps/web/lib/render/desktop-names.ts'
+const desktopWord = existsSync(resolve(webRoot, desktopNamesPath))
+  ? /export const DESKTOP_MARK_LABEL = '([^']+)'/.exec(readWeb(desktopNamesPath))?.[1]
+  : undefined
+const inDesktopNames = (text) => text.replace(/`([^`$]*)\$\{(?:STATEMENT_MARK_LABEL|STATEMENT_NAME_WORD)\}([^`$]*)`/g, (whole, before, after) => {
+  assert.ok(desktopWord, `${desktopNamesPath}: the catalogue names a model through the placeholder, but the desktop word is not readable`)
+  return `'${before}${desktopWord}${after}'`
+})
+const mediaText = inDesktopNames(mediaSource.getFullText())
+const classicAdultVideo = mediaText.split('\n')
   .filter((line) => /kind: 'video'/.test(line) && /adult: true/.test(line) && !/ops: \[/.test(line))
   .map((line) => ({ id: /id: '([^']+)'/.exec(line)?.[1], label: /label: '([^']+)'/.exec(line)?.[1] }))
-assert.ok(adultVideo.length > 0 && adultVideo.every((row) => row.id && row.label), 'adult video rows unreadable')
+assert.ok(classicAdultVideo.length > 0 && classicAdultVideo.every((row) => row.id && row.label), 'adult video rows unreadable')
+// Die Zaehlregel, Entscheid vom 22.09.2026 (src/lib/cloud-pitch.ts fuehrt
+// sie aus): gezaehlt wird jeder Eintrag mit `adult: true`, den ein Kunde
+// selbst waehlt, auch der aus dem Create-Studio. Der Studio-Katalog liegt in
+// studio-models.json. Heraus fallen dort die Zwillinge mit `sourceModel`
+// (derselbe Endpunkt unter zweitem Namen, schon klassisch gezaehlt) und die
+// Werkzeuge, die einen vorhandenen Clip verlaengern.
+const studioPath = 'apps/web/lib/render/studio-models.json'
+const studioCatalogue = existsSync(resolve(webRoot, studioPath)) ? JSON.parse(readWeb(studioPath)) : {}
+// Seit Oktober 2026 hat das Wort im Namen eine eigene Konstante
+// (STATEMENT_NAME_WORD), getrennt vom Wort der Marke; aeltere Web-Staende
+// kennen nur STATEMENT_MARK_LABEL.
+const markText = readWeb('apps/web/lib/unfiltered-mark.ts')
+const webWord = (/export const STATEMENT_NAME_WORD = '([^']+)'/.exec(markText) ?? /export const STATEMENT_MARK_LABEL = '([^']+)'/.exec(markText))?.[1]
+const studioLabel = (label) => (webWord && desktopWord ? label.replace(new RegExp(`\\b${webWord}\\b`, 'g'), desktopWord) : label)
+const studioOpen = (kind) => Object.entries(studioCatalogue)
+  .filter(([id, row]) => row.adult === true && row.kind === kind && row.sourceModel === undefined && !/-extend$/.test(id))
+  .map(([id, row]) => ({ id, label: studioLabel(row.label), studio: row }))
+const adultVideo = [...classicAdultVideo, ...studioOpen('video')]
 const creditsText = readWeb('apps/web/lib/billing/credits.ts')
 const creditUsd = Number(/export const CREDIT_USD = ([0-9.e-]+)/.exec(creditsText)?.[1])
 assert.ok(creditUsd > 0, 'CREDIT_USD not found in credits.ts')
@@ -291,40 +434,63 @@ const clipPrice = (id) => {
   assert.ok(hit, `no base price for ${id} in MEDIA_MODEL_USD`)
   return { base: Number(hit[1]), long: hit[3] === undefined ? undefined : Number(hit[3]) }
 }
-const adultRows = [...pricing.querySelectorAll('[data-adult-video-row]')]
+const adultRows = [...pricing.querySelectorAll('[data-open-video-row]')]
 assert.equal(
   adultRows.length,
   adultVideo.length,
   `docs/pricing/index.html: the page lists ${adultRows.length} adult video models, the catalogue has ${adultVideo.length}`,
 )
-// Entscheid David vom 13.09.2026, er kehrt den Entscheid vom 12.09. um: die
-// Anzeigenamen dieser Endpunkte heissen wieder "Spicy". Der Desktop und die
-// LUC-Seiten gingen voran, das Web hat mit acaa0c9d nachgezogen. Verglichen
-// wird deshalb wieder die volle Beschriftung; das Markenwort wird zusaetzlich
-// gegen den Entscheid geprueft, nicht nur gegen das Web. Auf der Zahlungsdomain
-// taucht keiner dieser Endpunkte auf (Entscheid dbf663fe).
-const MARKENWORT = 'Spicy'
-adultVideo.forEach((model, index) => {
-  const row = adultRows[index]
-  const name = row.querySelector('[data-adult-model-id]')
+// Entscheid vom 08.10.2026: die Anzeigenamen dieser Endpunkte heissen
+// "Uncensored". Er loest den Entscheid vom 13.09.2026 ab. Verglichen wird die
+// volle Beschriftung; das Markenwort wird zusaetzlich gegen den Entscheid
+// geprueft, nicht nur gegen das Web. Auf der Zahlungsdomain taucht keiner
+// dieser Endpunkte auf (Entscheid dbf663fe).
+const MARKENWORT = 'Uncensored'
+// Zwei Studio-Modelle heissen ohne das Markenwort und sind trotzdem offen:
+// die Marke haengt am Katalogfeld, nie am Namen. Die Ausnahme ist namentlich,
+// wie in src/lib/__tests__/offene-modelle-in-den-texten.test.ts. Die beiden
+// MiniMax H3 Singularity tragen das Wort seit Web 1738bc86 (24.10.2026).
+const OFFEN_OHNE_MARKENWORT = new Set(['open-video', 'open-video-lora'])
+// Die Seite ordnet nach Preis, der Katalog nach Herkunft. Verglichen wird
+// deshalb je Id: dieselbe Menge, jede Zeile mit Namen und Preis ihrer Id, und
+// die Preise auf der Seite steigen nie.
+const adultById = new Map(adultVideo.map((model) => [model.id, model]))
+const pageIds = adultRows.map((row) => row.querySelector('[data-open-model-id]')?.dataset.openModelId)
+assert.deepEqual([...pageIds].sort(), [...adultById.keys()].sort(),
+  'docs/pricing/index.html: the adult video rows are not the open video models of the catalogue')
+let lastCredits = 0
+adultRows.forEach((row, index) => {
+  const name = row.querySelector('[data-open-model-id]')
   assert.ok(name, `docs/pricing/index.html: adult video row ${index + 1} carries no model anchor`)
-  assert.equal(name.dataset.adultModelId, model.id, `docs/pricing/index.html: adult video id drift in row ${index + 1}`)
+  const model = adultById.get(name.dataset.openModelId)
   assert.equal(name.textContent, model.label,
     `docs/pricing/index.html: adult video label drift for ${model.id}`)
-  assert.ok(name.textContent.includes(MARKENWORT),
-    `docs/pricing/index.html: ${model.id} does not carry the decided word ${MARKENWORT}`)
+  assert.equal(name.textContent.includes(MARKENWORT), !OFFEN_OHNE_MARKENWORT.has(model.id),
+    `docs/pricing/index.html: ${model.id} and the decided word ${MARKENWORT} do not go together as decided`)
   assert.ok(!/\bOpen\b/.test(name.textContent),
     `docs/pricing/index.html: ${model.id} still carries the withdrawn word Open`)
   const cell = row.querySelector('[data-clip-credits]')
   assert.ok(cell, `docs/pricing/index.html: no clip price anchor for ${model.id}`)
-  const price = clipPrice(model.id)
-  const credits = Math.ceil(price.base / creditUsd)
+  let credits
+  if (model.studio) {
+    // Ein Studio-Modell rechnet je Sekunde Ausgabe und je Aufloesung
+    // (studio-contract.ts, studioCredits). Die Seite nennt den Clip von fuenf
+    // Sekunden in der kleinsten Aufloesung, die das Modell anbietet.
+    assert.equal(model.studio.price?.mode, 'output', `${model.id}: the studio price is no longer per second of output`)
+    const perSecond = Math.min(...Object.values(model.studio.price.rates))
+    credits = Math.ceil((perSecond * 5) / creditUsd - 1e-9)
+  } else {
+    const price = clipPrice(model.id)
+    credits = Math.ceil(price.base / creditUsd)
+    // Der Satz daneben sagt "five seconds, no eight second option". Er haengt
+    // daran, dass die klassischen in der Preistabelle keinen 8-Sekunden-Satz
+    // haben; clipLengths blendet den Knopf genau daran aus (R3-8).
+    assert.equal(price.long, undefined, `docs/pricing/index.html: ${model.id} now has an 8s rate, the five-second sentence is stale`)
+  }
   assert.equal(Number(cell.dataset.clipCredits), credits, `docs/pricing/index.html: clip price drift for ${model.id}`)
   assert.equal(cell.textContent, credits.toLocaleString('en-US'), `docs/pricing/index.html: clip price text drift for ${model.id}`)
-  // Der Satz daneben sagt "five seconds, no eight second option". Er haengt
-  // daran, dass die sechs in der Preistabelle keinen 8-Sekunden-Satz haben;
-  // clipLengths blendet den Knopf genau daran aus (R3-8).
-  assert.equal(price.long, undefined, `docs/pricing/index.html: ${model.id} now has an 8s rate, the five-second sentence is stale`)
+  assert.ok(credits >= lastCredits, `docs/pricing/index.html: ${model.id} stands out of price order`)
+  lastCredits = credits
 })
 assert.ok(
   /renders a clip of five seconds/.test(pricingRaw),
@@ -358,10 +524,11 @@ console.log(`Backend guard passed: both language-model files name the same ${bac
 
 // ── Eine Installergroesse fuer den ganzen Baum ──────────────────────
 //
-// Gemessen wurde bei jedem Bau: der Installerbericht zu 3.0.0 nennt
-// Locally Uncensored_3.0.0_x64-setup.exe mit 14.075.397 Bytes. Im Repo haelt
-// das Handbuch diese Zahl, und es ist die einzige docs/-Datei, die fuer 3.0.0
-// geschrieben wurde. Jede Seite, die eine Installergroesse nennt, nennt diese.
+// Gemessen am Release-Artefakt, nicht geschaetzt: am 09.10.2026 hat
+// Locally.Uncensored_3.0.5_x64-setup.exe am GitHub-Release 18.763.351 Bytes
+// (zu 3.0.0 waren es 14.075.397). Im Repo haelt das Handbuch diese Zahl, und
+// jede Seite, die eine Installergroesse nennt, nennt dieselbe. Mit jedem
+// Release am neuen Artefakt nachmessen und zuerst das Handbuch aendern.
 const installGuide = readFileSync(new URL('../docs/guide/install/index.html', import.meta.url), 'utf8')
 const installerMB = Number(/about (\d+) MB on Windows/.exec(installGuide)?.[1])
 assert.ok(Number.isFinite(installerMB), 'docs/guide/install/index.html: the installer size is gone')
@@ -380,57 +547,55 @@ console.log(`Installer guard passed: every "MB installer" claim in docs/ says ${
 
 // ── Der Mac, einmal beantwortet ─────────────────────────────────────
 //
-// Das Handbuch ist die einzige docs/-Flaeche, die fuer 3.0.0 geschrieben
-// wurde, und es sagt: es gibt keinen Mac-Bau und hat nie einen gegeben. Keine
-// andere Seite darf daneben eine Roadmap versprechen. Der Anker ist der Satz
-// im Handbuch: verschwindet er, faellt auch diese Pruefung auf.
-const startseite = readFileSync(new URL('../docs/index.html', import.meta.url), 'utf8')
+// Seit 3.0.6 gibt es einen Mac-Bau: Apple Silicon, macOS 14 oder neuer, kein
+// Intel. Der Anker ist die Antwort im Handbuch. Jede andere Seite darf dem
+// nicht widersprechen und nicht mehr versprechen, als dort steht.
 const macAnswer = readFileSync(new URL('../docs/guide/faq-and-glossary/index.html', import.meta.url), 'utf8')
 assert.ok(
-  macAnswer.includes('There is no Mac build and there has never been one'),
+  macAnswer.includes('The Mac build is for Apple Silicon and needs macOS 14 or newer. Intel Macs are not supported. The .dmg is signed and notarized.'),
   'docs/guide/faq-and-glossary/index.html: the Mac answer drifted',
 )
-const macRoadmapClaims = []
+// Was eine Seite ueber den Mac nicht sagen darf. Ein Release-Beitrag darf
+// von seinem eigenen Release sagen, dass es keinen Mac-Bau hatte ("This
+// release has no macOS build", "3.0.1 was built for Windows and Linux only").
+const macDenials = /\bno (native )?(Mac|macOS)( desktop)? build\b|never (been|was) one|macOS is not supported|\b(is|are) Windows and Linux only\b|Locally Uncensored currently does not/i
+const macOverclaims = /roadmap[^.]*\bmac(os)?\b|\bmac(os)?\b[^.]*roadmap|notari[sz]ed|Intel Macs? (is|are) supported|universal (binary|build)/i
+const macWrong = []
 for (const path of docsFiles(docsRoot)) {
   const text = readFileSync(path, 'utf8')
   for (const satz of text.split(/(?<=[.!?])["\s]|\n/)) {
-    if (/roadmap/i.test(satz) && /\bmac(os)?\b/i.test(satz)) macRoadmapClaims.push(`${path.slice(docsRoot.length + 1)}: ${satz.trim().slice(0, 70)}`)
+    if (/This release has no macOS build/.test(satz)) continue
+    // The one sentence about signing: true for the .dmg of a release run
+    // (Developer ID, notarized, Gatekeeper accepts it), and only in these words.
+    if (satz.trim() === 'The .dmg is signed and notarized.') continue
+    // The security page says the same about the app: signed with the
+    // Developer ID and notarized by Apple (checked on the 3.0.8 .dmg with
+    // spctl and stapler on 4 November 2026). That claim is allowed; anything
+    // else the sentence says is still checked.
+    const rest = satz.replace(/\bsigned (with an Apple Developer ID )?and notari[sz]ed by Apple\b/gi, 'signed')
+    if (macDenials.test(rest) || macOverclaims.test(rest)) macWrong.push(`${path.slice(docsRoot.length + 1)}: ${satz.trim().slice(0, 70)}`)
   }
 }
 assert.equal(
-  macRoadmapClaims.length,
+  macWrong.length,
   0,
-  `The handbook says there has never been a Mac build, so no page may put one on a roadmap: ${macRoadmapClaims.length} claim(s) [${macRoadmapClaims.join(' | ')}]`,
+  `There is a Mac build for Apple Silicon since 3.0.6, and nothing beyond that is proven: ${macWrong.length} sentence(s) deny it or promise more [${macWrong.join(' | ')}]`,
 )
-// Die Startseite hat den Mac ausserdem als behobenen Fehler gefuehrt. Jede
-// Stelle, die den Mac nennt, muss im selben Satz sagen, dass es den Bau nicht
-// gibt, sonst liest die Startseite sich wie eine Plattformzusage. Ein Bau
-// gaebe es an einem .dmg zu erkennen, und das kommt im ganzen Baum nicht vor.
-const macMentions = []
-for (const satz of startseite.split(/(?<=[.!?])["\s]|\n/)) {
-  if (!/\bmac(os)?\b/i.test(satz.replace(/machine/gi, ''))) continue
-  // Die Frage selbst darf den Mac nennen, nur die Antwort ist gebunden.
-  if (/\?/.test(satz)) continue
-  if (/no Mac build|on a Mac, use the hosted studio/i.test(satz)) continue
-  macMentions.push(satz.trim().slice(0, 70))
-}
-assert.equal(
-  macMentions.length,
-  0,
-  `There is no Mac build, so docs/index.html may only say so: ${macMentions.length} other Mac mention(s) [${macMentions.join(' | ')}]`,
-)
-const dmgClaims = docsFiles(docsRoot).filter((path) => /\.dmg\b|\bdmg\b/i.test(readFileSync(path, 'utf8')))
-assert.equal(dmgClaims.length, 0, `No Mac build exists, so docs/ may not offer a .dmg: ${dmgClaims.length} page(s)`)
-// Die Fernzugriff-Anleitung endet im Fenster der App, und das laeuft auf
-// einem Mac nicht. Eine Installationszeile fuer macOS fuehrt den Leser bis
-// Schritt 2 und dann ins Leere.
+// Wer ein .dmg anbietet, sagt auf derselben Seite, fuer welche Macs.
+const dmgWithoutChip = docsFiles(docsRoot)
+  .filter((path) => /\.dmg\b/i.test(readFileSync(path, 'utf8')) && !/Apple Silicon/.test(readFileSync(path, 'utf8')))
+  .map((path) => path.slice(docsRoot.length + 1))
+assert.equal(dmgWithoutChip.length, 0, `A page that offers a .dmg names Apple Silicon: ${dmgWithoutChip.join(', ')}`)
+// Die Fernzugriff-Anleitung fuehrt bis ins Fenster der App. Auf einem Mac
+// ist dieser Weg nicht nachgeprueft, deshalb traegt sie dort keine
+// Installationszeile.
 const remoteAccess = readFileSync(new URL('../docs/remote-access/index.html', import.meta.url), 'utf8')
 const macSetupLines = remoteAccess.split('\n').filter((zeile) => /macos/i.test(zeile))
-assert.equal(macSetupLines.length, 0, `There is no Mac build, so docs/remote-access/index.html may not carry a macOS setup line: ${macSetupLines.length}`)
+assert.equal(macSetupLines.length, 0, `Remote access is not checked on a Mac, so docs/remote-access/index.html carries no macOS setup line: ${macSetupLines.length}`)
 for (const platform of ['Windows:', 'Linux:']) {
   assert.ok(remoteAccess.includes(platform), `docs/remote-access/index.html: the ${platform} line is gone`)
 }
-console.log('Mac guard passed: 0 roadmap promises, 0 stray Mac mentions on the home page, 0 macOS setup lines in the remote-access guide and 0 dmg offers in docs/, and the handbook answer is unchanged.')
+console.log('Mac guard passed: the handbook says Apple Silicon and macOS 14 or newer, 0 sentences in docs/ deny the Mac build or promise more than that, every page with a .dmg names Apple Silicon, and the remote-access guide carries 0 macOS setup lines.')
 
 // ── Die Startseite verneint nicht, was die Wolkenseite verkauft ─────
 //
@@ -471,10 +636,8 @@ for (const [name, text] of [['docs/pricing/index.html', pricingRaw], ['src/lib/r
     assert.ok(text.includes(line), `${name}: the content-policy line drifted, expected "${line}"`)
   }
 }
-// "and reported" ist eine Zusage ueber eine Meldung. Der einzige Meldeweg im
-// Web ist alertCsamBlock, und der steigt ohne gesetzte SAFETY_ALERT_WEBHOOK_URL
-// sofort aus. Solange der Weg an einer Umgebungsvariablen haengt, darf keine
-// Seite in docs/ eine Meldung versprechen.
+// "and reported" ist eine Zusage ueber eine Meldung. Solange der Meldeweg des
+// Servers wahlfrei ist, darf keine Seite in docs/ eine Meldung versprechen.
 const safetySink = readWeb('apps/web/lib/render/safety.ts')
 const alertIsOptional = /SAFETY_ALERT_WEBHOOK_URL/.test(safetySink) && /if \(!url\) return/.test(safetySink)
 const reportedClaims = alertIsOptional
@@ -580,12 +743,12 @@ console.log('Comparison guard passed: 0 free-path claims in the LU column of 9 c
 
 // ── Entscheid V3: die Freimenge haengt an einem laufenden Abo ───────
 //
-// Entscheid David vom 12.09.2026 zum Zusatzfund V3: ein einmaliger Pack von
+// Entscheid vom 12.09.2026 zum Zusatzfund V3: ein einmaliger Pack von
 // 5 Euro oeffnet die Freimenge NICHT auf Dauer. Die Bedingung heisst kuenftig
 // "laufendes bezahltes Abo", nicht "hat je einmal gezahlt".
 //
 // Seit dem Merge vom 12.09.2026 traegt der Code die Regel selbst:
-// `planPays` (apps/web/lib/pricing.ts) nimmt nur noch den Rang der aktiven
+// `planPays` (the web app) nimmt nur noch den Rang der aktiven
 // Lizenz und fragt die Kaufhistorie nicht mehr. Aus der Wortlautschranke ist
 // darum wieder eine Codeschranke geworden, und beide stehen nebeneinander:
 // die alte Formulierung ist in docs/ verboten, die neue an vier Flaechen
@@ -611,7 +774,9 @@ for (const [name, raw] of [
     /accounts without an active plan keep paying credits/i.test(raw),
     `${name}: the condition an account without an active plan really meets is missing`,
   )
-  assert.ok(/on an active paid plan/.test(raw), `${name}: the Flash allowance is not tied to an active plan`)
+  // "on an active paid plan" oder "needs an active paid plan": beide binden
+  // die Freimenge an den laufenden Plan, die Preisseite schreibt das zweite.
+  assert.ok(/(?:on|needs) an active paid plan/.test(raw), `${name}: the Flash allowance is not tied to an active plan`)
 }
 assert.ok(
   !/pack without a plan does not get it/i.test(handbookText),
@@ -657,7 +822,7 @@ console.log(`Flash-class guard passed: the handbook names the class and not the 
 
 // ── Die Marke der Flash-Klasse heisst wieder "No credits" ───────────
 //
-// Entscheid David vom 12.09.2026 zum Wortlaut, den der Verfasser der
+// Entscheid vom 12.09.2026 zum Wortlaut, den der Verfasser der
 // Logikkontrolle selbst gesetzt hatte: das Etikett heisst nicht "Included",
 // sondern wieder "No credits", weil "Included" nicht sagt, worin etwas
 // enthalten ist, und der Tooltip daneben ohnehin "No credits" sagte.
@@ -697,19 +862,29 @@ console.log(`Flash-mark guard passed: the handbook calls the mark "${FLASH_MARK_
 // <time>. Die Messtabelle datiert sich selbst, und das ist die Quelle fuer
 // beide Angaben. Eine Seite, die den 9. stempelt und im Text den 10. zitiert,
 // laesst den Leser raten, welcher Lauf gemeint ist.
-const factsDate = /Produced by the owner on (\d{4}-\d{2}-\d{2})/.exec(readWeb('apps/web/lib/chat/model-facts.md'))?.[1]
+const factsText = readWeb('apps/web/lib/chat/model-facts.md')
+const factsDate = /Produced by the owner on (\d{4}-\d{2}-\d{2})/.exec(factsText)?.[1]
 assert.ok(factsDate, 'model-facts.md carries no production date')
+// Seit dem 05.10.2026 gibt es einen zweiten Lauf: die Messtabelle fuehrt die
+// Herabstufungen jenes Tages. Die Seiten zitieren beide Laeufe, und der
+// Stempel oben traegt den JUENGSTEN, den die Tabelle nennt: von dem Tag ist
+// die Zahl, die auf der Seite steht.
+const laterRuns = [...factsText.matchAll(/(?:downgraded|re-measured|measured again)[^.]*? on (\d{4}-\d{2}-\d{2})/g)].map((m) => m[1])
+const stampDate = [factsDate, ...laterRuns].sort().at(-1)
 const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
-const [factsYear, factsMonth, factsDay] = factsDate.split('-')
-const factsSpelled = `${monthNames[Number(factsMonth) - 1]} ${Number(factsDay)}, ${factsYear}`
+const [stampYear, stampMonth, stampDay] = stampDate.split('-')
+const stampSpelled = `${monthNames[Number(stampMonth) - 1]} ${Number(stampDay)}, ${stampYear}`
 for (const [name, doc] of zahlenseiten) {
   const stamp = doc.querySelector('.post-meta time')
   assert.ok(stamp, `${name}: the post date is gone`)
-  assert.equal(stamp.getAttribute('datetime'), factsDate, `${name}: the stamped date is not the date of the measurement it cites`)
-  assert.equal(stamp.textContent, factsSpelled, `${name}: the spelled date does not match the stamp`)
-  assert.ok(new RegExp(`measured on ${factsDate}`, 'i').test(doc.body.textContent), `${name}: the cited measurement date drifted`)
+  assert.equal(stamp.getAttribute('datetime'), stampDate, `${name}: the stamped date is not the date of the newest measurement it cites`)
+  assert.equal(stamp.textContent, stampSpelled, `${name}: the spelled date does not match the stamp`)
+  for (const run of new Set([factsDate, stampDate])) {
+    assert.ok(new RegExp(`measured on ${factsDate}`, 'i').test(doc.body.textContent) && doc.body.textContent.includes(run),
+      `${name}: the cited measurement date ${run} drifted`)
+  }
 }
-console.log(`Measurement-date guard passed: both sales pages stamp and cite ${factsDate}, the date model-facts.md carries.`)
+console.log(`Measurement-date guard passed: both sales pages cite ${factsDate} and stamp ${stampDate}, the dates model-facts.md carries.`)
 
 // ── Die Elf verlinkt nicht auf die Seite, die Fuenf sagt ────────────
 //
@@ -744,8 +919,7 @@ const appVersion = JSON.parse(readFileSync(new URL('../package.json', import.met
 const versionClaims = [
   /"softwareVersion":"([^"]+)"/g,
   /&middot; (\d+\.\d+\.\d+)</g,
-  /New in (\d+\.\d+\.\d+)/g,
-  /full (\d+\.\d+\.\d+) changelog/g,
+  /\bv(\d+\.\d+\.\d+) &middot;/g,
   /Current [Vv]ersion: v?(\d+\.\d+\.\d+)/g,
   /^- Version: v?(\d+\.\d+\.\d+)/gm,
 ]
@@ -763,6 +937,59 @@ assert.equal(
   0,
   `package.json says ${appVersion}, so every current-version claim says it: ${versionDrift.length} stale claim(s) [${versionDrift.join(', ')}]`,
 )
+// Ein Link auf releases/latest/download/<Datei> traegt die Version im
+// Dateinamen. Er zeigt nur dann auf eine Datei, wenn der Name zur laufenden
+// Version gehoert, also wird jeder solche Link im ganzen Baum geprueft, auch
+// der im Handbuch und jeder, der spaeter dazukommt.
+const staleDownloads = []
+const downloadLink = /releases\/latest\/download\/([^"'\s<>)]+)/g
+for (const path of docsFiles(docsRoot)) {
+  for (const treffer of readFileSync(path, 'utf8').matchAll(downloadLink)) {
+    if (!treffer[1].includes(appVersion)) staleDownloads.push(`${path.slice(docsRoot.length + 1)}: ${treffer[1]}`)
+  }
+}
+assert.equal(
+  staleDownloads.length,
+  0,
+  `package.json says ${appVersion}, so every direct download link names a file of that version: ${staleDownloads.length} stale link(s) [${staleDownloads.join(', ')}]`,
+)
+// Die Startseite bietet Windows, Mac und Linux gleichwertig an: zwei
+// Download-Bloecke und der Knopf in der Navigation, je System ein Knopf mit
+// der passenden Datei, dazu die Wahl darunter. Welcher Satz sichtbar ist,
+// entscheidet html[data-os] (Inline-Skript, assets/home.css).
+const homeText = readFileSync(new URL('../docs/index.html', import.meta.url), 'utf8')
+const downloadFile = { win: /_x64-setup\.exe$/, mac: /_aarch64\.dmg$/, linux: /_amd64\.AppImage$/ }
+const downloadDrift = []
+for (const [was, anzahl] of [['class="dl-btn" data-dl-for', 2], ['class="lu-nav-dl" data-dl-for', 1], ['data-dl-os', 2]]) {
+  for (const [os, datei] of Object.entries(downloadFile)) {
+    // Extra data attributes may sit before href, e.g. data-mac-latest on the
+    // Mac buttons (lu.js moves that link to the newest release with a .dmg).
+    const links = [...homeText.matchAll(new RegExp(`<a ${was}="${os}"(?: data-[a-z-]+(?:="[^"]*")?)* href="([^"]+)"`, 'g'))].map((m) => m[1])
+    if (links.length !== anzahl) downloadDrift.push(`${was}="${os}": ${links.length} instead of ${anzahl}`)
+    for (const link of links) if (!datei.test(link)) downloadDrift.push(`${was}="${os}": ${link}`)
+  }
+}
+for (const paket of ['_amd64.deb', '.x86_64.rpm']) {
+  if (homeText.split(`${paket}" download>`).length - 1 !== 2) downloadDrift.push(`${paket} is not linked from both download blocks`)
+}
+assert.equal(downloadDrift.length, 0, `docs/index.html offers every system its own file: ${downloadDrift.length} difference(s) [${downloadDrift.join(', ')}]`)
+// Der Abschnitt "What's new" der Startseite nennt seit dem 09.10.2026 keine
+// Version mehr: er verweist auf releases/latest, den Changelog und den Blog.
+// Davor stand dort "New in 3.0.1" und blieb seit 3.0.2 stehen. Kommt wieder
+// ein Abschnitt "New in X" (lu-306-texte/website-changes.md, braucht
+// Ueberschrift und Bilder), gilt weiter: Ueberschrift, Sprungmarke und
+// Changelog-Verweis nennen dieselbe Version, die ist nicht neuer als die
+// laufende, und ein Rueckstand wird bei jedem Lauf laut genannt.
+const whatsNew = new Set([
+  ...[...homeText.matchAll(/New in (\d+\.\d+\.\d+)/g)].map((m) => m[1]),
+  ...[...homeText.matchAll(/full (\d+\.\d+\.\d+) changelog/g)].map((m) => m[1]),
+])
+assert.ok(whatsNew.size <= 1, `docs/index.html: the "New in" section names ${whatsNew.size} versions [${[...whatsNew].join(', ')}]`)
+const versionKey = (v) => v.split('.').map((n) => n.padStart(4, '0')).join('.')
+for (const v of whatsNew) {
+  assert.ok(versionKey(v) <= versionKey(appVersion), `docs/index.html: the "New in" section names ${v}, newer than package.json (${appVersion})`)
+  if (v !== appVersion) console.log(`OPEN, owner decision: the home page section "New in ${v}" is behind package.json (${appVersion}).`)
+}
 // Genau eine Angabe je Datei, damit sich nicht zwei Stellen widersprechen
 // koennen, wie llms-full.txt es zehn Zeilen auseinander tat.
 for (const datei of ['llms.txt', 'llms-full.txt']) {
@@ -770,7 +997,7 @@ for (const datei of ['llms.txt', 'llms-full.txt']) {
   const angaben = [...text.matchAll(/Current [Vv]ersion: v?\d+\.\d+\.\d+/g), ...text.matchAll(/^- Version: v?\d+\.\d+\.\d+/gm)]
   assert.equal(angaben.length, 1, `docs/${datei}: ${angaben.length} current-version statements, expected exactly one`)
 }
-console.log(`Version guard passed: every current-version claim on the home page and in the language-model files says ${appVersion}, the version package.json carries.`)
+console.log(`Version guard passed: every current-version claim on the home page and in the language-model files says ${appVersion}, the version package.json carries, every direct download link in docs/ names a file of that version, and the home page offers Windows, Mac and Linux each its own file in both download blocks and in the navigation.`)
 
 // ── Der Changelog-Abschnitt der laufenden Version ────────────────────
 //
@@ -786,12 +1013,28 @@ const changelog = readFileSync(new URL('../CHANGELOG.md', import.meta.url), 'utf
 const changelogSection = changelog.split(/^## \[/m).find((part) => part.startsWith(`${appVersion}]`))
 assert.ok(changelogSection, `CHANGELOG.md carries no section for ${appVersion}, the version package.json says`)
 const flat = changelogSection.replace(/\s+/g, ' ')
-// Der Satz zur Freimenge, Entscheid V3, zeichengleich.
-const FLASH_SENTENCE =
-  `${flashInCatalog} of the ${catalogSize} models in the catalogue cost no credits at all in chat on an active paid plan, up to ${daily.toLocaleString('en-US')} input and output tokens per day. API keys keep paying credits, and accounts without an active plan keep paying credits too.`
-assert.ok(flat.includes(FLASH_SENTENCE), `CHANGELOG.md ${appVersion}: the Flash sentence does not read as the decision writes it`)
-// Der Satz zur Marke, Entscheid R6-5, derselbe wie in docs/.
-assert.ok(flat.includes(MARK_SENTENCE), `CHANGELOG.md ${appVersion}: the mark sentence does not read as the decision writes it`)
+// Die Saetze zur Freimenge, zur Marke und zum Abo-Vorteil standen als Pflicht
+// im Abschnitt zu 3.0.0, mit dem das Verkaufs-Panel kam. Kein Abschnitt danach
+// hat sie wiederholt, und ein veroeffentlichter Abschnitt wird nicht
+// nachtraeglich umgeschrieben. Die Regel heisst deshalb seit dem 09.10.2026:
+// der Abschnitt der laufenden Version muss diese Saetze nicht tragen, aber WO
+// er eine solche Aussage macht, stimmt sie mit der Quelle.
+//
+// Die Freimenge: jede Nennung im Abschnitt haengt am laufenden Plan.
+for (const satz of flat.split(/(?<=\.)\s+/)) {
+  if (/cost no credits at all in chat|free Flash tokens/i.test(satz) && !/Subscribers get/.test(satz)) {
+    assert.ok(/on an active paid plan/.test(satz) && satz.includes(daily.toLocaleString('en-US')),
+      `CHANGELOG.md ${appVersion}: a Flash sentence does not carry the active plan and the daily ceiling [${satz.slice(0, 90)}]`)
+  }
+}
+// Die Marke: ein Verhaeltnis im Abschnitt traegt die Zahlen der Messtabelle.
+// Das Wort der Marke ist das des Tages, an dem der Abschnitt erschien: bis
+// 3.0.5 "No refusals", seit dem Entscheid vom 08.10.2026 "No Filter".
+const MARK_WORDS = ['No Filter', 'No refusals']
+for (const hit of flat.match(markRatio) ?? []) {
+  assert.ok(MARK_WORDS.some((word) => hit === MARK_SENTENCE.replace('No Filter', word)),
+    `CHANGELOG.md ${appVersion}: the mark sentence does not carry the measured numbers [${hit}]`)
+}
 // Keine veraltete Schwelle, keine alte Bedingung, kein altes Etikett.
 for (const [pattern, why] of [
   [/\b27 of the\b/, 'the old mark threshold'],
@@ -802,27 +1045,26 @@ for (const [pattern, why] of [
   assert.ok(!pattern.test(flat), `CHANGELOG.md ${appVersion}: ${why} is still in the section`)
 }
 // Keine Gedankenstriche in dem Abschnitt. Der Altbestand der aelteren
-// Abschnitte bleibt unberuehrt, Entscheid David zu R6-21.
+// Abschnitte bleibt unberuehrt, Entscheid zu R6-21.
 const changelogDashes = changelogSection.match(/[–—]|&[mn]dash;/g) ?? []
 assert.equal(changelogDashes.length, 0, `CHANGELOG.md ${appVersion}: ${changelogDashes.length} typographic dash(es) in the new section`)
 // Nirgends, wie viele Tokens Geld kauft. Dieselbe Regel wie auf den Seiten.
 const tokensForMoney = /(EUR|USD|euro|credits?)[^.]{0,60}\b(buys?|gets?|worth)\b[^.]{0,40}tokens/i
 assert.ok(!tokensForMoney.test(flat), `CHANGELOG.md ${appVersion}: a sentence says how many tokens money buys`)
-console.log(`Changelog guard passed: the ${appVersion} section carries the mark sentence and the Flash sentence word for word, with 0 typographic dashes and 0 token-per-money claims.`)
+console.log(`Changelog guard passed: what the ${appVersion} section says about the mark and the Flash allowance matches the source, with 0 typographic dashes and 0 token-per-money claims.`)
 
 // ── Die Zahlen des Verkaufs-Panels am Wolkenschalter ─────────────────
 //
-// David, 13.09.2026: der Schalter zeigt ohne Sitzung ein Verkaufs-Panel mit
+// 13.09.2026: der Schalter zeigt ohne Sitzung ein Verkaufs-Panel mit
 // drei gezaehlten Zeilen und einem Preis. Die Zahlen stehen in
 // `src/lib/cloud-pitch.ts`, weil sie gebraucht werden, BEVOR jemand angemeldet
 // ist. Hier werden sie gegen den Katalog im Web-Repo gezaehlt.
 //
-// Gezaehlt wird, was ERZEUGT: `adult: true` mit der passenden Gattung und ohne
-// `ops`. Ein Eintrag mit `ops` ist ein Werkzeug auf einem vorhandenen Ergebnis
-// (`wan-2.2-spicy-extend` verlaengert einen Clip) und kein Modell, das jemand
-// im Waehler auswaehlt. Ohne diesen Ausschluss waere die Videozahl um eins zu
-// gross.
-const mediaSrc = readWeb('apps/web/lib/render/cloud-models.ts')
+// Gezaehlt wird, was ERZEUGT und was jemand selbst waehlt: klassisch
+// `adult: true` mit der passenden Gattung und ohne `ops` (ein Eintrag mit
+// `ops` ist dort ein Werkzeug auf einem vorhandenen Ergebnis, etwa
+// `wan-2.2-spicy-extend`), dazu die Studio-Modelle aus `studioOpen`.
+const mediaSrc = inDesktopNames(readWeb('apps/web/lib/render/cloud-models.ts'))
 function openModels(kind) {
   let found = 0
   for (const match of mediaSrc.matchAll(/\{[^{}]*\}/g)) {
@@ -833,7 +1075,9 @@ function openModels(kind) {
     if (/\bops:\s*\[/.test(row)) continue
     found++
   }
-  return found
+  // Dazu die Studio-Modelle, nach derselben Regel wie auf der Preisseite
+  // (Entscheid 22.09.2026, hergeleitet in src/lib/cloud-pitch.ts).
+  return found + studioOpen(kind).length
 }
 
 const pitchSrc = readFileSync(new URL('../src/lib/cloud-pitch.ts', import.meta.url), 'utf8')
@@ -857,7 +1101,7 @@ assert.equal(pitchNumber('hostedMonthlyEUR'), hostedTier.monthlyEUR, 'the buy bu
 assert.equal(pitchNumber('hostedCredits'), tierCredits.hosted, 'the entry plan credit budget drifted')
 
 // Der Abo-Satz, aus den lebenden Tabellen des Web-Repos geteilt, genau wie
-// dort in `apps/web/lib/billing/subscriber-rate.ts`. Gegen das BESTE Paket,
+// dort in the web app. Gegen das BESTE Paket,
 // damit der Satz untertreibt statt zu schmeicheln.
 //
 // Der Desktop fuehrt KEINE Packgroessen: sie werden im Web-Repo gesetzt und
@@ -876,18 +1120,25 @@ const desktopFactorMatch = /SUBSCRIBER_CREDIT_FACTOR = ([\d.]+)/.exec(pitchSrc)
 assert.ok(desktopFactorMatch, 'SUBSCRIBER_CREDIT_FACTOR carries no number')
 assert.equal(Number(desktopFactorMatch[1]), factor,
   `the desktop carries ${desktopFactorMatch[1]}x, the live web tables divide out to ${factor}x`)
-const SUBSCRIBER_LINE =
-  `Subscribers get about ${factor.toFixed(1)}x more credits per euro and ${daily.toLocaleString('en-US')} free Flash tokens a day.`
-assert.ok(flat.includes(SUBSCRIBER_LINE),
-  `CHANGELOG.md ${appVersion}: the subscriber sentence does not read as the live tables compute it`)
-
-// Und die drei Zeilen des Panels, im Changelog mit `open` statt `uncensored`.
-for (const [claim, why] of [
-  [`${MARKED_MODELS} chat models with no refusals`, 'the mark count'],
-  [`${openVideo} open video models`, 'the open video count'],
-  [`${openImage} open image models`, 'the open image count'],
-]) {
-  assert.ok(flat.includes(claim), `CHANGELOG.md ${appVersion}: ${why} does not match the catalogue (${claim})`)
+// Der Abschnitt der laufenden Version: nennt er den Abo-Vorteil oder zaehlt er
+// offene Modelle, dann mit diesen Zahlen (als Ziffer oder als Zahlwort).
+for (const hit of flat.match(/Subscribers get about [\d.]+x more credits per euro/g) ?? []) {
+  assert.equal(hit, `Subscribers get about ${factor.toFixed(1)}x more credits per euro`,
+    `CHANGELOG.md ${appVersion}: the subscriber sentence does not read as the live tables compute it`)
+}
+const ZAHLWORT = { three: 3, six: 6, seven: 7, nine: 9, ten: 10, fourteen: 14, fifteen: 15, seventeen: 17 }
+const zahl = (text) => (/^\d+$/.test(text) ? Number(text) : ZAHLWORT[text.toLowerCase()])
+for (const [kind, expected] of [['video', openVideo], ['image', openImage]]) {
+  const claims = [
+    ...flat.matchAll(new RegExp(`\\b(\\d+|${Object.keys(ZAHLWORT).join('|')}) (?:open |uncensored )?${kind} models\\b[^.]*\\bcloud catalogue`, 'gi')),
+    ...flat.matchAll(new RegExp(`\\b(\\d+) (?:open|uncensored) ${kind} models\\b`, 'gi')),
+  ]
+  for (const claim of claims) {
+    assert.equal(zahl(claim[1]), expected, `CHANGELOG.md ${appVersion}: the open ${kind} count does not match the catalogue (${expected})`)
+  }
+}
+for (const hit of flat.match(/\b\d+ (?:No Filter|No refusals) chat models\b/g) ?? []) {
+  assert.equal(Number(/\d+/.exec(hit)[0]), MARKED_MODELS, `CHANGELOG.md ${appVersion}: the mark count does not match the catalogue (${MARKED_MODELS})`)
 }
 console.log(`Cloud panel guard passed: ${MARKED_MODELS} marked chat models, ${openVideo} open video and ${openImage} open image models counted in the catalogue, EUR ${hostedTier.monthlyEUR} on the button, and a subscriber advantage of ${factor}x divided out of the live pack and plan tables.`)
 
@@ -944,3 +1195,51 @@ for (const [id, webLabel] of webEditModels) {
     `desktop seed labels '${id}' as "${desktopEditModels.get(id)}", web calls it "${webLabel}"`)
 }
 console.log(`Seed sync guard passed: ${desktopEditModels.size} edit-capable model(s) in the desktop seed match the web catalogue by id and label.`)
+
+// ── Plan- und Pack-Karten ausserhalb der Preisseite ──────────────────
+//
+// Seit 15.11.2026 tragen die Verkaufsseiten (Bild, Video, Chat online und
+// die Tueren-Seiten) im ersten Bildschirm dieselben Plan- und Pack-Karten
+// wie /pricing/. Jede Karte, jede Flash-Zahl und jede Katalogzahl dort
+// haengt an derselben Quelle wie auf der Preisseite.
+let fremdeKarten = 0
+for (const path of docsFiles(docsRoot)) {
+  if (!path.endsWith('.html')) continue
+  const rel = path.slice(docsRoot.length + 1)
+  if (rel === 'pricing/index.html' || rel === 'cloud/index.html') continue
+  const raw = readFileSync(path, 'utf8')
+  if (!/data-plan-id=|data-pack-id=|data-flash-model-count=|data-catalog-count=/.test(raw)) continue
+  const doc = new JSDOM(raw).window.document
+  for (const card of doc.querySelectorAll('.luc-plan[data-plan-id]')) {
+    const tier = tiers.find((row) => row.id === card.dataset.planId)
+    assert.ok(tier, `${rel}: plan missing from pricing.ts: ${card.dataset.planId}`)
+    assert.equal(Number(card.dataset.monthlyEur), tier.monthlyEUR, `${rel}: ${tier.id} monthly price drift`)
+    assert.equal(sichtbar(card, '.luc-plan-price strong', 'the monthly price'), `€${tier.monthlyEUR}`, `${rel}: ${tier.id} monthly price text drift`)
+    assert.equal(Number(card.dataset.annualEur), tier.annualEUR, `${rel}: ${tier.id} annual price drift`)
+    assert.equal(sichtbar(card, '.luc-plan-annual', 'the annual price'), `€${tier.annualEUR}/year · billed annually`, `${rel}: ${tier.id} annual price text drift`)
+    assert.equal(Number(card.dataset.planCredits), tierCredits[card.dataset.planId], `${rel}: ${tier.id} credit drift`)
+    assert.equal(sichtbar(card, '.luc-plan-wallet strong', 'the monthly credits'),
+      `${tierCredits[card.dataset.planId].toLocaleString('en-US')} credits/month`, `${rel}: ${tier.id} credit text drift`)
+    fremdeKarten += 1
+  }
+  for (const card of doc.querySelectorAll('.luc-pack[data-pack-id]')) {
+    const entry = packs.find((row) => row.id === card.dataset.packId)
+    assert.ok(entry, `${rel}: pack missing from topup.ts: ${card.dataset.packId}`)
+    assert.equal(Number(card.dataset.eurCents), entry.eurCents, `${rel}: ${entry.id} pack price drift`)
+    assert.equal(Number(card.dataset.credits), entry.credits, `${rel}: ${entry.id} pack credit drift`)
+    assert.equal(sichtbar(card, '.price', 'the pack price'), `€${entry.eurCents / 100}`, `${rel}: ${entry.id} pack price text drift`)
+    assert.equal(sichtbar(card, 'strong', 'the pack credits'), `${entry.credits.toLocaleString('en-US')} credits`, `${rel}: ${entry.id} pack credit text drift`)
+    fremdeKarten += 1
+  }
+  for (const flashCount of doc.querySelectorAll('[data-flash-model-count]')) {
+    const tier = flashCount.dataset.flashTier
+    const expected = tier === undefined ? flashInCatalog : flashForTier(tier)
+    assert.equal(Number(flashCount.dataset.flashModelCount), expected, `${rel}: flash model count drift${tier ? ` (${tier})` : ''}`)
+    assert.equal(flashCount.textContent, String(expected), `${rel}: flash model count text drift${tier ? ` (${tier})` : ''}`)
+  }
+  for (const claimed of doc.querySelectorAll('[data-catalog-count]')) {
+    assert.equal(Number(claimed.dataset.catalogCount), catalogSize, `${rel}: catalog size drift`)
+    assert.equal(claimed.textContent, String(catalogSize), `${rel}: catalog size text drift`)
+  }
+}
+console.log(`Sales card guard passed: ${fremdeKarten} plan and pack cards outside /pricing/ match the web source.`)

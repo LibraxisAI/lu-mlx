@@ -1,7 +1,7 @@
 /**
  * What a bundle card should say: Installed, Installing, Retry or Get.
  *
- * GH #113, JonnFlauty on Windows 11 with an RTX 5070 Ti: a video download
+ * GH #113 on Windows 11 with an RTX 5070 Ti: a video download
  * failed midway, he retried, and afterwards the model "doesn't shown in the
  * installed section and for some reason every model in the list shown retry".
  *
@@ -98,4 +98,78 @@ export function bundleHasErrors(
     const row = downloads[n]
     return row !== undefined && row.status !== 'complete'
   })
+}
+
+/** One gibibyte, the unit the catalog's `sizeGB` and every size message use. */
+const GIB = 1_073_741_824
+
+/** The fields of a catalog file the sums below read. */
+export interface SizedFile {
+  downloadUrl?: string
+  filename?: string
+  subfolder?: string
+  sizeGB?: number
+  sizeBytes?: number
+}
+
+/** A catalog file's size in bytes: the exact count where the catalog has it,
+ *  the rounded `sizeGB` otherwise, 0 when it states neither. */
+export function catalogFileBytes(file: SizedFile): number {
+  if (file.sizeBytes != null) return file.sizeBytes
+  return file.sizeGB ? Math.round(file.sizeGB * GIB) : 0
+}
+
+/**
+ * How many bytes this bundle still has to fetch, and where they land.
+ *
+ * Pure, so the sum can be tested without a drive. Files already on disk are
+ * left out: re-checking space for a file that is not going to be fetched would
+ * refuse installs that fit perfectly well, and a card that announces them
+ * promises a download three times the real one (the box, 03.10.2026: "Get ·
+ * 16.1 GB" for one file of 8.7 GB). The sum is taken over the files' own byte
+ * counts, not over the bundle's hand-written total. `totalSizeGB` is the
+ * fallback when the per-file sizes are missing: a rough number is a far better
+ * plan than planning for nothing.
+ */
+export function bundleBytesToFetch(
+  bundle: { files: SizedFile[]; totalSizeGB: number },
+  installed: ReadonlySet<string>,
+): { bytes: number; subfolder?: string; files: number } {
+  const pending = bundle.files.filter(
+    f => f.downloadUrl && f.filename && f.subfolder && !installed.has(f.filename),
+  )
+  if (pending.length === 0) return { bytes: 0, files: 0 }
+  const known = pending.reduce((sum, f) => sum + catalogFileBytes(f), 0)
+  // Not one file states a size: fall back to the bundle total, minus nothing,
+  // because we cannot tell which part of it is already there.
+  const bytes = known > 0 ? known : (bundle.totalSizeGB || 0) * GIB
+  return { bytes: Math.round(bytes), subfolder: pending[0].subfolder, files: pending.length }
+}
+
+const NOTHING_ON_DISK: ReadonlySet<string> = new Set()
+
+/** What a bundle card announces: the whole bundle, and the part of it a click
+ *  on Get will really fetch. `present` counts the files that are there already. */
+export function bundleGetPlan(
+  bundle: { files: SizedFile[]; totalSizeGB: number },
+  onDisk: ReadonlySet<string>,
+): { totalBytes: number; totalFiles: number; fetchBytes: number; fetchFiles: number; present: number } {
+  const sized = bundleBytesToFetch(bundle, NOTHING_ON_DISK)
+  // A bundle whose files carry no download address has nothing to sum: the
+  // catalog's own total and file count are all there is to say.
+  const total = sized.files > 0
+    ? sized
+    : { bytes: Math.round((bundle.totalSizeGB || 0) * GIB), files: bundle.files.length }
+  const pending = bundleBytesToFetch(bundle, onDisk)
+  // Nothing left to fetch and the card still offers Get: the files are on disk
+  // and ComfyUI does not list them. The click re-checks all of them, so the
+  // card names the whole bundle.
+  const fetch = pending.files > 0 ? pending : total
+  return {
+    totalBytes: total.bytes,
+    totalFiles: total.files,
+    fetchBytes: fetch.bytes,
+    fetchFiles: fetch.files,
+    present: total.files - fetch.files,
+  }
 }

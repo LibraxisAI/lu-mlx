@@ -1,5 +1,5 @@
 /**
- * GitHub #115 (graysoncooper): browser voice recording always failed, the
+ * GitHub #115: browser voice recording always failed, the
  * /local-api middleware 415'd the transcribe POST because it enforced
  * application/json on every body, and the transcribe body IS the recorded
  * audio. On top, both voice fetches went out without the CSRF header every

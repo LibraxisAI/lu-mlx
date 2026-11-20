@@ -10,19 +10,25 @@ import { OllamaProvider } from './ollama-provider'
 import { OpenAIProvider } from './openai-provider'
 import { AnthropicProvider } from './anthropic-provider'
 import { LuCloudProvider } from './lu-cloud-provider'
+import { CompatSlotProvider } from './compat-slot-provider'
+import { isCompatProviderId } from './compat-id'
 import { useProviderStore } from '../../stores/providerStore'
 import { cachedClient } from './client-cache'
+import { openaiEntryOfModel } from './model-name'
 
 // Cache und Namens-Helfer sind aus diesem Modul herausgezogen (Audit W-T2,
 // Begründung steht in client-cache.ts bzw. model-name.ts). Re-Export, damit
 // bestehende Importpfade unverändert bleiben.
 export { clearProviderCache } from './client-cache'
-export { getProviderIdFromModel, prefixModelName, displayModelName } from './model-name'
+export { getProviderIdFromModel, prefixModelName, displayModelName, openaiEntryOfModel, modelBackendKey, isOpenAISlotModel } from './model-name'
 
 /**
  * Create a provider client from config.
  */
 function createClient(config: ProviderConfig): ProviderClient {
+  // An extra OpenAI-compatible slot (`openai-<slug>`): not one of the four
+  // fixed cases below, and deliberately decided before them.
+  if (isCompatProviderId(config.id)) return new CompatSlotProvider(config)
   switch (config.id) {
     case 'ollama':
       return new OllamaProvider(config)
@@ -52,9 +58,22 @@ export function getProvider(id: ProviderId): ProviderClient {
   // agent / Test-button request, while the model list (getEnabledProviders,
   // which deobfuscates) worked — Groq answered "Invalid API Key", OpenRouter's
   // public /models made Test claim "connected" and chat then 401ed
-  // (m9mx Discord 2026-07-26, four providers).
+  // (Discord 2026-07-26, four providers).
   const config = { ...stored, apiKey: state.getProviderApiKey(id) }
 
+  return cachedClient(config, () => createClient(config))
+}
+
+/**
+ * GitHub #173: the client of one additional OpenAI-compatible entry. Throws
+ * like `getProvider` when the entry does not exist (removed since the model
+ * was picked), so a stale pick fails loudly instead of landing on the slot.
+ */
+export function getOpenAIEntryProvider(entryId: string): ProviderClient {
+  const state = useProviderStore.getState()
+  const stored = state.openaiEntries.find((e) => e.entryId === entryId)
+  if (!stored) throw new Error(`Provider not configured: openai:${entryId}`)
+  const config = { ...stored, apiKey: state.getOpenAIEntryApiKey(entryId) }
   return cachedClient(config, () => createClient(config))
 }
 
@@ -65,6 +84,7 @@ export function getProvider(id: ProviderId): ProviderClient {
  *   "ollama::llama3.1:8b"  →  Ollama
  *   "openai::gpt-4o"       →  OpenAI
  *   "anthropic::claude-sonnet-4-20250514"  →  Anthropic
+ *   "openai:kobold-3f9a::mistral"  →  the additional entry kobold-3f9a (GitHub #173)
  *
  * If no prefix, defaults to Ollama (backward compatibility).
  */
@@ -72,6 +92,8 @@ export function getProviderForModel(modelName: string): { provider: ProviderClie
   const parts = modelName.split('::')
 
   if (parts.length === 2) {
+    const entryId = openaiEntryOfModel(modelName)
+    if (entryId) return { provider: getOpenAIEntryProvider(entryId), modelId: parts[1] }
     const providerId = parts[0] as ProviderId
     return { provider: getProvider(providerId), modelId: parts[1] }
   }

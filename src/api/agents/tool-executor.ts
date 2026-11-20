@@ -18,11 +18,14 @@
 
 import type { AgentToolCall } from '../../types/agent-mode'
 import { toolResultIsFailure } from '../../lib/tool-result-failure'
+import { markRunTaint } from '../../lib/run-taint'
+import { runForCall } from '../agent-context'
 import type { AgentRunContext } from '../agent-context'
 import { deriveSideEffectKey } from './side-effect-key'
 import { validateToolArgs, formatValidationErrors, type JsonSchema } from './args-validator'
 import { stableArgsHash } from './block-helpers'
 import type { ToolArgs } from '../mcp/types'
+import { isGenericCallName } from '../../lib/loose-tool-parse'
 
 export interface ExecutorToolDef {
   name: string
@@ -169,6 +172,7 @@ export interface ExecutorOptions {
  * Run a batch of tool calls. Returns ordered results matching the input order.
  *
  * Scheduling:
+ *  - A batch with a shell call (key 'exec') runs serially, in input order.
  *  - Calls with no sideEffectKey run in parallel.
  *  - Calls sharing a key run serially within their group.
  *  - Groups with different keys run in parallel with each other and with the
@@ -216,6 +220,15 @@ export async function executeParallel(
     opts.onComplete?.(res)
   }
 
+  // A shell command can read or change any file, so a batch that holds one
+  // runs in the order the model wrote it. Measured (C59 bench, 9B): in one
+  // turn `cp config.json config.json.bak` and an edit of config.json ran on
+  // two queues, the edit won, and the backup held the new port.
+  if (tagged.some((t) => t.key === 'exec')) {
+    for (let i = 0; i < tagged.length; i++) await runOne(i)
+    return results.map((r, i) => r ?? abortedResult(tagged[i]))
+  }
+
   const solo = soloIndices.map(runOne)
 
   const grouped = [...groups.values()].map(async (indices) => {
@@ -235,6 +248,10 @@ async function runSingle(
   opts: ExecutorOptions
 ): Promise<ExecutionResult> {
   const startedAt = Date.now()
+  // What the duration counts from. Moves to the end of the approval wait: the
+  // time a call sat on the user's card is not the tool's time, and a 20 ms
+  // file_write read "21.6s" next to its tick (Gegenprobe 01.10.2026).
+  let clockFrom = startedAt
   const argsHash = stableArgsHash(req.args ?? {})
 
   opts.onStart?.(req)
@@ -250,7 +267,7 @@ async function runSingle(
 
   const finalize = (partial: Omit<ExecutionResult, 'completedAt' | 'durationMs'>): ExecutionResult => {
     const completedAt = Date.now()
-    const durationMs = completedAt - startedAt
+    const durationMs = completedAt - clockFrom
     const result: ExecutionResult = { ...partial, completedAt, durationMs }
     runtime.recordAudit?.({
       kind: 'complete',
@@ -272,7 +289,9 @@ async function runSingle(
       id: req.id,
       toolName: req.toolName,
       status: 'failed',
-      error: `Unknown tool: ${req.toolName}`,
+      error: isGenericCallName(req.toolName)
+        ? `Unknown tool: ${req.toolName}. "${req.toolName}" is not a tool name. Send the call again with the tool's own name, for example file_list or file_read, in the name field.`
+        : `Unknown tool: ${req.toolName}`,
       dispatchedArgs: req.args,
       argsHash,
       sideEffectKey,
@@ -349,6 +368,7 @@ async function runSingle(
   // User approval. Unconditional: a runtime that does not want a prompt says
   // so with APPROVE_ALL, it does not get there by forgetting the field.
   const approved = await runtime.awaitApproval(req, tool)
+  clockFrom = Date.now()
   if (!approved) {
     return finalize({
       id: req.id,
@@ -390,9 +410,11 @@ async function runSingle(
   // Dispatch.
   try {
     const result = await raceAbort(
-      runtime.execute(req.toolName, dispatchedArgs, req.run, signal),
+      runtime.execute(req.toolName, dispatchedArgs, req.run && runForCall(req.run, req.id), signal),
       signal,
     )
+    // C60 S3: output from outside LU marks the run, before anything reads it.
+    markRunTaint(req.run, req.toolName)
     if (result === ABORTED) {
       // The tool got the signal and is expected to wind itself down; what this
       // guarantees is that the RUN stops waiting. Without it, Stop was still a
@@ -426,6 +448,8 @@ async function runSingle(
       schemaValidated,
     })
   } catch (err) {
+    // An error text can carry foreign content too (a page's body in a fetch error).
+    markRunTaint(req.run, req.toolName)
     const errorText = err instanceof Error ? err.message : String(err)
     const hint = runtime.explainError?.(req.toolName, errorText)
     return finalize({
@@ -493,6 +517,18 @@ function abortedResult(tagged: { req: ExecutionRequest; key?: string }): Executi
     cacheHit: false,
     schemaValidated: false,
   }
+}
+
+/**
+ * What the loop guard needs to know about one result: did it fail. A tool that
+ * reports its failure as text (`Error (1): …`, `Web search failed: …`) comes
+ * back `completed`, and the guard fed `status === 'failed'` never saw it: a
+ * command failing over and over read as progress and even cleared the failure
+ * streaks (bug hunt 01.10.2026), so the run went on to the 200-round budget.
+ */
+export function resultFailed(r: Pick<ExecutionResult, 'status' | 'result'>): boolean {
+  if (r.status === 'failed') return true
+  return (r.status === 'completed' || r.status === 'cached') && toolResultIsFailure(r.result)
 }
 
 /** Convenience: attach ExecutionResult fields back onto an AgentToolCall. */

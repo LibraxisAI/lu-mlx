@@ -65,9 +65,15 @@ export const IDLE_STARTING = 'ComfyUI is starting up.'
  * `isGenerating` waehrend eines Renders erzaehlt der Fortschritt die Lage, und
  *                der Render-Pfad heilt sie ohnehin. Der Leerlaufwaechter hat
  *                dort nichts zu suchen und wuerde nur doppelt reden.
+ * `luIsRestarting` LU itself is stopping and starting ComfyUI right now (a
+ *                node pack install from Create, a ComfyUI update, the CORS
+ *                fix). The setup that does it tells its own story, and "ComfyUI
+ *                stopped. It will restart with your next render." above
+ *                "Waiting for ComfyUI to come back" is two voices saying
+ *                opposite things (the box, 04.10.2026).
  */
-export function shouldWatchComfyIdle(local: boolean, isMac: boolean, isGenerating: boolean): boolean {
-  return local && !isMac && !isGenerating
+export function shouldWatchComfyIdle(local: boolean, isMac: boolean, isGenerating: boolean, luIsRestarting: boolean): boolean {
+  return local && !isMac && !isGenerating && !luIsRestarting
 }
 
 /**

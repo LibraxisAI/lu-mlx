@@ -1,12 +1,12 @@
 import { expect, test } from '@playwright/test'
+import { appModules, type AppWindow } from './support/ui'
 
 test('real memory writes confirm snapshots in order and reject a stale sync guard', async ({ page }) => {
   await page.goto('/e2e/memory-sensitive-proof.html')
+  await appModules(page, ['/src/stores/memoryStore.ts', '/src/lib/memory-persistence.ts'])
   const result = await page.evaluate(async () => {
-    const memoryPath = '/src/stores/memoryStore.ts'
-    const persistPath = '/src/lib/memory-persistence.ts'
-    const { useMemoryStore } = await import(memoryPath) as typeof import('../src/stores/memoryStore')
-    const { flushMemoryPersist } = await import(persistPath) as typeof import('../src/lib/memory-persistence')
+    const { useMemoryStore } = (window as unknown as AppWindow).__APP__['/src/stores/memoryStore.ts'] as typeof import('../src/stores/memoryStore')
+    const { flushMemoryPersist } = (window as unknown as AppWindow).__APP__['/src/lib/memory-persistence.ts'] as typeof import('../src/lib/memory-persistence')
     const id = useMemoryStore.getState().addMemory({ type: 'user', title: 'Queue proof', content: 'Original queue fact', description: '', tags: [], source: 'manual' })
     const first = flushMemoryPersist()
     useMemoryStore.getState().updateMemory(id, { content: 'Updated queue fact' })

@@ -7,7 +7,7 @@ import {
   clearActiveChatId,
 } from '../agent-context'
 
-// David 2026-06-12: in plain chat, file_write captures here (ChatGPT-style
+// 2026-06-12: in plain chat, file_write captures here (ChatGPT-style
 // in-chat artifact) instead of touching disk. These lock the capture/drain/reset
 // contract that useAgentChat + executeFileWrite rely on.
 describe('chat-tools artifact context', () => {

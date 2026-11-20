@@ -69,9 +69,9 @@ test('fresh onboarding boots the built-in engine and answers a chat', async ({ p
   await expect(page.getByRole('button', { name: /Skip for now/i })).toBeVisible({ timeout: 30_000 })
   const downloads = await page.evaluate(() => (window as unknown as { __E2E_DL_CALLS__: unknown[] }).__E2E_DL_CALLS__)
   expect(downloads).toContainEqual(expect.objectContaining({
-    filename: 'Qwen2.5-7B-Instruct-Q4_K_M.gguf',
-    expectedBytes: 4683074240,
-    expectedSha256: '65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423',
+    filename: 'Qwen2.5-7B-Instruct-abliterated-v2.Q4_K_M.gguf',
+    expectedBytes: 4683073920,
+    expectedSha256: 'da9272f09cd51d27aaadf37c1a2a3e079763682688aa1601d7406062b0caa5aa',
   }))
   await page.getByRole('button', { name: /Skip for now/i }).click()
 

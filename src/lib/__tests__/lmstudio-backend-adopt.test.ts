@@ -112,7 +112,7 @@ describe('ModelSelector LM Studio banner', () => {
 
   it('adopts before it refetches, or the refetch reads the old slot', () => {
     const adopt = src.indexOf("setProviderConfig('openai', update)")
-    const refetch = src.indexOf('onStarted()', adopt)
+    const refetch = src.indexOf('onStartedRef.current()', adopt)
     expect(adopt).toBeGreaterThan(-1)
     expect(refetch).toBeGreaterThan(adopt)
   })

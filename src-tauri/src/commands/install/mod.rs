@@ -26,11 +26,11 @@
 //!
 //! Der Re-Export steht bewusst als Glob. Ein `#[tauri::command]` erzeugt
 //! neben der Funktion ein gleichnamiges `__cmd__`-Makro, und `generate_handler!`
-//! in `main.rs` sucht beides unter DIESEM Pfad — ein Glob nimmt beide mit,
+//! in `lib.rs` sucht beides unter DIESEM Pfad — ein Glob nimmt beide mit,
 //! ohne dass jeder Befehl zweimal aufgezählt werden muss.
 //!
 //! Sie steht auf `pub(crate)` und nicht auf `pub`, weil genau das ihre Aufgabe
-//! ist: `main.rs`, `state.rs`, `tts.rs`, `whisper.rs` und `trainer.rs` sollen
+//! ist: `lib.rs`, `state.rs`, `tts.rs`, `whisper.rs` und `trainer.rs` sollen
 //! `crate::commands::install::…` weiter auflösen können. Nach außen war
 //! hier ohnehin nie etwas erreichbar — dies ist eine Binärkiste ohne
 //! lib-Ziel —, und ein `pub` hätte die gemessene öffentliche Fläche um eine
@@ -55,6 +55,7 @@ pub(crate) const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 
 mod children;
+mod base_python;
 pub(crate) mod pip;
 mod torch;
 mod venv;
@@ -62,6 +63,7 @@ mod download;
 pub(crate) mod git;
 mod comfy_job;
 mod comfy_install;
+mod comfy_pin;
 mod comfy_repair;
 mod env_check;
 mod ollama;
@@ -70,8 +72,11 @@ mod lmstudio_install;
 mod python;
 mod voice;
 mod custom_nodes;
+mod custom_node_packs;
+mod lu_node_packs;
 
 pub(crate) use self::{
+    base_python::*,
     children::*,
     torch::*,
     venv::*,
@@ -85,7 +90,12 @@ pub(crate) use self::{
     python::*,
     voice::*,
     custom_nodes::*,
+    custom_node_packs::*,
+    lu_node_packs::*,
 };
+// The voice loop setup verifies its downloads with the same digest code the
+// installer downloads use.
+pub(crate) use self::download::{digest_matches, sha256_file};
 
 #[cfg(test)]
 mod tests {
@@ -94,15 +104,19 @@ mod tests {
     /// die daneben liegen. Wer ein Modul hinzufügt, trägt es hier ein; der
     /// Test darunter merkt es, wenn nicht.
     const BAUM: &[(&str, &str)] = &[
+        ("base_python.rs", include_str!("base_python.rs")),
         ("children.rs", include_str!("children.rs")),
         ("comfy_install.rs", include_str!("comfy_install.rs")),
         ("comfy_job.rs", include_str!("comfy_job.rs")),
+        ("comfy_pin.rs", include_str!("comfy_pin.rs")),
         ("comfy_repair.rs", include_str!("comfy_repair.rs")),
+        ("custom_node_packs.rs", include_str!("custom_node_packs.rs")),
         ("custom_nodes.rs", include_str!("custom_nodes.rs")),
         ("download.rs", include_str!("download.rs")),
         ("env_check.rs", include_str!("env_check.rs")),
         ("git.rs", include_str!("git.rs")),
         ("lmstudio.rs", include_str!("lmstudio.rs")),
+        ("lu_node_packs.rs", include_str!("lu_node_packs.rs")),
         ("lmstudio_install.rs", include_str!("lmstudio_install.rs")),
         ("ollama.rs", include_str!("ollama.rs")),
         ("pip.rs", include_str!("pip.rs")),
@@ -172,7 +186,7 @@ mod tests {
             ("comfy_repair.rs", "\"Environment repaired.", "the repair"),
             (
                 "comfy_repair.rs",
-                "\"ComfyUI updated. Restart ComfyUI",
+                "update(\"complete\", &done);",
                 "the update",
             ),
         ] {
@@ -229,12 +243,20 @@ mod tests {
         let venv_at = install_body
             .find("comfy_venv_state")
             .expect("install_comfyui ignores an existing venv");
-        let pep_at = install_body
-            .find("is_pep668_protected")
-            .expect("the PEP 668 branch");
+        let build_at = install_body
+            .find("create_comfyui_venv(")
+            .expect("install_comfyui builds no venv of its own");
         assert!(
-            venv_at < pep_at,
-            "the venv is only considered after the PEP 668 branch"
+            venv_at < build_at,
+            "an existing venv is only considered after a new one is built"
+        );
+        // A user (Discord 2026-09-22, Windows 11, RX 9060 XT): without a
+        // venv the packages went into the system Python next to another
+        // install's ROCm DLLs, and the environment check died on "Bad Image".
+        // The venv is built on every platform, not only behind PEP 668.
+        assert!(
+            !install_body.contains("pep668_protected"),
+            "the venv is only built where PEP 668 forces it again"
         );
     }
 
@@ -274,7 +296,7 @@ mod tests {
 
     #[test]
     fn every_python_start_in_this_tree_goes_through_python_command() {
-        // anglefire (Ticket 003, 03.09.): sein Windows-Benutzer heisst
+        // A user (Ticket 003, 03.09.): sein Windows-Benutzer heisst
         // "1 בוגר", also stehen in jedem Pfad, den ein Kind druckt, Zeichen
         // ausserhalb der alten Codepage. Genau eine Startstelle hat sich davor
         // geschuetzt, run_import_probe_bounded, und ihre Begruendung gilt

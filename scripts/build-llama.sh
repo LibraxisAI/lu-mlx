@@ -52,8 +52,8 @@ set -euo pipefail
 # CI reuses a cached checkout keyed on hashFiles('scripts/build-llama.sh')
 # (release.yml, sidecar-windows.yml), so both values below are inside the cache
 # key by construction — bumping one cannot silently reuse the old source tree.
-LLAMA_TAG="${LLAMA_TAG:-b9949}"
-LLAMA_COMMIT="${LLAMA_COMMIT:-049326a00025d00b08cc188ed716b681e984a3f8}"
+LLAMA_TAG="${LLAMA_TAG:-b11960}"
+LLAMA_COMMIT="${LLAMA_COMMIT:-8642541b255bfb5dc39cd351a178be09013a55d6}"
 LLAMA_REPO="${LLAMA_REPO:-https://github.com/ggml-org/llama.cpp.git}"
 
 # --- Paths -----------------------------------------------------------------
@@ -123,9 +123,9 @@ cmake_flags_for() {
   local common="-DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF -DGGML_NATIVE=OFF -DCMAKE_BUILD_TYPE=Release"
   case "$triple" in
     aarch64-apple-darwin)
-      echo "$common -DBUILD_SHARED_LIBS=OFF -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON -DCMAKE_OSX_ARCHITECTURES=arm64" ;;
+      echo "$common -DBUILD_SHARED_LIBS=OFF -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-14.0}" ;;
     x86_64-apple-darwin)
-      echo "$common -DBUILD_SHARED_LIBS=OFF -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON -DCMAKE_OSX_ARCHITECTURES=x86_64" ;;
+      echo "$common -DBUILD_SHARED_LIBS=OFF -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-14.0}" ;;
     x86_64-pc-windows-msvc)
       # -MAP, not /MAP (review-waechter-windows.md BL1): verify-sidecar-isa.sh's
       # Windows ISA guard needs a linker map to turn a VEX/EVEX hit's address
@@ -164,7 +164,29 @@ cmake_flags_for() {
       # files verify-sidecar-isa.sh's Windows guard most needs a map for,
       # since they are where an unconditional-AVX regression would actually
       # ship. All three linker-flags variables now carry -MAP.
-      echo "$common -DBUILD_SHARED_LIBS=ON -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DGGML_VULKAN=ON -DCMAKE_SHARED_LINKER_FLAGS=-MAP -DCMAKE_EXE_LINKER_FLAGS=-MAP -DCMAKE_MODULE_LINKER_FLAGS=-MAP" ;;
+      #
+      # -jumptablerdata (FEHLER-E1 #1, FEHLER-P11 #9): MSVC puts switch jump
+      # tables in .text beside the code by default (learn.microsoft.com,
+      # /jumptablerdata), and their entries are image RVAs that the ISA guard
+      # decodes as instructions. With b11960 it read one in llama.dll as
+      # "vsqrtph zmm28" at $LN954 of unicode.obj; nothing in that object can
+      # emit EVEX (no /arch outside ggml-cpu). In .rdata the guard no longer
+      # reads tables as code, so a hit that stays is real code. Set through
+      # CMAKE_<LANG>_FLAGS_INIT, which CMake's Windows-MSVC module appends its
+      # defaults (/EHsc and the rest) to; CMAKE_<LANG>_FLAGS would replace
+      # them. Dash spelling for the same MSYS reason as -MAP. MSVC 17.7+, x64.
+      #
+      # LLAMA_MSVC_TOOLSET (3.1.2, 19.11.2026): the Visual Studio toolset cmake
+      # hands to MSBuild (-T). verify-sidecar-isa.sh only trusts linker
+      # versions whose CRT/STL code was reviewed (WINDOWS_REVIEWED_LINKER_
+      # VERSIONS), and the hosted windows-latest image moved its default to
+      # MSVC 14.52 overnight, which that guard rightly refuses. CI pins the
+      # reviewed 14.44 toolset the image still installs
+      # (Microsoft.VisualStudio.Component.VC.14.44.17.14.x86.x64). Empty
+      # (default, e.g. on the box) leaves the generator's own choice.
+      local toolset=""
+      [ -z "${LLAMA_MSVC_TOOLSET:-}" ] || toolset=" -T ${LLAMA_MSVC_TOOLSET}"
+      echo "$common -DBUILD_SHARED_LIBS=ON -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DGGML_VULKAN=ON -DCMAKE_SHARED_LINKER_FLAGS=-MAP -DCMAKE_EXE_LINKER_FLAGS=-MAP -DCMAKE_MODULE_LINKER_FLAGS=-MAP -DCMAKE_C_FLAGS_INIT=-jumptablerdata -DCMAKE_CXX_FLAGS_INIT=-jumptablerdata${toolset}" ;;
     x86_64-unknown-linux-gnu)
       # CMAKE_BUILD_RPATH_USE_ORIGIN=ON (BLOCKER B3): without it,
       # CMAKE_BUILD_WITH_INSTALL_RPATH's OFF default still makes CMake write
@@ -214,6 +236,56 @@ out_name_for() {
   esac
 }
 
+# llama-quantize ships on macOS only (static binary, nothing beside it).
+quantize_ships_for() {
+  case "$1" in
+    *-apple-darwin) return 0 ;;
+    *)              return 1 ;;
+  esac
+}
+
+quantize_out_name_for() {
+  echo "lu-llama-quantize-$1"
+}
+
+# llama-cvector-generator (3.0.9, P11 Neuron tweaker) ships on all three
+# desktop platforms: it turns two short lists of example prompts into a
+# control vector for the model the user has, which llama-server then applies
+# with --control-vector. FEHLER-P11 #7: everything a feature needs must come
+# with the install.
+#
+# It comes out of the server's own build on every platform, linked against
+# the same libraries: on the Mac the static Metal build, on Windows and Linux
+# the GGML_BACKEND_DL build with the CPU variants and Vulkan as loadable
+# modules (K1). Upstream defines the target only without GGML_BACKEND_DL,
+# because the generator calls ggml-cpu directly; LU's patch
+# 0002-cvector-generator-backend-dl.patch reaches those through the backend
+# registry instead and lifts that condition. So the tool computes on the
+# GPU (LU passes -ngl 99) and otherwise on the best CPU variant, like the
+# server. Until E1 (3.0.9) Windows and Linux had a static CPU-only baseline
+# build of their own (FEHLER-P11 #8), without SSE4.2/AVX/AVX2: LFM3 1.7B
+# took ~25 min on the box against 30 s on the Mac, a 9B model hours. That
+# build is gone; its ISA rules hold for the tool as for the server exe.
+cvector_ships_for() {
+  case "$1" in
+    *-apple-darwin | x86_64-pc-windows-msvc | x86_64-unknown-linux-gnu) return 0 ;;
+    *)                                                                 return 1 ;;
+  esac
+}
+
+# Where the tool is built, and where verify-sidecar-isa.sh finds its linker
+# map on Windows: the server's build directory.
+cvector_build_dir_for() {
+  echo "$CACHE_DIR/build-$1"
+}
+
+cvector_out_name_for() {
+  case "$1" in
+    *-windows-*) echo "lu-llama-cvector-generator-$1.exe" ;;
+    *)           echo "lu-llama-cvector-generator-$1" ;;
+  esac
+}
+
 # A 40-hex commit SHA and nothing else. A short SHA, a tag name or an empty
 # override would all silently reduce the pin back to "whatever origin says".
 assert_pinned_commit() {
@@ -250,7 +322,85 @@ ensure_src() {
   have="$(git -C "$SRC_DIR" rev-parse HEAD)"
   [ "$have" = "$LLAMA_COMMIT" ] \
     || die "llama.cpp checkout is at $have, expected $LLAMA_COMMIT ($LLAMA_TAG) — upstream tag moved, or the build cache is stale"
-  assert_clean_tree
+  # A clean tree gets LU's patches; a tree that carries them already (a
+  # cache from an earlier run) is checked to carry exactly them.
+  if [ -z "$(git -C "$SRC_DIR" status --porcelain --untracked-files=all 2>/dev/null)" ]; then
+    apply_lu_patches
+  fi
+  assert_patched_tree
+}
+
+# LU's own changes to the pinned source, reviewed in this repo
+# (scripts/llama-patches/*.patch). 0001-0004 only touch
+# tools/cvector-generator. 0005 (A40, 3.1.2) is upstream llama.cpp PR 31360
+# backported: two `constexpr` words out of ggml-metal/kernels/unary.metal, so
+# the embedded Metal library compiles on macOS 14 and 15 again. Drop it once
+# LLAMA_COMMIT is at or past c9daee1. Everything else in the server binary is
+# the pinned source unchanged.
+#
+# P11 FEHLER 10 (David's test build, 31.10.2026): the vector tool aborted
+# on Qwen3.5 (GGML_ASSERT diff_filtered.size() == n_layers - 1): b9949 keeps
+# the last block's full rows there, so one layer too many came through.
+LU_PATCH_DIR="${LLAMA_LU_PATCH_DIR:-$REPO_ROOT/scripts/llama-patches}"
+
+lu_patches() {
+  [ -d "$LU_PATCH_DIR" ] || return 0
+  find "$LU_PATCH_DIR" -maxdepth 1 -name '*.patch' | LC_ALL=C sort
+}
+
+apply_lu_patches() {
+  local p
+  for p in $(lu_patches); do
+    log "applying $(basename "$p")"
+    git -C "$SRC_DIR" apply "$p" || die "LU patch $(basename "$p") does not apply to $LLAMA_COMMIT ($LLAMA_TAG)"
+  done
+}
+
+# The files LU's patches touch, one per line.
+lu_patched_files() {
+  local p
+  for p in $(lu_patches); do
+    sed -n 's|^+++ b/||p' "$p"
+  done | LC_ALL=C sort -u
+}
+
+# What is compiled is the pinned commit plus LU's patches and nothing else:
+# every change in the tree is a file a patch touches, and each such file is
+# byte for byte the pinned file with the patches applied.
+assert_patched_tree() {
+  git -C "$SRC_DIR" update-index -q --really-refresh >/dev/null 2>&1 || true
+  local dirty allowed line path
+  dirty="$(git -C "$SRC_DIR" status --porcelain --untracked-files=all 2>/dev/null || true)"
+  allowed="$(lu_patched_files)"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    path="${line:3}"
+    case "$line" in
+      " M "*) printf '%s\n' "$allowed" | grep -qxF "$path" && continue ;;
+    esac
+    die "llama.cpp source tree does not match $LLAMA_COMMIT ($LLAMA_TAG) plus LU's patches — the checkout carries local changes, so the build would not be the pinned source:
+$dirty"
+  done <<EOF_DIRTY
+$dirty
+EOF_DIRTY
+  [ -n "$allowed" ] || return 0
+  local tmp p f
+  tmp="$(mktemp -d)"
+  while IFS= read -r f; do
+    mkdir -p "$tmp/$(dirname "$f")"
+    git -C "$SRC_DIR" show "HEAD:$f" > "$tmp/$f"
+  done <<EOF_FILES
+$allowed
+EOF_FILES
+  for p in $(lu_patches); do
+    (cd "$tmp" && git apply "$p") || { rm -rf "$tmp"; die "LU patch $(basename "$p") does not apply to $LLAMA_COMMIT ($LLAMA_TAG)"; }
+  done
+  while IFS= read -r f; do
+    cmp -s "$tmp/$f" "$SRC_DIR/$f" || { rm -rf "$tmp"; die "llama.cpp source tree does not match $LLAMA_COMMIT ($LLAMA_TAG) plus LU's patches: $f differs"; }
+  done <<EOF_FILES
+$allowed
+EOF_FILES
+  rm -rf "$tmp"
 }
 
 # rev-parse only proves where HEAD POINTS. cmake does not compile HEAD, it
@@ -408,6 +558,16 @@ build_triple() {
   # CI runners mid llama.cpp.o (SIGTERM 143). Cap to a finite, memory-safe count;
   # CI lowers it further via BUILD_JOBS=2.
   cmake --build "$build_dir" --config Release --target llama-server -j "${BUILD_JOBS:-4}"
+  # macOS also ships llama-quantize (lu-llama-quantize, tauri.macos.conf.json):
+  # the refusal-removal tool (A14) writes its copy in the original's quant
+  # type with it. Same static Metal build, same source tree. Windows and
+  # Linux do not ship it yet; the tool writes Q8_0 there instead.
+  if quantize_ships_for "$triple"; then
+    cmake --build "$build_dir" --config Release --target llama-quantize -j "${BUILD_JOBS:-4}"
+  fi
+  if cvector_ships_for "$triple"; then
+    cmake --build "$build_dir" --config Release --target llama-cvector-generator -j "${BUILD_JOBS:-4}"
+  fi
   # Locate the produced binary (path differs by generator/platform).
   local built
   built="$(find "$build_dir" -type f \( -name 'llama-server' -o -name 'llama-server.exe' \) -print -quit)"
@@ -416,6 +576,20 @@ build_triple() {
   local out="$BIN_DIR/$(out_name_for "$triple")"
   cp "$built" "$out"
   chmod +x "$out"
+  if quantize_ships_for "$triple"; then
+    local built_q
+    built_q="$(find "$build_dir" -type f -name 'llama-quantize' -print -quit)"
+    [ -n "$built_q" ] || die "llama-quantize binary not found under $build_dir"
+    cp "$built_q" "$BIN_DIR/$(quantize_out_name_for "$triple")"
+    chmod +x "$BIN_DIR/$(quantize_out_name_for "$triple")"
+  fi
+  if cvector_ships_for "$triple"; then
+    local built_cv
+    built_cv="$(find "$build_dir" -type f \( -name 'llama-cvector-generator' -o -name 'llama-cvector-generator.exe' \) -print -quit)"
+    [ -n "$built_cv" ] || die "llama-cvector-generator binary not found under $build_dir"
+    cp "$built_cv" "$BIN_DIR/$(cvector_out_name_for "$triple")"
+    chmod +x "$BIN_DIR/$(cvector_out_name_for "$triple")"
+  fi
 
   local out_digest; out_digest="$(sha256_of "$out")"
   local digest_lines="$out: ${out_digest:-unavailable}"
@@ -475,13 +649,24 @@ check_binary() {
     export LD_LIBRARY_PATH="$ld_path"
   fi
   ( cd "$run_dir" && "$bin" --version >/dev/null 2>&1 ) || die "$bin --version failed (run from $run_dir, LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-unset})"
-  local port=8129
+  # BUILD_LLAMA_CHECK_PORT only for build-llama-script.test.ts, which takes a
+  # free port so a server already on 8129 cannot answer for the one under test.
+  local port="${BUILD_LLAMA_CHECK_PORT:-8129}"
   log "boot check: $bin on 127.0.0.1:$port, cwd=$run_dir (no model, router mode, /health only)"
-  ( cd "$run_dir" && "$bin" --host 127.0.0.1 --port "$port" >/dev/null 2>&1 ) &
+  # exec: $! has to be the server itself. Without it $! was the subshell, the
+  # kill below ended only that, and a check that failed (E1: the 9 s Metal
+  # first start) left a llama-server holding port 8129 behind.
+  ( cd "$run_dir" && exec "$bin" --host 127.0.0.1 --port "$port" >/dev/null 2>&1 ) &
   local pid=$!
   trap 'kill "$pid" 2>/dev/null || true' EXIT
   local ok=""
-  for _ in $(seq 1 30); do
+  # E1 (b11960): the first start of a freshly built Metal binary compiles its
+  # embedded shader libraries (measured 9.3 s on an M5 Pro, "loaded 36
+  # libraries ... in 9.314 sec"; later starts come out of the system's shader
+  # cache in 0.3 s). The 9 s this loop used to allow is exactly that first
+  # start, so it waits up to 60 s now.
+  # BUILD_LLAMA_CHECK_TRIES only for build-llama-script.test.ts.
+  for _ in $(seq 1 "${BUILD_LLAMA_CHECK_TRIES:-200}"); do
     if curl -fsS "http://127.0.0.1:$port/health" >/dev/null 2>&1; then ok=1; break; fi
     sleep 0.3
   done

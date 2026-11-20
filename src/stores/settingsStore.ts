@@ -4,14 +4,20 @@ import { safeJSONStorage } from '../lib/storage-quota'
 import type { Settings, Persona } from '../types/settings'
 import { DEFAULT_SETTINGS, BUILT_IN_PERSONAS } from '../lib/constants'
 import { isEffortLevel } from '../lib/effort'
+import { normalizeThinkBudget } from '../lib/think-budget'
 import { isRecord, asString } from '../types/json-guards'
+import { RETIRED_SEND_WINDOW_DEFAULT } from '../lib/send-window'
+import { normalizeGpuRoles } from '../lib/gpu-roles'
+import { storedTemperature } from '../lib/sampling'
+// From the leaf, not api/backend: that one imports this store (madge).
+import { isMacOS } from '../lib/device-kind'
 
 // v5 (Feature EE v2.5.0): added settings.exclusiveVramMode. The migrate below
 // already merges { ...DEFAULT_SETTINGS, ...persisted.settings }, so bumping the
 // version is all that's needed — the new default fills in while every existing
 // user value is preserved. Rehydration is NOT broken: a persisted v4 blob runs
 // the same merge path that has handled every prior additive field.
-// v6 (uselu design port): added settings.personasEnabled (master persona
+// v6 (the web app design port): added settings.personasEnabled (master persona
 // switch, default true). Bumped so existing users get the default ON instead
 // of an undefined → falsy "personas off" surprise.
 // v7 (Small-Model Mode v2.5.0): added settings.smallModelMode (lean profile
@@ -25,7 +31,7 @@ import { isRecord, asString } from '../types/json-guards'
 // before the VRAM swap"). Same additive merge path — existing users simply
 // see the picker on their next generation.
 // v10 (2026-06-16): one-time RESET of those three picker preferences. Video had
-// kept a silently-saved model and only offered "Change model"; David wants the
+// kept a silently-saved model and only offered "Change model"; the owner wants the
 // full picker to come FIRST again on both image AND video. Clearing the saved
 // picks once on upgrade makes the picker the default until the user deliberately
 // saves a model again via the picker's Remember.
@@ -78,7 +84,7 @@ import { isRecord, asString } from '../types/json-guards'
 // build switch and quietly wipe a user preference each time.
 // v21 (2.6.6): added settings.codexCloudConfirmOptIn (default false) and
 // retired settings.codexCloudConfirmShell (default true). Bypass means bypass
-// on a cloud model too (David 2026-08-22, replacing G15a of 2026-08-07), so
+// on a cloud model too (2026-08-22, replacing G15a of 2026-08-07), so
 // the cloud shell confirm is an opt-in now.
 // The key had to be a NEW one, not a flipped default on the old one: this
 // store persists the whole settings object, so every existing profile has
@@ -95,7 +101,13 @@ import { isRecord, asString } from '../types/json-guards'
 // survives, and there is NO one-shot reset. The default equals what the client
 // already sent for thinking ON, so a profile that rides this migration sends
 // byte-for-byte the same request it sent before.
-const STORE_VERSION = 22
+// v23 (3.0.7): added settings.localEffortChosen (default false). Local
+// servers take a rung since issue 176, and without this key the global 'high'
+// would have gone to every local model nobody had touched. STRICTLY ADDITIVE
+// and IDEMPOTENT like v20 to v22: the merge below fills false in for a profile
+// that never had the key, and a true the user set survives every rerun of
+// this migration after an A/B switch, because the merge keeps stored values.
+const STORE_VERSION = 23
 
 interface SettingsState {
   settings: Settings
@@ -181,6 +193,58 @@ export const useSettingsStore = create<SettingsState>()(
         if (!isEffortLevel(String(state.settings.reasoningEffort))) {
           state.settings.reasoningEffort = DEFAULT_SETTINGS.reasoningEffort
         }
+        // Think budget (D12): a whole, non-negative count or 0. No version
+        // bump, a profile without the key simply reads as auto.
+        state.settings.thinkingBudget = normalizeThinkBudget(state.settings.thinkingBudget)
+        // Local effort pick (v23): only a real true counts. A blob that is
+        // already at this version but lacks the key reads as not picked.
+        state.settings.localEffortChosen = state.settings.localEffortChosen === true
+        // Emoticons to emojis (3.0.7): on unless switched off, so a profile
+        // without the key gets the default.
+        state.settings.emojiAutoReplace = state.settings.emojiAutoReplace !== false
+        // Auto-compact is on by default since 3.0.7. Before, a 0 threshold was
+        // the only way to be off and it was also what every profile that never
+        // touched the setting held, so the stored 0 means "never chosen" and a
+        // profile without the key is on. Only an explicit false stays off.
+        state.settings.autoCompact = state.settings.autoCompact !== false
+        // Chat Tools are always on since 3.0.7 (lib/chat-tools-reach.ts). The
+        // old switch is gone, and so is what a profile kept of it, an "off"
+        // included: nothing reads it, and it would only travel on unseen.
+        delete (state.settings as unknown as Record<string, unknown>).chatToolsEnabled
+        // A33 (3.0.8): the temperature sliders ran to 2.0 until 3.0.7, and a
+        // profile that sat above TEMPERATURE_MAX made every model write noise.
+        // Such a value goes back to the default, on the Settings page and in
+        // every persona that carried its own, rather than to the ceiling:
+        // 1.5 is still far from what the user had working before they moved it.
+        state.settings.temperature = storedTemperature(state.settings.temperature) ?? DEFAULT_SETTINGS.temperature
+        if (Array.isArray(state.personas)) {
+          state.personas = state.personas.map((p) => {
+            if (!p?.sampling || p.sampling.temperature === undefined) return p
+            if (storedTemperature(p.sampling.temperature) !== undefined) return p
+            const sampling = { ...p.sampling }
+            delete sampling.temperature
+            return { ...p, sampling }
+          })
+        }
+        // REA plugin (3.0.7): only a real true starts a process.
+        state.settings.reaPluginEnabled = state.settings.reaPluginEnabled === true
+        // Neurons plugin (3.1.0): only a real true lets sliders steer.
+        state.settings.neuronsPluginEnabled = state.settings.neuronsPluginEnabled === true
+        // 3.0.8 (A2): background generations are on unless switched off, and
+        // the card per service is read defensively, a hand-edited profile
+        // must not send a half pick to the backend.
+        state.settings.backgroundMediaTools = state.settings.backgroundMediaTools !== false
+        state.settings.gpuRoles = normalizeGpuRoles(state.settings.gpuRoles)
+        // 3.0.4 halved the paid-provider send window. A stored 64000 is the old
+        // default (no UI writes this key), so it follows the new one. Here and
+        // not in migrate for the same reason as above: no version bump, and a
+        // downgrade simply reads the smaller number.
+        if (state.settings.codexSendWindowTokens === RETIRED_SEND_WINDOW_DEFAULT) {
+          state.settings.codexSendWindowTokens = DEFAULT_SETTINGS.codexSendWindowTokens
+        }
+        // A plain web search key on a phone moves into the keychain in the
+        // boot of the phone (mobile/boot/index.tsx), not from here: the vault
+        // reaches api/backend, which imports this store.
       },
       migrate: (persisted: unknown, version: number): SettingsState => {
         // Foreign at read time, an older build wrote this. A read that throws
@@ -197,7 +261,7 @@ export const useSettingsStore = create<SettingsState>()(
           const storedSettings = isRecord(blob.settings) ? blob.settings : {}
           const mergedSettings = { ...DEFAULT_SETTINGS, ...storedSettings }
           // v10: clear the saved model-picker preferences ONCE so the picker is
-          // shown first again on image + video (David 2026-06-16). The additive
+          // shown first again on image + video (2026-06-16). The additive
           // merge above would otherwise preserve a previously-saved pick.
           if (version < 10) {
             mergedSettings.preferredImageModel = ''
@@ -206,10 +270,9 @@ export const useSettingsStore = create<SettingsState>()(
           }
           // v19: release the Mac cloud lock (see the version log above).
           if (version < 19) {
-            const isMac = typeof navigator !== 'undefined' &&
-              (/Mac|iPhone|iPad|iPod/.test(navigator.platform || '') ||
-               /Mac OS X|Macintosh/.test(navigator.userAgent || ''))
-            if (isMac) mergedSettings.appMode = 'local'
+            // A phone is not a Mac: the lock never existed there, and an old
+            // phone profile in Cloud mode must not be thrown back to local.
+            if (isMacOS()) mergedSettings.appMode = 'local'
           }
           return {
             ...blob,

@@ -84,7 +84,7 @@ impl WhisperServer {
 
         println!("[Whisper] Starting persistent server: {} {}", python_bin, script_path);
 
-        let mut cmd = crate::python::python_command(python_bin);
+        let mut cmd = dictation_command(python_bin);
         cmd.arg(script_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -267,7 +267,7 @@ fn whisper_status_blocking(state: &AppState) -> Result<serde_json::Value, String
     // Report INSTALLED-on-disk, not merely "server process running". The whisper
     // server lazy-starts on first mic use and is killed on quit, so keying the
     // badge on process.is_some() made STT read as uninstalled after every
-    // relaunch — the "reinstall every launch" report (#78, ElBiggus). If the
+    // relaunch — the "reinstall every launch" report (#78). If the
     // server is up it's obviously installed; otherwise probe the resolved
     // interpreter for the faster_whisper package.
     let available = running || whisper_package_installed(state);
@@ -278,16 +278,61 @@ fn whisper_status_blocking(state: &AppState) -> Result<serde_json::Value, String
     }))
 }
 
-/// Is `faster_whisper` importable in the interpreter install_whisper targets
-/// (resolve_lu_python: ComfyUI venv if present, else system Python)? Cheap
-/// best-effort probe so the badge reflects a prior install across relaunches
-/// without the server running. Any spawn/timeout failure → "not installed".
-fn whisper_package_installed(state: &AppState) -> bool {
-    let python = crate::commands::install::resolve_lu_python(state);
-    if python.is_empty() {
-        return false;
+/// Which of two interpreters dictation runs on: the one `install_whisper`
+/// installs into, when it has faster-whisper, else the private Python of the
+/// Voice feature, when that has it. Each side is `None` when there is no such
+/// interpreter, else its path and whether the package is there.
+///
+/// Voice brings its own faster-whisper. Without this a user who installed
+/// Voice read "Speech-to-text is not installed" at the microphone in the chat
+/// and was sent to install the same package a second time (found in the
+/// Windows run of 07.10.2026).
+pub fn choose_dictation_python(lu: Option<(String, bool)>, voice: Option<(String, bool)>) -> Option<String> {
+    [lu, voice].into_iter().flatten().find(|(_, has_package)| *has_package).map(|(python, _)| python)
+}
+
+/// The private Python of the Voice feature, when it is on disk.
+fn voice_python() -> Option<String> {
+    let python = crate::commands::voice_loop::layout::VoiceDirs::current().venv_python();
+    python.is_file().then(|| python.to_string_lossy().to_string())
+}
+
+/// A command on the interpreter dictation uses. The private Python of Voice
+/// is started the way the voice loop starts it, without another
+/// installation's paths; the system Python keeps its environment.
+fn dictation_command(python: &str) -> std::process::Command {
+    let mut cmd = crate::python::python_command(python);
+    if voice_python().as_deref() == Some(python) {
+        cmd.env_remove("PYTHONHOME").env_remove("PYTHONPATH");
     }
-    let mut cmd = crate::python::python_command(&python);
+    cmd
+}
+
+/// The interpreter dictation runs on, or `None` when faster-whisper is in
+/// neither place. The second probe only runs when the first one says no.
+fn dictation_python(state: &AppState) -> Option<String> {
+    let lu = crate::commands::install::resolve_lu_python(state);
+    if !lu.is_empty() && has_faster_whisper(&lu) {
+        return choose_dictation_python(Some((lu, true)), None);
+    }
+    let lu = (!lu.is_empty()).then_some((lu, false));
+    let voice = voice_python().map(|python| {
+        let has = has_faster_whisper(&python);
+        (python, has)
+    });
+    choose_dictation_python(lu, voice)
+}
+
+/// Is faster-whisper installed where dictation can use it? Cheap best-effort
+/// probe so the badge reflects a prior install across relaunches without the
+/// server running. Any spawn/timeout failure counts as "not installed".
+fn whisper_package_installed(state: &AppState) -> bool {
+    dictation_python(state).is_some()
+}
+
+/// Is `faster_whisper` importable in this interpreter?
+fn has_faster_whisper(python: &str) -> bool {
+    let mut cmd = dictation_command(python);
     // Probe INSTALLABILITY with importlib.find_spec, NOT a full
     // `import faster_whisper`. The real import pulls in ctranslate2 / onnxruntime
     // / av and takes ~8 s warm (longer with a cold OS file cache), which on the
@@ -462,15 +507,50 @@ fn ensure_whisper_running(app: &AppHandle, state: &State<'_, AppState>) -> Resul
     if !needs_start {
         return Ok(());
     }
-    // Resolve the SAME interpreter install_whisper used (ComfyUI venv if
-    // present, else system Python). Using state.python_bin here meant a
-    // venv install was invisible at runtime → STT silently dead after
-    // relaunch on boxes with a ComfyUI venv (#78).
-    let python_bin = crate::commands::install::resolve_lu_python(state.inner());
-    if python_bin.is_empty() {
-        return Err("Whisper unavailable: no Python runtime detected. Install Python in the setup step, then retry.".to_string());
-    }
+    // The SAME interpreter install_whisper used (ComfyUI venv if present, else
+    // system Python) when faster-whisper is there. Using state.python_bin here
+    // meant a venv install was invisible at runtime and STT was silently dead
+    // after a relaunch on boxes with a ComfyUI venv (#78). Without the package
+    // there, the Python of the Voice feature, which brings its own.
+    let python_bin = match dictation_python(state.inner()) {
+        Some(python) => python,
+        None if crate::commands::install::resolve_lu_python(state.inner()).is_empty() => {
+            return Err("Whisper unavailable: no Python runtime detected. Install Python in the setup step, then retry.".to_string());
+        }
+        None => {
+            return Err(
+                "Speech-to-text needs faster-whisper, which is not installed. \
+                 Install it from Settings → Voice, then try again."
+                    .to_string(),
+            );
+        }
+    };
     auto_start_whisper_sync(app, &python_bin, &state.whisper)
+}
+
+/// One warm-up at a time.
+static WARMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Start speech recognition ahead of the first take, in the background
+/// (voice over remote, #212). A phone asks for the voice status when a chat
+/// with the microphone opens; loading the model then takes up to a minute,
+/// and without this the first take waited for all of it. Does nothing while
+/// the server runs or another warm-up is under way; a failure is said again
+/// by the take itself.
+pub fn warm_up(app: AppHandle) {
+    use std::sync::atomic::Ordering;
+    let state = app.state::<AppState>();
+    let running = state.whisper.lock().map(|w| w.is_running()).unwrap_or(true);
+    if running || WARMING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        if let Err(why) = ensure_whisper_running(&app, &state) {
+            println!("[Whisper] warm-up for a phone did not start: {}", why);
+        }
+        WARMING.store(false, Ordering::SeqCst);
+    });
 }
 
 /// Tear the server down and bring it back up, once.
@@ -512,7 +592,7 @@ pub fn auto_start_whisper_sync(
     whisper: &Arc<Mutex<WhisperServer>>,
 ) -> Result<(), String> {
     // Check if faster-whisper is installed
-    let mut cmd = crate::python::python_command(python_bin);
+    let mut cmd = dictation_command(python_bin);
     cmd.args(["-c", "import faster_whisper"]);
     let check = cmd.output();
 
@@ -950,5 +1030,35 @@ mod healing_is_wired_in {
         );
         drop(dir);
         assert!(!path.exists(), "the take outlived its handle");
+    }
+}
+
+#[cfg(test)]
+mod dictation_python_tests {
+    use super::choose_dictation_python;
+
+    fn some(python: &str, has_package: bool) -> Option<(String, bool)> {
+        Some((python.to_string(), has_package))
+    }
+
+    #[test]
+    fn dictation_prefers_the_python_its_own_install_button_fills() {
+        assert_eq!(choose_dictation_python(some("lu", true), some("voice", true)).as_deref(), Some("lu"));
+        assert_eq!(choose_dictation_python(some("lu", true), None).as_deref(), Some("lu"));
+    }
+
+    #[test]
+    fn dictation_uses_the_whisper_of_an_installed_voice_feature() {
+        // Voice is installed, faster-whisper was never installed the old way.
+        assert_eq!(choose_dictation_python(some("lu", false), some("voice", true)).as_deref(), Some("voice"));
+        // No system Python at all, Voice brought its own.
+        assert_eq!(choose_dictation_python(None, some("voice", true)).as_deref(), Some("voice"));
+    }
+
+    #[test]
+    fn dictation_is_not_installed_when_neither_python_has_the_package() {
+        assert_eq!(choose_dictation_python(some("lu", false), some("voice", false)), None);
+        assert_eq!(choose_dictation_python(some("lu", false), None), None);
+        assert_eq!(choose_dictation_python(None, None), None);
     }
 }

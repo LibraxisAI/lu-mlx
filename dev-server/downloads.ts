@@ -87,7 +87,7 @@ export function registerDownloadRoutes(routes: RouteMount): void {
           return
         }
 
-        // Resume support (issue #51, adhney): if a partial file exists, ask
+        // Resume support (issue #51): if a partial file exists, ask
         // the server for the remaining bytes via Range instead of restarting
         // from 0. Packaged mode (download.rs) already does this; this is the
         // dev-server parity.
@@ -221,7 +221,7 @@ export function registerDownloadRoutes(routes: RouteMount): void {
 
         const id = filename
         // Don't restart an in-flight download from 0 if the UI re-fires the
-        // start (issue #51, adhney).
+        // start (issue #51).
         const active = activeDownloads.get(id)
         if (active && (active.status === 'downloading' || active.status === 'connecting')) {
           res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -294,7 +294,7 @@ export function registerDownloadRoutes(routes: RouteMount): void {
         // Rust backend); only then fall back to common defaults. Without
         // this the dev stub guessed wrong for non-default installs and
         // reported every curated model "incomplete" → "no image model"
-        // (konata-session 2026-06-07).
+        // (2026-06-07).
         let comfyPath = ''
         try {
           const cfgPath = join(process.env.APPDATA || join(home, 'AppData', 'Roaming'), APP_CONFIG_DIR, 'config.json')

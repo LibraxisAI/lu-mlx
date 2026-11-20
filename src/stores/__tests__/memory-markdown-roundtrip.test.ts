@@ -88,7 +88,7 @@ describe('memory markdown round trip: the whole data-loss class (Opus-Review Nac
     ['CRLF (Windows paste)', 'Erste Zeile.\r\nZweite Zeile.\r\nDritte Zeile.'],
     ['bare CR (old Mac paste)', 'Erste Zeile.\rZweite Zeile.'],
     ['tabs', 'Spalte1\tSpalte2\tSpalte3'],
-    ['backslashes', 'C:\\Users\\david\\Desktop\\LU'],
+    ['backslashes', 'C:\\Users\\alice\\Desktop\\LU'],
     ['an escape sequence already spelled out', 'the literal text is \\n not a newline'],
     ['a markdown list marker at line start', '- this looks like another item\n- and this too'],
     ['U+2028 LINE SEPARATOR', 'Erste Zeile.\u2028Zweite Zeile.'],
@@ -224,7 +224,7 @@ describe('memory markdown import: Rueckwaertskompatibilitaet (Opus-Review Nachbe
 
 // ── R5-23: a file exported by the other app must not lose tags/source/date ──
 //
-// apps/web/stores/memoryStore.ts writes a different separator pair: a colon
+// the web app writes a different separator pair: a colon
 // after the title and a middle dot before the date, instead of Desktop's
 // comma. Desktop's own export format is unchanged (that half of R5-23 is
 // Desktop's to set), but the import side now reads every separator either

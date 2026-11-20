@@ -76,7 +76,7 @@ describe('the button actually renders that hint', () => {
   })
 })
 
-describe('sttEnabled stays a dead flag until David decides', () => {
+describe('sttEnabled stays a dead flag until the owner decides', () => {
   const store = readFileSync(resolve(__dirname, '..', '..', '..', 'stores', 'voiceStore.ts'), 'utf8')
 
   it('nothing gates on it, so it is marked unused where it is declared', () => {

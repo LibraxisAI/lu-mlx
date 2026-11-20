@@ -24,7 +24,7 @@ describe('tooltipPosition', () => {
     expect(p.top).toBe(334)
   })
 
-  it('flips up when the bottom edge is too close, which is ElBiggus case', () => {
+  it('flips up when the bottom edge is too close, which is a user case', () => {
     const nearBottom = { ...ICON, top: 770 }
     const p = tooltipPosition(nearBottom, BUBBLE, VIEW, 'bottom')
     expect(p.side).toBe('top')

@@ -9,8 +9,8 @@ import { primeContentPolicyCache } from '../../hooks/useContentPolicy'
  * Bestaetigung ankuendigt, die nicht mehr kommt, verspricht genau das, was die
  * Oberflaeche nicht mehr tut. Gleicher Bau wie im Web.
  *
- * Wortlaut (R5-5, R5-6): identisch mit apps/web/components/settings/
- * ContentPolicySettings.tsx, ein Wortlaut ist besser als zwei. Das Wort
+ * Wortlaut (R5-5, R5-6): identisch mit the web app,
+ * ein Wortlaut ist besser als zwei. Das Wort
  * "filter" bleibt hier erlaubt, anders als in der oeffentlichen Doku unter
  * docs/: die Regel gegen das Wort gilt der Zahlungsdomain, nicht dieser App.
  */

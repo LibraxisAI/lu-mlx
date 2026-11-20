@@ -9,9 +9,11 @@
  */
 
 import { log } from "../lib/logger";
-import { prop } from "../types/json-guards";
 import { shouldLogRepeat } from "../lib/probe-backoff";
 import { defaultComfyPort } from "../lib/comfy-default-port";
+import { chatFirstReplyMs, FIRST_REPLY_TIMEOUT } from "../lib/chat-reply-timeout";
+import { useSettingsStore } from "../stores/settingsStore";
+import { isIOS, isAndroid, isMobile, isMacOS } from "../lib/device-kind";
 
 // Hosts whose proxy failure has already been logged, host -> timestamp. Keeps
 // a dead local backend from filling the console with the same line forever.
@@ -19,29 +21,20 @@ const proxyWarnSeen = new Map<string, number>();
 
 let _invoke: ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>) | null = null;
 
-/** True when running inside a Tauri WebView (.exe), false in browser dev mode */
-export function isTauri(): boolean {
-  // Tauri v2 renamed the global from `__TAURI__` to `__TAURI_INTERNALS__`.
-  // Check both so the app keeps working across both versions (and also
-  // during the migration window when people might be on either).
-  if (typeof window === "undefined") return false;
-  // Neither global is in the DOM lib, so reading them off `window` needed an
-  // assertion. `prop` answers `undefined` for a missing key without claiming
-  // anything about the container — the same probe, checked.
-  const w: unknown = window;
-  return !!(prop(w, "__TAURI_INTERNALS__") || prop(w, "__TAURI__"));
-}
+// Lives in its own store-free module so `main.tsx` can reach it without
+// hydrating `settingsStore` before the onboarding handover (api/in-tauri.ts).
+import { isTauri } from "./in-tauri";
+export { isTauri };
 
-/** True when the host OS is macOS. The frontend `dist` is shared across the
- *  mac and Windows Tauri builds, so platform-specific behaviour must be a
- *  RUNTIME check. WKWebView reports "MacIntel" / "Mac OS X" (even on Apple
- *  Silicon); WebView2 reports "Win32" / "Windows NT". */
-export function isMacOS(): boolean {
-  if (typeof navigator === "undefined") return false;
-  const plat = navigator.platform || "";
-  const ua = navigator.userAgent || "";
-  return /Mac|iPhone|iPad|iPod/.test(plat) || /Mac OS X|Macintosh/.test(ua);
-}
+
+// isIOS, isAndroid and isMobile live in lib/device-kind.ts, a leaf without
+// imports. They are re-exported here because this is where callers look for
+// platform questions. The leaf exists so lib/capabilities.ts can ask "is this
+// a phone?" without going through this module, which half the test suite
+// replaces with a hand-written mock that knows nothing about phones.
+// isMacOS too, since 3.0.8: settingsStore asks it, and this module imports
+// settingsStore, so the store takes it from the leaf.
+export { isIOS, isAndroid, isMobile, isMacOS };
 
 /** True on Linux (WebKitGTK reports "Linux ..." / "X11; Linux"). Same
  *  runtime-check rule as isMacOS — one dist serves all three OS builds. */
@@ -63,7 +56,7 @@ export function isWindows(): boolean {
 
 /**
  * Launch policy: the macOS desktop app is now a full local+cloud app like
- * Windows/Linux (David 2026-07-22 — local mode built + tested). The former
+ * Windows/Linux (2026-07-22 — local mode built + tested). The former
  * Cloud-ONLY mac wall is lifted; the Local/Cloud switch, local-hardware
  * surfaces and local onboarding are available again. Kept as a function
  * returning false so the (dead) call sites collapse to the normal switchable
@@ -282,7 +275,7 @@ export async function localFetch(
     // transport failure — surface it faithfully so callers' status checks
     // (think-field 400 downgrade, buildError) behave exactly like a direct
     // fetch does on Linux/macOS. Retrying via direct fetch would be pointless
-    // and on WebView2 149 just adds a second guaranteed failure (rikki
+    // and on WebView2 149 just adds a second guaranteed failure (a user
     // Discord 2026-06-10: Win11 "agent error" while Kubuntu was fine).
     const httpErr = parseProxyHttpError(proxyErrMsg)
     if (httpErr) {
@@ -322,7 +315,7 @@ export async function localFetch(
       log.warn('[localFetch] Proxy failed, trying direct fetch (repeats within the next minute are not logged)', { err: proxyErrMsg })
     }
 
-    // Fallback: try direct fetch (works when ComfyUI has --enable-cors-header *)
+    // Fallback: try direct fetch (works when ComfyUI names the app in --enable-cors-header)
     // Apply the same timeout to the fallback so a hanging probe doesn't sit
     // for minutes on this path either.
     let fallbackSignal = signal;
@@ -380,7 +373,7 @@ export async function localFetchStream(
     ? { ...(body ? { "Content-Type": "application/json" } : {}), ...(extraHeaders ?? {}) }
     : undefined;
 
-  // Transport order (rikki Discord 2026-06-10, Win11 "agent error"):
+  // Transport order (Discord 2026-06-10, Win11 "agent error"):
   // on WebView2 the direct fetch to a loopback backend is dead on arrival —
   // Ollama's CORS rejects the tauri.localhost origin and WebView2 149 made
   // the failure mode flaky instead of clean. Burning that attempt first cost
@@ -432,12 +425,12 @@ export async function localFetchStream(
 }
 
 /**
- * STREAMING proxy (David 2026-06-02): a Tauri Channel forwards each chunk from
+ * STREAMING proxy (2026-06-02): a Tauri Channel forwards each chunk from
  * Rust as it arrives, fed into a ReadableStream → real token-by-token streaming
  * (the old buffered path produced NOTHING until the body was complete — the
- * multi-minute "model loading" hang, dhasim Discord report).
+ * multi-minute "model loading" hang, Discord report).
  *
- * Status fidelity (rikki Discord 2026-06-10): the Rust command rejects with the
+ * Status fidelity (Discord 2026-06-10): the Rust command rejects with the
  * string "HTTP <status>: <body>" when the backend answered non-2xx — BEFORE any
  * chunk is sent. The old code turned that into a stream error with no
  * statusCode, so callers' `res.status === 400` handling (Ollama think-field
@@ -465,7 +458,7 @@ async function proxyStreamChunked(url: string, method: string, body?: string, he
   // Deterministic backend cancellation: tag this stream with an id and, when the
   // caller aborts (Stop button / chat delete/close), tell Rust to cancel the
   // upstream request so Ollama actually stops generating — not just the JS loop
-  // (David 2026-06-15: "Aktivität komplett stoppen"). Without this, the proxy
+  // (2026-06-15: "Aktivität komplett stoppen"). Without this, the proxy
   // kept pulling from Ollama to completion after an abort, burning GPU.
   const streamId =
     (globalThis.crypto as Crypto | undefined)?.randomUUID?.() ??
@@ -524,7 +517,11 @@ async function proxyStreamChunked(url: string, method: string, body?: string, he
       settleStreaming();
     };
 
-    void invoke("proxy_localhost_stream_chunked", { url, method, body: body || null, headers: headers ?? null, onChunk: channel, streamId })
+    // Issue 177: the wait for the first byte is the user's setting (0 = Off),
+    // read at the moment the request leaves so a change applies to the next
+    // message without a restart.
+    const firstChunkTimeoutMs = chatFirstReplyMs(useSettingsStore.getState().settings);
+    void invoke("proxy_localhost_stream_chunked", { url, method, body: body || null, headers: headers ?? null, onChunk: channel, streamId, firstChunkTimeoutMs })
       .then(() => {
         // Do NOT close here — the EOF marker does that (it may arrive after
         // this resolves; see above). Grace fallback so a lost EOF can't leak
@@ -539,9 +536,17 @@ async function proxyStreamChunked(url: string, method: string, body?: string, he
         // Backend answered non-2xx (rejected before any chunk): faithful status.
         // Transport failure (connection refused / validation): 503 so callers
         // treat it as retryable instead of a deterministic 4xx.
+        // Issue 177: the first reply window ran out. The wait the user set has
+        // already passed once, so this is no transport hiccup: a retry would
+        // only wait the same window again (Windows run d307-j: 30 s set, three
+        // attempts, the error after 98 s). Its own code keeps it out of both
+        // retry ladders (api/providers/retry.ts, lib/http-status.ts).
+        const firstReplyTimeout = !httpErr && /sent nothing for \d+ s/.test(msg);
         settle(httpErr
           ? new Response(httpErr.body, { status: httpErr.status })
-          : new Response(JSON.stringify({ error: msg }), { status: 503 }));
+          : firstReplyTimeout
+            ? new Response(JSON.stringify({ error: msg, code: FIRST_REPLY_TIMEOUT }), { status: 504 })
+            : new Response(JSON.stringify({ error: msg }), { status: 503 }));
         closed = true;
         detachAbort();
         // If a reader is already consuming (mid-stream death), surface there too.
@@ -602,12 +607,21 @@ export async function backendCall<T = unknown>(
     install_ollama: { path: "/local-api/install-ollama", method: "POST" },
     install_ollama_status: { path: "/local-api/install-ollama-status" },
     set_comfyui_port: { path: "/local-api/set-comfyui-port", method: "POST" },
+    set_comfyui_autostart: { path: "/local-api/set-comfyui-autostart", method: "POST" },
     set_comfyui_host: { path: "/local-api/set-comfyui-host", method: "POST" },
     set_ollama_host: { path: "/local-api/set-ollama-host", method: "POST" },
     get_ollama_host: { path: "/local-api/get-ollama-host" },
     get_models_root: { path: "/local-api/get-models-root" },
     set_models_root: { path: "/local-api/set-models-root", method: "POST" },
     install_custom_node: { path: "/local-api/install-custom-node", method: "POST" },
+    // C60-S5: desktop app only (dev-server/remote-stubs.ts answers 501).
+    install_lu_node_pack: { path: "/local-api/install-lu-node-pack", method: "POST" },
+    workflow_fetch: { path: "/local-api/workflow-fetch", method: "POST" },
+    // The node pack manager (Settings, ComfyUI node packs) lives in Rust; the
+    // plain vite server answers these three with the desktop-only 501.
+    list_custom_nodes: { path: "/local-api/list-custom-nodes" },
+    remove_custom_node: { path: "/local-api/remove-custom-node", method: "POST" },
+    custom_node_log: { path: "/local-api/custom-node-log" },
     whisper_status: { path: "/local-api/transcribe-status" },
     install_whisper: { path: "/local-api/install-whisper", method: "POST" },
     install_whisper_status: { path: "/local-api/install-whisper" },
@@ -623,13 +637,31 @@ export async function backendCall<T = unknown>(
     // gives. See dev-server/mlx-media-stubs.ts for the shared stub handler
     // and its reasoning; the systematic check behind this list is
     // dev-server/__tests__/mlx-media-endpoint-coverage.test.ts.
+    // Desktop only, answered by a 501 stub in dev-server/remote-stubs.ts:
+    // the Local API usage counter and the download speed limit live in Rust.
+    local_api_usage: { path: "/local-api/local-api-usage" },
+    set_download_limit: { path: "/local-api/set-download-limit", method: "POST" },
+    set_engine_idle_unload: { path: "/local-api/set-engine-idle-unload", method: "POST" },
     mlx_status: { path: "/local-api/mlx-status" },
     mlx_start: { path: "/local-api/mlx-start", method: "POST" },
     mlx_unload: { path: "/local-api/mlx-unload", method: "POST" },
     mlx_generate: { path: "/local-api/mlx-generate", method: "POST" },
+    mlx_generate_progress: { path: "/local-api/mlx-generate-progress" },
+    mlx_generate_cancel: { path: "/local-api/mlx-generate-cancel", method: "POST" },
+    mlx_enhance_prompt: { path: "/local-api/mlx-enhance-prompt", method: "POST" },
+    mlx_upscale: { path: "/local-api/mlx-upscale", method: "POST" },
+    mlx_loras: { path: "/local-api/mlx-loras" },
+    mlx_loras_open_folder: { path: "/local-api/mlx-loras-open-folder", method: "POST" },
+    mlx_lora_delete: { path: "/local-api/mlx-lora-delete", method: "POST" },
+    mlx_output_trash: { path: "/local-api/mlx-output-trash", method: "POST" },
+    // C27 (3.1.0): "Restore from the output folder" reads a local ComfyUI's
+    // output folder from the Rust process; desktop-only answer in the browser.
+    scan_comfy_output: { path: "/local-api/scan-comfy-output" },
+    mlx_cutout: { path: "/local-api/mlx-cutout", method: "POST" },
     mlx_image_models: { path: "/local-api/mlx-image-models" },
     mlx_image_install_model: { path: "/local-api/mlx-image-install-model", method: "POST" },
     mlx_image_install_status: { path: "/local-api/mlx-image-install-status" },
+    mlx_image_cancel_install: { path: "/local-api/mlx-image-cancel-install", method: "POST" },
     mlx_image_delete_model: { path: "/local-api/mlx-image-delete-model", method: "POST" },
     install_mlx_diffusion: { path: "/local-api/install-mlx-diffusion", method: "POST" },
     install_mlx_diffusion_status: { path: "/local-api/install-mlx-diffusion" },
@@ -641,12 +673,101 @@ export async function backendCall<T = unknown>(
     video_install_mlx_status: { path: "/local-api/video-install-mlx" },
     video_install_model: { path: "/local-api/video-install-model", method: "POST" },
     video_install_model_status: { path: "/local-api/video-install-model-status" },
+    video_cancel_model_install: { path: "/local-api/video-cancel-model-install", method: "POST" },
     video_delete_model: { path: "/local-api/video-delete-model", method: "POST" },
+    video_stage_start_image: { path: "/local-api/video-stage-start-image", method: "POST" },
+    video_stage_motion_video: { path: "/local-api/video-stage-motion-video", method: "POST" },
+    video_stage_voice: { path: "/local-api/video-stage-voice", method: "POST" },
     video_generate: { path: "/local-api/video-generate", method: "POST" },
     video_progress: { path: "/local-api/video-progress" },
     video_cancel: { path: "/local-api/video-cancel", method: "POST" },
+    // B18: the colour settle of a long clip runs in the desktop app only
+    // (commands/video_settle.rs); the dev server answers 501.
+    video_color_settle: { path: "/local-api/video-color-settle", method: "POST" },
     read_media_file: { path: "/local-api/read-media-file", method: "POST" },
+    // The music engine of the Mac (commands/music.rs), desktop only like the
+    // MLX commands above: the dev server answers 501 (mlx-media-stubs.ts).
+    mlx_music_status: { path: "/local-api/mlx-music-status" },
+    mlx_music_install: { path: "/local-api/mlx-music-install", method: "POST" },
+    mlx_music_install_status: { path: "/local-api/mlx-music-install-status" },
+    mlx_music_cancel_install: { path: "/local-api/mlx-music-cancel-install", method: "POST" },
+    mlx_music_delete: { path: "/local-api/mlx-music-delete", method: "POST" },
+    mlx_music_generate: { path: "/local-api/mlx-music-generate", method: "POST" },
+    mlx_music_progress: { path: "/local-api/mlx-music-progress" },
+    mlx_music_cancel: { path: "/local-api/mlx-music-cancel", method: "POST" },
+    // The 3D engine of the Mac (commands/mesh3d.rs, 3.1.0), desktop only:
+    // the dev server answers 501 (mlx-media-stubs.ts).
+    mlx_mesh3d_status: { path: "/local-api/mlx-mesh3d-status" },
+    mlx_mesh3d_install: { path: "/local-api/mlx-mesh3d-install", method: "POST" },
+    mlx_mesh3d_install_status: { path: "/local-api/mlx-mesh3d-install-status" },
+    mlx_mesh3d_cancel_install: { path: "/local-api/mlx-mesh3d-cancel-install", method: "POST" },
+    mlx_mesh3d_delete: { path: "/local-api/mlx-mesh3d-delete", method: "POST" },
+    mlx_mesh3d_generate: { path: "/local-api/mlx-mesh3d-generate", method: "POST" },
+    mlx_mesh3d_progress: { path: "/local-api/mlx-mesh3d-progress" },
+    mlx_mesh3d_cancel: { path: "/local-api/mlx-mesh3d-cancel", method: "POST" },
+    mlx_train_status: { path: "/local-api/mlx-train-status" },
+    mlx_train_stage: { path: "/local-api/mlx-train-stage", method: "POST" },
+    mlx_train_clear: { path: "/local-api/mlx-train-clear", method: "POST" },
+    mlx_train_start: { path: "/local-api/mlx-train-start", method: "POST" },
+    mlx_train_progress: { path: "/local-api/mlx-train-progress" },
+    mlx_train_cancel: { path: "/local-api/mlx-train-cancel", method: "POST" },
+    // Astra voice loop: installed and run by the Rust process only. Mapped so
+    // the browser dev surface gets the desktop-only answer from
+    // dev-server/voice-loop-stubs.ts instead of "Unknown backend command".
+    voice_loop_requirements: { path: "/local-api/voice-loop-requirements" },
+    voice_loop_install: { path: "/local-api/voice-loop-install", method: "POST" },
+    voice_loop_install_status: { path: "/local-api/voice-loop-install-status" },
+    voice_loop_install_cancel: { path: "/local-api/voice-loop-install-cancel", method: "POST" },
+    voice_loop_status: { path: "/local-api/voice-loop-status" },
+    engine_key_for: { path: "/local-api/engine-key-for", method: "POST" },
+    voice_loop_start: { path: "/local-api/voice-loop-start", method: "POST" },
+    voice_loop_set_voice: { path: "/local-api/voice-loop-set-voice", method: "POST" },
+    voice_loop_stop: { path: "/local-api/voice-loop-stop", method: "POST" },
+    // The "Whole computer" grant of a voice session lives in the Rust file
+    // jail. The dev server has none to give and answers 501.
+    fs_whole_computer: { path: "/local-api/fs-whole-computer", method: "POST" },
+    fs_whole_computer_forget: { path: "/local-api/fs-whole-computer-forget", method: "POST" },
+    voice_loop_uninstall: { path: "/local-api/voice-loop-uninstall", method: "POST" },
+    // REA, the reverse engineering plugin of the agents: the pinned package
+    // is fetched and checked by the Rust process only (commands/plugin_rea.rs).
+    plugin_rea_status: { path: "/local-api/plugin-rea-status" },
+    mcp_child_path: { path: "/local-api/mcp-child-path" },
+    plugin_rea_fetch: { path: "/local-api/plugin-rea-fetch", method: "POST" },
+    plugin_rea_guard: { path: "/local-api/plugin-rea-guard", method: "POST" },
+    // Astra computer use: mouse, keyboard and screen belong to the Rust
+    // process. Mapped for the same reason as the voice loop above; the
+    // answers come from dev-server/computer-stubs.ts.
+    computer_status: { path: "/local-api/computer-status" },
+    computer_permissions: { path: "/local-api/computer-permissions" },
+    computer_permission_request: { path: "/local-api/computer-permission-request", method: "POST" },
+    computer_permission_reset: { path: "/local-api/computer-permission-reset", method: "POST" },
+    computer_chat_ask: { path: "/local-api/computer-chat-ask", method: "POST" },
+    computer_chat_answer: { path: "/local-api/computer-chat-answer", method: "POST" },
+    computer_session_begin: { path: "/local-api/computer-session-begin", method: "POST" },
+    computer_session_allow_app: { path: "/local-api/computer-session-allow-app", method: "POST" },
+    computer_session_revoke_app: { path: "/local-api/computer-session-revoke-app", method: "POST" },
+    computer_session_set_autonomous: { path: "/local-api/computer-session-set-autonomous", method: "POST" },
+    computer_session_end: { path: "/local-api/computer-session-end", method: "POST" },
+    computer_stop: { path: "/local-api/computer-stop", method: "POST" },
+    computer_request_attention: { path: "/local-api/computer-request-attention", method: "POST" },
+    computer_guard: { path: "/local-api/computer-guard" },
+    computer_windows: { path: "/local-api/computer-windows" },
+    computer_screen: { path: "/local-api/computer-screen", method: "POST" },
+    computer_action: { path: "/local-api/computer-action", method: "POST" },
+    computer_tree: { path: "/local-api/computer-tree", method: "POST" },
+    computer_pause: { path: "/local-api/computer-pause", method: "POST" },
+    computer_takeover_answer: { path: "/local-api/computer-takeover-answer", method: "POST" },
+    computer_watch: { path: "/local-api/computer-watch" },
+    computer_surface: { path: "/local-api/computer-surface", method: "POST" },
+    computer_surface_corner: { path: "/local-api/computer-surface-corner", method: "POST" },
     transcribe: { path: "/local-api/transcribe", method: "POST" },
+    transcribe_external: { path: "/local-api/transcribe-external", method: "POST" },
+    // Parakeet dictation (#233) is desktop only; the dev server answers 501.
+    parakeet_status: { path: "/local-api/parakeet-status" },
+    parakeet_install: { path: "/local-api/parakeet-install", method: "POST" },
+    parakeet_cancel: { path: "/local-api/parakeet-cancel", method: "POST" },
+    parakeet_stop: { path: "/local-api/parakeet-stop", method: "POST" },
+    parakeet_transcribe: { path: "/local-api/parakeet-transcribe", method: "POST" },
     execute_code: { path: "/local-api/execute-code", method: "POST" },
     // file_read / file_write: ABSICHTLICH NICHT HIER. Die beiden Dev-Endpunkte
     // sind entfernt (siehe vite.config.ts), weil sie keinen Aufrufer mehr
@@ -660,6 +781,64 @@ export async function backendCall<T = unknown>(
     detect_model_path: { path: "/local-api/detect-model-path", method: "POST" },
     check_model_sizes: { path: "/local-api/check-model-sizes", method: "POST" },
     delete_comfy_model: { path: "/local-api/delete-comfy-model", method: "POST" },
+    // D1: Details for a ComfyUI file. Rust only, the dev server answers 501.
+    comfy_model_info: { path: "/local-api/comfy-model-info", method: "POST" },
+    // C41 / C17: show a model file in the file manager, and what Delete would
+    // take for an LU Engine row. Rust only, the dev server answers 501.
+    comfy_model_reveal: { path: "/local-api/comfy-model-reveal", method: "POST" },
+    // A26 (3.1.0): Settings → Chat Backup, clear the chats only the backup
+    // holds and show its folder. Rust only, the dev server answers 501.
+    chat_backup_clear: { path: "/local-api/chat-backup-clear", method: "POST" },
+    chat_backup_reveal: { path: "/local-api/chat-backup-reveal", method: "POST" },
+    bundled_model_delete_plan: { path: "/local-api/bundled-model-delete-plan", method: "POST" },
+    // Check files and Repair (GH #113): Rust only, the dev server answers
+    // 501 (dev-server/remote-stubs.ts).
+    verify_model_files: { path: "/local-api/verify-model-files", method: "POST" },
+    verify_model_files_status: { path: "/local-api/verify-model-files-status", method: "POST" },
+    verify_model_files_cancel: { path: "/local-api/verify-model-files-cancel", method: "POST" },
+    trash_model_file: { path: "/local-api/trash-model-file", method: "POST" },
+    // The training photos of a local character live in the Rust process; the
+    // dev server answers 501 (dev-server/remote-stubs.ts).
+    character_photos: { path: "/local-api/character-photos", method: "POST" },
+    // The LoRA folder of this machine and a LoRA file dropped on "New
+    // character" (3.1.0) are the Rust process's too; the dev server answers
+    // 501 (dev-server/remote-stubs.ts), and the page asks only in the app.
+    character_lora_folder: { path: "/local-api/character-lora-folder", method: "POST" },
+    character_lora_folder_open: { path: "/local-api/character-lora-folder-open", method: "POST" },
+    character_lora_import: { path: "/local-api/character-lora-import", method: "POST" },
+    character_lora_import_cancel: { path: "/local-api/character-lora-import-cancel", method: "POST" },
+    // The GGUF file dialog of the Model Manager is native (D17); the dev
+    // server answers 501 (dev-server/remote-stubs.ts).
+    pick_gguf_file: { path: "/local-api/pick-gguf-file", method: "POST" },
+    // 3.0.8 (A2): the card per task lives in the Rust process (it forwards
+    // it to the spawns); the dev server answers 501 (dev-server/remote-stubs.ts).
+    set_gpu_roles: { path: "/local-api/set-gpu-roles", method: "POST" },
+    describe_gpu_roles: { path: "/local-api/describe-gpu-roles" },
+    // Remove refusals (A14): Python processes the Rust side starts and owns.
+    // Neuron tweaker (3.0.9, P11): desktop only, stubbed 501 in dev-server.
+    neuron_presets: { path: "/local-api/neuron-presets" },
+    neuron_info: { path: "/local-api/neuron-info", method: "POST" },
+    neuron_build: { path: "/local-api/neuron-build", method: "POST" },
+    neuron_feature_add: { path: "/local-api/neuron-feature-add", method: "POST" },
+    neuron_mlp_add: { path: "/local-api/neuron-mlp-add", method: "POST" },
+    neuron_delete: { path: "/local-api/neuron-delete", method: "POST" },
+    neuron_sae_download: { path: "/local-api/neuron-sae-download", method: "POST" },
+    neuron_sae_search: { path: "/local-api/neuron-sae-search", method: "POST" },
+    neuron_status: { path: "/local-api/neuron-status" },
+    neuron_cancel: { path: "/local-api/neuron-cancel", method: "POST" },
+    neuron_dismiss: { path: "/local-api/neuron-dismiss", method: "POST" },
+    neuron_apply: { path: "/local-api/neuron-apply", method: "POST" },
+    // 3.1.0: Neurons as a plugin, its on/off switch in Rust.
+    neuron_plugin_set: { path: "/local-api/neuron-plugin-set", method: "POST" },
+    neuron_plugin_status: { path: "/local-api/neuron-plugin-status" },
+    neuron_compare: { path: "/local-api/neuron-compare", method: "POST" },
+    abliterate_plan: { path: "/local-api/abliterate-plan", method: "POST" },
+    abliterate_start: { path: "/local-api/abliterate-start", method: "POST" },
+    abliterate_status: { path: "/local-api/abliterate-status" },
+    abliterate_cancel: { path: "/local-api/abliterate-cancel", method: "POST" },
+    abliterate_dismiss: { path: "/local-api/abliterate-dismiss", method: "POST" },
+    abliterate_runs: { path: "/local-api/abliterate-runs" },
+    abliterate_trash_copy: { path: "/local-api/abliterate-trash-copy", method: "POST" },
     download_progress: { path: "/local-api/download-progress" },
     pause_download: { path: "/local-api/pause-download", method: "POST" },
     cancel_download: { path: "/local-api/cancel-download", method: "POST" },
@@ -679,17 +858,68 @@ export async function backendCall<T = unknown>(
     remote_qr_code: { path: "/local-api/remote-qr-code" },
     remote_connected_devices: { path: "/local-api/remote-connected-devices" },
     set_remote_permissions: { path: "/local-api/set-remote-permissions", method: "POST" },
+    set_remote_page_title: { path: "/local-api/set-remote-page-title", method: "POST" },
     start_tunnel: { path: "/local-api/start-tunnel", method: "POST" },
     stop_tunnel: { path: "/local-api/stop-tunnel", method: "POST" },
     tunnel_status: { path: "/local-api/tunnel-status" },
+    // Sealed channel (REMOTE-PROTOKOLL v2): desktop only, 501 in the dev
+    // server (dev-server/remote-stubs.ts).
+    remote_pairing_qr: { path: "/local-api/remote-pairing-qr" },
+    remote_pairing_window: { path: "/local-api/remote-pairing-window", method: "POST" },
+    remote_paired_devices: { path: "/local-api/remote-paired-devices" },
+    remote_forget_device: { path: "/local-api/remote-forget-device", method: "POST" },
+    remote_set_device_rights: { path: "/local-api/remote-set-device-rights", method: "POST" },
+    remote_set_new_device_rights: { path: "/local-api/remote-set-new-device-rights", method: "POST" },
+    remote_firewall_status: { path: "/local-api/remote-firewall-status" },
+    remote_firewall_allow: { path: "/local-api/remote-firewall-allow", method: "POST" },
+    remote_pair_decide: { path: "/local-api/remote-pair-decide", method: "POST" },
+    remote_pair_requests: { path: "/local-api/remote-pair-requests" },
+    remote_set_anywhere: { path: "/local-api/remote-set-anywhere", method: "POST" },
+    remote_set_legacy_access: { path: "/local-api/remote-set-legacy-access", method: "POST" },
+    remote_signin_requests: { path: "/local-api/remote-signin-requests" },
+    remote_signin_decide: { path: "/local-api/remote-signin-decide", method: "POST" },
+    // Create over the desktop (lib/remote-create-runner.ts): desktop only,
+    // the dev server answers with the same Remote stub.
+    remote_create_progress: { path: "/local-api/remote-create-progress", method: "POST" },
+    remote_create_finish: { path: "/local-api/remote-create-finish", method: "POST" },
+    remote_create_capabilities_reply: { path: "/local-api/remote-create-capabilities-reply", method: "POST" },
+    remote_create_gallery_reply: { path: "/local-api/remote-create-gallery-reply", method: "POST" },
+    // Shared chats (lib/remote-chats-bridge.ts): desktop only.
+    remote_chats_sync: { path: "/local-api/remote-chats-sync", method: "POST" },
+    remote_chats_event: { path: "/local-api/remote-chats-event", method: "POST" },
+    remote_chats_reply: { path: "/local-api/remote-chats-reply", method: "POST" },
+    // Watchers (src-tauri/src/watchers.rs): the clock and the notification
+    // are Rust, so the dev server answers with the desktop-only stub.
+    watchers_list: { path: "/local-api/watchers-list" },
+    watchers_create: { path: "/local-api/watchers-create", method: "POST" },
+    watchers_update: { path: "/local-api/watchers-update", method: "POST" },
+    watchers_delete: { path: "/local-api/watchers-delete", method: "POST" },
+    watchers_run_now: { path: "/local-api/watchers-run-now", method: "POST" },
+    watchers_finished: { path: "/local-api/watchers-finished", method: "POST" },
+    watchers_runner_ready: { path: "/local-api/watchers-runner-ready", method: "POST" },
+    watchers_dismiss_hint: { path: "/local-api/watchers-dismiss-hint", method: "POST" },
+    watchers_notify: { path: "/local-api/watchers-notify", method: "POST" },
+    // Device tests only (Cargo feature e2e-remote); other builds have no such command.
+    remote_e2e_mode: { path: "/local-api/remote-e2e-mode" },
+    remote_create_cancel: { path: "/local-api/remote-create-cancel", method: "POST" },
+    remote_create_snapshot: { path: "/local-api/remote-create-snapshot" },
     // Agent tools (Phase 1 — new commands)
     shell_execute: { path: "/local-api/shell-execute", method: "POST" },
+    // T1: a shell_execute that outran its timeout runs on as a task in the
+    // dev server too (dev-server/exec-routes.ts), so the bench can read and
+    // stop it like the app does.
+    shell_task_status: { path: "/local-api/shell-task-status", method: "POST" },
+    shell_task_kill: { path: "/local-api/shell-task-kill", method: "POST" },
+    shell_task_list: { path: "/local-api/shell-task-list", method: "POST" },
     fs_read: { path: "/local-api/fs-read", method: "POST" },
     // Capped, jailed byte read for the Explorer image preview (2.6.6 C3).
     // Without this entry the browser dev surface answered "Unknown backend
     // command" and every preview fell over.
     fs_read_bytes: { path: "/local-api/fs-read-bytes", method: "POST" },
     fs_write: { path: "/local-api/fs-write", method: "POST" },
+    // One base64 chunk of a file attached in the chat, on its way into the
+    // working folder (3.0.5, lib/chat-files.ts).
+    fs_write_bytes: { path: "/local-api/fs-write-bytes", method: "POST" },
     fs_list: { path: "/local-api/fs-list", method: "POST" },
     fs_search: { path: "/local-api/fs-search", method: "POST" },
     fs_info: { path: "/local-api/fs-info", method: "POST" },
@@ -786,7 +1016,7 @@ export function ollamaUrl(path: string): string {
 }
 
 /** Configurable ComfyUI port — ComfyUI's own 8188 by default on every OS (see comfy-default-port.ts). */
-let _comfyPort = defaultComfyPort({ isMac: isMacOS() });
+let _comfyPort = defaultComfyPort();
 export function setComfyPort(port: number) { _comfyPort = port; }
 export function getComfyPort(): number { return _comfyPort; }
 
@@ -817,13 +1047,13 @@ export function comfyuiUrl(path: string): string {
 }
 
 /**
- * Web-build fallback for a relative ComfyUI media URL (konata 2026-06-08 chat,
+ * Web-build fallback for a relative ComfyUI media URL (a user 2026-06-08 chat,
  * 2026-06-25 Create page). In the browser build, media URLs are the RELATIVE
  * Vite-proxy path (`/comfyui/view?…`). That loads fine under `npm run dev`, but
  * a static host — or a reverse-proxy / SSH tunnel in front of a remote ComfyUI —
  * can mishandle the `<video>` byte-range subrequest and never paint it, while a
  * plain `<img>` GET and a direct top-level navigation to the same URL still work
- * (exactly konata's "video not in gallery, direct link works" report). When the
+ * (exactly a user's "video not in gallery, direct link works" report). When the
  * relative load fires onError, retry with an ABSOLUTE URL straight to the
  * ComfyUI host — `<img>`/`<video>` display is not CORS-gated, so it needs no
  * proxy. Tauri URLs are already absolute (never start with '/') and pass through
@@ -859,7 +1089,7 @@ export async function downloadComfyFile(filename: string, subfolder: string = ''
   // Tauri mode: fetch the bytes through the proxy, then a NATIVE Save-As dialog.
   // The old blob-URL + anchor-click pattern is UNRELIABLE in WebView2 — the
   // webview navigates to the blob URL instead of saving it, so clicking Download
-  // did nothing (David 2026-06-12: "der download button geht nicht für video und
+  // did nothing (2026-06-12: "der download button geht nicht für video und
   // image mcp"). save_binary_file_dialog writes the real bytes to the chosen path
   // (same native dialog the chat file-artifact card uses, which works).
   const invoke = await getInvoke()
@@ -897,9 +1127,10 @@ export async function downloadComfyFile(filename: string, subfolder: string = ''
 
 // ── Provider key keychain (H5) ──────────────────────────────────
 // Thin wrappers over the Rust secret_* commands (Windows Credential Manager /
-// macOS Keychain). They reject on the web build (no Tauri) and on Linux desktop
-// (the command reports unsupported), which is how providerStore detects "no
-// keychain here" and falls back to the obfuscated-localStorage path.
+// macOS Keychain / on Linux the Secret Service, else a 0600 file, GitHub
+// #226). They reject on the web build (no Tauri), which is how providerStore
+// detects "no keychain here" and falls back to the obfuscated-localStorage
+// path.
 export async function secretSet(account: string, value: string): Promise<void> {
   if (!isTauri()) throw new Error('keychain unavailable (web build)')
   const invoke = await getInvoke()
@@ -916,6 +1147,22 @@ export async function secretDelete(account: string): Promise<void> {
   if (!isTauri()) throw new Error('keychain unavailable (web build)')
   const invoke = await getInvoke()
   await invoke('secret_delete', { account })
+}
+
+/**
+ * Where `secretSet` puts a value on this machine: the platform's credential
+ * store (`os`), a file only this user can read (`file`, Linux without a
+ * Secret Service, `path` names it), or nowhere Rust-side (`none`).
+ */
+export interface SecretStoreInfo {
+  kind: 'os' | 'file' | 'none'
+  path?: string | null
+}
+
+export async function secretStoreInfo(): Promise<SecretStoreInfo> {
+  if (!isTauri()) return { kind: 'none' }
+  const invoke = await getInvoke()
+  return (await invoke('secret_store_info')) as SecretStoreInfo
 }
 
 // ── Parked provider key keychain (R9) ────────────────────────────
@@ -1028,6 +1275,14 @@ export function isSafeExternalUrl(url: string): boolean {
 export async function openExternal(url: string): Promise<void> {
   if (!isSafeExternalUrl(url)) {
     console.warn('[openExternal] blocked non-web URL:', url)
+    return
+  }
+  if (isMobile()) {
+    // A phone has no shell: `plugin:shell|open` starts a program, and an
+    // iPhone has none to start. The plugin lu-native asks the system itself
+    // (UIApplication.open, Intent ACTION_VIEW), the opener of the phone shell.
+    const native = await import('../lib/lu-native')
+    await native.openExternal(url)
     return
   }
   if (isTauri()) {
@@ -1145,6 +1400,7 @@ const CSP_DIRECT_HOSTS = new Set([
   'api.together.xyz',
   'api.deepseek.com',
   'api.mistral.ai',
+  'api.minimax.io',
   'api.anthropic.com',
   'ollama.com',
   'huggingface.co',

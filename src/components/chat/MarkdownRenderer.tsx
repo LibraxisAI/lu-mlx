@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
@@ -7,8 +7,11 @@ import { MATH_OPTIONS, contentNeedsKatex } from '../../lib/markdown-math'
 import { CodeBlock } from './CodeBlock'
 import { codeBlockText } from '../../lib/markdown-code'
 import { openExternal } from '../../api/backend'
+import { useComfyViewRescue, isInlineVideoUrl } from './comfyViewRescue'
 import { log } from '../../lib/logger'
 import type { Components, Options } from 'react-markdown'
+import { rehypeQuoteHighlight } from '../../lib/chat-highlight'
+import { useChatHighlight } from './ChatLookScope'
 
 interface Props {
   content: string
@@ -90,6 +93,21 @@ function isTrustedImageSrc(src: string): boolean {
   return false
 }
 
+/** A picture in a reply. A model often repeats the ComfyUI /view address of a
+ *  picture it just made, and on the desktop that direct load is blocked the
+ *  same way the tool block's was (comfyViewRescue.ts), so it gets the same
+ *  rescue. Every other picture loads as before. */
+function ChatImage({ src, alt }: { src: string; alt: string }) {
+  const [failed, setFailed] = useState(false)
+  const rescued = useComfyViewRescue(src, failed)
+  // A clip the model links the same way (`![clip](…/view?filename=x.mp4…)`)
+  // plays here instead of standing as a broken picture (3.0.8 A1).
+  if (isInlineVideoUrl(src)) {
+    return <video src={rescued ?? src} aria-label={alt || 'Video'} controls loop playsInline preload="metadata" onError={() => setFailed(true)} className="block max-w-full max-h-[320px] rounded-md my-2" />
+  }
+  return <img src={rescued ?? src} alt={alt} loading="lazy" onError={() => setFailed(true)} className="max-w-full rounded-md my-2" />
+}
+
 const components: Components = {
   code({ className, children, ...props }) {
     const match = /language-(\w+)/.exec(className || '')
@@ -161,7 +179,7 @@ const components: Components = {
   img({ src, alt }) {
     const s = typeof src === 'string' ? src : ''
     if (s && isTrustedImageSrc(s)) {
-      return <img src={s} alt={alt ?? ''} loading="lazy" className="max-w-full rounded-md my-2" />
+      return <ChatImage src={s} alt={alt ?? ''} />
     }
     // Untrusted host — do not silently fetch. Offer an explicit click instead.
     return (
@@ -177,9 +195,15 @@ const components: Components = {
 }
 
 export function MarkdownRenderer({ content }: Props) {
-  const rehypePlugins = useRehypePlugins(content)
+  const math = useRehypePlugins(content)
+  // Quoted speech in its own colour, only where the chat look asks for it
+  // (ChatLookScope, 3.1.0 C58). After KaTeX, so a formula is never split.
+  const { quotes } = useChatHighlight()
+  const rehypePlugins = useMemo(() => (quotes ? [...math, rehypeQuoteHighlight] : math), [quotes, math])
   return (
-    <div className="markdown-content text-gray-800 dark:text-gray-200">
+    // wrap-anywhere: a URL, hash or base64 run without a space used to run out
+    // of the bubble and get cut at the window edge (T1 night test 3.0.9, A5).
+    <div className="markdown-content text-gray-800 dark:text-gray-200 wrap-anywhere">
       <ReactMarkdown remarkPlugins={[remarkGfm, [remarkMath, MATH_OPTIONS]]} rehypePlugins={rehypePlugins} components={components}>
         {content}
       </ReactMarkdown>

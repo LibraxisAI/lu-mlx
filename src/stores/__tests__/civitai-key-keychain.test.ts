@@ -1,7 +1,7 @@
 /**
  * The CivitAI API key belongs in the OS vault, like every other secret.
  *
- * The field added for goonerforporn wrote the key into localStorage in plain
+ * The field added for a user wrote the key into localStorage in plain
  * text, while provider keys (providerStore, security fix H5) and the
  * HuggingFace token (MlxMediaSettings) already sit in Windows Credential
  * Manager or the macOS Keychain. Same shape here, same limits: Linux desktop

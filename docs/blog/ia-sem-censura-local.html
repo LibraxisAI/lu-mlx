@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="pt-BR" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IA sem censura local: o guia para 2026</title>
+<meta name="description" content="IA sem censura local no seu próprio PC: um instalador, sem linha de comando, sem conta na nuvem. Chat, imagens e vídeo sem filtros, grátis.">
+<meta name="keywords" content="ia sem censura, ia sem filtro, ia local, instalar ia local, ia sem censura local, ia sem filtro em português, ia local em português">
+<meta property="og:title" content="IA sem censura local: o guia para 2026">
+<meta property="og:description" content="IA sem censura local no seu próprio PC: um instalador, sem linha de comando, sem conta na nuvem. Chat, imagens e vídeo sem filtros, com privacidade, totalmente grátis.">
+<meta property="og:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<meta property="og:url" content="https://locallyuncensored.com/blog/ia-sem-censura-local.html">
+<meta property="og:type" content="article">
+<meta property="article:published_time" content="2026-10-10">
+<meta property="article:author" content="PurpleDoubleD">
+<meta property="article:tag" content="Português">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="IA sem censura local: o guia para 2026">
+<meta name="twitter:description" content="IA sem censura local no seu próprio PC: um instalador, sem linha de comando, sem conta na nuvem. Chat, imagens e vídeo sem filtros, com privacidade, totalmente grátis.">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<link rel="canonical" href="https://locallyuncensored.com/blog/ia-sem-censura-local.html">
+<link rel="alternate" hreflang="en" href="https://locallyuncensored.com/blog/run-uncensored-ai-locally.html">
+<link rel="alternate" hreflang="de" href="https://locallyuncensored.com/blog/unzensierte-ki-lokal.html">
+<link rel="alternate" hreflang="pt-BR" href="https://locallyuncensored.com/blog/ia-sem-censura-local.html">
+<link rel="alternate" hreflang="es" href="https://locallyuncensored.com/blog/ia-sin-censura-local.html">
+<link rel="alternate" hreflang="x-default" href="https://locallyuncensored.com/blog/run-uncensored-ai-locally.html">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="../favicon.png">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BlogPosting","headline":"IA sem censura local: o guia para 2026","description":"Locally Uncensored é um estúdio de IA plug and play para o desktop: chat sem censura, geração de imagens e de vídeo localmente no seu próprio PC. Um instalador, sem linha de comando, sem nuvem, sem filtros.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-10-10","dateModified":"2026-10-10","inLanguage":"pt-BR","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/ia-sem-censura-local.html"},"keywords":"ia sem censura, ia sem filtro, ia local, instalar ia local, ia sem censura local, ia sem filtro em português, ia local em português"}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"O que é IA local sem censura?","acceptedAnswer":{"@type":"Answer","text":"Um modelo de IA que roda inteiro no seu próprio PC e não tem os filtros de conteúdo de um provedor de nuvem. Modelos abertos como Llama, Qwen ou Gemma existem em variantes chamadas abliterated, nas quais as recusas embutidas foram removidas. Rodando localmente, ninguém além de você decide sobre o que a IA fala."}},{"@type":"Question","name":"IA sem censura é legal?","acceptedAnswer":{"@type":"Answer","text":"Usar software open source e modelos de pesos abertos é legal na maioria dos países. Para o conteúdo que você gera vale a lei do seu país: o que é ilegal continua ilegal, seja qual for a ferramenta. A diferença para a nuvem é que seus prompts nunca saem do seu computador."}},{"@type":"Question","name":"Preciso de um PC gamer caro?","acceptedAnswer":{"@type":"Answer","text":"Não. Para chat de texto, 8 GB de RAM bastam para modelos pequenos. Uma placa de vídeo com 6 a 8 GB de VRAM é o ponto ideal para um chat fluido com modelos 8B. Geração de imagens pede 8 GB de VRAM, vídeo pede 10 a 12 GB."}},{"@type":"Question","name":"É mesmo grátis e bom para a privacidade?","acceptedAnswer":{"@type":"Answer","text":"Sim. Locally Uncensored é open source (AGPL-3.0), os modelos abertos são downloads gratuitos, não há assinatura, nem kit de analytics, nem relatórios de falhas. Como tudo roda localmente, nenhum dado pessoal é transmitido a terceiros: é o jeito de usar IA que mais respeita a sua privacidade."}},{"@type":"Question","name":"O app existe em português?","acceptedAnswer":{"@type":"Answer","text":"A interface está em inglês no momento, mas é simples. Os modelos em si entendem português: Qwen, Llama e Gemma são multilíngues e respondem a prompts em português."}}]}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://locallyuncensored.com/"},{"@type":"ListItem","position":2,"name":"Blog","item":"https://locallyuncensored.com/blog/"},{"@type":"ListItem","position":3,"name":"IA sem censura local: o guia para 2026","item":"https://locallyuncensored.com/blog/ia-sem-censura-local.html"}]}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/lu.css">
+<script defer src="/assets/lu.js"></script>
+  <script data-goatcounter="https://purple47.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</head>
+<body>
+
+<nav class="lu-nav">
+  <a class="lu-nav-brand" href="/" aria-label="Locally Uncensored">
+    <span class="lu-mono" data-mono="nav" data-size="40" aria-hidden="true"></span>
+    <span class="lu-nav-word">Locally <span class="accent">Uncensored</span></span>
+  </a>
+  <div class="lu-nav-links" id="lu-nav-links">
+    <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/pricing/">Pricing</a>
+    <a class="lu-nav-link" href="/blog/">Blog</a>
+    <a class="lu-nav-link" href="/guide/">Guide</a>
+    <a class="lu-nav-link" href="/remote-access/">Remote</a>
+  </div>
+  <div class="lu-nav-right">
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">4200+&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">1700+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <span class="lu-nav-sep"></span>
+    <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="he-cta" href="/pricing/" aria-label="LU Cloud plans and what they include"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>Cloud</a>
+    <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
+    <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </div>
+</nav>
+<div class="container lu-doc">
+  <div class="breadcrumb"><a href="../">Locally Uncensored</a> / <a href="./">Blog</a> / This Post</div>
+
+  <div class="post-meta">
+    <span class="post-tag">Português</span>
+    <span>10 de outubro de 2026</span>
+    <span>·</span>
+    <span>8 min de leitura</span>
+  </div>
+
+  <article>
+    <h1>IA sem censura local: o guia para 2026</h1>
+
+    <p><strong>Locally Uncensored é um estúdio de IA plug and play para o desktop: um instalador coloca chat sem censura, geração de imagens e de vídeo localmente no seu próprio PC, sem linha de comando, sem Docker, sem nuvem.</strong> Este guia explica em português o que é <a href="/uncensored-ai/">IA local sem censura</a>, o que você precisa para usar e como começar em cinco minutos.</p>
+
+    <h2>Por que local e sem censura?</h2>
+
+    <p>No ChatGPT e similares, tudo o que você digita vai para um data center, é checado contra políticas de conteúdo e muitas vezes é recusado. A IA local inverte isso: o modelo fica como um arquivo no seu disco e roda no seu hardware. Seus prompts nunca saem do seu computador, não há assinatura, não há limite de uso, não há conta, e ninguém muda as regras da noite para o dia.</p>
+
+    <p>Sem censura quer dizer, na prática: existem modelos abertos em variantes chamadas abliterated, nas quais as recusas treinadas foram removidas. Eles discutem qualquer tema, escrevem qualquer história e respondem a perguntas que as IAs na nuvem bloqueiam. Quais são esses modelos e quão bons eles são, você encontra no <a href="abliterated-models-guide.html">guia de modelos abliterated</a> (em inglês).</p>
+
+    <h2>O bônus da privacidade</h2>
+
+    <p>Para quem se importa com privacidade, este é quase o argumento mais forte: a IA local é a única opção em que, com garantia, nenhum dado pessoal vai para um provedor, simplesmente porque nenhuma conexão é necessária. Depois do download do modelo, tudo funciona offline. No modo local, o Locally Uncensored não pede conta, não tem kit de analytics e não envia relatórios de falhas. Mais sobre isso no artigo <a href="why-run-ai-locally.html">Why run AI locally</a>.</p>
+
+    <h2>O que você precisa (a tabela honesta)</h2>
+
+    <table>
+      <thead><tr><th>Seu hardware</th><th>O que roda bem</th><th>Experiência</th></tr></thead>
+      <tbody>
+        <tr><td>Qualquer PC, 8 GB de RAM, sem GPU</td><td>Modelos de chat pequenos (1B a 3B)</td><td>Roda na CPU, visivelmente mais lento, serve muito bem para testar</td></tr>
+        <tr><td>GPU com 6 a 8 GB de VRAM</td><td>Modelos de chat 8B, primeira geração de imagens</td><td>O ponto ideal: chat rápido, qualidade sólida</td></tr>
+        <tr><td>GPU com 10 a 12 GB de VRAM</td><td>Chat de 12 a 14B, imagens com FLUX, primeiro vídeo</td><td>Chat bem mais inteligente, imagens fotorrealistas rápidas</td></tr>
+        <tr><td>GPU com 16 a 24 GB de VRAM</td><td>Modelos 30B+, imagem e vídeo em alta resolução</td><td>Nível entusiasta, perto da qualidade da nuvem</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Pronto em cinco minutos</h2>
+
+    <p>O caminho é simples de propósito: baixe o instalador na <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest">página de releases no GitHub</a> e instale como qualquer programa normal. Na primeira vez que você abre, o assistente de configuração procura no seu PC 12 backends locais de IA (Ollama, LM Studio e outros) e se conecta, ou instala o motor embutido com um clique. O Model Manager recomenda modelos que combinam com o seu hardware e baixa cada um com um clique. Aí você digita a sua primeira mensagem. Sem linha de comando, sem Python, sem arquivos de configuração.</p>
+
+    <p>Aliás, os modelos também entendem português: Qwen, Llama e Gemma são multilíngues e respondem a prompts em português, também nas variantes sem censura.</p>
+
+    <h2>Imagens e vídeo, sem grafos de nós</h2>
+
+    <p>O princípio do estúdio vale também para a parte criativa: FLUX e Stable Diffusion para imagens, Wan e LTX para vídeos curtos, tudo no mesmo programa, tudo local, tudo sem filtro. Digite o prompt, escolha o modelo, gere. Detalhes (em inglês): <a href="local-ai-image-and-video-generator.html">imagem e vídeo em um só app</a> e <a href="how-to-generate-ai-videos-locally.html">vídeos de IA locais</a>.</p>
+
+    <h2>FAQ</h2>
+
+    <h3>O que é IA local sem censura?</h3>
+    <p>Um modelo aberto sem os filtros de conteúdo da nuvem, que roda inteiro no seu PC. O que você pergunta e gera fica com você.</p>
+
+    <h3>Isso é legal?</h3>
+    <p>Usar software open source e modelos de pesos abertos é legal na maioria dos países. Para o conteúdo gerado vale a lei do seu país: o que é ilegal continua ilegal, com qualquer ferramenta.</p>
+
+    <h3>Preciso de um PC de ponta?</h3>
+    <p>Não. 8 GB de RAM bastam para testar, e uma GPU com 6 a 8 GB de VRAM deixa tudo bom de verdade.</p>
+
+    <h3>O app está em português?</h3>
+    <p>A interface é em inglês e simples de propósito, e os modelos respondem em português.</p>
+
+    <h2>Comece agora</h2>
+
+    <p>Baixe a versão atual na <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest">página de releases</a>, veja as <a href="https://locallyuncensored.com/">capturas de tela na página inicial</a> ou siga o <a href="https://locallyuncensored.com/guide/">guia passo a passo</a> ilustrado (em inglês).</p>
+
+    <hr>
+
+    <p><em>Locally Uncensored é licenciado sob AGPL-3.0 e gratuito. Desenvolvido por <a href="https://github.com/PurpleDoubleD">PurpleDoubleD</a>.</em></p>
+  </article>
+
+  <div class="post-footer">
+    <p>IA sem censura no seu próprio PC, em cinco minutos:</p>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored" class="cta-btn" target="_blank">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+      Get Started on GitHub
+    </a>
+    <p style="margin-top:14px;margin-bottom:0">Sem GPU? O LU Cloud roda no navegador, pago com pacotes de créditos a partir de 15 EUR, sem assinatura. <a href="/pricing/">Quanto custa</a>.</p>
+  </div>
+</div>
+
+<footer>
+  <div class="footer-row footer-meta"><span>&copy; 2026 &middot; Locally Uncensored &middot; AGPL-3.0</span></div>
+  <div class="footer-row footer-links">
+    <a href="https://locallyuncensored.com/blog/">Blog</a>
+    <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/pricing/">Pricing</a>
+    <a href="https://locallyuncensored.com/cloud/">LU Cloud</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-chat-online/">Uncensored AI chat online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-image-generator-online/">Image generator online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-video-generator-online/">Video generator online</a>
+    <a href="https://locallyuncensored.com/unrestricted-ai/">Unrestricted AI</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-coding-agent/">AI coding agent</a>
+    <a href="https://locallyuncensored.com/alternatives/">Alternatives</a>
+    <a href="https://locallyuncensored.com/is-locally-uncensored-safe/">Is it safe?</a>
+    <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
+    <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/discussions">Discussions</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
+    <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
+    <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+    <a href="https://locallyuncensored.com/privacy/">Privacy</a>
+    <a href="https://locallyuncensored.com/terms/">Terms</a>
+    <a href="https://locallyuncensored.com/impressum/">Impressum</a>
+  </div>
+</footer>
+</body>
+</html>

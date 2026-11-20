@@ -75,7 +75,7 @@
 
 ; Free the bundled engine before the new files land. Live in EVERY build.
 ;
-; aldrich_ironhart, 2026-08-10: the update stopped at "Error opening file for
+; A user, 2026-08-10: the update stopped at "Error opening file for
 ; writing: D:\Locally Uncensored\llama-server.exe" with Abort, Retry, Ignore.
 ; The sidecar is our own (externalBin), and Windows locks a running
 ; image against writes, so the copy cannot succeed while it lives. Rust kills it
@@ -219,4 +219,136 @@
     Goto lu_wix_scan
   lu_wix_done:
 !endif
+!macroend
+
+; The window needs the Microsoft Edge WebView2 Runtime, and it has to be there
+; for the Windows user who starts LU, not just somewhere on the machine.
+;
+; 2026-11-03, a fresh Windows install: right after setup LU opened only
+; Tauri's "Could not find the WebView2 Runtime ... You may have it installed
+; on another user account, but it is not available for this one". The stock
+; WebView2 section (tauri-bundler 2.11, installer.nsi) has the gaps that let
+; that happen without a word:
+;   - it counts the runtime as present as soon as a "pv" value exists, and
+;     EdgeUpdate leaves "0.0.0.0" behind after a broken or removed runtime;
+;     Microsoft's own detection rule says that value means not installed;
+;   - it also counts a per-user runtime in HKCU, and an install for all users
+;     that a standard user starts with an admin's password runs under the
+;     admin's account, so it reads the admin's HKCU and skips the install for
+;     the person who will actually use the app;
+;   - it skips everything on an update (/UPDATE);
+;   - with the default downloadBootstrapper a blocked download ends the setup.
+; The bootstrapper is now embedded (bundle.windows.webviewInstallMode), and
+; this check runs after the stock section with Microsoft's rule. When it still
+; finds no runtime it runs the same bootstrapper itself.
+;
+; A copy of the bootstrapper stays in the install folder: the app runs it at
+; start (webview2_check.rs) for a Windows user who has no runtime even though
+; the install went fine, the "another user account" case. NSIS stores the
+; identical file once, so the copy costs no installer size.
+!macro LU_READ_WEBVIEW2 ROOT KEY
+  ${If} $R1 == ""
+    ReadRegStr $R1 ${ROOT} "${KEY}\Microsoft\EdgeUpdate\Clients\${WEBVIEW2APPGUID}" "pv"
+    ${If} $R1 == "0.0.0.0"
+      StrCpy $R1 ""
+    ${EndIf}
+  ${EndIf}
+!macroend
+
+!macro LU_ENSURE_WEBVIEW2
+  Push $R1
+  Push $R2
+  StrCpy $R1 ""
+  !insertmacro LU_READ_WEBVIEW2 HKLM "SOFTWARE\WOW6432Node"
+  !insertmacro LU_READ_WEBVIEW2 HKLM "SOFTWARE"
+  ; A per-user runtime counts only for a per-user install, the one case where
+  ; this HKCU belongs to the person who starts the app.
+  StrCpy $R2 "CurrentUser"
+  !if "${INSTALLMODE}" == "perMachine"
+    StrCpy $R2 "AllUsers"
+  !else if "${INSTALLMODE}" == "both"
+    StrCpy $R2 $MultiUser.InstallMode
+  !endif
+  ${If} $R2 != "AllUsers"
+    !insertmacro LU_READ_WEBVIEW2 HKCU "SOFTWARE"
+  ${EndIf}
+
+  !if "${INSTALLWEBVIEW2MODE}" == "embedBootstrapper"
+    File "/oname=$INSTDIR\MicrosoftEdgeWebview2Setup.exe" "${WEBVIEW2BOOTSTRAPPERPATH}"
+    ${If} $R1 == ""
+      DetailPrint "$(installingWebview2)"
+      ExecWait '"$INSTDIR\MicrosoftEdgeWebview2Setup.exe" ${WEBVIEW2INSTALLERARGS} /install' $R2
+      ${If} $R2 = 0
+        DetailPrint "$(webview2InstallSuccess)"
+      ${Else}
+        DetailPrint "$(webview2InstallError)"
+        ; Not an abort: LU itself is installed fine, and at its start it
+        ; offers the runtime again with Microsoft's download page as the
+        ; fallback. Silent updates show nothing here.
+        ${IfNot} ${Silent}
+          MessageBox MB_OK|MB_ICONEXCLAMATION "LU is installed, but the Microsoft Edge WebView2 Runtime it needs for its window could not be installed (code $R2).$\r$\n$\r$\nLU offers it again when it starts. You can also get it from Microsoft:$\r$\nhttps://developer.microsoft.com/microsoft-edge/webview2/"
+        ${EndIf}
+      ${EndIf}
+    ${EndIf}
+  !endif
+  Pop $R2
+  Pop $R1
+!macroend
+
+!macro NSIS_HOOK_POSTINSTALL
+  !insertmacro LU_ENSURE_WEBVIEW2
+!macroend
+
+; C67 (3.1.0): the uninstaller left the llama.cpp libraries behind.
+;
+; P-J on the Windows box, 10.11.2026: after an uninstall the program folder
+; still held ggml*.dll, llama*.dll, mtmd.dll and llama-server-impl.dll, and
+; the folder itself stayed. The stock uninstaller deletes exactly the file list
+; of the build that wrote it and nothing else, which misses three cases:
+;   - a library an OLDER release shipped and this one no longer does: the
+;     companion set is whatever cmake built (build-llama.sh,
+;     stage_dynamic_isa_companions), so names come and go between llama.cpp
+;     versions, and an update only ever copies, it never removes;
+;   - a library still loaded by an orphaned lu-llama-server.exe (a crash, a
+;     hard kill): Windows refuses to delete a mapped image, Delete fails
+;     without a word, and CheckIfAppIsRunning only looks for the main exe;
+;   - the `.old` copies LU_FREE_SIDECAR renames aside when a lock outlives it.
+; Then `RMDir "$INSTDIR"` finds the folder not empty and leaves it.
+;
+; Only our own folder is swept: the families below are deleted only when the
+; main exe was there at the start of the uninstall (the same caution as the
+; index.html check in LU_SWEEP_OLD_FRONTEND), and only by the names llama.cpp
+; gives its libraries, never *.dll. The sweep runs AFTER the stock section, so
+; an uninstall that is cancelled at "the app is running" never loses a file.
+Var LuOwnInstall
+
+!macro NSIS_HOOK_PREUNINSTALL
+  ; The stock uninstaller removes only the files it copied itself and then the
+  ; folder if it is empty, so the bootstrapper copy above would keep it alive.
+  Delete "$INSTDIR\MicrosoftEdgeWebview2Setup.exe"
+  StrCpy $LuOwnInstall 0
+  ${If} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
+    StrCpy $LuOwnInstall 1
+  ${EndIf}
+!macroend
+
+!macro LU_SWEEP_ENGINE_LIBRARIES
+  ${If} $LuOwnInstall = 1
+    ; An orphaned engine still maps the libraries; end it by its exact path.
+    !insertmacro LU_FREE_SIDECAR "lu-llama-server.exe"
+    Delete "$INSTDIR\lu-llama-server.exe"
+    Delete "$INSTDIR\lu-llama-cvector-generator.exe"
+    Delete /REBOOTOK "$INSTDIR\lu-llama-server.exe.old"
+    Delete /REBOOTOK "$INSTDIR\llama-server.exe.old"
+    Delete /REBOOTOK "$INSTDIR\ggml*.dll"
+    Delete /REBOOTOK "$INSTDIR\llama*.dll"
+    Delete /REBOOTOK "$INSTDIR\mtmd*.dll"
+    ; The stock RMDir already ran and found these files. Ask again; it still
+    ; only removes an EMPTY folder, so anything of the user's keeps it.
+    RMDir "$INSTDIR"
+  ${EndIf}
+!macroend
+
+!macro NSIS_HOOK_POSTUNINSTALL
+  !insertmacro LU_SWEEP_ENGINE_LIBRARIES
 !macroend

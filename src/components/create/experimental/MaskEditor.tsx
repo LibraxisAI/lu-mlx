@@ -6,10 +6,12 @@ import {
 } from 'lucide-react'
 import { useCreateStore, type ImageRef } from '../../../stores/createStore'
 import { uploadImage } from '../../../api/comfyui'
+import { isMlxImageHost } from '../../../api/mlx-image'
 import { MaskCanvasEngine, defaultBrushSize, type Tool } from '../canvas/MaskCanvasEngine'
 import { Slider } from '../ui/Slider'
 import { Button } from '../ui/Button'
 import { cn } from '../ui/cn'
+import { maskHistoryAction, maskShortcutLabels } from './maskShortcuts'
 
 function blobToDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -60,6 +62,7 @@ function MaskEditorInner({ onClose }: { onClose: () => void }) {
   // rendering (React 19 `refs`), and one that can tear: the ref is free to hold
   // a different engine than the tree currently being rendered.
   const [history, setHistory] = useState({ canUndo: false, canRedo: false })
+  const shortcuts = maskShortcutLabels()
   const syncHistory = useCallback(() => {
     const e = engineRef.current
     setHistory({ canUndo: !!e?.canUndo(), canRedo: !!e?.canRedo() })
@@ -111,6 +114,18 @@ function MaskEditorInner({ onClose }: { onClose: () => void }) {
     }
     img.src = source.url
     renderOverlay()
+    // C76: a mask painted before on this picture is where the editor starts.
+    // It used to open empty, and Apply then dropped the mask that was there.
+    const painted = useCreateStore.getState().mask
+    if (painted?.url && painted.width === source.width && painted.height === source.height) {
+      const m = new Image()
+      m.onload = () => {
+        if (engineRef.current !== e) return
+        e.loadMask(m)
+        renderOverlay()
+      }
+      m.src = painted.url
+    }
     // No history sync here any more: a brand-new engine has empty stacks, which
     // is exactly what the state above already says for this source.
     return () => { engineRef.current = null }
@@ -207,9 +222,8 @@ function MaskEditorInner({ onClose }: { onClose: () => void }) {
       if (e.key === ' ') { spaceDown.current = true; syncCursor(); return }
       const eng = engineRef.current
       if (!eng) return
-      const mod = e.metaKey || e.ctrlKey
-      if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) eng.redo(); else eng.undo(); renderOverlay(); syncHistory(); return }
-      if (e.key === 'y') { eng.redo(); renderOverlay(); syncHistory(); return }
+      const step = maskHistoryAction(e)
+      if (step) { e.preventDefault(); if (step === 'redo') eng.redo(); else eng.undo(); renderOverlay(); syncHistory(); return }
       if (e.key === '[') { setBrush(eng, Math.max(4, eng.brushSize - 8)) }
       if (e.key === ']') { setBrush(eng, Math.min(maxBrush, eng.brushSize + 8)) }
       if (e.key.toLowerCase() === 'b') { eng.tool = 'brush'; setTool('brush') }
@@ -233,9 +247,11 @@ function MaskEditorInner({ onClose }: { onClose: () => void }) {
     // and 415s the upload ("unsupported image format"). A data url round-trips.
     const url = await blobToDataUrl(blob)
     // Cloud sessions may have no ComfyUI to stage into — the cloud path
-    // re-uploads from the data url at submit time (filename stays '').
+    // re-uploads from the data url at submit time (filename stays ''). The
+    // Mac has no ComfyUI either: its Edit writes the mask to disk at submit
+    // time, with the edge softened by the feather slider.
     const filename =
-      useCreateStore.getState().backend === 'cloud'
+      useCreateStore.getState().backend === 'cloud' || isMlxImageHost()
         ? ''
         : await uploadImage(new File([blob], 'mask.png', { type: 'image/png' }))
     const ref: ImageRef = { filename, url, width: source.width, height: source.height }
@@ -270,8 +286,8 @@ function MaskEditorInner({ onClose }: { onClose: () => void }) {
         </div>
         <div className="w-40"><Slider label="Size" min={4} max={maxBrush} step={1} value={brushSize} onChange={(v) => { const e = engineRef.current; if (e) e.brushSize = v; setBrushSize(v) }} unit="px" /></div>
         <Divider />
-        <Button variant="ghost" size="sm" icon={Undo2} iconOnly title="Undo (⌘Z)" disabled={!history.canUndo} onClick={() => { engineRef.current?.undo(); renderOverlay(); syncHistory() }} />
-        <Button variant="ghost" size="sm" icon={Redo2} iconOnly title="Redo (⇧⌘Z)" disabled={!history.canRedo} onClick={() => { engineRef.current?.redo(); renderOverlay(); syncHistory() }} />
+        <Button variant="ghost" size="sm" icon={Undo2} iconOnly title={shortcuts.undo} disabled={!history.canUndo} onClick={() => { engineRef.current?.undo(); renderOverlay(); syncHistory() }} />
+        <Button variant="ghost" size="sm" icon={Redo2} iconOnly title={shortcuts.redo} disabled={!history.canRedo} onClick={() => { engineRef.current?.redo(); renderOverlay(); syncHistory() }} />
         <Button variant="ghost" size="sm" icon={FlipHorizontal2} iconOnly title="Invert (I)" onClick={() => { engineRef.current?.invert(); renderOverlay(); syncHistory() }} />
         <Button variant="ghost" size="sm" icon={Trash2} iconOnly title="Clear" onClick={() => { engineRef.current?.clear(); renderOverlay(); syncHistory() }} />
         <Divider />
@@ -338,7 +354,7 @@ function Divider() { return <span className="w-px h-5 bg-white/[0.08] mx-0.5" />
 
 // Die Anleitung zum Malen der Maske. Sie stand bis zum 19.09.2026 gross und
 // gelb im Promptfenster, bei jedem Bearbeitungslauf aufs Neue. Entscheid von
-// David: "zu einer einmal wegklickbaren Info machen, wenn man die Paint Mask
+// Der Inhaber: "zu einer einmal wegklickbaren Info machen, wenn man die Paint Mask
 // oeffnet. Komplett raus aus dem Promptfenster."
 //
 // Sie steht jetzt dort, wo sie gebraucht wird, naemlich ueber der Leinwand, und
@@ -353,13 +369,17 @@ function MaskHint() {
   const [dismissed, setDismissed] = useState(() => {
     try { return localStorage.getItem(MASK_HINT_KEY) === '1' } catch { return false }
   })
+  // Erase has no prompt field: after the mask the next step is Create.
+  const isEraser = useCreateStore((s) => s.intent()) === 'eraser'
   if (dismissed) return null
   return (
     <div className="pointer-events-none absolute inset-x-0 top-3 z-10 flex justify-center px-3">
       <div className="lu-elevated pointer-events-auto flex items-center gap-2 rounded-[var(--radius-control)] px-3 py-1.5">
         <Brush size={13} className="shrink-0 text-gray-400" />
         <span className="t-control text-gray-300">
-          Apply mask when you are done, then describe the edit below the image.
+          {isEraser
+            ? 'Apply mask when you are done, then hit Create.'
+            : 'Apply mask when you are done, then describe the edit below the image.'}
         </span>
         <button
           onClick={() => {

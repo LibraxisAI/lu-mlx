@@ -1,7 +1,7 @@
 /**
  * @vitest-environment jsdom
  *
- * The web collapse behaviour, on the desktop (2.6.8, David).
+ * The web collapse behaviour, on the desktop (2.6.8).
  *
  * "Die Einklapp-Optik von der Webapp soll auch in den Desktop, bzw. auch die
  *  Latest Chats dann im Hauptscreen wie in der Webapp, ausser man klappt das
@@ -115,7 +115,7 @@ describe('the collapsed sidebar is a rail, not a hole', () => {
 
   it('navigating away and back keeps the collapse the user chose', () => {
     // The old setView forced sidebarOpen open on every return to Chat, which
-    // is exactly the behaviour David asked to be gone.
+    // is exactly the behaviour the owner asked to be gone.
     useUIStore.setState({ sidebarOpen: false })
     useUIStore.getState().setView('models')
     useUIStore.getState().setView('chat')

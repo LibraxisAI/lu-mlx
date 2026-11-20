@@ -20,6 +20,7 @@ const read = (rel: string) => readFileSync(resolve(here, rel), 'utf8')
 const agent = read('../useAgentChat.ts')
 const provider = read('../../api/providers/openai-provider.ts')
 const types = read('../../api/providers/types.ts')
+const codeTab = read('../useCodex.ts')
 
 describe('the header survives the trip to the retry site', () => {
   it('parseError puts it on the error it builds', () => {
@@ -40,7 +41,8 @@ describe('both retry sites honour it', () => {
       .join('\n')
     expect(code).not.toContain('setTimeout(r, 1500 * connRetries)')
     expect(agent.match(/const wait = retryDelayMs\(thinkErr, connRetries\)/g)).toHaveLength(2)
-    expect(agent.match(/await new Promise\(\(r\) => setTimeout\(r, wait\)\)/g)).toHaveLength(2)
+    // The sleep of exactly that wait, through the helper that also shows "Retrying" while it lasts.
+    expect(agent.match(/await waitBeforeRetry\(convId, wait, abort\.signal\)/g)).toHaveLength(2)
   })
 
   it('a long wait is announced, so a quiet minute does not read as a freeze', () => {
@@ -58,7 +60,15 @@ describe('and giving up says when to come back', () => {
     const generic = agent.indexOf("'\\n\\nAgent error: ' + errorMsg")
     expect(branch).toBeGreaterThan(-1)
     expect(branch).toBeLessThan(generic)
-    expect(agent).toContain('The server is limiting how many requests this account may send')
+  })
+
+  it('the sentence is the server\'s, and the app\'s own one claims nothing about the account', () => {
+    const branch = agent.slice(
+      agent.indexOf('} else if (httpStatusOf(err) === 429) {'),
+      agent.indexOf("} else if ((err as { code?: string })?.code === 'flash_timeout') {"),
+    )
+    expect(branch).toContain('requestLimitMessageOf(err,')
+    expect(agent).not.toContain('this account may send')
   })
 
   it('but an empty wallet is judged first, it answers 429 too', () => {
@@ -78,5 +88,22 @@ describe('and giving up says when to come back', () => {
       agent.indexOf("} else if ((err as { code?: string })?.code === 'flash_timeout') {"),
     )
     expect(branch).not.toContain('loopHalt =')
+  })
+})
+
+describe('the Code tab does the same', () => {
+  it('waits the time the server names and asks again, at most twice', () => {
+    expect(codeTab).toContain('if (httpStatusOf(limitErr) !== 429 || isTerminalModelError(limitErr) || limitWaits >= 2 || abort.signal.aborted) throw limitErr')
+    expect(codeTab).toContain('const wait = retryDelayMs(limitErr, limitWaits)')
+    expect(codeTab).toContain('await waitBeforeRetry(convId, wait, abort.signal)')
+  })
+
+  it('and ends on the same sentence, without a code and a status in front', () => {
+    const limit = codeTab.indexOf('if (status === 429) {')
+    expect(limit).toBeGreaterThan(-1)
+    expect(limit).toBeLessThan(codeTab.indexOf('fullContent += `\\n\\nError: ${msg}${hint}`'))
+    // An empty wallet answers 429 too and is judged first.
+    expect(codeTab.indexOf("if (code === 'credits_exhausted') {")).toBeLessThan(limit)
+    expect(codeTab.slice(limit, limit + 400)).toContain('requestLimitMessageOf(err,')
   })
 })

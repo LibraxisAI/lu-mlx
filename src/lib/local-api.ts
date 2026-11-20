@@ -97,6 +97,43 @@ export function clientFelder(base: string, token: string): Array<{ feld: string;
 }
 
 /**
+ * Die kurze Anleitung "Use with SillyTavern / other apps" in der Einstellung.
+ *
+ * GitHub Discussion #14 (micnorian14): "API key not working even though I
+ * haven't set one". Niemand setzt hier einen Schluessel selbst: LU erzeugt
+ * ihn, und jede Anfrage braucht ihn. Discord: SillyTavern zeigte "no model
+ * loaded", weil die Liste leer war (C57). Die Schritte nennen deshalb die
+ * Felder so, wie SillyTavern sie nennt, und sagen, dass LU-Engine-Modelle beim
+ * ersten Aufruf geladen werden.
+ */
+export interface AnleitungsAbschnitt {
+  titel: string
+  schritte: string[]
+}
+
+export function clientAnleitung(base: string): AnleitungsAbschnitt[] {
+  return [
+    {
+      titel: 'SillyTavern',
+      schritte: [
+        'API Connections: API "Chat Completion", source "Custom (OpenAI-compatible)".',
+        `Custom Endpoint (Base URL): ${base}`,
+        'Custom API Key: the API Key above (copy button).',
+        'Press Connect, then pick a model. lu/… are LU Engine models, ollama/… and lmstudio/… the other apps.',
+      ],
+    },
+    {
+      titel: 'Any other OpenAI-compatible app',
+      schritte: [
+        'Set the Base URL and the API Key from above. The key is required, also on this machine.',
+        'Model: an id from GET /v1/models, for example lu/<model name>.',
+        'An LU Engine model that is not loaded is loaded by the first request, so the first answer takes longer.',
+      ],
+    },
+  ]
+}
+
+/**
  * Was die Oberflaeche ueber die Reichweite sagt.
  *
  * Der LAN-Satz ist bewusst konkret statt beruhigend: "andere Geraete" ist
@@ -111,8 +148,21 @@ export function reichweiteText(lan: boolean): string {
 
 /** Ob der aktuelle Stand ueberhaupt startbar ist. */
 export function kannStarten(token: string, port: number): PortUrteil {
-  if (!token.trim()) return { ok: false, grund: 'The API will not start without a token. Generate one first.' }
+  if (!token.trim()) return { ok: false, grund: 'The API will not start without an API key. Press Generate below first.' }
   return pruefePort(port)
+}
+
+/**
+ * Soll die API beim Start von LU von selbst hochkommen?
+ *
+ * fanezeu (23.10.2026) betreibt LU auf einem Linux-Server ohne Bildschirm
+ * davor. Dort startet LU mit der Sitzung, und eine API, die erst nach einem
+ * Klick in den Einstellungen laeuft, ist nach jedem Neustart weg. Gestartet
+ * wird nur, was der Nutzer selbst eingeschaltet hat und was auch der Knopf
+ * starten wuerde: ohne Token oder mit unbrauchbarem Port bleibt sie aus.
+ */
+export function sollBeimStartStarten(s: { mitLuStarten: boolean; token: string; port: number; laeuft: boolean }): boolean {
+  return s.mitLuStarten && !s.laeuft && kannStarten(s.token, s.port).ok
 }
 
 /**
@@ -167,4 +217,53 @@ export function corsText(origins: string[]): string {
   return origins.length === 1
     ? `Open to ${origins[0]} only.`
     : `Open to ${origins.length} origins: ${origins.join(', ')}.`
+}
+
+// ── Was ueber die API gelaufen ist (GH Discussion #4 2026-09-22) ──
+
+/** Die Zahlen, die `local_api_usage` seit dem letzten Start liefert. */
+export interface LocalApiNutzung {
+  since: number
+  requests: number
+  failed: number
+  active: number
+  promptTokens: number
+  completionTokens: number
+  withoutCounts: number
+  lastModel: string | null
+  lastAt: number | null
+}
+
+const zahl = (n: number) => n.toLocaleString('en-US')
+
+function vorWieLangem(ms: number, jetzt: number): string {
+  const s = Math.max(0, Math.round((jetzt - ms) / 1000))
+  if (s < 60) return 'just now'
+  const m = Math.round(s / 60)
+  if (m < 60) return `${m} min ago`
+  const h = Math.round(m / 60)
+  return h < 24 ? `${h} h ago` : `${Math.round(h / 24)} d ago`
+}
+
+/** Die Zeilen fuer das Panel. Sichtbarer Text ist Englisch. */
+export function nutzungZeilen(u: LocalApiNutzung, jetzt: number): Array<{ feld: string; wert: string }> {
+  return [
+    // Gezaehlt wird, was ein Modell erreicht (chat, completions, embeddings),
+    // nicht das Abfragen der Modellliste, das viele Werkzeuge im Sekundentakt
+    // tun. Die 3.0.4-Gegenprobe (02.10.2026) rief /v1/models auf und las
+    // "Requests 0" als Fehler; der Name sagt jetzt, was gezaehlt wird.
+    { feld: 'Model requests', wert: u.failed > 0 ? `${zahl(u.requests)} (${zahl(u.failed)} failed)` : zahl(u.requests) },
+    { feld: 'Running now', wert: zahl(u.active) },
+    { feld: 'Tokens in', wert: zahl(u.promptTokens) },
+    { feld: 'Tokens out', wert: zahl(u.completionTokens) },
+    { feld: 'Last model', wert: u.lastModel ? `${u.lastModel}, ${vorWieLangem(u.lastAt ?? jetzt, jetzt)}` : 'none yet' },
+  ]
+}
+
+/** Tokens kennt nur der Modellserver. Wo er keine meldet, steht das da,
+ *  statt dass eine Schaetzung als Zaehlung auftritt. */
+export function ohneZahlenText(u: LocalApiNutzung): string | null {
+  if (u.withoutCounts === 0) return null
+  const wer = u.withoutCounts === 1 ? '1 answer' : `${zahl(u.withoutCounts)} answers`
+  return `${wer} came without token counts from the model server, so the totals above leave them out.`
 }

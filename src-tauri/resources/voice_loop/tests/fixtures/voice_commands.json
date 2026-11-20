@@ -1,0 +1,10 @@
+{
+  "comment": "What counts as a spoken yes, no or stop (stop includes wait and pause: the app holds the task for all of them). Read by the voice loop's tests (pytest) and by the app's tests (vitest), so the two matchers cannot drift apart.",
+  "yes": ["yes", "Yes.", "Yes, please.", "yeah", "Yep!", "OK", "Okay.", "sure", "Go ahead.", "do it", "Yes, do it.", "Yes, go ahead.", "confirm", "Allow it."],
+  "no": ["no", "No.", "No, thanks.", "No thank you.", "nope", "Don't.", "do not", "deny", "Decline.", "No, don't."],
+  "stop": ["stop", "Stop.", "STOP!", "Stop it.", "stop that", "Please stop.", "Stop, please.", "stop now", "Stop everything.", "Stop the task.", "cancel", "Cancel that.", "Cancel it.", "abort", "wait", "Wait.", "Wait a moment.", "wait a second", "Hold on.", "pause", "Pause it."],
+  "none": [
+    "", "yes but first tell me what you will click", "no idea", "I said yes yesterday", "stop by the bakery on the way", "yesterday",
+    "don't stop", "Wait. What is two plus two?", "wait for the page to load", "pause the video", "can you stop the music in the browser", "okay so what is on the screen", "sure thing but wait", "thank you", "know", "nose", "yes no"
+  ]
+}

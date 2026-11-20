@@ -26,7 +26,7 @@ const ROH =
 describe('hostOf', () => {
   it('schneidet Schema und Pfad weg und laesst den Port stehen', () => {
     expect(hostOf('http://127.0.0.1:8127/v1')).toBe('127.0.0.1:8127')
-    expect(hostOf('https://192.168.0.54:11434')).toBe('192.168.0.54:11434')
+    expect(hostOf('https://192.168.1.54:11434')).toBe('192.168.1.54:11434')
     expect(hostOf('http://localhost:1234/v1/chat/completions')).toBe('localhost:1234')
   })
 

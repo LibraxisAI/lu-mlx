@@ -131,7 +131,7 @@ describe('the name repair runs before both gates', () => {
   // 2026-07-24) is not in MUTATING_TOOLS and is not registered, so a read-only
   // turn passed it, and canonicalToolName then turned it into `file_write`
   // on the way to the executor.
-  const repairAt = src.indexOf('const knownToolNames = toolRegistry.getAll()')
+  const repairAt = src.indexOf('const fixed = repairToolCall(raw, args, tools)')
   const readOnlyGateAt = src.indexOf('const blocked = toolCalls.filter((tc) => !allowedInReadOnlyTurn')
   const permissionGateAt = src.indexOf('const refused = toolCalls.filter(isBlocked)')
 

@@ -1,13 +1,16 @@
 import { expect, test, type Page } from '@playwright/test'
 import type { SyncedMemoryRecord } from '../src/api/cloud/memory-sync'
 import { isRecord } from './support/recorded'
+import { appModules, type AppWindow } from './support/ui'
+
+// The app's own port, from the configured baseURL, so a second config on another port still works.
+const appPort = () => new URL(test.info().project.use.baseURL ?? 'http://localhost:5273').port
 
 async function accountFixture(page: Page) {
-  await page.evaluate(async () => {
-    const authPath = '/src/stores/cloudAuthStore.ts'
-    const sdkPath = '/src/api/cloud/supabase.ts'
-    const { useCloudAuthStore } = await import(authPath) as typeof import('../src/stores/cloudAuthStore')
-    const { supabaseCloud } = await import(sdkPath) as typeof import('../src/api/cloud/supabase')
+  await appModules(page, ['/src/stores/cloudAuthStore.ts', '/src/api/cloud/supabase.ts'])
+  await page.evaluate(() => {
+    const { useCloudAuthStore } = (window as unknown as AppWindow).__APP__['/src/stores/cloudAuthStore.ts'] as typeof import('../src/stores/cloudAuthStore')
+    const { supabaseCloud } = (window as unknown as AppWindow).__APP__['/src/api/cloud/supabase.ts'] as typeof import('../src/api/cloud/supabase')
     const auth = supabaseCloud().auth
     Reflect.set(auth, 'getSession', async () => ({ data: { session: { access_token: 'synthetic-proof-token', user: { id: 'owner-a' } } } }))
     Reflect.set(auth, 'getUser', async () => ({ data: { user: { id: 'owner-a' } }, error: null }))
@@ -21,7 +24,7 @@ test('foreground cancellation stops a held pull and leaving the collection cance
   let finish: (() => Promise<void>) | undefined
   let hold = true
   let reads = 0
-  await page.route('**/*', route => new URL(route.request().url()).port === '5273' ? route.continue() : route.abort())
+  await page.route('**/*', route => new URL(route.request().url()).port === appPort() ? route.continue() : route.abort())
   await page.route('**/api/memory/sync**', async route => {
     expect(route.request().method()).toBe('GET')
     reads++
@@ -69,7 +72,7 @@ test('foreground cancellation stops a held pull and leaving the collection cance
 test('explicit UI sync uploads, downloads, preserves conflicts and persists shared deletion', async ({ page }, testInfo) => {
   let records: SyncedMemoryRecord[] = []
   let writes = 0
-  await page.route('**/*', route => new URL(route.request().url()).port === '5273' ? route.continue() : route.abort())
+  await page.route('**/*', route => new URL(route.request().url()).port === appPort() ? route.continue() : route.abort())
   await page.route('**/api/memory/sync**', async route => {
     expect(route.request().headers().authorization).toBe('Bearer synthetic-proof-token')
     if (route.request().method() === 'POST') {
@@ -117,9 +120,9 @@ test('explicit UI sync uploads, downloads, preserves conflicts and persists shar
   await sync.click()
   await expect(page.getByRole('status')).toHaveText('Synced 0 uploads and 1 downloads. 0 conflicting memories left unchanged.')
   await expect(page.getByText('Cloud revision', { exact: true })).toBeVisible()
-  await page.evaluate(async () => {
-    const path = '/src/stores/memoryStore.ts'
-    const { useMemoryStore } = await import(path) as typeof import('../src/stores/memoryStore')
+  await appModules(page, ['/src/stores/memoryStore.ts'])
+  await page.evaluate(() => {
+    const { useMemoryStore } = (window as unknown as AppWindow).__APP__['/src/stores/memoryStore.ts'] as typeof import('../src/stores/memoryStore')
     useMemoryStore.getState().updateMemory(useMemoryStore.getState().entries[0].id, { content: 'Local correction' })
   })
   records = records.map(record => ({ ...record, revision: 3, payload: { ...record.payload, content: 'Concurrent cloud correction', updatedAt: 3 } }))
@@ -130,9 +133,9 @@ test('explicit UI sync uploads, downloads, preserves conflicts and persists shar
   await conflict.getByText('Compare full memory records', { exact: true }).click()
   await expect(conflict.locator('pre').first()).toContainText('Local correction')
   await expect(conflict.locator('pre').last()).toContainText('Concurrent cloud correction')
-  const persistedReview = await page.evaluate(async () => {
-    const path = '/src/lib/memory-persistence.ts'
-    return (await import(path) as typeof import('../src/lib/memory-persistence')).flushMemoryPersist()
+  await appModules(page, ['/src/lib/memory-persistence.ts'])
+  const persistedReview = await page.evaluate(() => {
+    return ((window as unknown as AppWindow).__APP__['/src/lib/memory-persistence.ts'] as typeof import('../src/lib/memory-persistence')).flushMemoryPersist()
   })
   expect(persistedReview).not.toContain('Concurrent cloud correction')
   await conflict.screenshot({ path: testInfo.outputPath('memory-conflict.png') })
@@ -147,9 +150,9 @@ test('explicit UI sync uploads, downloads, preserves conflicts and persists shar
   await page.getByRole('button', { name: 'Use cloud version', exact: true }).click()
   await expect(page.getByRole('status')).toHaveText('Synced 0 uploads and 1 downloads. 0 conflicting memories left unchanged.')
   await expect(page.getByText('Newer cloud correction', { exact: true })).toBeVisible()
-  await page.evaluate(async () => {
-    const path = '/src/stores/memoryStore.ts'
-    const { useMemoryStore } = await import(path) as typeof import('../src/stores/memoryStore')
+  await appModules(page, ['/src/stores/memoryStore.ts'])
+  await page.evaluate(() => {
+    const { useMemoryStore } = (window as unknown as AppWindow).__APP__['/src/stores/memoryStore.ts'] as typeof import('../src/stores/memoryStore')
     useMemoryStore.getState().updateMemory(useMemoryStore.getState().entries[0].id, { content: 'Final local correction' })
   })
   records = records.map(record => ({ ...record, revision: 5, payload: { ...record.payload, content: 'Another cloud correction', updatedAt: 5 } }))
@@ -158,25 +161,28 @@ test('explicit UI sync uploads, downloads, preserves conflicts and persists shar
   await page.getByRole('button', { name: 'Keep local version', exact: true }).click()
   await expect(page.getByRole('status')).toHaveText('Synced 1 uploads and 0 downloads. 0 conflicting memories left unchanged.')
   expect(records[0]).toMatchObject({ revision: 6, payload: { content: 'Final local correction' } })
-  await page.evaluate(async () => {
-    const path = '/src/stores/memoryStore.ts'
-    const { useMemoryStore } = await import(path) as typeof import('../src/stores/memoryStore')
+  await appModules(page, ['/src/stores/memoryStore.ts'])
+  await page.evaluate(() => {
+    const { useMemoryStore } = (window as unknown as AppWindow).__APP__['/src/stores/memoryStore.ts'] as typeof import('../src/stores/memoryStore')
     useMemoryStore.getState().updateMemory(useMemoryStore.getState().entries[0].id, { content: 'Delete this local fact' })
   })
   records = records.map(record => ({ ...record, revision: 7, payload: { ...record.payload, content: 'Delete this cloud fact', updatedAt: 7 } }))
   await sync.click()
   await expect(conflict).toBeVisible()
-  await page.getByRole('button', { name: 'Delete entry', exact: true }).click()
+  await page.getByTitle('Delete this memory', { exact: true }).click()
+  await page.getByTitle('Click again to delete', { exact: true }).click()
+  // The Undo bar of a delete is a status line of its own (3.0.8); OK closes it.
+  await page.getByRole('button', { name: 'Dismiss', exact: true }).click()
   await expect(page.getByRole('group', { name: 'Memory conflict 1', exact: true })).toHaveCount(0)
   await sync.click()
   await expect(page.getByRole('status')).toHaveText('Synced 1 uploads and 0 downloads. 0 conflicting memories left unchanged.')
   expect(records[0]).toMatchObject({ deleted: true, payload: null, revision: 8 })
   await page.reload()
   await accountFixture(page)
-  await expect(page.getByRole('button', { name: 'Delete entry', exact: true })).toHaveCount(0)
-  const baseline = await page.evaluate(async () => {
-    const path = '/src/stores/memoryStore.ts'
-    const { useMemoryStore } = await import(path) as typeof import('../src/stores/memoryStore')
+  await expect(page.getByTitle('Delete this memory', { exact: true })).toHaveCount(0)
+  await appModules(page, ['/src/stores/memoryStore.ts'])
+  const baseline = await page.evaluate(() => {
+    const { useMemoryStore } = (window as unknown as AppWindow).__APP__['/src/stores/memoryStore.ts'] as typeof import('../src/stores/memoryStore')
     return Object.values(useMemoryStore.getState().memorySyncBaselines['owner-a'])
   })
   expect(baseline).toEqual([{ revision: 8, hash: null }])
@@ -187,7 +193,7 @@ test(`a ${responseMode} first-upload response cannot revive a locally deleted me
   let records: SyncedMemoryRecord[] = []
   let lostResponse = false
   let finish: (() => Promise<void>) | undefined
-  await page.route('**/*', route => new URL(route.request().url()).port === '5273' ? route.continue() : route.abort())
+  await page.route('**/*', route => new URL(route.request().url()).port === appPort() ? route.continue() : route.abort())
   await page.route('**/api/memory/sync**', async route => {
     if (route.request().method() === 'GET') return route.fulfill({ json: { ownerId: 'owner-a', records, next: null } })
     const body: unknown = route.request().postDataJSON()
@@ -225,16 +231,17 @@ test(`a ${responseMode} first-upload response cannot revive a locally deleted me
   }
   await expect(page.getByRole('status')).toContainText('Some changes may already be saved')
   expect(records[0].deleted).toBe(false)
-  await page.getByRole('button', { name: 'Delete entry', exact: true }).click()
+  await page.getByTitle('Delete this memory', { exact: true }).click()
+  await page.getByTitle('Click again to delete', { exact: true }).click()
+  await appModules(page, ['/src/lib/memory-persistence.ts'])
   await page.evaluate(async () => {
-    const path = '/src/lib/memory-persistence.ts'
-    await (await import(path) as typeof import('../src/lib/memory-persistence')).flushMemoryPersist()
+    await ((window as unknown as AppWindow).__APP__['/src/lib/memory-persistence.ts'] as typeof import('../src/lib/memory-persistence')).flushMemoryPersist()
   })
   await page.reload()
   await accountFixture(page)
-  const pending = await page.evaluate(async () => {
-    const path = '/src/stores/memoryStore.ts'
-    const { useMemoryStore } = await import(path) as typeof import('../src/stores/memoryStore')
+  await appModules(page, ['/src/stores/memoryStore.ts'])
+  const pending = await page.evaluate(() => {
+    const { useMemoryStore } = (window as unknown as AppWindow).__APP__['/src/stores/memoryStore.ts'] as typeof import('../src/stores/memoryStore')
     return { entries: useMemoryStore.getState().entries.length, pending: Object.keys(useMemoryStore.getState().memorySyncPending['owner-a']).length }
   })
   expect(pending).toEqual({ entries: 0, pending: 1 })
@@ -242,6 +249,6 @@ test(`a ${responseMode} first-upload response cannot revive a locally deleted me
   await page.getByRole('button', { name: 'Sync account memories', exact: true }).click()
   await expect(page.getByRole('status')).toHaveText('Synced 1 uploads and 0 downloads. 0 conflicting memories left unchanged.')
   expect(records[0]).toMatchObject({ revision: 2, payload: null, deleted: true })
-  await expect(page.getByRole('button', { name: 'Delete entry', exact: true })).toHaveCount(0)
+  await expect(page.getByTitle('Delete this memory', { exact: true })).toHaveCount(0)
 })
 }

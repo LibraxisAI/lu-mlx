@@ -1,4 +1,5 @@
 import { extractToolCallsWithRanges, stripRanges } from '../../lib/tool-call-repair'
+import { toolCallsFromReasoning } from '../../lib/loose-tool-parse'
 import type { ToolCall } from '../../api/providers/types'
 
 /**
@@ -20,7 +21,7 @@ import type { ToolCall } from '../../api/providers/types'
  *
  *  3. WAS UEBRIG BLEIBT, IST ANTWORT. Das ist die Regel, die man am leichtesten
  *     falsch macht: die Prosa um das JSON herum wird BEHALTEN, damit die
- *     Zwischenantworten in der Zeitleiste stehen bleiben (David 2026-06-02 r2:
+ *     Zwischenantworten in der Zeitleiste stehen bleiben (2026-06-02 r2:
  *     "antworten zwischen drin verschwinden immer, darf nicht sein"). Geleert
  *     wird nur, wenn nach dem Schnitt nichts als Satzzeichen und Leerraum
  *     dasteht.
@@ -65,7 +66,7 @@ export function recoverToolCallsFromContent(toolCalls: ToolCall[], content: stri
   // tool-call JSON alongside native tool_calls — native was parsed
   // already, but the same JSON still sits in the content. Strip
   // those too so the chat bubble stays readable.
-  if (calls.length > 0 && turnContent && /\{\s*"(?:name|tool|function)"\s*:/.test(turnContent)) {
+  if (calls.length > 0 && turnContent && /\{\s*"(?:name|tool|function|call)"\s*:/.test(turnContent)) {
     const { ranges } = extractToolCallsWithRanges(turnContent)
     if (ranges.length > 0) {
       turnContent = stripRanges(turnContent, ranges)
@@ -78,10 +79,51 @@ export function recoverToolCallsFromContent(toolCalls: ToolCall[], content: stri
   // stripRanges above. Keeping it (instead of clearing) is what makes
   // every between-tool answer survive so the renderer can interleave
   // them chronologically: tool → answer → tool → tool → answer …
-  // (David 2026-06-02 r2: "antworten zwischen drin verschwinden immer,
+  // (2026-06-02 r2: "antworten zwischen drin verschwinden immer,
   // darf nicht sein"). Older answers auto-collapse in the UI, so the
   // old "stack of duplicated I'm-about-to paragraphs" problem is gone.
   // Only drop it when nothing but punctuation/whitespace remains.
+  // The marker some models put in front of each call (GH #147) is no prose.
+  if (extractedFromContent) turnContent = turnContent.replace(/!function_call:\s*/g, '').trim()
   if (extractedFromContent && !/[A-Za-z0-9]/.test(turnContent)) turnContent = ''
   return { toolCalls: calls, content: turnContent, extractedFromContent }
+}
+
+/**
+ * Dasselbe, aber ein Aufruf AUS DEM TEXT zaehlt nur, wenn jeder Name darin ein
+ * Werkzeug dieses Agenten ist (GH #147): Beispiel-JSON in einer Erklaerung
+ * wird so nie ausgefuehrt. Native Aufrufe bleiben, wie sie sind.
+ *
+ * Der Streaming-Zweig von useCodex hatte diese Regel inline, der Hermes-Zweig
+ * gar keine: ein Modell auf dem Prompt-Transport, das seine Aufrufe als
+ * ```json-Block schrieb, beendete den Lauf mit rohem JSON (T1-Nachttest 3.0.9).
+ */
+export function recoverKnownToolCallsFromContent(
+  toolCalls: ToolCall[],
+  content: string,
+  isKnown: (name: string, args: Record<string, unknown>) => boolean,
+): RecoveredTurn {
+  const recovered = recoverToolCallsFromContent(toolCalls, content)
+  const fromText = toolCalls.length === 0 && recovered.toolCalls.length > 0
+  if (!fromText) return recovered
+  const allKnown = recovered.toolCalls.every((tc) => {
+    const args = tc.function.arguments
+    return isKnown(tc.function.name, args && typeof args === 'object' && !Array.isArray(args) ? args as Record<string, unknown> : {})
+  })
+  return allKnown ? recovered : { toolCalls, content, extractedFromContent: false }
+}
+
+/**
+ * C59 A3: the calls of a turn that sat in the reasoning channel while the
+ * answer stayed empty (lib/loose-tool-parse.ts, toolCallsFromReasoning).
+ * Unchanged when there is an answer or a call already.
+ */
+export function recoverToolCallsFromReasoning(
+  toolCalls: ToolCall[],
+  content: string,
+  thinking: string | undefined,
+  known: readonly string[],
+): ToolCall[] {
+  const lifted = toolCallsFromReasoning(thinking ?? '', content, toolCalls.length, known)
+  return lifted.length ? lifted.map((c) => ({ function: { name: c.name, arguments: c.arguments } })) : toolCalls
 }

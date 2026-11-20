@@ -6,7 +6,7 @@ import {
 // These sets drive the phase labels of the Create progress bar. A node type
 // missing here does not break the run, it breaks the STORY the bar tells:
 // the GGUF video path showed no "Loading model" phase at all because
-// UnetLoaderGGUF was unknown (David 2026-08-02).
+// UnetLoaderGGUF was unknown (2026-08-02).
 describe('progress phase node sets', () => {
   it('recognises the GGUF unet loaders as model loading', () => {
     expect(LOADER_NODES.has('UnetLoaderGGUF')).toBe(true)

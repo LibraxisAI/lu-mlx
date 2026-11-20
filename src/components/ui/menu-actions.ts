@@ -32,15 +32,23 @@ export interface MenuAction {
 
 /**
  * Die Aktionen, die die Aktionsleiste unter einer Nachricht schon hat
- * (`chat/MessageBubble.tsx`). Genau diese vier, keine erfundene fünfte.
+ * (`chat/MessageBubble.tsx`). Genau diese, keine erfundene weitere; `branch` kam mit GH #174 an beide zugleich.
  * `regenerate` ist `null`, wo die Leiste den Knopf auch nicht zeigt (eigene
  * Nachricht, oder es läuft gerade eine Antwort).
  */
 export interface MessageMenuHandlers {
+  /** The Copy button of the bar: the message as Markdown. */
   readonly copy: () => void
+  /** Right-click only: the selected or shown text, as Ctrl+C gives it
+   *  (lib/copy-plain.ts). With it, the button's copy becomes "Copy as
+   *  Markdown" in the menu. */
+  readonly copyText?: () => void
   readonly edit: (() => void) | null
   readonly regenerate: (() => void) | null
-  readonly remove: () => void
+  /** GH #174: a new chat that ends with this message. */
+  readonly branch: (() => void) | null
+  /** Null in a read-only view (an earlier compact layer, 3.0.9). */
+  readonly remove: (() => void) | null
 }
 
 export interface MessageMenuState {
@@ -54,10 +62,17 @@ export function buildMessageMenu(h: MessageMenuHandlers, s: MessageMenuState): M
   const out: MenuAction[] = []
   if (h.edit) out.push({ id: 'edit', label: 'Edit', run: h.edit })
   if (h.regenerate) out.push({ id: 'regenerate', label: 'Regenerate', run: h.regenerate })
-  out.push({ id: 'copy', label: s.copied ? 'Copied' : 'Copy text', run: h.copy })
+  if (h.copyText) {
+    // Discord 30.10.2026: "Copy text" pasted ** around bold words.
+    out.push({ id: 'copy', label: s.copied ? 'Copied' : 'Copy text', run: h.copyText })
+    out.push({ id: 'copy-markdown', label: 'Copy as Markdown', run: h.copy })
+  } else {
+    out.push({ id: 'copy', label: s.copied ? 'Copied' : 'Copy text', run: h.copy })
+  }
+  if (h.branch) out.push({ id: 'branch', label: 'Branch from here', run: h.branch })
   // Die Beschriftung sagt dasselbe wie der `title` des Knopfes: der erste
   // Aufruf schärft nur, gelöscht wird erst beim zweiten.
-  out.push({
+  if (h.remove) out.push({
     id: 'delete',
     label: s.confirmDelete ? 'Click again to delete' : 'Delete message',
     run: h.remove,
@@ -78,6 +93,12 @@ export interface ModelMenuHandlers {
   readonly select: () => void
   readonly info: () => void
   readonly remove: () => void
+  /** A14: only on LU Engine rows whose original weights are known. */
+  readonly removeRefusals?: () => void
+  /** W33: a ComfyUI file (image or video model) shown in its folder. */
+  readonly reveal?: () => void
+  /** W33: the name LU shows for a ComfyUI file (the file stays). */
+  readonly rename?: () => void
 }
 
 export interface ModelMenuState {
@@ -91,7 +112,55 @@ export function buildModelCardMenu(h: ModelMenuHandlers, s: ModelMenuState): Men
   // nichts tut — die Karte zeigt an derselben Stelle ihr ACTIVE-Etikett.
   if (!s.isActive) out.push({ id: 'select', label: 'Use this model', run: h.select })
   out.push({ id: 'info', label: 'Details', run: h.info })
+  if (h.reveal) out.push({ id: 'reveal', label: 'Show in folder', run: h.reveal })
+  if (h.rename) out.push({ id: 'rename', label: 'Rename…', run: h.rename })
+  if (h.removeRefusals) out.push({ id: 'remove-refusals', label: 'Remove refusals…', run: h.removeRefusals })
   if (s.canDelete) out.push({ id: 'delete', label: 'Delete model', run: h.remove, destructive: true })
+  return out
+}
+
+/* ── LoRA ────────────────────────────────────────────────────────────────── */
+
+/** W33: the right click on a LoRA row in the Models tab. Only actions the
+ *  row already has as buttons: its folder, the rename-and-note dialog (C41;
+ *  it renames the name LU shows, the file stays), Details, and Delete, which
+ *  opens the same confirmation as the row's Delete button. */
+export interface LoraMenuHandlers {
+  readonly reveal?: () => void
+  readonly rename?: () => void
+  readonly info?: () => void
+  readonly remove: () => void
+}
+
+export function buildLoraRowMenu(h: LoraMenuHandlers): MenuAction[] {
+  const out: MenuAction[] = []
+  if (h.reveal) out.push({ id: 'reveal', label: 'Show in folder', run: h.reveal })
+  if (h.rename) out.push({ id: 'rename', label: 'Rename…', run: h.rename })
+  if (h.info) out.push({ id: 'info', label: 'Details', run: h.info })
+  out.push({ id: 'delete', label: 'Delete…', run: h.remove, destructive: true })
+  return out
+}
+
+/* ── Download-Fenster ────────────────────────────────────────────────────── */
+
+/** W33: the right click on a finished ComfyUI download. "Remove from list"
+ *  only takes the entry off the list; "Delete file…" deletes the model file,
+ *  through the same confirmation as the Models tab. Rename and Delete only
+ *  where the entry is one file: a bundle's files are rows of their own in
+ *  the Models tab. */
+export interface DownloadMenuHandlers {
+  readonly reveal?: () => void
+  readonly rename?: () => void
+  readonly removeFromList: () => void
+  readonly deleteFile?: () => void
+}
+
+export function buildDownloadMenu(h: DownloadMenuHandlers): MenuAction[] {
+  const out: MenuAction[] = []
+  if (h.reveal) out.push({ id: 'reveal', label: 'Show in folder', run: h.reveal })
+  if (h.rename) out.push({ id: 'rename', label: 'Rename…', run: h.rename })
+  out.push({ id: 'remove-from-list', label: 'Remove from list', run: h.removeFromList })
+  if (h.deleteFile) out.push({ id: 'delete-file', label: 'Delete file…', run: h.deleteFile, destructive: true })
   return out
 }
 

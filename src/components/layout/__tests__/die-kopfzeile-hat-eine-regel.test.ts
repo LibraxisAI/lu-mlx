@@ -71,7 +71,7 @@ describe('D-S19: der Center-Slot traegt jetzt etwas, und rechts steht weniger', 
 
   it('und der Stale-Hinweis steht seit dem 04.09.2026 auch hier', () => {
     // Er stand in der Mitte-Gruppe und schob dort das Drehrad zur Seite,
-    // sobald ein Modell kaputt war. David: "das ausgewaehlte im drehrad ist
+    // sobald ein Modell kaputt war. Der Inhaber: "das ausgewaehlte im drehrad ist
     // immer hardstuck mittig. keine ausnahme."
     //
     // Er gehoert ohnehin hierher, denn er zeigt einen ZUSTAND, und genau das
@@ -204,6 +204,12 @@ describe('D-S47: die Kebab-Regel ist an der Anordnung ablesbar', () => {
       /const navTargets = NAV_TARGETS\.filter\(\(t\) => !t\.localOnly \|\| settings\.appMode !== 'cloud'\)/,
     )
     expect([...CODE.matchAll(/appMode !== 'cloud'/g)]).toHaveLength(1)
+  })
+
+  it('Voice is one of the targets Cloud hides, next to Benchmark and Models', () => {
+    const local = [...CODE.matchAll(/\{ id: '(\w+)',[^}]*localOnly: true \}/g)].map((m) => m[1])
+    // Neurons left the header in 3.1.0 (a plugin with its own window).
+    expect(local.sort()).toEqual(['benchmark', 'models', 'voice'])
   })
 })
 

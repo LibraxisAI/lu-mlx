@@ -1,18 +1,32 @@
+import { PC_3D_MODEL } from '../../../lib/three/run-local-3d'
+import { MAC_3D_MODELS } from '../../../lib/mac-3d'
+import { isPictureFirstRun, pictureFirstPictureCredits } from '../../../lib/three/picture-first'
 import { useCreateStore } from '../../../stores/createStore'
 import {
-  useCloudCatalogStore, cloudModelById, defaultCloudModel, opPickerModels, modelCostHint, isEditModel, shortCount,
+  useCloudCatalogStore, cloudModelById, defaultCloudModel, opPickerModels, modelCostHint, shortCount,
+  editCapableModels, animatePickerModels, videoPickerModels, studioOnlyImageModels,
+  resolveCharacterModel, characterGenerationModels,
 } from '../../../stores/cloudCatalogStore'
-import { intentPickerModels, intentRoles, createStudioCost, isStudioModel } from '../../../lib/render/create-studio'
-import { resolveCharacterModel, characterGenerationModels } from '../../../hooks/useCloudCreate'
+import { DEFAULT_MODEL_IDS } from '../../../lib/render/cloud-models'
+import { groupForPicker, sortByTier, tierGroup, tierMarks } from '../../../lib/render/model-tier'
+import { localTier } from '../../../lib/render/local-model-tier'
+import { intentPickerModels, intentRoles, createStudioCost, isStudioModel, studioIntentOf } from '../../../lib/render/create-studio'
 import type { RenderOp } from '../../../lib/render/cloud-jobs'
 import type { PresetModel } from '../../../lib/render/preset-models'
 import { useSettingsStore } from '../../../stores/settingsStore'
 import { useUIStore } from '../../../stores/uiStore'
 import { useContentPolicy } from '../../../hooks/useContentPolicy'
-import { Select, type SelectOption } from '../ui/Select'
-import { TYPE_BADGE } from './badges'
-import { resolveLocalOpPick, videoLaneModels } from '../../../api/comfyui'
-import { isMlxImageModel } from '../../../api/mlx-image'
+import { Select, type SelectOption, type SelectTag } from '../ui/Select'
+import { SWAP_MAIN_MODEL, swapMaxPeople } from '../../../lib/render/swap'
+import { TYPE_LABEL } from './badges'
+import { UNFILTERED_MARK_LABEL } from '../../../lib/unfiltered-mark'
+import { useLocalPick } from './localPick'
+import { useLocalModelFits } from '../../../hooks/useLocalModelFit'
+import { vramFitLabel } from '../../../lib/vram-fit'
+import { localModelLabel } from '../../../lib/local-model-name'
+import { isMlxImageHost, mlxPickerFamily } from '../../../api/mlx-image'
+import { isMlxImageModel } from '../../../lib/mlx-model-name'
+import { ref2vRefusal, ref2vRowNote } from '../../../api/comfyui'
 import { intentNeedsComfyGraph } from './intents'
 
 // Portplan P7: lipsync/music/extend/motion reach the Studio track through the
@@ -22,43 +36,93 @@ import { intentNeedsComfyGraph } from './intents'
 // this only prices each row, since a PresetModel carries no `credits` field.
 function pickerCostHint(m: PresetModel, musicDuration: number): string | undefined {
   const classic = cloudModelById(m.id)
-  if (classic) return modelCostHint(classic, m.op as RenderOp, m.op === 'music' ? musicDuration : undefined)
-  if (isStudioModel(m.id)) {
-    // No options chosen yet (this is the picker row, not the run), so use the
-    // model's own baseline preview, same figure studio-contract.ts's
-    // studioBaseCredits() would compute, just inlined to avoid a second
-    // import for one call site.
-    const cr = createStudioCost(m.id, {}, 100)
-    return `${shortCount(cr)} cr`
-  }
-  return undefined
+  if (classic && !isStudioModel(m.id)) return modelCostHint(classic, m.op as RenderOp, m.op === 'music' ? musicDuration : undefined)
+  return studioCostHint(m.id)
 }
 
-const CLOUD_BADGE = { label: 'Cloud', color: 'bg-violet-500/15 text-violet-500 dark:text-violet-200' }
-// C2: the "No refusals" mark on models the provider ships with its own
-// filter off (CloudModel.adult, web parity: apps/web/components/create/
-// experimental/ModelChip.tsx). The mark says what the MODEL can do and
+/** A Studio row prices from its own schema: no options chosen yet (this is the
+ *  picker row, not the run), so the model's own baseline preview, the same
+ *  figure studio-contract.ts's studioBaseCredits() would compute. */
+function studioCostHint(id: string): string | undefined {
+  return isStudioModel(id) ? `${shortCount(createStudioCost(id, {}, 100))} cr` : undefined
+}
+
+const CLOUD_BADGE: SelectTag = { label: 'Cloud' }
+// C2: the measured mark (lib/unfiltered-mark) on models the provider ships with its own
+// filter off (CloudModel.adult, web parity: the web app).
+// The mark says what the MODEL can do and
 // decides nothing itself: while the account's content policy still filters
 // (anything but 'off'), it stays pale, since the account setting is the
 // boundary, not the model. No adult vocabulary here, this surface sits on
 // the payment domain.
-const NO_REFUSALS_COLOR = {
-  filtering: 'text-gray-500 dark:text-gray-600',
-  open: 'text-purple-600 dark:text-purple-300',
-}
+// No accent since 2026-10-09: the accent belongs to the statement mark of the
+// chat picker, this mark is the quiet one everywhere.
+const noRefusalsBadge = (policyOff: boolean): SelectTag =>
+  (policyOff ? { label: UNFILTERED_MARK_LABEL } : { label: UNFILTERED_MARK_LABEL, tone: 'quiet' })
 
 // Local-mode discovery (2.5.8): hosted models ride at the bottom of the local
 // picker as teaser rows — picking one opens the Cloud sheet instead of
 // changing the selection. Value prefix keeps them apart from real checkpoints.
+
 const TEASER_PREFIX = 'lu-cloud-teaser:'
 const TEASER_ROWS = 4
+/** The heading over the hosted rows at the end of the local picker. The list
+ *  draws a heading only where the group changes, so rows without one ran on
+ *  under "Older models" (the box, 03.10.2026). A hosted model is not an older
+ *  one, with or without a tier from the server. */
+export const CLOUD_GROUP = 'LU Cloud'
 
 // Badge-aware model picker (replaces the raw <select>). Local backend lists
 // the installed checkpoints; the cloud backend lists the hosted catalog
 // (server-driven via cloudCatalogStore) and writes the cloud model slugs.
 export function ModelChip() {
   const backend = useCreateStore((s) => s.backend)
-  return backend === 'cloud' ? <CloudModelChip /> : <LocalModelChip />
+  const intent = useCreateStore((s) => s.intent())
+  if (backend === 'cloud') return <CloudModelChip />
+  // Local 3D: on a Mac a pick of its own models (TripoSR, Stable Fast 3D),
+  // each with its own setup; in ComfyUI the one model, TRELLIS.2, named.
+  if (intent === '3d') return <LocalThreeDChip />
+  return <LocalModelChip />
+}
+
+function LocalThreeDChip() {
+  if (isMlxImageHost()) return <MacThreeDPicker />
+  const name = PC_3D_MODEL
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 h-[var(--control-h-md)] px-3 rounded-lg border border-white/[0.08] t-control text-gray-300"
+      title={`${name} on this machine. Local 3D is never filtered.`}
+      data-testid="model-chip-3d"
+    >
+      {name}
+    </span>
+  )
+}
+
+/** The local 3D models of a Mac. Picking one that is not set up shows its
+ *  setup card on the Stage (ThreeDStage), with the licence where it has one. */
+function MacThreeDPicker() {
+  const value = useCreateStore((s) => s.threeDMacModel)
+  const setModel = useCreateStore((s) => s.setThreeDMacModel)
+  const options: SelectOption[] = MAC_3D_MODELS.map((m) => ({
+    value: m.id,
+    label: m.name,
+    sublabel: m.line,
+    title: `${m.name} on this Mac`,
+  }))
+  return (
+    <span data-testid="model-chip-3d-mac">
+      <Select
+        size="sm"
+        align="right"
+        className="min-w-[150px] max-w-[230px]"
+        options={options}
+        value={value}
+        onChange={(v) => setModel(v === 'sf3d' ? 'sf3d' : 'triposr')}
+        ariaLabel="3D model"
+      />
+    </span>
+  )
 }
 
 function CloudModelChip() {
@@ -73,8 +137,9 @@ function CloudModelChip() {
   const setCloudVideoModel = useCreateStore((s) => s.setCloudVideoModel)
   const setCloudOpModel = useCreateStore((s) => s.setCloudOpModel)
   // Subscribed, not read once: the music sublabel must follow the length
-  // slider live so the shown price is the billed price (A3, sockenmonster).
+  // slider live so the shown price is the billed price (A3).
   const musicDuration = useCreateStore((s) => s.musicDuration)
+  const swapPeople = useCreateStore((s) => s.swapFigures.length)
   const models = useCloudCatalogStore((s) => s.models)
   const contentPolicy = useContentPolicy()
 
@@ -85,7 +150,7 @@ function CloudModelChip() {
   // trainer kinds together for Character-Studio TRAIN) and store into
   // cloudOpModel. Character-Studio USE is its own thing: it picks a
   // GENERATION endpoint compatible with the trained LoRA's family, not a
-  // trainer. A picker showing trainers there would be a lie (uselu main
+  // trainer. A picker showing trainers there would be a lie (the web app main
   // 5be5dec3).
   const special =
     (intent === 'character' && !characterUse) || intent === 'lipsync' || intent === 'music' ||
@@ -93,22 +158,28 @@ function CloudModelChip() {
   // Portplan P7: lipsync/music/extend/motion reach the Studio track through
   // the SAME picker as their classic op-specialized twins.
   // intentPickerModels() (create-studio.ts, P2) already merges both worlds.
-  const roleIntent = !characterUse && intentRoles(intent).length > 0
-  const roleModels: PresetModel[] = roleIntent ? intentPickerModels(intent) : []
+  const threeDWay = useCreateStore((s) => s.threeDWay)
+  const pickIntent = studioIntentOf(intent, threeDWay)
+  const roleIntent = !characterUse && intentRoles(pickIntent).length > 0
+  const roleModels: PresetModel[] = roleIntent ? intentPickerModels(pickIntent) : []
   const characterModels = characterUse ? characterGenerationModels(selectedCharacter?.family ?? '') : []
   // List only the models that can run the current op — otherwise the picker
   // offers checkpoints that useCloudCreate silently swaps out at submit, so the
   // user's choice was a lie. Edit needs masked-img2img (flux-dev); Animate needs
   // i2v; Video needs t2v (absent flag = capable, so today's dual-capable fleet
   // lists in full, and a future t2v-only model that sets i2v:false is excluded).
+  //
+  // 02.10.2026 (Web-Paritaet): Edit, Video und Animate fuehren hinter den
+  // klassischen Modellen die Studio-Modelle, die der Server kennt (siehe
+  // cloudCatalogStore.studioEntries); Image fuehrt die Studio-Bildmodelle, die
+  // in keinem klassischen Eintrag stehen. R5-58: Edit sieht auch die op-
+  // spezialisierten Endpunkte (qwen-image-edit hat `ops: ['edit']`).
   const list =
-    // R5-58: `m.edit` alone missed the 2.5.8 op-specialized edit endpoints
-    // (qwen-image-edit carries `ops: ['edit']`, not `edit: true`), so the
-    // picker never offered a model the catalog genuinely served.
-    intent === 'edit' ? models.filter((m) => m.kind === 'image' && isEditModel(m))
-    : intent === 'animate' ? models.filter((m) => m.kind === 'video' && m.i2v !== false)
-    : intent === 'video' ? models.filter((m) => m.kind === 'video' && m.t2v !== false)
+    intent === 'edit' ? editCapableModels()
+    : intent === 'animate' ? animatePickerModels()
+    : intent === 'video' ? videoPickerModels()
     : intent === 'character' && !characterUse ? opPickerModels('lora-train')
+    : kind === 'image' ? [...models.filter((m) => m.kind === 'image' && !m.ops), ...studioOnlyImageModels()]
     : models.filter((m) => m.kind === kind && !m.ops)
   const current = characterUse
     ? (resolveCharacterModel(selectedCharacter?.family ?? '', cloudOpModel) ?? '')
@@ -118,9 +189,12 @@ function CloudModelChip() {
   // Reflect the model the run will really use, so a leftover pick the current op
   // can't perform doesn't show as "selected".
   const roleOrCharacterIds = roleIntent ? roleModels : characterModels
+  // Faellt die Wahl heraus, gilt das Standardmodell dieser Unterkategorie (wie in
+  // modelForOp), und erst dahinter der erste Eintrag.
+  const standard = intent === 'edit' ? DEFAULT_MODEL_IDS.edit : intent === 'animate' ? DEFAULT_MODEL_IDS.animate : (defaultCloudModel(kind)?.id ?? '')
   const value = roleIntent || characterUse
     ? (roleOrCharacterIds.some((m) => m.id === current) ? current : (roleOrCharacterIds[0]?.id ?? current))
-    : list.some((m) => m.id === current) ? current : (list[0]?.id ?? current)
+    : list.some((m) => m.id === current) ? current : list.some((m) => m.id === standard) ? standard : (list[0]?.id ?? current)
 
   // The op this picker's models will run as, so the sublabel prices correctly
   // (a trainer bills a training run, not an image).
@@ -134,32 +208,50 @@ function CloudModelChip() {
     : intent === 'edit' ? 'edit'
     : intent === 'animate' ? 'animate'
     : 'generate'
+  // Swap Character: the order is the recommendation (SCAIL 2 first), and a
+  // model for fewer people than are marked stands greyed out with the reason.
+  const swap = intent === 'swap_character'
+  const swapTooMany = (id: string) => swap && swapPeople > swapMaxPeople(id)
+  const swapLimitText = (id: string) => (swapMaxPeople(id) === 1 ? 'one person only' : `up to ${swapMaxPeople(id)} people`)
   const options: SelectOption[] = roleIntent
-    ? roleModels.map((m) => ({
+    ? (swap ? roleModels.map((model) => ({ model, group: undefined as string | undefined })) : groupForPicker(roleModels)).map(({ model: m, group }) => ({
         value: m.id,
         label: m.label,
-        sublabel: pickerCostHint(m, musicDuration),
+        // "Picture first" costs the picture and the model together.
+        sublabel: pickIntent === '3d-text' && isPictureFirstRun('text', m.id)
+          ? `${shortCount(createStudioCost(m.id, {}, 100) + pictureFirstPictureCredits(''))} cr`
+          : swapTooMany(m.id) ? swapLimitText(m.id) : pickerCostHint(m, musicDuration),
+        disabled: swapTooMany(m.id),
+        group,
+        tags: swap && m.id === SWAP_MAIN_MODEL ? [{ label: 'Recommended', tone: 'accent' as const }, ...tierMarks(m)] : tierMarks(m),
         badge: m.adult
-          ? { label: 'No refusals', color: contentPolicy === 'off' ? NO_REFUSALS_COLOR.open : NO_REFUSALS_COLOR.filtering }
+          ? noRefusalsBadge(contentPolicy === 'off')
           : CLOUD_BADGE,
       }))
     : characterUse
-      ? characterModels.map((m) => ({
+      ? groupForPicker(characterModels).map(({ model: m, group }) => ({
           value: m.id,
           label: m.label,
           sublabel: modelCostHint(m, 'generate', undefined),
+          group,
+          tags: tierMarks(m),
           badge: m.adult
-            ? { label: 'No refusals', color: contentPolicy === 'off' ? NO_REFUSALS_COLOR.open : NO_REFUSALS_COLOR.filtering }
+            ? noRefusalsBadge(contentPolicy === 'off')
             : CLOUD_BADGE,
         }))
-      : list.map((m) => ({
+      : groupForPicker(list).map(({ model: m, group }) => ({
           value: m.id,
           label: m.label,
-          sublabel: modelCostHint(m, op, op === 'music' ? musicDuration : undefined),
+          sublabel: isStudioModel(m.id) ? studioCostHint(m.id) : modelCostHint(m, op, op === 'music' ? musicDuration : undefined),
+          // Nach Familie gruppiert, Beste zuerst, Aeltere gesammelt unten unter
+          // einer Zwischenzeile, nichts verschwindet (lib/render/model-tier).
+          // Die Marken stehen nur in der aufgeklappten Liste.
+          group,
+          tags: tierMarks(m),
           // adult models keep the standard Cloud badge everywhere EXCEPT the row
-          // itself, where "No refusals" is strictly more informative, matching web.
+          // itself, where "No Filter" is strictly more informative, matching web.
           badge: m.adult
-            ? { label: 'No refusals', color: contentPolicy === 'off' ? NO_REFUSALS_COLOR.open : NO_REFUSALS_COLOR.filtering }
+            ? noRefusalsBadge(contentPolicy === 'off')
             : CLOUD_BADGE,
         }))
 
@@ -167,10 +259,16 @@ function CloudModelChip() {
     <Select
       size="sm"
       searchable
-      align="right"
+      // Swap Character: the list is wider (recommendation, the reason for a
+      // greyed out model) and opens to the right, into the panel.
+      align={swap ? 'left' : 'right'}
       className="min-w-[150px] max-w-[230px]"
       options={options}
       value={value}
+      // "Use character" lists the models of the picked character's family.
+      // With no character picked there is no list yet, and the bare
+      // "Select..." asked for a model that cannot be chosen.
+      placeholder={characterUse && !selectedCharacter ? 'Pick a character first' : undefined}
       onChange={(v) =>
         special || roleIntent || characterUse ? setCloudOpModel(v) : isVideo ? setCloudVideoModel(v) : setCloudImageModel(v)
       }
@@ -178,17 +276,46 @@ function CloudModelChip() {
   )
 }
 
+/** The Train tab on a Mac: the run trains on Z-Image Turbo whatever image
+ *  model is picked (api/mlx-train), so the chip names that and offers no
+ *  list. The picked image model showed there before ("MLX SD Turbo"). */
+function MacTrainBaseChip() {
+  return (
+    <span
+      className="lu-control t-control px-2 shrink-0"
+      data-testid="mac-train-base"
+      title="Characters train on Z-Image Turbo, the image model Use character runs them on."
+    >
+      Trains on Z-Image Turbo
+    </span>
+  )
+}
+
+/** The Train tab on Windows and Linux (GH #210, 31.10.2026): the local
+ *  trainer trains on Z-Image Base alone (api/trainer TRAINER_BASE_FILES), and
+ *  the training call carries no model. The picker stood here with every image
+ *  model, and a tester picked Qwen-Image 2.1 as the training model. In the
+ *  cloud lane this chip is the training model, so the look was a fair guess. */
+function LocalTrainBaseChip() {
+  return (
+    <span
+      className="lu-control t-control px-2 shrink-0"
+      data-testid="local-train-base"
+      title="The local trainer makes Z-Image characters and styles. Use character runs them on a Z-Image model. Training for other models is in LU Cloud."
+    >
+      Local training uses Z-Image
+    </span>
+  )
+}
+
 function LocalModelChip() {
-  const mode = useCreateStore((s) => s.mode)
   const intent = useCreateStore((s) => s.intent())
-  const imageModel = useCreateStore((s) => s.imageModel)
-  const videoModel = useCreateStore((s) => s.videoModel)
-  const localOpModel = useCreateStore((s) => s.localOpModel)
-  const imageModelList = useCreateStore((s) => s.imageModelList)
-  const videoModelList = useCreateStore((s) => s.videoModelList)
-  const audioModelList = useCreateStore((s) => s.audioModelList)
-  const lipsyncModelList = useCreateStore((s) => s.lipsyncModelList)
-  const motionModelList = useCreateStore((s) => s.motionModelList)
+  const characterTab = useCreateStore((s) => s.characterTab)
+  if (intent === 'character' && characterTab !== 'use') return isMlxImageHost() ? <MacTrainBaseChip /> : <LocalTrainBaseChip />
+  return <LocalModelPicker />
+}
+
+function LocalModelPicker() {
   const setImageModel = useCreateStore((s) => s.setImageModel)
   const setVideoModel = useCreateStore((s) => s.setVideoModel)
   const setLocalOpModel = useCreateStore((s) => s.setLocalOpModel)
@@ -196,41 +323,38 @@ function LocalModelChip() {
   const setCloudTeaser = useUIStore((s) => s.setCloudTeaser)
   const catalogModels = useCloudCatalogStore((s) => s.models)
 
-  const isVideo = mode === 'video'
-  // The 2.5.8 lanes with their own local model families. Extend is NOT here:
-  // it rides the regular i2v-capable video list (last-frame continue).
-  const laneList =
-    intent === 'music' ? audioModelList
-    : intent === 'lipsync' ? lipsyncModelList
-    : intent === 'motion' ? motionModelList
-    : null
+  // Which model a run takes lives in localPick, shared with the waiting area.
+  const { isVideo, laneList, list, value } = useLocalPick()
+  const intent = useCreateStore((s) => s.intent())
+  // A model that does not sit comfortably on the detected card says so on its
+  // row, here, where it is picked. Never at the prompt field. A model that
+  // fits, and a machine without a detected card, add nothing.
+  const { cardGb, fitOf } = useLocalModelFits(list)
+  const fitMarks = (name: string) => {
+    const fit = fitOf(name)
+    return fit === 'tight' || fit === 'big' ? [{ label: vramFitLabel(fit, cardGb) }] : []
+  }
 
-  // Mirror the cloud picker's op-gating (David 2026-07-17: "only offer models
-  // that can actually do it"): Animate/Extend list i2v-capable local models,
-  // Video lists t2v-capable ones (SVD/FramePack are i2v-only and drop there).
-  // Shared with Stage's missing-models gate so card and picker cannot drift.
-  const rawList = isVideo ? videoModelList : imageModelList
-  const laneFiltered = laneList ?? (!isVideo ? rawList : videoLaneModels(rawList, intent))
   // Comfy graphs cannot load an "MLX …" row. Hide those names on every intent
-  // that submits a checkpoint, so the chip cannot offer the id that
-  // CheckpointLoaderSimple then rejects.
-  // Edit/expand of an MLX model stays on the MLX lane, so those rows stay
-  // in the chip. Other Comfy intents have no MLX path and must not offer them.
-  const list = intentNeedsComfyGraph(intent) && intent !== 'edit'
-    ? laneFiltered.filter((m) => !isMlxImageModel(m.name))
-    : laneFiltered
-  const stored = laneList ? localOpModel : (isVideo ? videoModel : imageModel)
-  // Reflect the model the run will really use — a leftover pick the current
-  // op can't perform must not show as "selected". Lanes share the submit-side
-  // rule (resolveLocalOpPick) so chip, meter and run always agree.
-  const value = laneList
-    ? resolveLocalOpPick(stored, list)
-    : list.some((m) => m.name === stored) ? stored : (list[0]?.name ?? stored)
-
-  const options: SelectOption[] = list.map((m) => ({
+  // that submits a checkpoint (aside from edit, which stays on MLX/Comfy).
+  const displayList = intentNeedsComfyGraph(intent) && intent !== 'edit'
+    ? list.filter((m) => !isMlxImageModel(m.name))
+    : list
+  const mac = isMlxImageHost()
+  const family = (m: { name: string }) => (mac && !isVideo && !laneList ? mlxPickerFamily(m.name) : null)
+  const options: SelectOption[] = sortByTier(displayList.map((m) => ({ m, tier: localTier({ name: m.name, type: family(m)?.type ?? m.type }) }))).map(({ m, tier }) => ({
     value: m.name,
-    label: prettyName(m.name),
-    badge: TYPE_BADGE[m.type],
+    // The catalogue's name for a file it knows (lib/local-model-name); any
+    // other file as before.
+    ...localModelLabel(m.name),
+    // The whole name is the tooltip: the file name on Windows and Linux,
+    // the catalogue name on the Mac. It is what is left where a name is cut
+    // off after all (a narrow window, a very long file name).
+    title: isVideo && intent === 'animate' && ref2vRefusal(m.name) ? `${m.name}\n${ref2vRefusal(m.name)}` : m.name,
+    sublabel: isVideo ? ref2vRowNote(m.name, intent) : undefined,
+    badge: { label: family(m)?.label ?? TYPE_LABEL[m.type] },
+    group: tierGroup({ tier }),
+    tags: [...tierMarks({ tier }), ...fitMarks(m.name)],
   }))
   // Discovery rows: a few hosted models of this kind at the list's tail.
   // Picking one opens the Cloud sheet; the local selection stays untouched.
@@ -242,6 +366,7 @@ function LocalModelChip() {
         label: m.label,
         sublabel: modelCostHint(m, 'generate'),
         badge: CLOUD_BADGE,
+        group: CLOUD_GROUP,
       })
     }
   }
@@ -251,7 +376,12 @@ function LocalModelChip() {
       size="sm"
       searchable
       align="right"
-      className="min-w-[150px] max-w-[230px]"
+      // A name ends in what tells two packs of one model apart ("… 4-bit",
+      // "… 8-bit", "… Turbo 8-bit" on the Mac, "… (INT8)" or a quant
+      // elsewhere), and 230 px cut exactly that off: "MLX Qwen-Im…" three
+      // times (persona walk, Fund 17). The row has the room, so the chip may
+      // take it, on every platform.
+      className="min-w-[150px] max-w-[360px]"
       options={options}
       value={value}
       onChange={(v) => {
@@ -272,8 +402,4 @@ function LocalModelChip() {
       }}
     />
   )
-}
-
-function prettyName(filename: string): string {
-  return filename.replace(/\.(safetensors|ckpt|pt|gguf)$/i, '').replace(/[_]+/g, ' ')
 }

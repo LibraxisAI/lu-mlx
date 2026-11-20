@@ -1,6 +1,6 @@
 /**
  * The second half of GH #122, and the Discord thread "Read me first"
- * (ever.noob, 2026-08-28): LoRAs the user dropped into a folder of his own
+ * (2026-08-28): LoRAs the user dropped into a folder of his own
  * stayed invisible.
  *
  * LU never scans image or video models off the disk, that inventory comes out
@@ -61,7 +61,7 @@ describe('handing the folder to ComfyUI', () => {
   })
 })
 
-describe('the Model Storage copy tells the truth', () => {
+describe('the Storage copy tells the truth', () => {
   const src = readFileSync(
     join(process.cwd(), 'src/components/settings/SettingsPage.tsx'),
     'utf8',

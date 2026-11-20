@@ -1,6 +1,9 @@
 import { useState } from 'react'
 import { Folder, Shield, Check, Plus, X } from 'lucide-react'
+import { HowItWorks } from '../ui/HowItWorks'
+import { HOWTO } from '../../lib/howto'
 import { Modal } from '../ui/Modal'
+import { ModalActions, ModalButton } from '../ui/ModalActions'
 import { useAgentModeStore } from '../../stores/agentModeStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { backendCall } from '../../api/backend'
@@ -106,7 +109,7 @@ export function AgentWorkspaceDialog({
       const res = await backendCall<string | null>('pick_folder', { asWorkspace: true })
       if (res) {
         // Commit + close right after the folder is chosen. Picking IS the
-        // decision — the dialog must go away (David 2026-06-06). Multi-repo
+        // decision — the dialog must go away (2026-06-06). Multi-repo
         // extras / remember-as-default are managed later via the badge.
         onChoose({ kind: 'folder', path: res, extraPaths: [] })
         return
@@ -159,6 +162,54 @@ export function AgentWorkspaceDialog({
     })
   }
 
+  // GH #223 (07.11.2026): wer einmal einen Ordner gewaehlt hatte, kam an den
+  // Hauptordner nicht mehr heran. Der Dialog sprang beim Wiederoeffnen in die
+  // Zusatzordner, und dort liessen sich nur Extras hinzufuegen und entfernen.
+  // Jetzt laesst sich der Hauptordner tauschen, ein Extra zum Hauptordner
+  // machen und der Hauptordner entfernen.
+  const handleChangePrimary = async () => {
+    setPicking(true)
+    setError(null)
+    try {
+      const res = await backendCall<string | null>('pick_folder', { asWorkspace: true })
+      if (!res) return
+      setDraft((d) => {
+        if (!d || d.kind !== 'folder') return d
+        const key = pathKey(res)
+        // Der neue Hauptordner stand vielleicht schon als Extra da: dann nicht doppelt.
+        return { ...d, path: res, extraPaths: (d.extraPaths ?? []).filter((p) => pathKey(p) !== key) }
+      })
+    } catch (e) {
+      setError(
+        e instanceof Error ? e.message : 'Folder picker unavailable (bridge offline?)',
+      )
+    } finally {
+      setPicking(false)
+    }
+  }
+
+  /** Tauscht: das Extra wird Hauptordner, der bisherige Hauptordner ein Extra. */
+  const handleMakePrimary = (path: string) => {
+    setDraft((d) => {
+      if (!d || d.kind !== 'folder') return d
+      const rest = (d.extraPaths ?? []).filter((p) => p !== path)
+      return { ...d, path, extraPaths: d.path ? [d.path, ...rest] : rest }
+    })
+  }
+
+  /**
+   * Gibt es Extras, rueckt das erste nach. Ohne Extras geht es zurueck zur
+   * Auswahl (Sandbox, letzter Ordner, anderer Ordner); Abbrechen laesst dann
+   * alles, wie es war.
+   */
+  const handleRemovePrimary = () => {
+    setDraft((d) => {
+      if (!d || d.kind !== 'folder') return d
+      const [next, ...rest] = d.extraPaths ?? []
+      return next ? { ...d, path: next, extraPaths: rest } : null
+    })
+  }
+
   const handleSave = () => {
     if (!draft) return
     if (rememberAsDefault && draft.kind === 'folder' && draft.path) {
@@ -170,21 +221,19 @@ export function AgentWorkspaceDialog({
   const phase: 'pick' | 'extras' = draft ? 'extras' : 'pick'
 
   return (
-    <Modal open={open} onClose={onClose} title="" ariaLabel="Agent workspace">
+    <Modal open={open} onClose={onClose} title={phase === 'pick' ? 'Where should the agent work?' : 'Workspace folders'} ariaLabel="Agent workspace">
       <div className="space-y-4">
-        <div className="text-center space-y-1">
-          <h3 className="text-base font-semibold text-gray-900 dark:text-white">
-            {phase === 'pick' ? 'Where should the agent work?' : 'Add more repos?'}
-          </h3>
+        <div className="space-y-1">
           <p className="text-[0.7rem] text-gray-500">
             {phase === 'pick'
               ? 'Pick a folder to edit your real files, or use a separate workspace for this chat. You can change this later.'
-              : 'Primary anchors relative paths. Extras give the agent absolute access, perfect for "sync the API in repo-A with the client in repo-B".'}
+              : 'Primary anchors relative paths, change or remove it here. Extras give the agent absolute access, perfect for "sync the API in repo-A with the client in repo-B".'}
           </p>
           <p className="text-[0.7rem] text-gray-500" data-testid="workspace-security-boundary">
             Workspace protection is a folder path jail, not a container or virtual machine.
             Commands run on this computer. Review tool requests before allowing them.
           </p>
+          {HOWTO.sandbox && <HowItWorks topic="sandbox" variant="line" placement="below-end" />}
         </div>
 
         {/* Drei Wahlmoeglichkeiten, drei Farben, und keine davon sagt etwas
@@ -230,13 +279,35 @@ export function AgentWorkspaceDialog({
             durch die Beschriftung, nicht durch die Farbe. */}
         {phase === 'extras' && draft?.kind === 'folder' && (
           <div className="space-y-2" data-testid="agent-workspace-extras">
-            <div className="rounded-lg border border-gray-200 dark:border-white/10 px-3 py-2">
-              <div className={`text-[0.55rem] uppercase tracking-widest ${HINWEIS_TEXT.ruhig} mb-0.5`}>
-                Primary
+            <div className="flex items-center justify-between gap-2 rounded-lg border border-gray-200 dark:border-white/10 px-3 py-2" data-testid="agent-workspace-primary">
+              <div className="flex-1 min-w-0">
+                <div className={`text-[0.55rem] uppercase tracking-widest ${HINWEIS_TEXT.ruhig} mb-0.5`}>
+                  Primary
+                </div>
+                <div className="text-[0.7rem] font-mono text-gray-800 dark:text-gray-200 truncate">
+                  {draft.path}
+                </div>
               </div>
-              <div className="text-[0.7rem] font-mono text-gray-800 dark:text-gray-200 truncate">
-                {draft.path}
-              </div>
+              <button
+                type="button"
+                onClick={handleChangePrimary}
+                disabled={picking}
+                className="shrink-0 t-micro text-gray-500 underline hover:text-gray-800 dark:hover:text-white disabled:opacity-50"
+                data-testid="agent-workspace-change-primary"
+              >
+                Change…
+              </button>
+              <button
+                type="button"
+                onClick={handleRemovePrimary}
+                disabled={picking}
+                title="Remove"
+                aria-label="Remove primary folder"
+                className="p-1 rounded hover:bg-red-500/10 text-red-500 disabled:opacity-50"
+                data-testid="agent-workspace-remove-primary"
+              >
+                <X size={11} />
+              </button>
             </div>
 
             {(draft.extraPaths ?? []).map((p) => (
@@ -247,6 +318,14 @@ export function AgentWorkspaceDialog({
                 <span className="text-[0.7rem] font-mono text-gray-700 dark:text-gray-300 truncate flex-1 min-w-0">
                   {p}
                 </span>
+                <button
+                  type="button"
+                  onClick={() => handleMakePrimary(p)}
+                  className="shrink-0 t-micro text-gray-500 underline hover:text-gray-800 dark:hover:text-white"
+                  data-testid="agent-workspace-make-primary"
+                >
+                  Make primary
+                </button>
                 <button
                   onClick={() => handleRemoveExtra(p)}
                   title="Remove"
@@ -303,27 +382,19 @@ export function AgentWorkspaceDialog({
         )}
 
         {error && (
-          <p className="t-micro text-red-500 text-center">{error}</p>
+          <p className="t-micro text-red-500">{error}</p>
         )}
 
-        <div className="flex items-center justify-end gap-2 pt-1">
-          <button
-            onClick={onClose}
-            className="px-3 py-1.5 rounded-lg text-[0.7rem] text-gray-500 hover:text-gray-800 dark:hover:text-white transition-colors"
-            data-conversation-id={conversationId}
-          >
+        <ModalActions>
+          <ModalButton variant="quiet" onClick={onClose} data-conversation-id={conversationId}>
             Cancel
-          </button>
+          </ModalButton>
           {phase === 'extras' && (
-            <button
-              onClick={handleSave}
-              className="px-3 py-1.5 rounded-lg text-[0.7rem] font-medium bg-emerald-500 hover:bg-emerald-600 text-white transition-colors"
-              data-testid="agent-workspace-save"
-            >
+            <ModalButton variant="primary" onClick={handleSave} data-testid="agent-workspace-save">
               Save
-            </button>
+            </ModalButton>
           )}
-        </div>
+        </ModalActions>
       </div>
     </Modal>
   )

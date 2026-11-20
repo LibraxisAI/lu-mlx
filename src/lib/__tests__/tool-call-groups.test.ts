@@ -41,7 +41,7 @@ describe('groupAgentBlocks', () => {
     expect(asBand(groups[0]).calls.map((c) => c.toolName)).toEqual(['file_read', 'file_write'])
   })
 
-  // G14-4 (David 2026-08-07): this test used to assert the OPPOSITE, that an
+  // G14-4 (2026-08-07): this test used to assert the OPPOSITE, that an
   // interleaved answer splits the band. That split is exactly the stack he
   // was looking at ("die Toolcalls kommen alle untereinander"), because any
   // model that narrates between calls produced band(1), note, band(1). The
@@ -60,7 +60,7 @@ describe('groupAgentBlocks', () => {
 
   it('NEGATIVE CONTROL: the trailing answer stays OUTSIDE the band', () => {
     // The final answer is the model's actual reply. Swallowing it into a
-    // collapsed band would hide the one thing David asked to see (G14-2).
+    // collapsed band would hide the one thing the owner asked to see (G14-2).
     const t1 = toolBlock(call('file_read', 'completed'))
     const t2 = toolBlock(call('file_write', 'completed'))
     const fin = answerBlock('All done, results above.')
@@ -79,7 +79,7 @@ describe('groupAgentBlocks', () => {
 
   it('G21-2: an interior thinking block is absorbed as a note, band unbroken', () => {
     // Until 2026-08-07 this case asserted the SPLIT ('tools','single','tools').
-    // David, live at R19: "die Denkblasen muessen zwischen den Tool Calls dann
+    // Der Inhaber, live at R19: "die Denkblasen muessen zwischen den Tool Calls dann
     // genau da kommen, in der richtigen Reihenfolge" AND the band must stay
     // one row (G14-4), so round k's thought anchors after round k-1's call.
     const t1 = toolBlock(call('file_read', 'completed'))
@@ -124,7 +124,7 @@ describe('groupAgentBlocks', () => {
   })
 })
 
-// ── G34 (David 2026-08-07, R17d) ──────────────────────────────────────────
+// ── G34 (2026-08-07, R17d) ──────────────────────────────────────────
 // "die tools sind nicht im call band alle untereinander." The screenshots
 // showed 15+ loose chips with loose Thinking rows between them. Replaying the
 // REAL persisted R17d sequence (47 rounds of thinking+call pairs, each pair

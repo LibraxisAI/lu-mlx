@@ -1,4 +1,4 @@
-import { useCallback, useState, useEffect, useRef } from 'react'
+import { Fragment, useCallback, useState, useEffect, useRef } from 'react'
 import { chatRecommendationGroups, isBelowChatMinimum, SMALL_CHAT_MODEL_WARNING } from '../../lib/chat-model-minimum'
 import { bundleIsComplete, bundleIsDownloading, bundleHasErrors } from '../../lib/bundle-state'
 import { motion } from 'framer-motion'
@@ -6,23 +6,36 @@ import { Search, XCircle, Sparkles, Unlock, ShieldCheck, ExternalLink, Info } fr
 import { X } from 'lucide-react'
 import {
   searchHuggingFaceModels,
-  getImageBundles, getVideoBundles,
+  hfSearchFailureText,
+  getImageBundles, getVideoBundles, getAudioBundles, getLipsyncBundles, getMotionBundles,
   getUncensoredTextModels, getMainstreamTextModels,
-  detectProviderModelPath, startModelDownloadToPath, luEngineDownloadDir,
+  detectProviderModelPath, luEngineDownloadDir, luEngineDownloadFolder, providerModelFolder,
   startModelDownload,
-  installBundleComplete, checkBundlesInstalled, resolveHfGgufFiles, planModelDownload,
-  type DiscoverModel, type DownloadProgress, type ModelBundle, type HfGgufFile,
+  installBundleComplete, remoteBundleNotice, checkBundlesOnDisk, resolveHfGgufFiles, ggufRequestFor, quantBudgetBytes, planModelDownload,
+  imagePartFor, imagePartOf, checkDownloadSpace,
+  fetchGgufChoices, discoverModelForChoice, type GgufChoice,
+  type DiscoverModel, type DownloadProgress, type ModelBundle, type HfGgufFile, type ImagePartSource, type PlannedDownload,
 } from '../../api/discover'
-import { getSystemVRAM } from '../../api/comfyui'
-import { getMaxVramGb, getTotalRamGb, bundleVramNeedGb } from '../../lib/hardware'
-import { openExternal } from '../../api/backend'
+import { startPlannedDownload } from '../../api/model-download'
+import { kimiK31CatalogEntries } from '../../api/kimi-k3-catalog'
+import { asOneDownload, downloadSizeGB, gbOf, imagePartFileName, includeImageInputLabel, isImagePartFile } from '../../lib/image-part'
+import { sortByTier, tierGroup } from '../../lib/render/model-tier'
+import { bundlesForTabAndSearch } from '../../lib/discover-bundle-search'
+import { catalogEntryMatchesSearch } from '../../lib/model-search'
+import { getTotalRamGb } from '../../lib/hardware'
+import { vramFit } from '../../lib/vram-fit'
+import { chatModelBudgetGb, sharedMemoryWording } from '../../lib/shared-memory-wording'
+import { useGraphicsMemoryGb } from '../../hooks/useGraphicsMemory'
+import { openExternal, isMacOS, backendCall } from '../../api/backend'
+import { isLfm3Model, lmStudioRuntimeNote } from '../../lib/lmstudio-runtime'
+import { bundleCloudTask } from '../../lib/cloud-offer'
+import { forThisPlatform } from '../../lib/mlx-only-builds'
 import { useModels } from '../../hooks/useModels'
 import { useDownloadStore } from '../../stores/downloadStore'
 import { ModelGridSkeleton } from '../layout/ViewSkeletons'
 import { useProviderStore } from '../../stores/providerStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useModelStore } from '../../stores/modelStore'
-import { getProviderIdFromModel } from '../../api/providers'
 import { activateDownloadedBundledModel } from '../../lib/bundled-download-activation'
 import { diagnoseBuiltinEngine } from '../../api/builtin-ensure'
 import type { InstalledModelLike } from '../../lib/lmstudio-match'
@@ -30,20 +43,34 @@ import { findInstalledForDiscoverModel } from '../../lib/discover-installed'
 import { isBuiltinEngineEntry } from '../../lib/lmstudio-match'
 import { ensureLuEngineIsChatProvider, announceLuEngineSwitch } from '../../api/lu-engine-switch'
 import { LuEngineSwitchBar } from '../chat/LuEngineSwitchBar'
-import { resolveTextDownloadTarget } from '../../lib/text-download-target'
-import { hfUrlToOllamaRef, hfUrlToLmStudioSubdir, parseHfUrl, extractGgufQuant, isShardedOrIncompatibleGguf } from '../../lib/hf-to-provider'
+import { chosenTextDownloadTarget, ollamaOnlyDownloadBlock, resolveTextDownloadTarget, textDownloadTargetLabel } from '../../lib/text-download-target'
+import { useUIStore } from '../../stores/uiStore'
+import { mayBeStartHerePick } from '../../lib/start-here-picks'
+import { modelInfoTitle } from '../../lib/model-info-title'
+import { partInputWord } from '../../lib/image-part'
+import { hfUrlToOllamaRef, hfUrlToLmStudioSubdir, parseHfUrl, isShardedOrIncompatibleGguf } from '../../lib/hf-to-provider'
 import { HINWEIS_TEXT } from '../../lib/hinweis'
-import { GlowButton } from '../ui/GlowButton'
+import { originalsFirst } from '../../lib/original-search'
 import { Modal } from '../ui/Modal'
+import { ModalActions, ModalButton } from '../ui/ModalActions'
 import { countLabel } from '../../lib/formatters'
+import { useHfLinkStore } from '../../stores/hfLinkStore'
+import { HfLinkDialog } from './HfLinkDialog'
 import type { ModelCategory } from '../../types/models'
 import { log } from '../../lib/logger'
-import {
-  ModelTile, BundleTile, HardwareChip, groupModels, pickDefaultVariant, computeFit,
-  CapLegend,
-} from './ModelTiles'
+import { groupModels, pickDefaultVariant, computeFit, modelFootprintGb } from './ModelTiles'
+import { modelSkin } from './skin'
 import { ICON_SM } from '../ui/icon-size'
 import { CivitaiSearchPanel } from './CivitaiSearchPanel'
+import { ModelFileCheck, type FileCheckSubject } from './ModelFileCheck'
+import { bundleCheckTargets, chatModelCheckTargets, chatModelCheckable } from '../../lib/model-file-check'
+import { NEURONS_ENABLED } from '../../lib/features'
+import { UninstallDialog, type UninstallRequest } from './UninstallDialog'
+import { usePageMemoryStore, DEFAULT_DISCOVER_LANE, type DiscoverLaneMemory } from '../../stores/pageMemoryStore'
+import {
+  TEXT_CATEGORIES, IMAGE_CATEGORIES, VIDEO_CATEGORIES, SORTS,
+  filterByCategory, categoryCounts, sortItems, type CategoryDef, type VideoItem,
+} from '../../lib/discover-categories'
 
 interface Props {
   category: ModelCategory
@@ -51,9 +78,13 @@ interface Props {
   search?: string
   /** Bumped by ModelManager whenever the user submits the search (Enter). */
   searchSubmitToken?: number
+  /** The search that looks for a maker's original model (Neurons' "Get the
+   *  original"). While the field still holds it, changed versions of the
+   *  model are listed after the originals, under their own heading. */
+  originalFor?: string | null
 }
 
-// Size buckets stay EXACTLY the ones from the old VRAM-tier filter (David
+// Size buckets stay EXACTLY the ones from the old VRAM-tier filter (the owner
 // 2026-06-06) — only the labels turned human. 'fit' is new and additive:
 // it filters on the detected GPU instead of a fixed bucket.
 type SizeTier = 'all' | 'fit' | 'ultra' | 'light' | 'middle' | 'highend'
@@ -217,14 +248,62 @@ export function awaitDownloadedFile(
   })
 }
 
-export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }: Props) {
+/**
+ * D9: when no folder for a GGUF can be had at all. The old sentence blamed
+ * "app permissions" for every cause; the backend's own reason says which.
+ */
+export function noModelFolderError(modelName: string, reason: string | null): string {
+  const why = (reason || '').trim().replace(/\.$/, '')
+  return why
+    ? `LU found no folder to download ${modelName} into: ${why}.`
+    : `LU found no folder to download ${modelName} into.`
+}
+
+/**
+ * D7 (GitHub #215): the line that says which quant a search hit got and why.
+ * Null when nothing was swapped and the file fits.
+ */
+export function quantFitNote(
+  name: string,
+  resolution: { quant?: string; totalBytes: number; fitSwap?: { from: string; fromBytes: number }; overBudget?: boolean } | null | undefined,
+  memoryGb: number | null,
+  sharedMemory: boolean,
+): string | null {
+  if (!resolution || !memoryGb) return null
+  const gb = (b: number) => (b / 1_073_741_824).toFixed(1)
+  const where = sharedMemory ? `the ${Math.round(memoryGb)} GB this Mac can give a model` : `your ${Math.round(memoryGb)} GB of graphics memory`
+  if (resolution.fitSwap) {
+    return `${name}: LU picked ${resolution.quant ?? 'a smaller quant'} (${gb(resolution.totalBytes)} GB), so it fits ${where} with room for the context. ${resolution.fitSwap.from} (${gb(resolution.fitSwap.fromBytes)} GB) would not fit fully and would run partly on the CPU, much slower.`
+  }
+  if (resolution.overBudget) {
+    return `${name}: no quant of it fits fully in ${where}. LU fetches ${resolution.quant ?? 'the GGUF'} (${gb(resolution.totalBytes)} GB); it runs, partly on the CPU and much slower. A smaller model will be faster.`
+  }
+  return null
+}
+
+/** A later line of the same download keeps the quant line in front of it. */
+function withFitNote(fitNote: string | null, line: string): string {
+  return fitNote ? `${fitNote} ${line}` : line
+}
+
+export function DiscoverModels({ category, search = '', searchSubmitToken = 0, originalFor = null }: Props) {
   const [loading, setLoading] = useState(false)
-  const [systemVRAM, setSystemVRAM] = useState<number | null>(null)
+  const systemVRAM = useGraphicsMemoryGb()
   const [ramGb, setRamGb] = useState<number | null>(null)
-  // Mainstream is the default + first tab (David 2026-07-17) — Unfiltered is
+  // Mainstream is the default + first tab (2026-07-17) — Unfiltered is
   // one click away but new users land on the neutral list.
-  const [subTab, setSubTab] = useState<'uncensored' | 'mainstream'>('mainstream')
-  const [vramTier, setVramTier] = useState<SizeTier>('all')
+  // C22: the filters of each lane live in the page memory, so a trip to Chat
+  // or Create and back finds them as they were.
+  const laneMemory: DiscoverLaneMemory = usePageMemoryStore((s) => s.discover[category]) ?? DEFAULT_DISCOVER_LANE
+  const setLane = usePageMemoryStore((s) => s.setDiscoverLane)
+  const subTab = laneMemory.subTab
+  const setSubTab = (v: 'uncensored' | 'mainstream') => setLane(category, { subTab: v })
+  const vramTier: SizeTier = laneMemory.sizeTier
+  const setVramTier = (v: SizeTier) => setLane(category, { sizeTier: v })
+  const categoryId = laneMemory.category
+  const setCategoryId = (v: string) => setLane(category, { category: v })
+  const sortId = laneMemory.sort
+  const setSortId = (v: string) => setLane(category, { sort: v })
   // Details modal — the card shows one calm line; the FULL catalog description
   // (incl. per-model tips like "run thinking-OFF") lives here.
   const [infoModel, setInfoModel] = useState<DiscoverModel | null>(null)
@@ -234,13 +313,17 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
   // Provider state for model path detection
   const providers = useProviderStore(s => s.providers)
   const hfOverride = useSettingsStore(s => s.settings.hfDownloadPathOverride)
-  // Bug Y/a v2.5.0 — Aldrich Ironhart Discord. We need to know which provider
+  // Bug Y/a v2.5.0 — a user Discord. We need to know which provider
   // the user is actually chatting against, not just which one is enabled,
   // because both can be enabled at once and the active picker decides where
   // the file should land. `activeModel` is `<providerId>::<id>` for non-Ollama
   // backends and a bare name for Ollama.
   const activeChatModel = useModelStore(s => s.activeModel)
   const [hfModelPath, setHfModelPath] = useState<string | null>(null)
+  // A locallyuncensored://open-model link waiting for its question (HfLinkInbox).
+  const hfLink = useHfLinkStore(s => s.pending)
+  const hfNeedsLocal = useHfLinkStore(s => s.needsLocal)
+  const clearHfLink = useHfLinkStore(s => s.clear)
   const { pullModel, models: installedModels, fetchModels, setActiveModel } = useModels()
 
   // Refresh installed-model list on mount + when category switches to text
@@ -260,29 +343,35 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
     detectProviderModelPath(providerName).then(path => setHfModelPath(path))
   }, [category, hfOverride, providers.openai?.name])
 
-  // Detect hardware for the "runs on your PC" hints. Two probes, best wins:
-  // detect_gpus (nvidia-smi/rocm-smi/wmic — works WITHOUT ComfyUI running)
-  // and ComfyUI's /system_stats (the pre-redesign source, kept as fallback).
+  // The graphics memory behind the "runs on your PC" hints comes from
+  // useGraphicsMemoryGb above (detect_gpus and ComfyUI's /system_stats, best
+  // wins), the same reading Create uses. RAM is asked here.
   useEffect(() => {
-    getMaxVramGb().then(v => {
-      if (v > 0) setSystemVRAM(prev => Math.max(prev ?? 0, Math.round(v)))
-    }).catch(() => {})
-    getSystemVRAM().then(v => {
-      if (v) setSystemVRAM(prev => Math.max(prev ?? 0, v))
-    })
     getTotalRamGb().then(r => { if (r > 0) setRamGb(r) }).catch(() => {})
   }, [])
+  // A Mac has one memory pool and no card. The chat lane compares a model
+  // with the share of that pool a model can take, and says memory and Mac
+  // where a PC reads GPU and PC (lib/shared-memory-wording.ts). On a PC
+  // `chatFitGb` IS the detected card, so nothing changes there.
+  const sharedMemory = isMacOS()
+  const chatFitGb = chatModelBudgetGb(sharedMemory, systemVRAM, ramGb)
 
   // Check which bundles are REALLY installed (file size validated, not just file existence)
   const [bundleStatuses, setBundleStatuses] = useState<Record<string, boolean>>({})
+  // Which bundle files are there already, so a card announces only what Get
+  // will really fetch (bundles share their text encoders and VAEs).
+  const [bundleFilesOnDisk, setBundleFilesOnDisk] = useState<ReadonlySet<string>>(() => new Set())
   // Memoised so the two effects below can name it as the dependency it is
   // instead of hiding it from the dep array. It only closes over `category`,
   // so its identity changes exactly when the effects had to re-run anyway —
   // no re-subscription loop.
   const refreshBundleStatuses = useCallback(() => {
     if (category !== 'image' && category !== 'video') return
-    const allBundles = [...getImageBundles(), ...getVideoBundles()]
-    checkBundlesInstalled(allBundles).then(statuses => setBundleStatuses(statuses))
+    const allBundles = [...getImageBundles(), ...getVideoBundles(), ...getAudioBundles(), ...getLipsyncBundles(), ...getMotionBundles()]
+    checkBundlesOnDisk(allBundles).then(({ installed, files }) => {
+      setBundleStatuses(installed)
+      setBundleFilesOnDisk(files)
+    })
   }, [category])
   useEffect(() => {
     refreshBundleStatuses()
@@ -303,17 +392,33 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
   const isText = category === 'text'
   const isImage = category === 'image'
   const isVideo = category === 'video'
-  const bundles = isImage ? getImageBundles() : isVideo ? getVideoBundles() : []
+  // The Video tab also carries the other Create lanes (music, lip sync, motion).
+  // They used to be installable only from the empty-lane starter card of Create,
+  // so a second music model (YuE2 next to ACE Step) or the Wan S2V FP8 variant
+  // could never be fetched once the first one was on disk. Each such tile says
+  // which lane it belongs to.
+  const laneOf = new Map<string, string>([
+    ...getAudioBundles().map((b) => [b.name, 'Music'] as const),
+    ...getLipsyncBundles().map((b) => [b.name, 'Lip sync'] as const),
+    ...getMotionBundles().map((b) => [b.name, 'Motion'] as const),
+  ])
+  const bundles = isImage
+    ? getImageBundles()
+    : isVideo ? [...getVideoBundles(), ...getAudioBundles(), ...getLipsyncBundles(), ...getMotionBundles()] : []
 
-  // How much VRAM a bundle wants, read by the ONE shared parser in
-  // lib/hardware. The local copy that used to live here answered 99 GB to the
-  // add-on bundles, whose requirement reads "any", so the sort buried them,
-  // the tier filter hid them and the tile called a 0.17 GB LoRA too big for a
-  // 12 GB card.
-  const parseVRAM = (b: ModelBundle): number => bundleVramNeedGb(b)
+  // How much graphics memory a bundle wants to run without offloading, from the
+  // ONE rule in lib/vram-fit. The companion files name no number, their
+  // download size stands in so they keep a place in the sort and the buckets.
+  const parseVRAM = (b: ModelBundle): number => b.vramComfortGB ?? b.totalSizeGB
+  const fitsCard = (b: ModelBundle): boolean => {
+    const fit = vramFit(b, systemVRAM)
+    return fit === 'fits' || fit === 'unknown'
+  }
 
   // Sort bundles: verified first, then HOT, then fits VRAM, then by size
-  const sortedBundles = [...bundles].sort((a, b) => {
+  // Then the tier, stable: Best on top, Older gathered at the bottom under its
+  // own line, nothing hidden (2026-10-02, same rule as the cloud pickers).
+  const sortedBundles = sortByTier([...bundles].sort((a, b) => {
     // Verified models always first
     if (a.verified && !b.verified) return -1
     if (!a.verified && b.verified) return 1
@@ -321,30 +426,38 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
     if (a.hot && !b.hot) return -1
     if (!a.hot && b.hot) return 1
     if (systemVRAM) {
-      const aFits = parseVRAM(a) <= systemVRAM
-      const bFits = parseVRAM(b) <= systemVRAM
+      const aFits = fitsCard(a)
+      const bFits = fitsCard(b)
       if (aFits && !bFits) return -1
       if (!aFits && bFits) return 1
     }
     return parseVRAM(a) - parseVRAM(b)
-  })
+  }))
 
-  const tabFilteredBundles = sortedBundles.filter(b => subTab === 'uncensored' ? b.uncensored : !b.uncensored)
+  // A typed search looks in both tabs (lib/discover-bundle-search: FramePack,
+  // filed under Unfiltered, was not found from Mainstream, Discord 15.10.2026).
+  const tabFilteredBundles = bundlesForTabAndSearch(sortedBundles, subTab, search)
 
   // VRAM tier filtering for bundles
   const vramFilteredBundles = tabFilteredBundles.filter(b => {
     if (vramTier === 'all') return true
     const vram = parseVRAM(b)
-    if (vramTier === 'fit') return systemVRAM ? vram <= systemVRAM + 2 : true
+    if (vramTier === 'fit') return vramFit(b, systemVRAM) !== 'big'
     if (vramTier === 'ultra') return vram <= 4
     if (vramTier === 'light') return vram > 4 && vram <= 10
     if (vramTier === 'middle') return vram > 10 && vram <= 20
     return vram > 20 // highend (open-ended)
   })
 
-  const filteredBundles = search
-    ? vramFilteredBundles.filter((b) => b.name.toLowerCase().includes(search.toLowerCase()) || b.description.toLowerCase().includes(search.toLowerCase()))
-    : vramFilteredBundles
+  // "Better Categories": what the bundle is for, the lanes of Create.
+  const videoItems: VideoItem[] = vramFilteredBundles.map((bundle) => ({ bundle, lane: laneOf.get(bundle.name) }))
+  const categorizedBundles: ModelBundle[] = isVideo
+    ? filterByCategory(videoItems, VIDEO_CATEGORIES, categoryId).map((v) => v.bundle)
+    : isImage ? filterByCategory(vramFilteredBundles, IMAGE_CATEGORIES, categoryId) : vramFilteredBundles
+  const filteredBundles = sortItems(categorizedBundles, sortId, {
+    size: (b) => b.totalSizeGB || undefined,
+    name: (b) => b.name,
+  })
 
   // Which model the Use button is currently loading. A GGUF start blocks for
   // seconds to minutes, and without this the button stayed live and a second
@@ -360,11 +473,33 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
   // evidence. Whether the engine answers on its port is a different question
   // with a different repair, and it must never be able to unsay "this 8 GB
   // file is on your machine" (Bug #43 was the first version of the same
-  // mistake, nayffy's restart the second).
+  // mistake, a user's restart the second).
   const installedEntryFor = (model: DiscoverModel) =>
     findInstalledForDiscoverModel(model, downloads, installedModels as unknown as InstalledModelLike[])
 
   const isModelFullyInstalled = (model: DiscoverModel) => installedEntryFor(model) !== null
+
+  // Check files and Repair (GH #113). One dialog for the page; a bundle or a
+  // chat model opens it with its files.
+  const [checkSubject, setCheckSubject] = useState<FileCheckSubject | null>(null)
+  const canCheckModel = (model: DiscoverModel) => {
+    const entry = installedEntryFor(model)
+    return chatModelCheckable(model, entry, isBuiltinEngineEntry(entry))
+  }
+  const checkModel = (model: DiscoverModel) => setCheckSubject({
+    name: model.name,
+    groupName: model.group || model.name,
+    load: async () => {
+      const dir = await luEngineDownloadDir()
+      if (!dir) throw new Error('Could not find the model folder of the LU Engine.')
+      return chatModelCheckTargets(model, dir)
+    },
+  })
+  const checkBundle = (bundle: ModelBundle) => setCheckSubject({
+    name: bundle.name,
+    groupName: bundle.name,
+    load: async () => bundleCheckTargets(bundle.files),
+  })
 
   /** Can the Use button do anything for this row: is the local model behind it
    *  known by its picker id. A download that finished in this session is on the
@@ -418,6 +553,8 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
   }
 
   const [installingBundle, setInstallingBundle] = useState<string | null>(null)
+  // C17: the bundle whose uninstall dialog is open.
+  const [uninstall, setUninstall] = useState<UninstallRequest | null>(null)
   const [installError, setInstallError] = useState<string | null>(null)
   // Kein Fehler, sondern eine Auskunft: der Nutzer hat den Download angehalten
   // oder abgebrochen, und die Installation sagt, was das fuer die Engine
@@ -425,6 +562,12 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
   // heisst in dieser App „kaputt oder wird geloescht" (siehe die Begruendung
   // am `.lu-control`-Rezept in index.css).
   const [installNotice, setInstallNotice] = useState<string | null>(null)
+  // Where Get sends a chat model on this visit (P11, David 2026-10-30). Null
+  // follows the chat model (resolveTextDownloadTarget); 'builtin' is the
+  // user's choice of the LU Engine for these downloads, without switching the
+  // chat model first. A button elsewhere (the Neuron tweaker) can hand it in.
+  const [targetChoice, setTargetChoice] = useState<'builtin' | null>(() => useUIStore.getState().discoverTarget)
+  useEffect(() => { useUIStore.getState().clearDiscoverTarget() }, [])
   // T-69: ein Controller pro Installationsversuch. Er bricht ab, wenn die
   // Ansicht verschwindet — AppShell haengt Models an `currentView === 'models'`
   // (`AppShell.tsx:955`), ein Wechsel haengt sie also wirklich ab — und wenn
@@ -433,18 +576,35 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
   useEffect(() => () => installWaitRef.current?.abort(), [])
   // Confirmation gate for multi-part (sharded) downloads — these sets routinely
   // run hundreds of GB across many files, so we never start them silently.
-  const [confirmDownload, setConfirmDownload] = useState<{ name: string; files: HfGgufFile[]; targetDir: string; totalGB: number; note?: string } | null>(null)
+  const [confirmDownload, setConfirmDownload] = useState<{ model: DiscoverModel; name: string; files: HfGgufFile[]; targetDir: string; totalGB: number; part: ImagePartSource | null; note?: string } | null>(null)
 
-  // Download a resolved file-set straight into one folder (llama.cpp / LM Studio
-  // merge multi-part `-NNNNN-of-NNNNN` GGUFs that share a directory).
-  const startDirectDownload = async (files: HfGgufFile[], targetDir: string, groupName: string) => {
-    const names = files.map(f => f.filename)
-    if (names.length > 1) dlStore.getState().setBundleGroup(groupName, names)
-    for (const f of files) {
-      dlStore.getState().setMeta(f.filename, f.url, 'gguf', targetDir)
-      await startModelDownloadToPath(f.url, targetDir, f.filename, f.sizeBytes || undefined)
+  // The user's choice about the image part, per model. Empty is the default:
+  // a model with image input brings its image part along. A name lands here
+  // when its box in the download dialog was unticked.
+  const [withoutImagePart, setWithoutImagePart] = useState<ReadonlySet<string>>(new Set())
+  const wantsImagePart = (model: DiscoverModel) => !withoutImagePart.has(model.name)
+  const setWantsImagePart = (model: DiscoverModel, wanted: boolean) => {
+    setWithoutImagePart(prev => {
+      const next = new Set(prev)
+      if (wanted) next.delete(model.name)
+      else next.add(model.name)
+      return next
+    })
+  }
+  // The image part of the model in the details dialog, when the catalog does
+  // not name it and the repository had to be asked.
+  const [infoPart, setInfoPart] = useState<{ model: string; part: ImagePartSource | null } | null>(null)
+
+  // Download a split model: every part into one folder (llama.cpp / LM Studio
+  // merge multi-part `-NNNNN-of-NNNNN` GGUFs that share a directory), and the
+  // image part next to them, named after the first part, which is the path the
+  // engine is started with.
+  const startDirectDownload = async (files: HfGgufFile[], targetDir: string, groupName: string, part: ImagePartSource | null) => {
+    const plan: PlannedDownload[] = files.map(f => ({ url: f.url, filename: f.filename, expectedBytes: f.sizeBytes || undefined, sha256: f.sha256 }))
+    if (part && files[0]) {
+      plan.push({ url: part.url, filename: imagePartFileName(files[0].filename), expectedBytes: part.sizeBytes, sha256: part.sha256 })
     }
-    dlStore.getState().startPolling()
+    await startPlannedDownload(plan, targetDir, groupName)
   }
 
   const handleBundleInstall = async (bundle: ModelBundle) => {
@@ -454,7 +614,10 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
     const filenames: string[] = []
     for (const file of bundle.files) {
       if (file.downloadUrl && file.filename && file.subfolder) {
-        dlStore.getState().setMeta(file.filename, file.downloadUrl, file.subfolder)
+        dlStore.getState().setMeta(file.filename, file.downloadUrl, file.subfolder, undefined, {
+          expectedBytes: file.sizeGB ? Math.round(file.sizeGB * 1_073_741_824) : undefined,
+          sha256: file.sha256,
+        })
         filenames.push(file.filename)
       }
     }
@@ -462,25 +625,21 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
     // Start polling BEFORE install so progress is tracked immediately
     dlStore.getState().startPolling()
     try {
-      await installBundleComplete(bundle)
+      const report = await installBundleComplete(bundle)
+      // GH #143: a ComfyUI on another machine. Not an error, the downloads
+      // run; the notice says where they go and what is left to do over there.
+      if (report.remote) setInstallNotice(remoteBundleNotice(bundle.name, report.remote))
     } catch (err) {
       log.error('[DiscoverModels] Bundle install failed', { err })
       setInstallError(`${bundle.name}: ${err instanceof Error ? err.message : String(err)}`)
     }
-    // Wait for polling to pick up at least one active download before clearing spinner
-    // This prevents the "disappearing" UI — spinner stays until downloads are visible
-    const waitForDownloads = () => {
-      const active = filenames.some(fn => {
-        const dl = dlStore.getState().downloads[fn]
-        return dl && (dl.status === 'downloading' || dl.status === 'connecting' || dl.status === 'complete')
-      })
-      if (active) {
-        setInstallingBundle(null)
-      } else {
-        setTimeout(waitForDownloads, 500)
-      }
-    }
-    setTimeout(waitForDownloads, 1000)
+    // One poll, so the rows of the downloads that did start are in the store
+    // before the card stops saying "Installing" on its own account. From here
+    // the card shows what the rows say: nothing started (no space, no network,
+    // cancelled) is "Get" again at once, a failed file is "Retry". The loop
+    // that stood here waited for a running row and never ended without one.
+    await dlStore.getState().refresh().catch(() => {})
+    setInstallingBundle(null)
   }
 
   // The three card states live in lib/bundle-state.ts, pure, because bundles
@@ -495,9 +654,11 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
   const hasBundleErrors = (bundle: ModelBundle): boolean =>
     bundleHasErrors(bundle.files, downloads, bundleStatuses[bundle.name] === true)
 
+  // A model and its image part are one download: one progress, one total, and
+  // complete only when both files are (lib/image-part.ts).
   const getModelDownloadState = (model: DiscoverModel): DownloadProgress | null => {
     if (!model.filename) return null
-    return downloads[model.filename] ?? null
+    return asOneDownload([downloads[model.filename], downloads[imagePartFileName(model.filename)]])
   }
 
   const retryBundle = (bundle: ModelBundle) => {
@@ -510,14 +671,15 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
         dlStore.getState().retry(f.filename)
       } else if (!dl || (dl.status !== 'complete' && dl.status !== 'downloading' && dl.status !== 'connecting')) {
         // File has no active download — start fresh
-        dlStore.getState().setMeta(f.filename, f.downloadUrl, f.subfolder)
-        startModelDownload(f.downloadUrl, f.subfolder, f.filename, f.sizeGB ? Math.round(f.sizeGB * 1_073_741_824) : undefined)
+        const expectedBytes = f.sizeGB ? Math.round(f.sizeGB * 1_073_741_824) : undefined
+        dlStore.getState().setMeta(f.filename, f.downloadUrl, f.subfolder, undefined, { expectedBytes, sha256: f.sha256 })
+        startModelDownload(f.downloadUrl, f.subfolder, f.filename, expectedBytes, f.sha256)
         dlStore.getState().startPolling()
       }
     }
   }
 
-  // Clear (the_mr_pickles): a bundle whose download keeps failing (bad URL,
+  // Clear: a bundle whose download keeps failing (bad URL,
   // model pulled) was stuck on Retry with no escape — the user couldn't get it
   // out of the error state to try another model. Dismiss ALL of the bundle's
   // entries (not just errored — a partial-complete otherwise keeps
@@ -528,16 +690,38 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
     }
   }
 
-  const [hfSearchResults, setHfSearchResults] = useState<DiscoverModel[]>([])
+  // C22: the hits of the last search stay for the session, with the words
+  // they were found for.
+  const [hfSearchResults, setHfSearchResultsState] = useState<DiscoverModel[]>(() => usePageMemoryStore.getState().hfSearch?.results ?? [])
+  const setHfSearchResults = (results: DiscoverModel[], query = '') => {
+    setHfSearchResultsState(results)
+    usePageMemoryStore.getState().setHfSearch(results.length ? { query, results } : null)
+  }
+  // Each Enter is a new search. Only the newest one may write the results and
+  // end the spinner: a slow answer to an older query arriving late used to
+  // overwrite the hits of the query now in the box.
+  const hfSearchSeq = useRef(0)
+  // Offline or rate limited is not "No models found": the user would go on
+  // trying other words instead of checking the connection.
+  const [hfSearchError, setHfSearchError] = useState<string | null>(null)
 
   const handleSearch = async () => {
     if (!search.trim() || !isText) return
+    const mine = ++hfSearchSeq.current
     setLoading(true)
     try {
       const results = await searchHuggingFaceModels(search.trim())
-      setHfSearchResults(results)
-    } catch { /* keep existing */ }
-    setLoading(false)
+      if (mine === hfSearchSeq.current) {
+        setHfSearchResults(results, search.trim())
+        setHfSearchError(null)
+      }
+    } catch (err) {
+      if (mine === hfSearchSeq.current) {
+        setHfSearchResults([])
+        setHfSearchError(hfSearchFailureText(err))
+      }
+    }
+    if (mine === hfSearchSeq.current) setLoading(false)
   }
 
   // The search input lives in the ModelManager header. It feeds `search`
@@ -548,10 +732,21 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchSubmitToken])
 
-  const uncensoredModels = isText ? getUncensoredTextModels() : []
-  const mainstreamModels = isText ? getMainstreamTextModels() : []
+  // Kimi K3.1 Pro kommt erst in die Liste, wenn es die Gewichte als GGUF auf
+  // HF gibt und die Engine sie oeffnet (api/kimi-k3-catalog.ts). Gecacht,
+  // offline oder bei einem Fehler bleibt die Liste einfach ohne.
+  const [gatedTextModels, setGatedTextModels] = useState<DiscoverModel[]>([])
+  useEffect(() => {
+    if (!isText) return
+    let live = true
+    kimiK31CatalogEntries().then((entries) => { if (live) setGatedTextModels(entries) }).catch(() => {})
+    return () => { live = false }
+  }, [isText])
 
-  // Apply the size filter to text models too (Feature 46, leonsk29 GH #46).
+  const uncensoredModels = isText ? forThisPlatform(getUncensoredTextModels(), isMacOS()) : []
+  const mainstreamModels = isText ? forThisPlatform([...getMainstreamTextModels(), ...gatedTextModels], isMacOS()) : []
+
+  // Apply the size filter to text models too (Feature 46, GH #46).
   // We use the model's GGUF `sizeGB` as a proxy for VRAM need — Q4 quants run
   // entirely on the GPU when sizeGB ≤ VRAM, so the same bucketing as
   // image/video applies here. Models without a `sizeGB` (cloud / canPull:false
@@ -559,20 +754,21 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
   const matchesVramTier = (sizeGB?: number) => {
     if (vramTier === 'all') return true
     if (sizeGB === undefined || sizeGB === null) return true
-    if (vramTier === 'fit') return systemVRAM ? computeFit(sizeGB, systemVRAM) !== 'big' : true
+    if (vramTier === 'fit') return chatFitGb ? computeFit(sizeGB, chatFitGb) !== 'big' : true
     if (vramTier === 'ultra') return sizeGB <= 4
     if (vramTier === 'light') return sizeGB > 4 && sizeGB <= 10
     if (vramTier === 'middle') return sizeGB > 10 && sizeGB <= 20
     return sizeGB > 20 // highend (open-ended)
   }
 
-  const matchesSearch = (m: DiscoverModel) =>
-    !search ||
-    m.name.toLowerCase().includes(search.toLowerCase()) ||
-    m.description.toLowerCase().includes(search.toLowerCase())
+  // Name, description, and the file it downloads (lib/model-search): the
+  // model on disk can be found here by its file name too.
+  const matchesSearch = (m: DiscoverModel) => !search || catalogEntryMatchesSearch(m, search)
 
-  const filteredUncensored = uncensoredModels.filter(m => matchesSearch(m) && matchesVramTier(m.sizeGB))
-  const filteredMainstream = mainstreamModels.filter(m => matchesSearch(m) && matchesVramTier(m.sizeGB))
+  // The size filter counts the image part like the tile does: it is loaded
+  // next to the model, so a model that only fits without it does not fit.
+  const filteredUncensored = uncensoredModels.filter(m => matchesSearch(m) && matchesVramTier(modelFootprintGb(m)))
+  const filteredMainstream = mainstreamModels.filter(m => matchesSearch(m) && matchesVramTier(modelFootprintGb(m)))
 
   // Turn a raw Ollama pull error into actionable guidance. Sharded/split GGUF
   // repos (model split into multiple .gguf parts) make `ollama pull` 400 —
@@ -588,15 +784,29 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
     // A bare HTTP 400 from `ollama pull hf.co/...` is usually an OUT-OF-DATE
     // Ollama (HF-pull support is version-gated) — the same ref succeeds on
     // current Ollama. Tell the user instead of surfacing "ollama: 400"
-    // (Aldrich Ironhart, Discord 2026-06-07: "Gemma 4 26B MoE → ollama: 400").
+    // (a user, Discord 2026-06-07: "Gemma 4 26B MoE → ollama: 400").
     if (/\b400\b/.test(msg)) {
       return `Ollama rejected the download of ${modelName} (HTTP 400). This is almost always an outdated Ollama. Update it from ollama.com/download and retry. Otherwise download via LM Studio, or pick a single file quant.`
     }
     return `Download failed: ${msg}`
   }
 
-  const handleTextDownload = async (model: DiscoverModel) => {
-    // Bug Y/a v2.5.0 — Aldrich Ironhart Discord. Pre-v2.5.0 we picked the
+  const targetInput = {
+    activeChatModel,
+    openai: providers.openai,
+    ollamaEnabled: !!providers.ollama?.enabled,
+  }
+  const followTarget = resolveTextDownloadTarget(targetInput)
+  const shownTarget = chosenTextDownloadTarget(targetInput, targetChoice)
+  const targetName = (t: typeof shownTarget) => textDownloadTargetLabel(t, providers.openai?.name)
+  /** What a tile's Get says it fills. An entry only Ollama can pull goes
+   *  there whatever was chosen (handleTextDownload). */
+  const getTargetOf = (m: DiscoverModel) => (m.ollamaModel ? 'Ollama' : targetName(shownTarget))
+
+  // `confirmed`: the user already said yes to the size and the parts in the
+  // Hugging Face link dialog, so a split set starts without a second question.
+  const handleTextDownload = async (model: DiscoverModel, opts: { confirmed?: boolean } = {}) => {
+    // Bug Y/a v2.5.0 — a user Discord. Pre-v2.5.0 we picked the
     // download backend by "whichever is enabled" with LM Studio winning when
     // both were on. That decoupled the download path from the active chat
     // picker: a user chatting on LM Studio could click Download and the
@@ -604,37 +814,22 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
     // chat side. Fix: derive the target backend from the *active chat
     // model*. If no active model yet (first run, brand new install), fall
     // back to the previous enabled-wins logic so the download still works.
-    const activeProviderId = activeChatModel ? getProviderIdFromModel(activeChatModel) : null
     // Built-in engine lives in the managed `openai` slot. A second chat model
     // downloaded here goes flat into the app-owned models dir and boots
     // llama-server, mirroring onboarding — never nested like LM Studio.
     //
-    // GH #118: the three flags below used to be read off `activeProviderId`
+    // GH #118: the three flags below used to be read off the active provider
     // alone, so a fresh install (no chat model picked yet) matched none of
     // them and the file went down the LM Studio branch into a nested folder
     // the built-in engine never scans. resolveTextDownloadTarget keeps the
     // active-model rule and adds the missing fallback.
-    const downloadTarget = resolveTextDownloadTarget({
-      activeChatModel,
-      openai: providers.openai,
-      ollamaEnabled: !!providers.ollama?.enabled,
-    })
-    const isActiveBuiltin = downloadTarget === 'builtin'
-    const isActiveLmStudio = downloadTarget === 'lmstudio'
-    const isActiveOllama = downloadTarget === 'ollama'
+    let downloadTarget = chosenTextDownloadTarget(targetInput, targetChoice)
 
-    // Ollama-native models: only meaningful with Ollama present. If the user
-    // is chatting on LM Studio and clicks one of these (e.g. Qwen3.6 35B
-    // listed only by Ollama tag), warn instead of silently pulling into a
-    // backend the user can't see from chat.
+    // Ollama-native models land in Ollama whatever the picker holds.
     if (model.ollamaModel) {
-      const ollamaOn = !!providers.ollama?.enabled
-      if (!ollamaOn) {
-        setInstallError(`${model.name} only runs on Ollama. Enable the Ollama provider (Settings → Providers) before downloading.`)
-        return
-      }
-      if (activeProviderId && !isActiveOllama) {
-        setInstallError(`${model.name} can only run on Ollama. Switch the chat picker to an Ollama model first, then download.`)
+      const blocked = ollamaOnlyDownloadBlock(model.name, !!providers.ollama?.enabled)
+      if (blocked) {
+        setInstallError(blocked)
         return
       }
       try {
@@ -646,16 +841,57 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
       return
     }
     if (!model.downloadUrl || !model.filename) return
+    setInstallNotice(null)
+
+    // D9: a server of the user's own in the openai slot (vLLM, LiteLLM, a
+    // Custom one) may read no folder LU knows. Its GGUF goes to the LU Engine
+    // then, and the chat stays on that server, rather than every Get ending
+    // in "Could not determine model directory".
+    const serverName = providers.openai?.name || 'LM Studio'
+    let noFolderOn: string | null = null
+    if (downloadTarget === 'openai-compat' && !hfModelPath && !(await detectProviderModelPath(serverName))) {
+      noFolderOn = serverName
+      downloadTarget = 'builtin'
+    }
+    // Chosen against the chat model: the file goes to the LU Engine, and the
+    // chat stays on the model the user is talking to.
+    const keepChatModel = downloadTarget === 'builtin' && resolveTextDownloadTarget(targetInput) !== 'builtin'
+    const isActiveBuiltin = downloadTarget === 'builtin'
+    const isActiveLmStudio = downloadTarget === 'lmstudio'
+    const isActiveOllama = downloadTarget === 'ollama'
+
+    // N1: an LFM3 GGUF for LM Studio needs its runtime 2.65.1+. Said before
+    // the download, which still runs: the file is right, the runtime is old.
+    if (isActiveLmStudio && isLfm3Model(model.filename)) {
+      void backendCall<string | null>('lmstudio_gguf_runtime').catch(() => null).then((runtime) => {
+        const note = lmStudioRuntimeNote(model.filename!, runtime)
+        if (note) setInstallNotice(note)
+      })
+    }
 
     // Resolve the REAL file(s) on HuggingFace before downloading. The curated /
     // search-derived (url, filename) is only a *guess* — the repo may host the
     // quant in a subfolder, split it into multiple parts, or not have that
     // exact filename. Querying the tree turns the guess into the truth.
-    const parsed = parseHfUrl(model.downloadUrl)
-    const preferredQuant = extractGgufQuant(model.filename)
-    const resolution = parsed
-      ? await resolveHfGgufFiles(`${parsed.user}/${parsed.repo}`, preferredQuant)
+    //
+    // The file the entry names decides. The quant is only the fallback for a
+    // name the repo does not carry: on its own it cannot tell two families in
+    // one repo apart, and it reads nothing from `-0731.gguf` or `_K_P.gguf`.
+    const request = ggufRequestFor(model)
+    // D7 (GitHub #215): a quant nobody chose is taken by the memory there is.
+    const budget = request?.quantGuessed ? quantBudgetBytes(chatFitGb) : undefined
+    const resolution = request
+      ? await resolveHfGgufFiles(request.repoId, request.preferredQuant, request.exactPath, budget)
       : null
+    const fitNote = quantFitNote(model.name, resolution, chatFitGb, sharedMemory)
+
+    // A split set the uploader has not finished: llama.cpp loads it only with
+    // every part, so none of it is fetched.
+    if (resolution?.incomplete) {
+      setInstallError(`${model.name} is not complete on Hugging Face yet: only ${resolution.incomplete.have} of ${resolution.incomplete.of} parts are there, and the model loads only with all of them. Try again later.`)
+      return
+    }
+    if (fitNote) setInstallNotice(fitNote)
 
     const lmStudioEnabled = !!providers.openai?.enabled && (providers.openai?.name || '').toLowerCase().includes('lm studio')
     const ollamaEnabledNow = !!providers.ollama?.enabled
@@ -670,12 +906,16 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
       if (isActiveBuiltin) {
         return await luEngineDownloadDir()
       }
-      const base = hfModelPath || (await detectProviderModelPath(providers.openai?.name || 'LM Studio'))
+      const base = hfModelPath || (await detectProviderModelPath(serverName))
       if (!base) return null
       setHfModelPath(base)
       const subdir = hfUrlToLmStudioSubdir(model.downloadUrl!)
       return subdir ? `${base}/${subdir}` : base
     }
+
+    // The backend's own sentence for a missing folder, asked only once it is missing.
+    const whyNoFolder = async (): Promise<string | null> =>
+      (isActiveBuiltin ? await luEngineDownloadFolder() : await providerModelFolder(serverName)).reason
 
     // ── Sharded / multi-part: `ollama pull` cannot load split GGUF
     // (ollama/ollama#5245), so the only sound path is a direct multi-part
@@ -686,7 +926,7 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
     if (resolution?.sharded) {
       const targetDir = await ensureDirectDir()
       if (!targetDir) {
-        setInstallError('Could not determine model directory. Please check app permissions.')
+        setInstallError(noModelFolderError(model.name, await whyNoFolder()))
         return
       }
       // The note is about Ollama's split-GGUF gap, so it must only appear when
@@ -694,11 +934,18 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
       // built-in engine as the target the parts land in the app's own flat
       // models dir and the Rust scan collapses the set, so the note would lie.
       const ollamaCantLoad = isActiveOllama || (!isActiveBuiltin && !isActiveLmStudio && !lmStudioEnabled && ollamaEnabledNow)
+      if (opts.confirmed) {
+        const part = imagePartFor(model, resolution)
+        await startDirectDownload(resolution.files, targetDir, model.name, wantsImagePart(model) ? part : null)
+        return
+      }
       setConfirmDownload({
+        model,
         name: model.name,
         files: resolution.files,
         targetDir,
         totalGB: +(resolution.totalBytes / 1_073_741_824).toFixed(1),
+        part: imagePartFor(model, resolution),
         note: ollamaCantLoad
           ? `Ollama can't load split GGUF (#5245). The parts go to your LM Studio models folder. Load it from LM Studio, or pick a single file quant for Ollama.`
           : undefined,
@@ -735,24 +982,38 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
 
     const targetDir = await ensureDirectDir()
     if (!targetDir) {
-      setInstallError('Could not determine model directory. Please check app permissions.')
+      setInstallError(noModelFolderError(model.name, await whyNoFolder()))
       return
     }
-    // A vision GGUF carries no image tower: llama.cpp reads it from a separate
-    // mmproj file that has to sit in the model folder BEFORE the server starts,
-    // or the model silently loads text-only. It goes down the same path as the
-    // model, so progress, pause, resume and retry work on it unchanged.
-    const plan = planModelDownload(model, realUrl, realName, realBytes)
+    // A GGUF carries no image tower: llama.cpp reads it from a second file that
+    // has to lie next to the model BEFORE the server starts, or the model
+    // loads without image input. It is part of the same download: one entry
+    // in the download list, one progress, one total, and pause, resume, retry
+    // and cancel act on both.
+    const part = imagePartFor(model, resolution)
+    let withPart = !!part && wantsImagePart(model)
     try {
-      if (plan.length > 1) {
-        dlStore.getState().setBundleGroup(model.group || model.name, plan.map(f => f.filename))
+      // Little room on the drive: when model plus image part do not fit and
+      // the model alone does, the model comes without it rather than not at
+      // all, and the line under the list says so. The part can be added from
+      // the installed model later.
+      if (withPart && part?.sizeBytes && realBytes) {
+        const [both, alone] = await Promise.all([
+          checkDownloadSpace({ destDir: targetDir }, realBytes + part.sizeBytes),
+          checkDownloadSpace({ destDir: targetDir }, realBytes),
+        ])
+        if (both && !both.fits && alone?.fits) {
+          withPart = false
+          setInstallNotice(withFitNote(fitNote, `${model.name} is downloading without ${partInputWord(model)}: the drive has no room for the extra ${gbOf(part.sizeBytes)} GB. You can add it later under Installed.`))
+        }
       }
-      for (const f of plan) {
-        dlStore.getState().setMeta(f.filename, f.url, 'gguf', targetDir)
-        await startModelDownloadToPath(f.url, targetDir, f.filename, f.expectedBytes)
-      }
-      dlStore.getState().startPolling()
-      if (isActiveBuiltin) {
+      const plan = planModelDownload(model, realUrl, realName, realBytes, single?.sha256, { part, withImagePart: withPart })
+      await startPlannedDownload(plan, targetDir, model.group || model.name)
+      if (isActiveBuiltin && keepChatModel) {
+        setInstallNotice(withFitNote(fitNote, noFolderOn
+          ? `${noFolderOn} reads no model folder LU knows, so ${model.name} is downloading to the LU Engine. Your chat stays on ${noFolderOn}; the model list shows it once it is done.`
+          : `${model.name} is downloading to the LU Engine. Your chat stays on its model; ${NEURONS_ENABLED ? 'the Neuron tweaker and ' : ''}the model list show${NEURONS_ENABLED ? '' : 's'} it once it is done.`))
+      } else if (isActiveBuiltin) {
         // Built-in engine: await the flat GGUF, then make it the active chat
         // model so the freshly-added model is chat-ready without a manual switch.
         // The projector is awaited too: booting before it lands would bring the
@@ -765,10 +1026,12 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
         installWaitRef.current?.abort()
         const wait = new AbortController()
         installWaitRef.current = wait
-        setInstallNotice(null)
         for (const f of plan) {
           const outcome = await awaitDownloadedFile(dlStore, f.filename, wait.signal)
           if (outcome === 'complete') continue
+          // Cancelling only the image part is a choice about the part: the
+          // model is still the download, and it is still switched to.
+          if (outcome === 'cancelled' && isImagePartFile(f.filename)) continue
           // Jeder andere Ausgang ist eine Entscheidung des Nutzers (Pause,
           // Abbruch) oder das Ende der Ansicht. Keiner davon ist ein Fehler,
           // und keiner darf spaeter noch eine Engine hochfahren.
@@ -805,23 +1068,37 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
   // ── Derived view data for the tile grid ─────────────────────────────
 
   const activeTextModels = subTab === 'uncensored' ? filteredUncensored : filteredMainstream
-  const textGroups = isText ? groupModels(activeTextModels) : []
+  const allTextGroups = isText ? groupModels(activeTextModels) : []
+  // A card is a group of quants of one model: it belongs to a category when
+  // any of its variants does (the tags of a family can differ per quant).
+  const groupCategories: CategoryDef<DiscoverModel[]>[] = TEXT_CATEGORIES.map((d) => ({ ...d, match: (g: DiscoverModel[]) => g.some(d.match) }))
+  const textGroups = sortItems(filterByCategory(allTextGroups, groupCategories, categoryId), sortId, {
+    size: (g) => {
+      const sizes = g.map((m) => modelFootprintGb(m)).filter((x): x is number => typeof x === 'number' && x > 0)
+      return sizes.length ? Math.min(...sizes) : undefined
+    },
+    released: (g) => g.map((m) => m.released).filter((r): r is string => !!r).sort().pop(),
+    name: (g) => g[0].group ?? g[0].name,
+  })
 
   // "Start here" — up to 3 derived picks for the current tab. Pure derivation
   // from existing flags (hot/agent/lightweight) + the hardware fit; no new
   // catalog data and no picks while searching or filtering.
-  const showPicks = isText && !search && vramTier === 'all' && textGroups.length > 4
+  const showPicks = isText && !search && vramTier === 'all' && categoryId === 'all' && sortId === 'recommended' && textGroups.length > 4
   const scoredGroups = showPicks
     ? chatRecommendationGroups(textGroups)
         .map(g => {
-          const rep = pickDefaultVariant(g, systemVRAM, isModelFullyInstalled, getModelDownloadState)
+          const rep = pickDefaultVariant(g, chatFitGb, isModelFullyInstalled, getModelDownloadState)
+          // An entry only Ollama can pull is no first pick while Ollama is
+          // off (lib/start-here-picks). It stays in the list below.
+          if (!mayBeStartHerePick(rep, { ollamaEnabled: !!providers.ollama?.enabled })) return { g, score: -1 }
           let score = 0
           if (rep.hot) score += 2
           if (rep.agent) score += 1
-          const fit = computeFit(rep.sizeGB, systemVRAM)
+          const fit = computeFit(modelFootprintGb(rep), chatFitGb)
           if (fit === 'fits') score += 2
           else if (fit === 'tight') score += 1
-          if (!systemVRAM && rep.lightweight) score += 2
+          if (!chatFitGb && rep.lightweight) score += 2
           if (rep.canPull === false) score -= 2
           if (isModelFullyInstalled(rep)) score -= 3
           return { g, score }
@@ -841,23 +1118,87 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
     return null
   }
 
+  // The face of the page: the classic one on Windows and Linux, the redesign
+  // on the Mac (skin/which.ts). It lays out and colours; what is shown and
+  // what a click does is decided in this file, once, for both.
+  const skin = modelSkin()
+
+  // The category chips with their counts. Counted on the list the other
+  // filters leave, so a number never promises cards the size filter hides.
+  const categoryChips: { id: string; label: string; hint: string; count: number }[] = (() => {
+    const pick = <T,>(items: readonly T[], defs: readonly CategoryDef<T>[]) => {
+      const counts = categoryCounts(items, defs)
+      return [
+        { id: 'all', label: 'All', hint: 'Every model of this list', count: counts.all },
+        ...defs.map((d) => ({ id: d.id, label: d.label, hint: d.hint, count: counts[d.id] ?? 0 })),
+      ]
+    }
+    if (isText) return pick(allTextGroups, groupCategories)
+    if (isVideo) return pick(videoItems, VIDEO_CATEGORIES)
+    if (isImage) return pick(vramFilteredBundles, IMAGE_CATEGORIES)
+    return []
+  })()
+  // An empty category is left out, except the one that is picked: the user
+  // has to be able to see what holds the list empty and click it away.
+  const shownCategoryChips = categoryChips.filter((c) => c.id === 'all' || c.count > 0 || c.id === categoryId)
+  const sortChoices = SORTS.filter((o) => isText || !o.textOnly)
+
+  // The image part of the model in the details dialog: the catalog's, or for
+  // a model the catalog does not know, the one its repository lists. That
+  // second answer needs one request, asked when the dialog opens.
+  const infoImagePart: ImagePartSource | null = infoModel
+    ? imagePartOf(infoModel) ?? (infoPart?.model === infoModel.name ? infoPart.part : null)
+    : null
+  // C21: the files of the repository behind the model in the details dialog,
+  // listed on request (one request to Hugging Face, not one per card).
+  const [fileChoices, setFileChoices] = useState<{ model: string; repoId: string; list: GgufChoice[] | null; loading: boolean } | null>(null)
+  const infoRepoId = (m: DiscoverModel | null): string | null => {
+    if (!m || m.ollamaModel || m.canPull === false || !m.downloadUrl) return null
+    return ggufRequestFor(m)?.repoId ?? null
+  }
+  const loadFileChoices = (m: DiscoverModel) => {
+    const repoId = infoRepoId(m)
+    if (!repoId) return
+    setFileChoices({ model: m.name, repoId, list: null, loading: true })
+    void fetchGgufChoices(repoId).then((list) => {
+      setFileChoices((cur) => (cur && cur.model === m.name ? { ...cur, list, loading: false } : cur))
+    })
+  }
+  const openInfo = (model: DiscoverModel) => {
+    setInfoModel(model)
+    setFileChoices(null)
+    // The same question the download asks (`ggufRequestFor`): the file the
+    // entry names decides, the quant is only the fallback.
+    const request = ggufRequestFor(model)
+    if (imagePartOf(model) || !request || !model.filename) return
+    void resolveHfGgufFiles(request.repoId, request.preferredQuant, request.exactPath).then((resolution) => {
+      setInfoPart({ model: model.name, part: imagePartFor(model, resolution) })
+    })
+  }
+
   const renderTile = (group: DiscoverModel[], i: number, highlight = false) => (
     <motion.div
       key={group[0].group ?? group[0].name}
+      className={skin.cls.tileWrap}
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: Math.min(i, 12) * 0.025 }}
     >
-      <ModelTile
+      <skin.ModelTile
         variants={group}
-        vramGb={systemVRAM}
+        vramGb={chatFitGb}
+        sharedMemory={sharedMemory}
         isInstalled={isModelFullyInstalled}
         dlState={getModelDownloadState}
         onDownload={handleTextDownload}
+        getTarget={getTargetOf}
         onUse={handleUseInstalled}
         canUse={canUseInstalled}
         isUsing={(m) => installedEntryFor(m)?.name === usingModel && usingModel !== null}
-        onInfo={setInfoModel}
+        onCheck={checkModel}
+        canCheck={canCheckModel}
+        onInfo={openInfo}
+        withImagePart={wantsImagePart}
         onOpenUrl={(u) => openExternal(u)}
         highlight={highlight}
       />
@@ -866,69 +1207,118 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
 
   return (
     <div className="space-y-4">
-      {/* Filter bar: Unfiltered/Mainstream + size chips + hardware chip */}
-      <div className="flex items-center gap-2 flex-wrap">
-        <div className={SEGMENT_TRACK} role="group" aria-label="Catalogue">
-          <button
-            onClick={() => setSubTab('mainstream')}
-            aria-pressed={subTab === 'mainstream'}
-            title="Popular models with tool calling + vision"
-            className="lu-control"
-          >
-            <ShieldCheck size={ICON_SM} /> Mainstream
-          </button>
-          <button
-            onClick={() => setSubTab('uncensored')}
-            aria-pressed={subTab === 'uncensored'}
-            title="No filters, no limits"
-            className="lu-control"
-          >
-            <Unlock size={ICON_SM} /> Unfiltered
-          </button>
-        </div>
-
-        <div className="ml-auto">
-          <HardwareChip vramGb={systemVRAM} ramGb={ramGb} />
-        </div>
-      </div>
-
-      {/* Size chips — same buckets as the old VRAM-tier filter, plain labels */}
-      {(isImage || isVideo || (isText && (uncensoredModels.length > 0 || mainstreamModels.length > 0))) && (
-        <div className={SEGMENT_TRACK} role="group" aria-label="Size">
-          {([
-            { key: 'all' as SizeTier, label: 'All', desc: '' },
-            ...(systemVRAM ? [{ key: 'fit' as SizeTier, label: 'Fits my PC', desc: `≤${systemVRAM} GB` }] : []),
-            { key: 'ultra' as SizeTier, label: 'Tiny', desc: '≤4 GB' },
-            { key: 'light' as SizeTier, label: 'Small', desc: '4 to 10 GB' },
-            { key: 'middle' as SizeTier, label: 'Medium', desc: '10 to 20 GB' },
-            { key: 'highend' as SizeTier, label: 'Big', desc: '>20 GB' },
-          ]).map(tier => (
+      {/* Filter bar: Unfiltered/Mainstream, the size chips, the hardware chip,
+          the line that says a pick moved the chat backend (A14: the same bar
+          the composer shows, from the same store, so the sentence cannot
+          drift into two versions of itself) and the legend. What is in the
+          bar is decided here; how it is laid out is the face's business: two
+          rows on Windows and Linux, one row on the Mac. */}
+      <skin.FilterBar
+        catalogue={(
+          <div className={SEGMENT_TRACK} role="group" aria-label="Catalogue">
             <button
-              key={tier.key}
-              onClick={() => setVramTier(tier.key)}
-              aria-pressed={vramTier === tier.key}
+              onClick={() => setSubTab('mainstream')}
+              aria-pressed={subTab === 'mainstream'}
+              title="Popular models with tool calling + vision"
               className="lu-control"
             >
-              {tier.label}
-              {tier.desc && <span className="opacity-60 ml-1">{tier.desc}</span>}
+              <ShieldCheck size={ICON_SM} /> Mainstream
+            </button>
+            <button
+              onClick={() => setSubTab('uncensored')}
+              aria-pressed={subTab === 'uncensored'}
+              title="No filters, no limits"
+              className="lu-control"
+            >
+              <Unlock size={ICON_SM} /> Unfiltered
+            </button>
+          </div>
+        )}
+        // Size chips: same buckets as the old VRAM-tier filter, plain labels
+        sizes={(isImage || isVideo || (isText && (uncensoredModels.length > 0 || mainstreamModels.length > 0))) && (
+          <div className={SEGMENT_TRACK} role="group" aria-label="Size">
+            {([
+              { key: 'all' as SizeTier, label: 'All', desc: '' },
+              ...(sharedMemory
+                // The whole pool is what the owner knows the Mac by; the share a
+                // model can take of it is the rule behind the filter.
+                ? (isText && chatFitGb && ramGb ? [{ key: 'fit' as SizeTier, label: 'Fits my Mac', desc: `${Math.round(ramGb)} GB` }] : [])
+                : (systemVRAM ? [{ key: 'fit' as SizeTier, label: 'Fits my PC', desc: `≤${systemVRAM} GB` }] : [])),
+              { key: 'ultra' as SizeTier, label: 'Tiny', desc: '≤4 GB' },
+              { key: 'light' as SizeTier, label: 'Small', desc: '4 to 10 GB' },
+              { key: 'middle' as SizeTier, label: 'Medium', desc: '10 to 20 GB' },
+              { key: 'highend' as SizeTier, label: 'Big', desc: '>20 GB' },
+            ]).map(tier => (
+              <button
+                key={tier.key}
+                onClick={() => setVramTier(tier.key)}
+                aria-pressed={vramTier === tier.key}
+                className="lu-control"
+              >
+                {tier.label}
+                {tier.desc && <span className="opacity-60 ml-1">{tier.desc}</span>}
+              </button>
+            ))}
+          </div>
+        )}
+        categories={shownCategoryChips.length > 1 && (
+          <div className="flex items-center gap-2 flex-wrap" data-testid="discover-categories">
+            <div className={SEGMENT_TRACK} role="group" aria-label="Category">
+              {shownCategoryChips.map((c) => (
+                <button
+                  key={c.id}
+                  onClick={() => setCategoryId(c.id)}
+                  aria-pressed={categoryId === c.id || (c.id === 'all' && !categoryChips.some((x) => x.id === categoryId))}
+                  title={c.hint}
+                  className="lu-control"
+                  data-testid={`discover-category-${c.id}`}
+                >
+                  {c.label}
+                  <span className="opacity-60 ml-1 tabular-nums">{c.count}</span>
+                </button>
+              ))}
+            </div>
+            <label className="flex items-center gap-1.5 t-micro text-gray-500 dark:text-gray-400 ml-auto">
+              Sort
+              <select
+                value={sortChoices.some((o) => o.id === sortId) ? sortId : 'recommended'}
+                onChange={(e) => setSortId(e.target.value)}
+                className="lu-control"
+                aria-label="Sort models"
+                data-testid="discover-sort"
+              >
+                {sortChoices.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+              </select>
+            </label>
+          </div>
+        )}
+        hardware={{ vramGb: systemVRAM, ramGb, sharedMemory }}
+        switchBar={<LuEngineSwitchBar />}
+        // D-S22 · die Legende zu den Faehigkeitszeichen auf den Kacheln.
+        // Steht einmal hier statt 53 Mal als Tooltip, den man erst findet,
+        // wenn man auf einem 12px-Glyph stehenbleibt. Sie rendert aus
+        // derselben `CAPABILITIES`-Tabelle wie die Kacheln (ModelTiles.tsx),
+        // kann also nicht von ihnen abweichen. Sie steht unter der Leiste,
+        // also so nah wie moeglich an dem Raster, das sie erklaert.
+        legend={isText && (uncensoredModels.length > 0 || mainstreamModels.length > 0)}
+      />
+
+      {/* Where Get puts a chat model, and the way to choose the LU Engine
+          for it (P11). Only where it is a choice: when the chat model already
+          runs on the LU Engine there is nothing to pick. */}
+      {isText && (
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 t-body text-gray-600 dark:text-gray-300" data-testid="discover-target">
+          <span>Get downloads to <span className="font-semibold text-gray-900 dark:text-white" data-testid="discover-target-name">{targetName(shownTarget)}</span>{targetChoice === 'builtin' && followTarget !== 'builtin' ? ' for now.' : '.'}</span>
+          {followTarget !== 'builtin' && (targetChoice === 'builtin' ? (
+            <button className="lu-control" onClick={() => setTargetChoice(null)} data-testid="discover-target-follow">
+              Back to {targetName(followTarget)}
+            </button>
+          ) : (
+            <button className="lu-control" onClick={() => setTargetChoice('builtin')} data-testid="discover-target-builtin" title={NEURONS_ENABLED ? 'The Neuron tweaker and the LU Engine only use files in the LU Engine. Your chat model stays as it is.' : 'The LU Engine only uses files in the LU Engine. Your chat model stays as it is.'}>
+              Send to LU Engine instead
             </button>
           ))}
         </div>
-      )}
-
-      {/* A14: the pick took the chat backend with it, and says so. The same
-          bar the composer shows, from the same store, so the sentence cannot
-          drift into two versions of itself. */}
-      <LuEngineSwitchBar />
-
-      {/* D-S22 · die Legende zu den Faehigkeitszeichen auf den Kacheln.
-          Steht einmal hier statt 53 Mal als Tooltip, den man erst findet,
-          wenn man auf einem 12px-Glyph stehenbleibt. Sie rendert aus
-          derselben `CAPABILITIES`-Tabelle wie die Kacheln (ModelTiles.tsx),
-          kann also nicht von ihnen abweichen. Sie steht unter der Leiste,
-          also so nah wie moeglich an dem Raster, das sie erklaert. */}
-      {isText && (uncensoredModels.length > 0 || mainstreamModels.length > 0) && (
-        <CapLegend />
       )}
 
       {/* Install error banner */}
@@ -961,25 +1351,38 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
       {(isImage || isVideo) && filteredBundles.length > 0 && (
         <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-2.5">
           {filteredBundles.map((bundle, bi) => (
-            <motion.div key={bundle.name} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: Math.min(bi, 12) * 0.025 }}>
-              <BundleTile
+            <Fragment key={bundle.name}>
+            {tierGroup(bundle) && tierGroup(bundle) !== tierGroup(filteredBundles[bi - 1] ?? {}) && (
+              <skin.Head place="tier" title={tierGroup(bundle) ?? ''} />
+            )}
+            <motion.div className={skin.cls.tileWrap} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: Math.min(bi, 12) * 0.025 }}>
+              <skin.BundleTile
                 bundle={bundle}
+                lane={laneOf.get(bundle.name)}
+                cloudTask={bundleCloudTask(isImage ? 'image' : 'video', bundle, laneOf.get(bundle.name))}
                 vramGb={systemVRAM}
+                sharedMemory={isMacOS()}
                 complete={isBundleComplete(bundle)}
+                filesOnDisk={bundleFilesOnDisk}
                 downloading={isBundleDownloading(bundle) || installingBundle === bundle.name}
                 hasErrors={hasBundleErrors(bundle)}
                 onInstall={() => handleBundleInstall(bundle)}
                 onRetry={() => retryBundle(bundle)}
                 onClear={() => clearBundle(bundle)}
+                onCheck={() => checkBundle(bundle)}
+                onUninstall={() => setUninstall({ kind: 'bundle', bundle })}
                 onOpenUrl={(u) => openExternal(u)}
               />
             </motion.div>
+            </Fragment>
           ))}
         </div>
       )}
 
       {(isImage || isVideo) && sortedBundles.length > 0 && filteredBundles.length === 0 && (
-        <p className="text-center text-gray-500 py-4 text-sm">No models match this size filter. Try a different one.</p>
+        <p className={skin.cls.sizeFilterEmpty}>
+          {categoryId !== 'all' ? 'No models match this size and category. Try another one, or All.' : 'No models match this size filter. Try a different one.'}
+        </p>
       )}
 
       {/* CivitAI Search (Image & Video). Checkpoints here; the LoRA rail
@@ -1041,78 +1444,96 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
         <>
           {/* Start here — derived picks for the active tab */}
           {topPicks.length >= 2 && (
-            <div className="space-y-1.5" role="region" aria-label="Start here">
-              <div className="flex items-center gap-1.5 px-1">
-                <Sparkles size={11} className="text-gray-400 dark:text-gray-500" />
-                <h3 className="t-micro font-semibold uppercase tracking-[0.12em] text-gray-700 dark:text-gray-300">Start here</h3>
-                <span className="text-[0.55rem] text-gray-400 dark:text-gray-500">picked for your PC</span>
-                <div className="flex-1 h-px bg-gray-200 dark:bg-white/[0.06]" />
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5">
+            <div className={skin.cls.group} role="region" aria-label="Start here">
+              <skin.Head
+                place="start-here"
+                Icon={Sparkles}
+                title="Start here"
+                note={sharedMemory ? 'picked for this Mac' : 'picked for your PC'}
+              />
+              <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-2.5">
                 {topPicks.map((g, i) => renderTile(g, i, true))}
               </div>
             </div>
           )}
 
-          <div className="space-y-1.5">
+          <div className={skin.cls.group}>
             {topPicks.length >= 2 && (
-              <div className="flex items-center gap-1.5 px-1 pt-1">
-                <h3 className="t-micro font-semibold uppercase tracking-[0.12em] text-gray-700 dark:text-gray-300">
-                  {subTab === 'uncensored' ? 'All unfiltered models' : 'All mainstream models'}
-                </h3>
-                <div className="flex-1 h-px bg-gray-200 dark:bg-white/[0.06]" />
-              </div>
+              <skin.Head place="all" title={subTab === 'uncensored' ? 'All unfiltered models' : 'All mainstream models'} />
             )}
             <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-2.5">
               {gridGroups.map((g, i) => renderTile(g, i))}
             </div>
+            {activeTextModels.length > 0 && textGroups.length === 0 && (
+              <p className={skin.cls.searchEmpty}>No models of this category here. Pick All, or the other catalogue.</p>
+            )}
             {activeTextModels.length === 0 && (
-              <p className="text-center text-gray-500 py-4">
+              <p className={skin.cls.searchEmpty}>
                 {subTab === 'uncensored' ? 'No unfiltered models match your search' : 'No mainstream models match your search'}
               </p>
             )}
           </div>
 
-          {/* HuggingFace Search Results */}
-          {hfSearchResults.length > 0 && (
-            <div className="space-y-1.5 mt-6">
-              <div className="flex items-center gap-1.5 px-1">
-                <Search size={10} className="text-gray-400" />
-                <h3 className="t-micro font-semibold uppercase tracking-[0.12em] text-gray-500">HuggingFace results</h3>
-                <div className="flex-1 h-px bg-gray-200 dark:bg-white/[0.06]" />
-              </div>
-              <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-2.5">
-                {hfSearchResults.map((model, i) => (
-                  <motion.div key={model.name + i} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: Math.min(i, 12) * 0.025 }}>
-                    <ModelTile
-                      variants={[model]}
-                      vramGb={systemVRAM}
-                      isInstalled={isModelFullyInstalled}
-                      dlState={getModelDownloadState}
-                      onDownload={handleTextDownload}
-                      onUse={handleUseInstalled}
-                      canUse={canUseInstalled}
-                      isUsing={(m) => installedEntryFor(m)?.name === usingModel && usingModel !== null}
-                      onInfo={setInfoModel}
-                      onOpenUrl={(u) => openExternal(u)}
-                    />
-                  </motion.div>
-                ))}
-              </div>
-            </div>
+          {hfSearchError && (
+            <p role="alert" className={skin.cls.searchEmpty} data-testid="hf-search-failed">{hfSearchError}</p>
           )}
+
+          {/* HuggingFace Search Results */}
+          {hfSearchResults.length > 0 && (() => {
+            const wantsOriginal = !!originalFor && search.trim() === originalFor
+            const { originals, changed } = wantsOriginal ? originalsFirst(hfSearchResults, originalFor) : { originals: hfSearchResults, changed: [] }
+            const tiles = (list: DiscoverModel[]) => list.map((model, i) => (
+              <motion.div key={model.name + i} className={skin.cls.tileWrap} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: Math.min(i, 12) * 0.025 }}>
+                <skin.ModelTile
+                  variants={[model]}
+                  vramGb={chatFitGb}
+                  sharedMemory={sharedMemory}
+                  isInstalled={isModelFullyInstalled}
+                  dlState={getModelDownloadState}
+                  onDownload={handleTextDownload}
+                  getTarget={getTargetOf}
+                  onUse={handleUseInstalled}
+                  canUse={canUseInstalled}
+                  isUsing={(m) => installedEntryFor(m)?.name === usingModel && usingModel !== null}
+                  onInfo={openInfo}
+                  withImagePart={wantsImagePart}
+                  onOpenUrl={(u) => openExternal(u)}
+                />
+              </motion.div>
+            ))
+            return (
+              <div className={`${skin.cls.group} mt-6`} data-testid="hf-results">
+                <skin.Head place="hf-results" Icon={Search} title={wantsOriginal ? 'Original models on Hugging Face' : 'HuggingFace results'} />
+                {wantsOriginal && originals.length === 0 && (
+                  <p className={`t-body ${HINWEIS_TEXT.ruhig} mb-2`}>No original of this model in the results. Try a shorter search.</p>
+                )}
+                <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-2.5" data-testid="hf-results-originals">
+                  {tiles(originals)}
+                </div>
+                {changed.length > 0 && (
+                  <div className="mt-5" data-testid="hf-results-changed">
+                    <p className="t-label text-gray-300 mb-0.5">Changed by others, not the original</p>
+                    <p className={`t-micro ${HINWEIS_TEXT.ruhig} mb-2`}>Uncensored, merged or fine-tuned versions.{NEURONS_ENABLED && ' Neuron sliders work best on the originals above.'}</p>
+                    <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-2.5">
+                      {tiles(changed)}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          })()}
         </>
       ) : null}
 
-      {!loading && filteredBundles.length === 0 && filteredUncensored.length === 0 && filteredMainstream.length === 0 && (
-        <p className="text-center text-gray-500 py-4">No models found</p>
+      {!loading && !(isText && hfSearchError) && filteredBundles.length === 0 && filteredUncensored.length === 0 && filteredMainstream.length === 0 && (
+        <p className={skin.cls.searchEmpty}>No models found</p>
       )}
 
       {/* Details modal — the full catalog description, tags and links */}
-      <Modal open={!!infoModel} onClose={() => setInfoModel(null)} title={infoModel?.group ? `${infoModel.group}: ${infoModel.name}` : (infoModel?.name || 'Model')}>
+      <Modal open={!!infoModel} onClose={() => setInfoModel(null)} title={modelInfoTitle(infoModel)}>
         {infoModel && (
           <div className="space-y-3">
-            <p className="text-[0.72rem] text-gray-700 dark:text-gray-200 leading-relaxed">{infoModel.description}</p>
+            <p className="text-[0.72rem] text-gray-700 dark:text-gray-200 leading-relaxed">{sharedMemoryWording(infoModel.description, sharedMemory)}</p>
             {isBelowChatMinimum(infoModel) && <p className="text-xs leading-relaxed text-gray-700 dark:text-gray-200">{SMALL_CHAT_MODEL_WARNING}</p>}
             <div className="flex items-center gap-1.5 flex-wrap">
               {infoModel.tags.map(t => (
@@ -1122,6 +1543,85 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
               {infoModel.pulls && <span className="t-micro text-gray-400">{infoModel.pulls} pulls</span>}
               {infoModel.released && <span className="t-micro text-gray-400">released {infoModel.released}</span>}
             </div>
+            {/* The image part of a model that can take pictures. Ticked by
+                default: it comes with the download unless the user says no,
+                for instance on a drive with little room. Not shown once the
+                model is installed, where adding the part is its own click. */}
+            {infoImagePart && !isModelFullyInstalled(infoModel) && !getModelDownloadState(infoModel) && (
+              <label className="flex items-start gap-2 text-[0.72rem] text-gray-700 dark:text-gray-200" data-testid="include-image-input">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={wantsImagePart(infoModel)}
+                  onChange={(e) => setWantsImagePart(infoModel, e.target.checked)}
+                />
+                <span>
+                  {includeImageInputLabel(infoImagePart.sizeBytes)}
+                  <span className="block t-micro text-gray-500 dark:text-gray-400">
+                    {wantsImagePart(infoModel)
+                      ? `The download is ${downloadSizeGB(infoModel.sizeGB, infoImagePart.sizeBytes, true) ?? '?'} GB in total. With it the model can look at pictures and at the screen.`
+                      : 'Without it the model answers text only. You can add it later under Installed.'}
+                  </span>
+                </span>
+              </label>
+            )}
+            {/* C21: pick the file instead of LU picking it. */}
+            {infoRepoId(infoModel) && (
+              <div className="space-y-1.5 pt-1" data-testid="gguf-choices">
+                {!fileChoices || fileChoices.model !== infoModel.name ? (
+                  <button className="lu-control" onClick={() => loadFileChoices(infoModel)} data-testid="gguf-choices-load">
+                    Choose another file of this model…
+                  </button>
+                ) : fileChoices.loading ? (
+                  <p className="t-micro text-gray-500 dark:text-gray-400">Reading the files of {fileChoices.repoId}…</p>
+                ) : !fileChoices.list ? (
+                  <p className="t-micro text-gray-500 dark:text-gray-400">Hugging Face did not answer, so the files cannot be listed now. Try again in a moment.</p>
+                ) : fileChoices.list.length === 0 ? (
+                  <p className="t-micro text-gray-500 dark:text-gray-400">This repository has no GGUF file.</p>
+                ) : (
+                  <>
+                    <p className="t-micro text-gray-500 dark:text-gray-400">
+                      Files in {fileChoices.repoId}, smallest first. Get downloads the one you pick to {getTargetOf(infoModel)}.
+                      {chatFitGb ? ` A file well under ${Math.round(chatFitGb)} GB leaves room for the context.` : ''}
+                    </p>
+                    <div className="max-h-56 overflow-y-auto scrollbar-thin space-y-1 pr-1">
+                      {fileChoices.list.map((c) => {
+                        // The fit compares in GiB like the rest of the page; the
+                        // size reads in decimal GB, the unit the catalog's cards
+                        // print, so one file never shows two sizes.
+                        const gib = c.totalBytes / 1_073_741_824
+                        const gb = c.totalBytes / 1e9
+                        const fit = chatFitGb && gib > 0 ? computeFit(gib, chatFitGb) : null
+                        const current = !!infoModel.filename && infoModel.filename === c.filename
+                        return (
+                          <div key={c.path} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-gray-200 dark:border-white/10" data-testid="gguf-choice">
+                            <span className="flex-1 min-w-0">
+                              <span className="block truncate text-xs font-mono text-gray-900 dark:text-gray-100" title={c.path}>{c.quant ?? c.filename}</span>
+                              <span className="block t-micro text-gray-500 dark:text-gray-400 truncate">
+                                {[c.parts > 1 ? `${c.parts} parts` : c.filename, current ? 'the file of this card' : '', fit === 'big' ? (sharedMemory ? 'too big for this Mac' : 'too big for your GPU') : fit === 'tight' ? 'tight fit' : ''].filter(Boolean).join(' · ')}
+                              </span>
+                            </span>
+                            <span className="t-micro tabular-nums text-gray-500 dark:text-gray-400 shrink-0">{gb > 0 ? `${gb.toFixed(1)} GB` : ''}</span>
+                            <button
+                              className="lu-control shrink-0"
+                              disabled={c.incomplete}
+                              title={c.incomplete ? 'Not every part is uploaded yet, so this file cannot load.' : `Download ${c.filename}`}
+                              onClick={() => {
+                                const picked = discoverModelForChoice(infoModel, fileChoices.repoId, c)
+                                setInfoModel(null)
+                                void handleTextDownload(picked)
+                              }}
+                            >
+                              {c.incomplete ? 'Incomplete' : 'Get'}
+                            </button>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
             {infoRepoUrl(infoModel) && (
               <button
                 onClick={() => openExternal(infoRepoUrl(infoModel)!)}
@@ -1134,6 +1634,39 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
         )}
       </Modal>
 
+      <UninstallDialog
+        request={uninstall}
+        onClose={() => setUninstall(null)}
+        onDone={async () => {
+          refreshBundleStatuses()
+          await fetchModels().catch(() => {})
+        }}
+      />
+
+      <ModelFileCheck
+        subject={checkSubject}
+        onClose={() => {
+          setCheckSubject(null)
+          // Repair may have moved files to the Trash: the cards ask the disk again.
+          refreshBundleStatuses()
+        }}
+      />
+
+      {hfLink && !hfNeedsLocal && category === 'text' && (
+        <HfLinkDialog
+          key={`${hfLink.repo}|${hfLink.file ?? ''}`}
+          link={hfLink}
+          onCancel={clearHfLink}
+          onConfirm={(model) => {
+            clearHfLink()
+            handleTextDownload(model, { confirmed: true }).catch((e) => {
+              log.error('Hugging Face link download failed', { err: e })
+              setInstallError(`Download failed: ${e instanceof Error ? e.message : String(e)}`)
+            })
+          }}
+        />
+      )}
+
       <Modal open={!!confirmDownload} onClose={() => setConfirmDownload(null)} title="Download split model">
         {confirmDownload && (
           <div className="space-y-3">
@@ -1143,7 +1676,7 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
               totalling <span className="font-semibold text-gray-900 dark:text-white">{confirmDownload.totalGB} GB</span>.
             </p>
             <p className="text-[0.7rem] text-gray-500">
-              All parts must download into one folder to load as a single model. Make sure you have the disk space, and the RAM/VRAM to actually run it.
+              All parts must download into one folder to load as a single model. Make sure you have the disk space, and the {sharedMemory ? 'memory' : 'RAM/VRAM'} to actually run it.
             </p>
             {/* Beide Saetze standen in Gelb, also in der Farbe, mit der die
                 App bis heute alles zwischen „gut" und „kaputt" markiert hat.
@@ -1154,30 +1687,40 @@ export function DiscoverModels({ category, search = '', searchSubmitToken = 0 }:
                 Saetze darueber, damit der Absatz eine Stimme behaelt. */}
             {confirmDownload.totalGB > 60 && (
               <p className={`text-[0.7rem] ${HINWEIS_TEXT.ruhig}`}>
-                That is very large for a local model. Most consumer GPUs can't run it.
+                That is very large for a local model. {sharedMemory ? "Most Macs can't run it." : "Most consumer GPUs can't run it."}
               </p>
             )}
             {confirmDownload.note && (
               <p className={`text-[0.7rem] ${HINWEIS_TEXT.ruhig}`}>{confirmDownload.note}</p>
             )}
-            <div className="flex gap-2 pt-1">
-              <GlowButton variant="secondary" onClick={() => setConfirmDownload(null)} className="flex-1">
+            {confirmDownload.part && (
+              <label className="flex items-center gap-2 text-[0.72rem] text-gray-700 dark:text-gray-200" data-testid="include-image-input">
+                <input
+                  type="checkbox"
+                  checked={wantsImagePart(confirmDownload.model)}
+                  onChange={(e) => setWantsImagePart(confirmDownload.model, e.target.checked)}
+                />
+                {includeImageInputLabel(confirmDownload.part.sizeBytes)}
+              </label>
+            )}
+            <ModalActions>
+              <ModalButton variant="quiet" onClick={() => setConfirmDownload(null)}>
                 Cancel
-              </GlowButton>
-              <GlowButton
+              </ModalButton>
+              <ModalButton
+                variant="primary"
                 onClick={() => {
                   const c = confirmDownload
                   setConfirmDownload(null)
-                  startDirectDownload(c.files, c.targetDir, c.name).catch((e) => {
+                  startDirectDownload(c.files, c.targetDir, c.name, wantsImagePart(c.model) ? c.part : null).catch((e) => {
                     log.error('Sharded GGUF download failed', { err: e })
                     setInstallError(`Download failed: ${e instanceof Error ? e.message : String(e)}`)
                   })
                 }}
-                className="flex-1"
               >
-                Download {confirmDownload.files.length} parts ({confirmDownload.totalGB} GB)
-              </GlowButton>
-            </div>
+                Download {confirmDownload.files.length} parts ({downloadSizeGB(confirmDownload.totalGB, confirmDownload.part?.sizeBytes, wantsImagePart(confirmDownload.model)) ?? confirmDownload.totalGB} GB)
+              </ModalButton>
+            </ModalActions>
           </div>
         )}
       </Modal>

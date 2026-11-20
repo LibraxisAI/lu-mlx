@@ -16,7 +16,7 @@ function conv(id: string, updatedAt: number, title = `chat ${id}`): Conversation
   } as Conversation
 }
 
-// chatStore.importConversations — konata backup restore (merge never drops chats).
+// chatStore.importConversations — a user backup restore (merge never drops chats).
 describe('chatStore.importConversations', () => {
   beforeEach(() => {
     useChatStore.setState({ conversations: [], activeConversationId: null })

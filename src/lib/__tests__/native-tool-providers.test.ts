@@ -23,7 +23,7 @@ import {
 //
 // Two of the four were NOT real and had drifted unnoticed: this file claimed
 // Sao10K/L3.3-70B-Euryale-v2.3 and MiniMaxAI/MiniMax-M2 while the catalogue has
-// carried v2.2 and M2.7 for a while (apps/web/lib/chat/tier-models.ts:150 and
+// carried v2.2 and M2.7 for a while (the web app and
 // :287, checked 2026-09-02). Nothing went red, because the cloud path answers
 // 'native' for any id at all, so the test kept passing while proving none of
 // what its own comment promised. Corrected here; there is no automatic guard,

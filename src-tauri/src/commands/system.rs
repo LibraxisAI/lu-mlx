@@ -5,16 +5,76 @@ use sysinfo::System;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-/// Disk-space preflight shim for `commands::video::video_install_model`
-/// (originally the bridge's statvfs-based free/total/used probe). Not wired up
-/// to a real disk-usage check here — returning `None` makes the preflight a
-/// no-op (video installs proceed without a disk-space guard, same as every
-/// other model-download path in this codebase, none of which check free space
-/// today). Signature (`Option<(free, total, used)>` in bytes) matches the call
-/// site's `if let Some((free, _, _)) = ...` destructure.
-#[allow(dead_code)]
-pub fn volume_space_for(_path: &std::path::Path) -> Option<(u64, u64, u64)> {
+/// Free, total and used bytes of the volume that holds `path`.
+///
+/// `path` does not have to exist yet: an install asks before it creates its
+/// folder, so the nearest ancestor that is there answers for it. `None` means
+/// "could not be measured", and callers then let the install go ahead.
+///
+/// Only the Mac measures. The callers are the MLX installers, which run
+/// nowhere else, and `libc` is a dependency of the Mac build alone.
+pub fn volume_space_for(path: &std::path::Path) -> Option<(u64, u64, u64)> {
+    let existing = path.ancestors().find(|p| p.exists())?;
+    volume_space_of_existing(existing)
+}
+
+#[cfg(target_os = "macos")]
+fn volume_space_of_existing(path: &std::path::Path) -> Option<(u64, u64, u64)> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // statfs and not statvfs: on macOS the block counts of statvfs are 32 bit.
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::zeroed();
+    // SAFETY: `c_path` is a NUL terminated string that outlives the call, and
+    // `stat` points at writable memory of the size the call fills.
+    if unsafe { libc::statfs(c_path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: statfs returned 0, so it filled the struct.
+    let stat = unsafe { stat.assume_init() };
+    let block = u64::from(stat.f_bsize);
+    // f_bavail is what this user may still write, f_bfree would count the
+    // blocks the system keeps for itself.
+    let free = stat.f_bavail.saturating_mul(block);
+    let total = stat.f_blocks.saturating_mul(block);
+    Some((free, total, total.saturating_sub(stat.f_bfree.saturating_mul(block))))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn volume_space_of_existing(_path: &std::path::Path) -> Option<(u64, u64, u64)> {
     None
+}
+
+/// The sentence an install stops with when `need` bytes do not fit, or `None`
+/// when they do. `what` names the thing being installed, `note` is an optional
+/// reason for the size ("incl. the one-time convert").
+pub fn disk_shortfall(what: &str, need: u64, free: u64, note: &str) -> Option<String> {
+    if free >= need {
+        return None;
+    }
+    let note = if note.is_empty() { String::new() } else { format!(" ({note})") };
+    Some(format!(
+        "Not enough disk space: {what} needs about {:.0} GB{note}, and only {:.0} GB are free. Free up space and try again.",
+        (need as f64 / 1e9).ceil(),
+        (free as f64 / 1e9).floor(),
+    ))
+}
+
+/// The disk check every MLX model install runs before it downloads anything:
+/// measure the volume that holds `target` and refuse with one sentence when
+/// `need` bytes do not fit. A volume that cannot be measured lets it through.
+pub fn ensure_free_space(target: &std::path::Path, what: &str, need: u64, note: &str) -> Result<(), String> {
+    match volume_space_for(target) {
+        Some((free, _, _)) => disk_shortfall(what, need, free, note).map_or(Ok(()), Err),
+        None => Ok(()),
+    }
+}
+
+/// Installed memory in bytes. On Apple Silicon this is the one pool the
+/// models, the system and every other app share.
+pub fn total_memory_bytes() -> u64 {
+    let mut sys = System::new();
+    sys.refresh_memory();
+    sys.total_memory()
 }
 
 #[tauri::command]
@@ -253,11 +313,12 @@ fn capture_screen_to(_tmp: &std::path::Path) -> Result<(), String> {
 ///
 /// `as_workspace` is for the callers that ARE choosing a workspace, and it turns
 /// the refusal into this command's error instead of dropping it (bug D,
-/// aldrich_ironhart, Discord 2026-09-08). Without it the picker answered
+/// Discord 2026-09-08). Without it the picker answered
 /// `Ok(Some(path))` for a folder it had just refused to record: the Code tab put
 /// that path in its header as the working directory, and every file op after it
 /// answered "pick it again to allow it", which the user had just done. The
 /// reason was produced, discarded here, and never reached anybody.
+#[cfg(desktop)]
 #[tauri::command]
 pub async fn pick_folder(
     default_path: Option<String>,
@@ -278,14 +339,26 @@ pub async fn pick_folder(
     Ok(picked.map(|p| p.to_string_lossy().to_string()))
 }
 
-/// Exit the app — used by the auto-updater to let the NSIS installer swap
-/// the binary, and by any future "full quit" UI affordance.
+/// A phone has no folder picker, and no folder outside the app to pick.
+#[cfg(mobile)]
+#[tauri::command]
+pub async fn pick_folder(
+    default_path: Option<String>,
+    as_workspace: Option<bool>,
+) -> Result<Option<String>, String> {
+    let _ = (default_path, as_workspace);
+    Err(crate::commands::filesystem::NO_FILE_DIALOG.to_string())
+}
+
+/// Exit the app. Used by the "full quit" of the command palette and by the
+/// update lane where LU installs itself, which has started the new version
+/// before it calls this. The plugin's lane ends in `restart_after_update`.
 ///
 /// Live-tested on 2026-05-25: Tauri v2's `app.exit(0)` returns from the run
 /// loop without dropping the managed `AppState` on Windows, so subprocess
 /// children (Ollama, ComfyUI, Claude Code) survived every "graceful" quit
 /// path. We work around it by explicitly running the shutdown chain BEFORE
-/// asking Tauri to exit. This is what makes kj103x's Ollama-orphan fix
+/// asking Tauri to exit. This is what makes a user's Ollama-orphan fix
 /// (v2.4.9, Discord 2026-05-23) actually deliver on the tray-Quit + auto-
 /// updater paths in the released binary.
 #[tauri::command]
@@ -295,6 +368,57 @@ pub fn exit_app(app: tauri::AppHandle) {
         state.shutdown_subprocesses();
     }
     app.exit(0);
+}
+
+/// Start the app again after the updater plugin has replaced it, then leave.
+///
+/// The update button says "Restart Now", and only Windows used to keep that
+/// promise, because there the NSIS installer starts the app itself (the
+/// plugin passes it `/R`) and this process never gets past `install()`. On
+/// macOS and Linux `install()` returns into the old process, and all that
+/// followed was `exit_app`: the window closed and the user had to find the
+/// icon again (GitHub discussion 150).
+///
+/// macOS takes Tauri's own restart. It runs the exit event first, so single
+/// instance has let go of its socket before the new process asks for it.
+///
+/// Linux cannot: the restart would start `current_exe()`, which after a deb
+/// or rpm update is a name the kernel has marked as deleted, and it would
+/// hand the new AppImage the environment of the old mount. So the helper that
+/// already starts the new file after LU has installed itself does it here
+/// too. It waits for this process to be gone and cleans that environment.
+///
+/// Whatever goes wrong with the start, the app still exits: the update is
+/// installed at this point, and a window that stays open on the old build
+/// would be worse than one the user has to open again.
+#[tauri::command]
+pub fn restart_after_update(app: tauri::AppHandle) {
+    use tauri::Manager;
+    if let Some(state) = app.try_state::<crate::state::AppState>() {
+        state.shutdown_subprocesses();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use super::self_migrate;
+        let target = self_migrate::relaunch_target(
+            std::env::var("APPIMAGE").ok(),
+            std::env::current_exe().ok(),
+        )
+        .filter(|exe| exe.is_file());
+        match target {
+            Some(exe) => {
+                if let Err(why) = self_migrate::launch_after_exit(&exe, std::process::id()) {
+                    tracing::warn!("[update] the updated app was not started again: {why}");
+                }
+            }
+            None => tracing::warn!("[update] no file to start the updated app from, exiting only"),
+        }
+        app.exit(0);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    app.request_restart();
 }
 
 /// Get the persistent settings dir — outside the (NSIS) install dir so it
@@ -357,7 +481,7 @@ pub(crate) fn keys_lost(previous: &str, incoming: &str) -> Vec<String> {
 /// The snapshot that actually goes to disk: the incoming one, plus every key
 /// it lost carried over from the backup that is already there.
 ///
-/// aldrich_ironhart, 2.6.5, Discord #general 18.08.: "My code chats are
+/// A user, 2.6.5, Discord #general 18.08.: "My code chats are
 /// vaporised". chat-conversations lives in IndexedDB, localStorage does not,
 /// and they are different storage layers with different lifetimes. A hard
 /// process kill during a self update can leave Chromium discarding the whole
@@ -418,7 +542,308 @@ pub(crate) fn backup_candidates(dir: &std::path::Path) -> Vec<std::path::PathBuf
         paths.push(dir.join(format!("store_backup.{i}.json")));
     }
     paths.push(dir.join("store_backup.prev.json"));
+    // The chat archives (archive_dropped_chats) come after everything else:
+    // each one is a whole backup from before chats left the store, so it is
+    // older than the live file and the ring. Listing them here also keeps the
+    // attachment collector from deleting the images their chats point at.
+    paths.extend(chat_archives(dir));
     paths
+}
+
+/// How many chat archives (`store_backup.chats-<ms>.json`) are kept.
+pub(crate) const CHAT_ARCHIVES_KEPT: usize = 5;
+
+const CHAT_ARCHIVE_PREFIX: &str = "store_backup.chats-";
+
+/// The chat archives in `dir`, newest first. A folder that cannot be listed
+/// has none.
+pub(crate) fn chat_archives(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut found: Vec<(u128, std::path::PathBuf)> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let stamp = name.strip_prefix(CHAT_ARCHIVE_PREFIX)?.strip_suffix(".json")?.parse::<u128>().ok()?;
+            Some((stamp, e.path()))
+        })
+        .collect();
+    found.sort_by_key(|f| std::cmp::Reverse(f.0));
+    found.into_iter().map(|(_, p)| p).collect()
+}
+
+/// The conversation list inside a backup file's `chat-conversations` value.
+/// None when the file, the value or the list cannot be read.
+fn backup_conversation_list(backup: &str) -> Option<Vec<serde_json::Value>> {
+    let outer: serde_json::Value = serde_json::from_str(backup).ok()?;
+    let chat = outer.get(crate::commands::chat_attachments::CHAT_KEY)?.as_str()?;
+    let mut inner: serde_json::Value = serde_json::from_str(chat).ok()?;
+    match inner.pointer_mut("/state/conversations")?.take() {
+        serde_json::Value::Array(list) => Some(list),
+        _ => None,
+    }
+}
+
+/// The conversation ids in a backup file. None when there is no readable list.
+///
+/// Runs on every backup write, so it reads into typed shapes that skip
+/// everything but the ids instead of building the whole history as a Value.
+fn backup_chat_ids(backup: &str) -> Option<std::collections::HashSet<String>> {
+    #[derive(serde::Deserialize)]
+    struct Outer {
+        #[serde(rename = "chat-conversations")]
+        chat: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Blob {
+        state: Option<State>,
+    }
+    #[derive(serde::Deserialize)]
+    struct State {
+        conversations: Option<Vec<Option<Entry>>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        id: Option<serde_json::Value>,
+    }
+    let outer: Outer = serde_json::from_str(backup).ok()?;
+    let blob: Blob = serde_json::from_str(&outer.chat?).ok()?;
+    let list = blob.state?.conversations?;
+    Some(
+        list.into_iter()
+            .flatten()
+            .filter_map(|c| c.id.and_then(|v| v.as_str().map(str::to_string)))
+            .collect(),
+    )
+}
+
+/// The conversation ids the previous backup had and the one about to replace
+/// it has not.
+///
+/// perrt, Discord 05.11.2026, 3.0.8: the chat store came back empty, the
+/// merge in `merged_backup` kept the chats while the key was missing, and the
+/// moment the store wrote a fresh, nearly empty list the next snapshot carried
+/// a valid value again and replaced the only complete copy. A missing key is
+/// not the only shape of a loss: a list without the old chats is one too.
+///
+/// An incoming snapshot without a chat value answers nothing here, that case
+/// is the merge's (the old value stays in the file). An unreadable previous
+/// list answers nothing as well, there is nothing to compare.
+pub(crate) fn chat_ids_dropped(previous: &str, incoming: &str) -> Vec<String> {
+    let Some(before) = backup_chat_ids(previous) else { return Vec::new() };
+    let incoming_has_chats = serde_json::from_str::<serde_json::Value>(incoming)
+        .ok()
+        .and_then(|v| v.get(crate::commands::chat_attachments::CHAT_KEY).and_then(|c| c.as_str()).map(|s| !s.is_empty()))
+        .unwrap_or(false);
+    if !incoming_has_chats {
+        return Vec::new();
+    }
+    let after = backup_chat_ids(incoming).unwrap_or_default();
+    let mut dropped: Vec<String> = before.difference(&after).cloned().collect();
+    dropped.sort();
+    dropped
+}
+
+/// Keep the previous backup as a chat archive before chats leave it.
+///
+/// Not a judgement on whether the loss was wanted: deleting a chat drops its
+/// id too, and the archive costs one file. When the newest archive already
+/// holds every dropped chat nothing is written, so deleting chats one by one
+/// does not rotate the archives through. At most `CHAT_ARCHIVES_KEPT` stay.
+/// Returns the archive written, if any. Best effort: an archive that cannot be
+/// written must not stop the backup itself.
+pub(crate) fn archive_dropped_chats(
+    dir: &std::path::Path,
+    previous: &str,
+    dropped: &[String],
+    now_ms: u128,
+) -> Option<std::path::PathBuf> {
+    if dropped.is_empty() || previous.is_empty() {
+        return None;
+    }
+    let archives = chat_archives(dir);
+    if let Some(newest) = archives.first() {
+        let held = std::fs::read_to_string(newest).ok().and_then(|raw| backup_chat_ids(&raw));
+        if held.is_some_and(|ids| dropped.iter().all(|id| ids.contains(id))) {
+            return None;
+        }
+    }
+    // A name that is already taken (two writes in the same millisecond) moves
+    // on rather than replacing an archive.
+    let mut stamp = now_ms;
+    let mut path = dir.join(format!("{CHAT_ARCHIVE_PREFIX}{stamp}.json"));
+    while path.exists() {
+        stamp += 1;
+        path = dir.join(format!("{CHAT_ARCHIVE_PREFIX}{stamp}.json"));
+    }
+    let tmp = dir.join("store_backup.chats.tmp");
+    let written = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(previous.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, &path)
+    })();
+    if let Err(e) = written {
+        tracing::warn!("chat archive could not be written: {}", os_error::english(&e));
+        let _ = std::fs::remove_file(&tmp);
+        return None;
+    }
+    for old in chat_archives(dir).into_iter().skip(CHAT_ARCHIVES_KEPT) {
+        let _ = std::fs::remove_file(old);
+    }
+    Some(path)
+}
+
+/// Every chat in every backup file (the live one, the ring, the file set aside
+/// and the chat archives), one entry per id. Where several files hold the same
+/// chat the copy with the newest `updatedAt` wins, on a tie the one with more
+/// messages.
+pub(crate) fn chats_in_backups(raws: impl IntoIterator<Item = String>) -> Vec<serde_json::Value> {
+    let mut by_id: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+    let rank = |c: &serde_json::Value| {
+        (
+            c.get("updatedAt").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            c.get("messages").and_then(|v| v.as_array()).map(|m| m.len()).unwrap_or(0),
+        )
+    };
+    for raw in raws {
+        for chat in backup_conversation_list(&raw).unwrap_or_default() {
+            let Some(id) = chat.get("id").and_then(|v| v.as_str()).map(str::to_string) else { continue };
+            if !chat.get("messages").is_some_and(|m| m.is_array()) {
+                continue;
+            }
+            let better = match by_id.get(&id) {
+                None => true,
+                Some(held) => {
+                    let (a, b) = (rank(&chat), rank(held));
+                    a.0 > b.0 || (a.0 == b.0 && a.1 > b.1)
+                }
+            };
+            if better {
+                by_id.insert(id, chat);
+            }
+        }
+    }
+    let mut list: Vec<serde_json::Value> = by_id.into_values().collect();
+    let id_of = |c: &serde_json::Value| c.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    list.sort_by(|a, b| {
+        rank(b).0.partial_cmp(&rank(a).0).unwrap_or(std::cmp::Ordering::Equal).then_with(|| id_of(a).cmp(&id_of(b)))
+    });
+    list
+}
+
+/// The chats of every backup file, for "Restore chats from backup" in
+/// Settings and the hint at launch. The WebView decides which of them it is
+/// missing. Inline images are moved into the attachment store here, natively,
+/// like `restore_stores` does, so an old backup never reaches the renderer as
+/// one huge string.
+#[tauri::command]
+pub async fn chat_backup_conversations() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let dir = persistent_dir()?;
+        let raws = backup_candidates(&dir).into_iter().filter_map(|p| std::fs::read_to_string(p).ok());
+        let mut list = serde_json::Value::Array(chats_in_backups(raws));
+        if let Ok(attachments) = crate::commands::chat_attachments::attachment_dir() {
+            crate::commands::chat_attachments::externalize_conversations(&mut list, &attachments);
+        }
+        Ok(list.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// One writer at a time for the backup files: the snapshot (`backup_stores`)
+/// and "Clear backup" (`chat_backup_clear`, A26) both rewrite them.
+static BACKUP_FILES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The backup file `raw` with only the chats whose id is in `keep`, and the
+/// ids it took out. None when there was nothing to take out or the file has
+/// no readable chat list; such a file is left exactly as it is. Every other
+/// store in the file (settings, memories, characters) stays untouched.
+pub(crate) fn backup_with_only(raw: &str, keep: &std::collections::HashSet<String>) -> Option<(String, Vec<String>)> {
+    let key = crate::commands::chat_attachments::CHAT_KEY;
+    let mut outer: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let mut inner: serde_json::Value = serde_json::from_str(outer.get(key)?.as_str()?).ok()?;
+    let list = inner.pointer_mut("/state/conversations")?.as_array_mut()?;
+    let mut removed = Vec::new();
+    list.retain(|c| match c.get("id").and_then(|v| v.as_str()) {
+        Some(id) if !keep.contains(id) => {
+            removed.push(id.to_string());
+            false
+        }
+        _ => true,
+    });
+    if removed.is_empty() {
+        return None;
+    }
+    *outer.get_mut(key)? = serde_json::Value::String(inner.to_string());
+    Some((outer.to_string(), removed))
+}
+
+/// A26 (3.1.0): take every chat out of the backup files that is not in the
+/// chat list (`keep`). The chat archives go as a whole, they exist only to
+/// hold chats that left the list. The live file, the ring and the file set
+/// aside keep everything else they carry. Returns how many different chats
+/// were taken out.
+pub(crate) fn clear_chats_outside(dir: &std::path::Path, keep: &std::collections::HashSet<String>) -> Result<usize, String> {
+    let mut removed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let archives = chat_archives(dir);
+    for path in backup_candidates(dir) {
+        let Ok(raw) = std::fs::read_to_string(&path) else { continue };
+        if archives.contains(&path) {
+            removed.extend(backup_chat_ids(&raw).unwrap_or_default().into_iter().filter(|id| !keep.contains(id)));
+            std::fs::remove_file(&path)
+                .map_err(|e| format!("could not remove {}: {}", path.display(), os_error::english(&e)))?;
+            continue;
+        }
+        let Some((rewritten, gone)) = backup_with_only(&raw, keep) else { continue };
+        let tmp = path.with_extension("json.clear.tmp");
+        let written = (|| -> std::io::Result<()> {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(rewritten.as_bytes())?;
+            file.sync_all()?;
+            std::fs::rename(&tmp, &path)
+        })();
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("could not rewrite {}: {}", path.display(), os_error::english(&e)));
+        }
+        removed.extend(gone);
+    }
+    Ok(removed.len())
+}
+
+/// "Clear backup" in Settings → Chat Backup (A26). `keep` is the chat list
+/// as it is now; every other chat leaves the backup files for good.
+#[cfg(desktop)]
+#[tauri::command]
+pub async fn chat_backup_clear(keep: Vec<String>) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _one = BACKUP_FILES.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = persistent_dir()?;
+        let keep: std::collections::HashSet<String> = keep.into_iter().collect();
+        let n = clear_chats_outside(&dir, &keep)?;
+        if n > 0 {
+            // The images only those chats pointed at can go too.
+            crate::commands::chat_attachments::collect_garbage_soon(dir);
+        }
+        Ok(n)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// "Open folder" in Settings → Chat Backup (A26): the backup file selected
+/// in Finder or Explorer, its folder on Linux.
+#[cfg(desktop)]
+#[tauri::command]
+pub fn chat_backup_reveal() -> Result<String, String> {
+    let dir = persistent_dir()?;
+    let file = dir.join("store_backup.json");
+    let target = if file.exists() { file } else { dir.clone() };
+    crate::commands::download::reveal_in_file_manager(&target)?;
+    Ok(dir.to_string_lossy().into_owned())
 }
 
 /// A backup is worth restoring from when it parses as a JSON object that still
@@ -500,6 +925,7 @@ fn rotate_generations(dir: &std::path::Path) {
 /// the shape of failure this whole path exists to survive.
 #[tauri::command]
 pub fn backup_stores(data: String) -> Result<(), String> {
+    let _one = BACKUP_FILES.lock().unwrap_or_else(|e| e.into_inner());
     let dir = persistent_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| os_error::english(&e))?;
     let target = dir.join("store_backup.json");
@@ -522,6 +948,23 @@ pub fn backup_stores(data: String) -> Result<(), String> {
         merged_backup(&previous, &data, &lost)
     };
 
+    // Chats that are about to leave the backup go to an archive first, see
+    // chat_ids_dropped (perrt, 05.11.2026).
+    let dropped = chat_ids_dropped(&previous, &payload);
+    if !dropped.is_empty() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        if let Some(path) = archive_dropped_chats(&dir, &previous, &dropped, now_ms) {
+            tracing::warn!(
+                "{} chats left the chat store, the previous backup is kept as {}",
+                dropped.len(),
+                path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+            );
+        }
+    }
+
     rotate_generations(&dir);
 
     {
@@ -531,19 +974,45 @@ pub fn backup_stores(data: String) -> Result<(), String> {
         file.sync_all().map_err(|e| os_error::english(&e))?;
     }
     std::fs::rename(&tmp, &target).map_err(|e| os_error::english(&e))?;
+    // A complete snapshot just landed, so the set of images anything can still
+    // point at is known: the live stores (this file) and the older backups.
+    // Not after a merged one: its chat value may be older than the live store.
+    if lost.is_empty() {
+        crate::commands::chat_attachments::collect_garbage_soon(dir);
+    }
     Ok(())
 }
 
-/// Restore stores from the %APPDATA% backup, falling back through the rotated
-/// generations when the newest file cannot be read as a backup at all.
-#[tauri::command]
-pub fn restore_stores() -> Result<Option<String>, String> {
+/// Read the store backup, falling back through the rotated generations when
+/// the newest file cannot be read as a backup at all. Plain read, for the
+/// native callers that only look inside (the onboarding decision).
+pub fn read_store_backup() -> Result<Option<String>, String> {
     let dir = persistent_dir()?;
     Ok(pick_backup(
         backup_candidates(&dir)
             .into_iter()
             .filter_map(|p| std::fs::read_to_string(p).ok()),
     ))
+}
+
+/// Restore stores from the %APPDATA% backup, for the WebView.
+///
+/// A backup written before the attachment store carries every chat image
+/// inline, and handing that to the WebView as one string is the largest
+/// allocation the renderer ever sees: the IPC string, its parse, the
+/// IndexedDB write, and after the reload the hydration read of the same
+/// value. So the images are moved into `chat-attachments` HERE, in native
+/// memory and off the main thread, and the WebView receives the small form.
+/// An image whose file cannot be written stays inline, so nothing is lost.
+#[tauri::command]
+pub async fn restore_stores() -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let Some(raw) = read_store_backup()? else { return Ok(None) };
+        let dir = crate::commands::chat_attachments::attachment_dir()?;
+        Ok(Some(crate::commands::chat_attachments::externalize_store_backup(&raw, &dir).unwrap_or(raw)))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Backup the IndexedDB RAG chunks (embedding vectors) to %APPDATA%.
@@ -556,7 +1025,7 @@ pub fn restore_stores() -> Result<Option<String>, String> {
 /// metadata but the IndexedDB chunks were silently lost — every "RAG enabled"
 /// chat would show the document name + remain non-searchable.
 ///
-/// kj103x report (Discord 2026-05-23, #help-chat thread 1507756765612216411,
+/// A user report (Discord 2026-05-23, #help-chat thread 1507756765612216411,
 /// running v2.4.8): "is there a way to keep chats with the plugins and the
 /// attached documents via RAG when i close the app and reopen it?" References
 /// Discussion #26 as "'fixed' but not really fixed" — the v2.3.4 fix was the
@@ -684,7 +1153,45 @@ pub fn get_current_time() -> Result<serde_json::Value, String> {
 mod tests {
     use super::*;
 
-    /// aldrich_ironhart, 2.6.5, Discord #general 18.08. 12:59 "has anyone lost
+    /// Fund 5: die Vorpruefung war am Mac ein Platzhalter, der immer `None`
+    /// gab. Sie misst jetzt das Volume, auch fuer einen Ordner, den es noch
+    /// nicht gibt.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn volume_space_measures_the_volume_of_a_folder_that_does_not_exist_yet() {
+        let dir = tempfile::tempdir().unwrap();
+        let (free, total, used) = volume_space_for(dir.path()).expect("the Mac measures its volume");
+        assert!(total > 0 && free > 0 && free <= total, "free {free} of {total}");
+        assert!(used <= total);
+        // An install asks before it creates its folder.
+        let later = dir.path().join("mlx-video").join("some-model").join("src");
+        assert!(!later.exists());
+        let (free_later, total_later, _) = volume_space_for(&later).expect("the nearest folder answers");
+        assert_eq!(total_later, total, "the same volume");
+        // Other processes write while this runs, so the two readings may differ a little.
+        assert!(free_later.abs_diff(free) < 5_000_000_000, "{free_later} vs {free}");
+    }
+
+    #[test]
+    fn disk_shortfall_is_one_sentence_with_both_numbers() {
+        assert_eq!(disk_shortfall("Wan 2.1 T2V 14B", 100, 100, ""), None, "it fits exactly");
+        assert_eq!(disk_shortfall("Wan 2.1 T2V 14B", 100, 101, "x"), None);
+        let msg = disk_shortfall("LTX-2 Distilled", 111_000_000_000, 60_400_000_000, "").unwrap();
+        assert_eq!(
+            msg,
+            "Not enough disk space: LTX-2 Distilled needs about 111 GB, and only 60 GB are free. Free up space and try again."
+        );
+        let msg = disk_shortfall("Wan 2.1 T2V 14B", 142_000_000_000, 60_000_000_000, "incl. the one-time convert").unwrap();
+        assert!(msg.contains("needs about 142 GB (incl. the one-time convert), and only 60 GB are free"), "{msg}");
+        assert!(!msg.contains('\u{2014}') && !msg.contains('\u{2013}'));
+    }
+
+    #[test]
+    fn total_memory_is_measured() {
+        assert!(total_memory_bytes() >= 1_073_741_824, "{}", total_memory_bytes());
+    }
+
+    /// A user, 2.6.5, Discord #general 18.08. 12:59 "has anyone lost
     /// their chats after a restart??" and 16:12 "My code chats are vaporised".
     ///
     /// chat-conversations lives in IndexedDB and the rest of the stores live
@@ -830,7 +1337,7 @@ mod tests {
             r"C:\Users\O''Brien\AppData\Local\Temp\a.png"
         );
         // A plain path is passed through untouched — no backslash doubling.
-        assert_eq!(ps_single_quoted(r"C:\Users\dave\a.png"), r"C:\Users\dave\a.png");
+        assert_eq!(ps_single_quoted(r"C:\Users\alex\a.png"), r"C:\Users\alex\a.png");
     }
 
     #[test]
@@ -959,7 +1466,7 @@ mod tests {
         dir
     }
 
-    /// aldrich_ironhart lost the chats to a boot that came back with the
+    /// A user lost the chats to a boot that came back with the
     /// IndexedDB gone. The file on disk was fine that time. It does not have
     /// to be: the rename that publishes store_backup.json is atomic in name
     /// only, the bytes are not on the platter until they are synced, and a
@@ -1074,6 +1581,119 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A backup file in the shape 3.0.8 writes: `chat-conversations` is the
+    /// zustand blob as a string, with `state.conversations`.
+    fn backup_with_chats(ids: &[&str]) -> String {
+        let conversations: Vec<serde_json::Value> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| serde_json::json!({ "id": id, "title": id, "createdAt": 1, "updatedAt": 10 + i, "messages": [] }))
+            .collect();
+        let chat = serde_json::json!({ "state": { "conversations": conversations, "activeConversationId": null } });
+        serde_json::json!({ "__ts": "t", "chat-conversations": chat.to_string(), "chat-settings": "{}" }).to_string()
+    }
+
+    /// perrt, 05.11.2026: the merge kept the chats while the key was missing,
+    /// then the store wrote a fresh list and the next snapshot replaced the
+    /// only complete copy. The previous file now goes to an archive first.
+    #[test]
+    fn a_snapshot_whose_list_lost_chats_archives_the_previous_backup() {
+        let dir = scratch_dir("chat-archive");
+        let previous = backup_with_chats(&["a", "b", "c"]);
+        let incoming = backup_with_chats(&["new"]);
+
+        let dropped = chat_ids_dropped(&previous, &incoming);
+        assert_eq!(dropped, vec!["a", "b", "c"]);
+        // Negative control: the rule that decides the merge sees no loss here,
+        // which is exactly how the chats went.
+        assert!(keys_lost(&previous, &incoming).is_empty());
+
+        let path = archive_dropped_chats(&dir, &previous, &dropped, 1000).expect("archived");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), previous);
+        assert_eq!(chat_archives(&dir), vec![path.clone()]);
+        // And a restore and the attachment collector see it.
+        assert!(backup_candidates(&dir).contains(&path));
+
+        // The same chats dropped again: the newest archive has them, no new file.
+        assert!(archive_dropped_chats(&dir, &previous, &["b".to_string()], 2000).is_none());
+        assert_eq!(chat_archives(&dir).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_archive_without_a_dropped_chat() {
+        let previous = backup_with_chats(&["a", "b"]);
+        // Grown, unchanged, or a snapshot without the key (the merge's case).
+        assert!(chat_ids_dropped(&previous, &backup_with_chats(&["a", "b", "c"])).is_empty());
+        assert!(chat_ids_dropped(&previous, &previous).is_empty());
+        assert!(chat_ids_dropped(&previous, r#"{"chat-settings":"{}"}"#).is_empty());
+        // No previous list to compare with.
+        assert!(chat_ids_dropped("", &backup_with_chats(&["a"])).is_empty());
+        assert!(chat_ids_dropped(r#"{"chat-conversations":"garbled"}"#, &backup_with_chats(&[])).is_empty());
+    }
+
+    #[test]
+    fn a_stray_null_in_the_list_does_not_hide_the_loss() {
+        let chat = serde_json::json!({ "state": { "conversations": [null, { "id": "a", "messages": [] }] } });
+        let previous = serde_json::json!({ "chat-conversations": chat.to_string() }).to_string();
+        assert_eq!(chat_ids_dropped(&previous, &backup_with_chats(&[])), vec!["a"]);
+    }
+
+    #[test]
+    fn only_the_newest_five_archives_stay() {
+        let dir = scratch_dir("chat-archive-ring");
+        for i in 0..7u128 {
+            let id = format!("chat{i}");
+            let previous = backup_with_chats(&[id.as_str()]);
+            archive_dropped_chats(&dir, &previous, &[id], 100 + i).expect("archived");
+        }
+        let names: Vec<String> = chat_archives(&dir)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), CHAT_ARCHIVES_KEPT);
+        assert_eq!(names[0], "store_backup.chats-106.json");
+        assert_eq!(names[4], "store_backup.chats-102.json");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Restore chats from backup: one entry per id across every file, the
+    /// newest copy wins, entries without an id or messages are skipped.
+    #[test]
+    fn chats_in_backups_merges_every_file_by_id() {
+        let live = backup_with_chats(&["new"]);
+        let older = backup_with_chats(&["a", "b"]);
+        let newer_b = serde_json::json!({
+            "chat-conversations": serde_json::json!({ "state": { "conversations": [
+                { "id": "b", "updatedAt": 99, "messages": [{ "id": "m" }] },
+                { "id": "broken" },
+                { "title": "no id", "messages": [] }
+            ] } }).to_string()
+        })
+        .to_string();
+        let list = chats_in_backups(vec![live, older, newer_b, "not json".to_string()]);
+        let ids: Vec<&str> = list.iter().map(|c| c["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["b", "a", "new"]);
+        assert_eq!(list[0]["updatedAt"], 99);
+    }
+
+    /// perrt's folder after five more hours: the ring holds only the two new
+    /// chats, store_backup.prev.json the old ones. Both come back, side by side.
+    #[test]
+    fn the_file_set_aside_is_read_next_to_an_emptied_ring() {
+        let dir = scratch_dir("rescue-prev");
+        std::fs::write(dir.join("store_backup.json"), backup_with_chats(&["new1", "new2"])).unwrap();
+        for i in 1..=BACKUP_GENERATIONS {
+            std::fs::write(dir.join(format!("store_backup.{i}.json")), backup_with_chats(&["new1"])).unwrap();
+        }
+        std::fs::write(dir.join("store_backup.prev.json"), backup_with_chats(&["old1", "old2", "old3"])).unwrap();
+        let raws = backup_candidates(&dir).into_iter().filter_map(|p| std::fs::read_to_string(p).ok());
+        let mut ids: Vec<String> = chats_in_backups(raws).iter().map(|c| c["id"].as_str().unwrap().to_string()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["new1", "new2", "old1", "old2", "old3"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Nothing to rotate must not create an empty generation that then reads
     /// as a backup on the next boot.
     #[test]
@@ -1082,5 +1702,62 @@ mod tests {
         rotate_generations(&dir);
         assert!(!dir.join("store_backup.1.json").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── A26: "Clear backup" ─────────────────────────────────────
+
+    fn ids_in(raw: &str) -> Vec<String> {
+        let mut v: Vec<String> = backup_chat_ids(raw).unwrap_or_default().into_iter().collect();
+        v.sort();
+        v
+    }
+
+    /// A26 (3.1.0): the backup kept every deleted chat, and "Clear backup"
+    /// takes them out of the live file, the ring and the file set aside, and
+    /// removes the chat archives. The chats in the list and every other
+    /// store in the files stay.
+    #[test]
+    fn clearing_the_backup_keeps_the_chat_list_and_every_other_store() {
+        let dir = scratch_dir("chat-clear");
+        std::fs::write(dir.join("store_backup.json"), backup_with_chats(&["live1", "live2", "gone1"])).unwrap();
+        std::fs::write(dir.join("store_backup.1.json"), backup_with_chats(&["live1", "gone1", "gone2"])).unwrap();
+        std::fs::write(dir.join("store_backup.prev.json"), backup_with_chats(&["gone3"])).unwrap();
+        std::fs::write(dir.join("store_backup.chats-1000.json"), backup_with_chats(&["live2", "gone4"])).unwrap();
+        // A file without a chat list is not touched.
+        std::fs::write(dir.join("store_backup.2.json"), r#"{"chat-settings":"{}"}"#).unwrap();
+
+        let keep: std::collections::HashSet<String> = ["live1", "live2"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(clear_chats_outside(&dir, &keep).unwrap(), 4, "gone1..gone4, each counted once");
+
+        let live = std::fs::read_to_string(dir.join("store_backup.json")).unwrap();
+        assert_eq!(ids_in(&live), vec!["live1", "live2"]);
+        let outer: serde_json::Value = serde_json::from_str(&live).unwrap();
+        assert_eq!(outer["chat-settings"], "{}", "the other stores stay");
+        assert_eq!(outer["__ts"], "t");
+        assert_eq!(ids_in(&std::fs::read_to_string(dir.join("store_backup.1.json")).unwrap()), vec!["live1"]);
+        assert!(ids_in(&std::fs::read_to_string(dir.join("store_backup.prev.json")).unwrap()).is_empty());
+        assert!(chat_archives(&dir).is_empty(), "the chat archives are gone");
+        assert_eq!(std::fs::read_to_string(dir.join("store_backup.2.json")).unwrap(), r#"{"chat-settings":"{}"}"#);
+        let leftovers: Vec<String> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".tmp")).collect();
+        assert!(leftovers.is_empty(), "no temporary file is left: {leftovers:?}");
+
+        // What the restore reads now offers nothing that is not in the list.
+        let raws = backup_candidates(&dir).into_iter().filter_map(|p| std::fs::read_to_string(p).ok());
+        let mut ids: Vec<String> = chats_in_backups(raws).iter().map(|c| c["id"].as_str().unwrap().to_string()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["live1", "live2"]);
+
+        // Twice is a no-op.
+        assert_eq!(clear_chats_outside(&dir, &keep).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_backup_with_nothing_to_take_out_is_left_byte_for_byte() {
+        let raw = backup_with_chats(&["a", "b"]);
+        let keep: std::collections::HashSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        assert!(backup_with_only(&raw, &keep).is_none());
+        assert!(backup_with_only("not json", &keep).is_none());
     }
 }

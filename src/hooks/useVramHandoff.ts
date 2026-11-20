@@ -12,7 +12,7 @@
  *     checkpoint co-exist): no `freeing_vram` fires, so `evicted` stays false,
  *     but the card STILL shows from `loading_image_model` onward with plain
  *     "loading the image model / generating" copy and NO false "freeing VRAM"
- *     claim (David 2026-06-16: the image tool should show status too, honestly).
+ *     claim (2026-06-16: the image tool should show status too, honestly).
  * `done`/`error` are terminal and reset the state.
  */
 

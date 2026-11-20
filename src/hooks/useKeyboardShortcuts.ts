@@ -28,6 +28,7 @@ import { useModelStore } from '../stores/modelStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { useUIStore } from '../stores/uiStore'
 import { exportConversation } from '../lib/chat-export'
+import { usesCommandKey } from '../lib/capabilities'
 
 /** Die Teilmenge eines KeyboardEvent, die der Besitz-Entscheidung reicht. */
 export interface ShortcutKeyEvent {
@@ -77,7 +78,7 @@ export function shortcutOwner(e: ShortcutKeyEvent, inInput: boolean, isMac: bool
   return 'app'
 }
 
-const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test(navigator.userAgent || '')
+const IS_MAC = usesCommandKey()
 
 /** Jede Aktion, die dieser App über eine Taste erreichbar ist. */
 export type ShortcutId =
@@ -136,11 +137,16 @@ export const SHORTCUT_ACTIONS: Readonly<Record<ShortcutId, () => void>> = {
 
   'new-conversation': () => {
     const model = useModelStore.getState().activeModel
-    const persona = useSettingsStore.getState().getActivePersona()
+    const { getActivePersona, settings } = useSettingsStore.getState()
+    const persona = getActivePersona()
     if (model) {
       // Same field mix-up as useABCompare had: `Persona.systemPrompt`.
       // Ctrl+N used to open every chat with an empty system prompt.
-      useChatStore.getState().createConversation(model, persona?.systemPrompt || '')
+      // A character card persona only opens a role play chat while personas
+      // are on, the same rule as the sidebar's New Chat.
+      useChatStore.getState().createConversation(model, persona?.systemPrompt || '', undefined, {
+        persona: settings.personasEnabled ? persona : null,
+      })
     }
     useUIStore.getState().setView('chat')
   },
@@ -153,7 +159,7 @@ export const SHORTCUT_ACTIONS: Readonly<Record<ShortcutId, () => void>> = {
   'export-chat': () => {
     const state = useChatStore.getState()
     const conv = state.conversations.find(c => c.id === state.activeConversationId)
-    if (conv) void exportConversation(conv, 'markdown')
+    if (conv) void exportConversation(conv, 'markdown', useSettingsStore.getState().personas)
   },
 
   'toggle-theme': () => {
@@ -259,8 +265,33 @@ export const SHORTCUTS: readonly ShortcutEntry[] = [
   { id: null, keys: 'Escape', description: 'Close panel or modal' },
 ]
 
+const MAC_MODIFIERS: Readonly<Record<string, string>> = { Ctrl: '\u2318', Alt: '\u2325', Shift: '\u21E7' }
+// Apple writes modifiers in a fixed order (Option, Shift, Command) and without
+// a plus sign: "Ctrl+Shift+D" is "\u21E7\u2318D" in every Mac menu.
+const MAC_MODIFIER_ORDER = ['\u2325', '\u21E7', '\u2318']
+
+/**
+ * A shortcut label as this machine's keyboard names it.
+ *
+ * `SHORTCUTS` is written the PC way ("Ctrl+K") and stays that way: on Windows
+ * and Linux this returns its input untouched. On a Mac the app shortcuts run
+ * on Command (`shortcutOwner` even hands Ctrl without Cmd back to the text
+ * field), so a label saying "Ctrl+K" named a key that does nothing there.
+ * Every place that SHOWS a shortcut goes through here, so the help dialog,
+ * the command palette and a tooltip cannot disagree.
+ */
+export function platformKeys(keys: string, isMac: boolean = IS_MAC): string {
+  if (!isMac) return keys
+  const parts = keys.split('+')
+  const key = parts.pop() ?? ''
+  const mods = parts.map(p => MAC_MODIFIERS[p] ?? p)
+  mods.sort((a, b) => MAC_MODIFIER_ORDER.indexOf(a) - MAC_MODIFIER_ORDER.indexOf(b))
+  return mods.join('') + key
+}
+
 /** Die Beschriftung eines Kürzels — EINE Liste, keine zweite Tabelle für die
- *  Palette. */
-export function shortcutKeys(id: ShortcutId): string | undefined {
-  return SHORTCUTS.find(s => s.id === id)?.keys
+ *  Palette. Schon in der Schreibweise dieser Plattform. */
+export function shortcutKeys(id: ShortcutId, isMac: boolean = IS_MAC): string | undefined {
+  const keys = SHORTCUTS.find(s => s.id === id)?.keys
+  return keys === undefined ? undefined : platformKeys(keys, isMac)
 }

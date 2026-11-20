@@ -1,7 +1,7 @@
 /**
  * The plan belongs in the PlanBar, not thirty times in the transcript.
  *
- * David, 2026-08-06, having said it before: "Du solltest auch die
+ * 2026-08-06, having said it before: "Du solltest auch die
  * Planbenachrichtigung und den Planfortschritt nicht im Transfer haben."
  *
  * Captured on the installed 2.6.2 build during a 30 step Coding run, reading

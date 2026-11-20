@@ -43,6 +43,7 @@ vi.hoisted(() => {
 const findOrphanDownloads = vi.fn(async (_extra: string[]): Promise<OrphanDownload[]> => [])
 const deleteOrphanDownload = vi.fn(async () => {})
 const resumeDownload = vi.fn(async () => {})
+const startModelDownloadToPath = vi.fn(async () => {})
 const getDownloadProgress = vi.fn(async (): Promise<Record<string, DownloadProgress>> => ({}))
 
 vi.mock('../../api/discover', async () => {
@@ -54,7 +55,7 @@ vi.mock('../../api/discover', async () => {
     clearDownloadEntry: vi.fn(async () => {}),
     resumeDownload: (...a: unknown[]) => resumeDownload(...(a as [])),
     startModelDownload: vi.fn(async () => {}),
-    startModelDownloadToPath: vi.fn(async () => {}),
+    startModelDownloadToPath: (...a: unknown[]) => startModelDownloadToPath(...(a as [])),
     lookupFileMeta: () => undefined,
     findOrphanDownloads: (...a: unknown[]) => findOrphanDownloads(...(a as [string[]])),
     deleteOrphanDownload: (...a: unknown[]) => deleteOrphanDownload(...(a as [])),
@@ -131,6 +132,25 @@ describe('orphaned partials', () => {
     await useDownloadStore.getState().scanOrphans()
 
     expect(findOrphanDownloads).toHaveBeenCalledWith([GGUF_DIR])
+  })
+
+  it('continues a file that has a folder of its own in that folder, not in the ComfyUI tree', async () => {
+    // Box, 09.10.2026: the half image part of a chat model was resumed by
+    // subfolder, began at zero and landed in ComfyUI/models/gguf.
+    const part = 'Qwen3.5-9B-abliterated.Q4_K_M.mmproj.gguf'
+    useDownloadStore.getState().setMeta(part, 'https://huggingface.co/a/b/resolve/main/mmproj-F16.gguf', 'gguf', GGUF_DIR, { expectedBytes: 918166080, sha256: 'ab'.repeat(32) })
+    await useDownloadStore.getState().resume(part)
+    useDownloadStore.getState().stopPolling()
+    expect(startModelDownloadToPath).toHaveBeenCalledWith('https://huggingface.co/a/b/resolve/main/mmproj-F16.gguf', GGUF_DIR, part, 918166080, 'ab'.repeat(32))
+    expect(resumeDownload).not.toHaveBeenCalled()
+  })
+
+  it('continues a ComfyUI file by its subfolder as before', async () => {
+    useDownloadStore.getState().setMeta('wan_2.1_vae.safetensors', 'https://huggingface.co/a/b/resolve/main/wan_2.1_vae.safetensors', 'vae')
+    await useDownloadStore.getState().resume('wan_2.1_vae.safetensors')
+    useDownloadStore.getState().stopPolling()
+    expect(resumeDownload).toHaveBeenCalledWith('wan_2.1_vae.safetensors', 'https://huggingface.co/a/b/resolve/main/wan_2.1_vae.safetensors', 'vae', undefined, undefined)
+    expect(startModelDownloadToPath).not.toHaveBeenCalled()
   })
 
   it('lists a partial it cannot name, but never offers to resume it', async () => {

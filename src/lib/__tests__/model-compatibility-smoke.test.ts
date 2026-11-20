@@ -182,11 +182,11 @@ describe('getRecommendedAgentModels', () => {
   })
 })
 
-// ── Davids 9B-Grenze, gespiegelt aus dem Web ────────────────────────────
+// ── Die 9B-Grenze, gespiegelt aus dem Web ────────────────────────────
 //
 // R5-68: die Tabelle empfahl `hermes3:8b` zum lokalen Laufen. Das Web hat die
 // Zeile mit Begruendung entfernt und haelt sie seither mit einem Waechter
-// (`apps/web/lib/__tests__/model-compatibility-parity.test.ts`). Dass die
+// (the web app). Dass die
 // Tabelle im Desktop heute ausser Tests keinen Aufrufer hat, ist kein Grund:
 // die Regel kennt keine Ausnahme fuer unsichtbaren Code.
 

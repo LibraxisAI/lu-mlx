@@ -1,6 +1,6 @@
 /**
  * normalizeModelBase — shared identity for the installed-visibility check and
- * the fuzzy variant fallback (pnwpdr4519: bundle "installed" on disk must not
+ * the fuzzy variant fallback (a user: bundle "installed" on disk must not
  * survive when the running ComfyUI cannot see the file).
  * Run: npx vitest run src/api/__tests__/discover-visibility.test.ts
  */

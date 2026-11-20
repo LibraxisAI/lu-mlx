@@ -86,13 +86,15 @@ const KATALOG = [
 const nichts = { local: null, cloud: null }
 
 describe('jeder Modus behaelt seine eigene Wahl', () => {
-  it('Cloud an ohne Vorgeschichte: der Kopf des Katalogs, wie bisher', () => {
+  it('Cloud an ohne Vorgeschichte: nichts ist gewaehlt, der Kopf des Katalogs springt nicht mehr ein', () => {
     // T1, Nebenfund 7: genau das stand da, `Llama 3.1 8B Turbo`, ohne dass der
-    // Tester es gewaehlt hatte. Beim ERSTEN Eintritt ist das richtig, es gibt
-    // nichts anderes; der Befund ist, dass es beim zweiten genauso war.
+    // Tester es gewaehlt hatte. Bis zum 05.10.2026 galt das beim ERSTEN
+    // Eintritt als richtig. Gemessen am selben Tag: dieses Modell lehnt
+    // Erwachsenen-Fiktion ab, und die Ablehnung im Verlauf uebernehmen danach
+    // auch die guten Modelle. In der Cloud waehlt jetzt der Nutzer.
     const hin = pickForMode(HERMES_ROW, KATALOG, 'cloud', null, { local: HERMES_ROW, cloud: null })
     expect(hin.change).toBe(true)
-    expect(hin.next).toBe(KIMI)
+    expect(hin.next).toBeNull()
   })
 
   it('THE FIX, Cloud an mit Vorgeschichte: die letzte Wolkenwahl, nicht der Kopf', () => {
@@ -100,9 +102,9 @@ describe('jeder Modus behaelt seine eigene Wahl', () => {
     expect(hin.next).toBe(FLASH)
   })
 
-  it('DIE ROTE ZAHL des Hinwegs: ohne die Wolken-Erinnerung springt der Kopf ein', () => {
+  it('ohne die Wolken-Erinnerung landet der Hinweg auf keinem der beiden Cloud-Modelle', () => {
     const hin = pickForMode(HERMES_ROW, KATALOG, 'cloud', null, { local: HERMES_ROW, cloud: null })
-    expect(hin.next).toBe(KIMI)
+    expect(hin.next).not.toBe(KIMI)
     expect(hin.next).not.toBe(FLASH)
   })
 

@@ -1,0 +1,36 @@
+{
+  "about": "The tool call messages exactly as they cross the wire between the voice loop sidecar and the app. The sidecar tests assert that it emits and accepts these, the app's VoiceToolBridge tests assert the same from the other side.",
+  "tool": {
+    "type": "function",
+    "function": {
+      "name": "web_fetch",
+      "description": "Test tool",
+      "parameters": { "type": "object", "properties": { "value": { "type": "string" } }, "required": ["value"] }
+    }
+  },
+  "in_progress": {
+    "label": "rtvi-ai",
+    "type": "llm-function-call-in-progress",
+    "data": { "tool_call_id": "call_abc123", "function_name": "web_fetch", "arguments": { "value": "hello" } }
+  },
+  "result": {
+    "label": "rtvi-ai",
+    "type": "llm-function-call-result",
+    "data": {
+      "function_name": "web_fetch",
+      "tool_call_id": "call_abc123",
+      "arguments": { "value": "hello" },
+      "result": { "status": "completed", "text": "done", "truncated": false }
+    }
+  },
+  "stopped_completed": {
+    "label": "rtvi-ai",
+    "type": "llm-function-call-stopped",
+    "data": { "tool_call_id": "call_abc123", "cancelled": false, "function_name": "web_fetch" }
+  },
+  "stopped_cancelled": {
+    "label": "rtvi-ai",
+    "type": "llm-function-call-stopped",
+    "data": { "tool_call_id": "call_abc123", "cancelled": true, "function_name": "web_fetch" }
+  }
+}

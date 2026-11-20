@@ -1,4 +1,6 @@
-import type { ImageAttachment, Message } from '../types/chat'
+import type { FileAttachment, ImageAttachment, Message } from '../types/chat'
+import { textWithoutAttachmentNote } from './create/chat-attachments'
+import { CREATE_REPORT_PREFIX } from './create/chat-control'
 
 /**
  * What has to leave the thread before a turn is sent again — Regenerate and
@@ -18,9 +20,16 @@ export interface ResendPlan {
   /** Exactly what sendMessage receives as the user's input. */
   content: string
   images?: ImageAttachment[]
+  /** The files the question carried. Their summaries travel with them, so the
+   *  resend rebuilds the same message without the bytes. */
+  files?: FileAttachment[]
+  /** The answer is the comment after a Create run: what produced it is the
+   *  hidden report, and that goes out hidden again, never as a message of the
+   *  customer's. Never set for an edit. */
+  createReport?: boolean
 }
 
-type ThreadMessage = Pick<Message, 'id' | 'role' | 'content' | 'displayContent' | 'images'>
+type ThreadMessage = Pick<Message, 'id' | 'role' | 'content' | 'displayContent' | 'images' | 'files' | 'hidden'>
 
 export function planResend(
   messages: ThreadMessage[],
@@ -39,16 +48,27 @@ export function planResend(
   while (anchorIdx >= 0 && messages[anchorIdx].role !== 'user') anchorIdx--
   if (anchorIdx < 0) return null
   const anchor = messages[anchorIdx]
+  if (override === undefined && anchor.hidden && anchor.content.startsWith(CREATE_REPORT_PREFIX)) {
+    return { deleteFromId: anchor.id, content: anchor.content, createReport: true }
+  }
 
   // A slash command's displayContent is literally what the user typed
   // ("/review"), so that is what goes back in — sendMessage expands it again.
   // Any other displayContent is a label, not input: the /loop driver writes
   // "pass 3 of 5" there over the instruction the model actually ran.
-  const typed = anchor.displayContent?.startsWith('/') ? anchor.displayContent : anchor.content
+  // A message with files keeps what the user typed in displayContent as well:
+  // its content is that text PLUS the file summaries, and sending the content
+  // back in would put the summaries into the question a second time.
+  const typed = anchor.displayContent !== undefined && (anchor.files?.length || anchor.displayContent.startsWith('/'))
+    ? anchor.displayContent
+    // With Create on, a message with an attachment carries a note for the
+    // model behind the typed text; sent back in, the note would come twice.
+    : textWithoutAttachmentNote(anchor)
 
   return {
     deleteFromId: anchor.id,
     content: override ?? typed,
     ...(anchor.images?.length ? { images: anchor.images } : {}),
+    ...(anchor.files?.length ? { files: anchor.files } : {}),
   }
 }

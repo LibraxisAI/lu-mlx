@@ -4,7 +4,7 @@ import { isRecord } from '../types/json-guards'
 
 /**
  * Wie viele Erinnerungen des angemeldeten Kontos noch nicht in der Wolke
- * stehen (R3-19, Entscheid David vom 12.09.2026).
+ * stehen (R3-19, Entscheid vom 12.09.2026).
  *
  * Das Abmelden raeumt die Kontosammlung aus der laufenden Ansicht. Wer vorher
  * nie synchronisiert hat, verliert damit nichts von der Platte, sieht seine

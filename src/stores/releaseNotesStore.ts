@@ -4,27 +4,35 @@ import { safeJSONStorage } from '../lib/storage-quota'
 import { releaseNoteFor } from '../lib/release-notes'
 
 /**
- * "What is new" popup, once per VERSION (B4, David 2026-08-04).
+ * "What is new" popup, once per VERSION (B4, 2026-08-04).
  *
- * Deliberately NOT hung off `cloudTeasersEnabled`. That flag means "once per
- * user, never again, not even after an update" (David 2026-07-19). This is the
+ * Deliberately NOT hung off `cloudTeasersEnabled`. That flag is the user's own
+ * switch for the Cloud features in Local mode, and once off it stays off, not
+ * even an update turns it back on (2026-07-19). This is the
  * opposite by design: once per version, every version. Two layers, two flags.
  */
 interface ReleaseNotesState {
   /** The version whose notes this user has already seen. */
   lastNotesVersion: string | null
+  /** The user asked for the sheet again (Settings, Updates). Lives only while
+   *  the app runs: a restart never opens a sheet nobody asked for. */
+  reopened: boolean
   markNotesSeen: (version: string) => void
+  reopen: () => void
 }
 
 export const useReleaseNotesStore = create<ReleaseNotesState>()(
   persist(
     (set) => ({
       lastNotesVersion: null,
-      markNotesSeen: (version) => set({ lastNotesVersion: version }),
+      reopened: false,
+      markNotesSeen: (version) => set({ lastNotesVersion: version, reopened: false }),
+      reopen: () => set({ reopened: true }),
     }),
     {
       name: 'lu_release_notes',
       storage: safeJSONStorage(),
+      partialize: (s) => ({ lastNotesVersion: s.lastNotesVersion }),
     },
   ),
 )

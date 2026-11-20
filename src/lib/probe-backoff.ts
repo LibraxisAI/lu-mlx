@@ -13,7 +13,7 @@
  * to fault-finding: the real errors drown in it.
  *
  * A backend that answers is worth polling briskly, because the loaded/unloaded
- * toggle has to self-correct within a beat (David 2026-06-12: "on und offload
+ * toggle has to self-correct within a beat (2026-06-12: "on und offload
  * button sehr delayed"). A backend that is not there is worth asking about
  * less and less often, up to a minute, because the answer only changes when
  * somebody starts it and one minute is a fine time to notice that.

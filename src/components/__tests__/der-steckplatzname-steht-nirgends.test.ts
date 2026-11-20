@@ -74,6 +74,9 @@ const OHNE_STECKPLATZ = new Set([
   // Begruendung wie eine Zeile hoeher: ein CivitAI-Treffer ist ein Dateiname
   // auf civitai.com, kein Chat-Modell mit Steckplatz davor.
   'models/CivitaiSearchPanel.tsx',
+  // Die Kachel der Mac-Bild- und Videomodelle: Katalognamen aus mlx.rs und
+  // video.rs ("SD Turbo"), dieselbe Liste wie MlxMediaSettings oben.
+  'models/MacMediaTile.tsx',
 ])
 
 const portableComponentPath = (path: string) => path.replace(/\\/g, '/')

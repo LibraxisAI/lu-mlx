@@ -1,18 +1,15 @@
 /**
- * Auto-Compact: das Opt-in und die Verdrahtung (2.6.8, Compact-Schritt 4).
+ * Auto-Compact: der Schalter und die Verdrahtung (2.6.8, Compact-Schritt 4;
+ * ab Werk an seit 3.0.7).
  *
  * Zwei Zusicherungen, die einzeln wenig und zusammen alles wert sind.
  *
- * Die erste ist eine Negativ-Aussage. Mit den ausgelieferten Einstellungen
- * darf `maybeAutoCompact` NICHTS tun — nicht den Gespraechs-Store lesen, nicht
- * das Fenster aufloesen, erst recht kein Modell fragen. Die Entscheidung vom
- * 02.09.2026 war "einstellbar sonst aus", und der Grund steht in
- * compact-trigger.ts: eine Zusammenfassung ersetzt Gespraechsverlauf, und wenn
- * sie falsch ist, verliert der Nutzer Arbeit, ohne es zu merken. Ein gespei-
- * chertes Profil auf STORE_VERSION 21 liefert das Feld als `undefined` aus
- * (der additive Merge fuellt es erst beim naechsten Versionssprung nach) —
- * wuerde das als Zahl durchgehen, waere das Feature bei jedem Bestandsnutzer
- * ungefragt an.
+ * Die erste betrifft den Schalter. Bis 3.0.6 war das Feature ein Opt-in
+ * ("einstellbar sonst aus", 02.09.2026). Seit dem 17.10.2026 ist es ab Werk
+ * an, und eine gespeicherte 0 oder ein fehlender Schalter heisst "an, passend
+ * zum Fenster". Ausgeschaltet darf `maybeAutoCompact` dagegen NICHTS tun:
+ * nicht den Gespraechs-Store lesen, nicht das Fenster aufloesen, erst recht
+ * kein Modell fragen.
  *
  * Die zweite ist die Verdrahtung, und sie ist der eigentliche Wert dieser
  * Datei. Die Funktion taugt nur so viel, wie es Sende-Pfade gibt, die sie
@@ -58,9 +55,19 @@ vi.mock('../compact-run', async (importOriginal) => {
 })
 
 import { maybeAutoCompact, runCompactForConversation } from '../run-compact-command'
+import { compactCuts, layerItems } from '../compact-layers'
+import { useRunActivityStore } from '../../stores/runActivityStore'
+import { useSendSizeStore } from '../../stores/sendSizeStore'
+import { deriveRunStatus } from '../../components/status/run-status'
 import { runCompactSummary } from '../compact-run'
 import { resolveAgentNumCtxWithConfidence } from '../agent-num-ctx'
-import { usableThreshold, MIN_MESSAGES_TO_COMPACT, MIN_MESSAGES_SINCE_COMPACT } from '../compact-trigger'
+import {
+  usableThreshold,
+  resolveCompactThreshold,
+  adaptiveCompactThreshold,
+  MIN_MESSAGES_TO_COMPACT,
+  MIN_MESSAGES_SINCE_COMPACT,
+} from '../compact-trigger'
 import { DEFAULT_SETTINGS } from '../constants'
 import { useChatStore } from '../../stores/chatStore'
 import { useSettingsStore } from '../../stores/settingsStore'
@@ -96,10 +103,15 @@ function setzeSchwelle(schwelle: number) {
   })
 }
 
-/** Ein Profil aus der Zeit vor dem Feld: der Schluessel fehlt ganz. */
-function setzeProfilOhneFeld() {
+/** Auto-Compact ausdruecklich ausgeschaltet. */
+function setzeAus() {
+  useSettingsStore.setState({ settings: { ...DEFAULT_SETTINGS, autoCompact: false } })
+}
+
+/** Ein Profil aus der Zeit vor dem Schalter: der Schluessel fehlt ganz. */
+function setzeProfilOhneSchalter() {
   const ohne: Record<string, unknown> = { ...DEFAULT_SETTINGS }
-  delete ohne.autoCompactThreshold
+  delete ohne.autoCompact
   useSettingsStore.setState({ settings: ohne as unknown as Settings })
 }
 
@@ -111,7 +123,7 @@ function beobachteStore() {
   return vi.spyOn(useChatStore, 'getState')
 }
 
-describe('Opt-in: mit den ausgelieferten Einstellungen passiert nichts', () => {
+describe('Ab Werk an (3.0.7), aus nur auf ausdruecklichen Wunsch', () => {
   beforeEach(() => {
     fensterAufloesen.mockClear()
     useSettingsStore.setState({ settings: DEFAULT_SETTINGS })
@@ -120,36 +132,45 @@ describe('Opt-in: mit den ausgelieferten Einstellungen passiert nichts', () => {
     vi.restoreAllMocks()
   })
 
-  it('die ausgelieferte Schwelle ist 0 und liest sich als "aus"', () => {
-    expect(DEFAULT_SETTINGS.autoCompactThreshold).toBe(0)
-    expect(DEFAULT_SETTINGS.autoCompactThreshold).toBeFalsy()
-    // Dieselbe 0 muss auch der Entscheider als "nie" lesen, sonst haengt das
-    // Aus-Sein an zwei Stellen, die auseinanderlaufen koennen.
+  it('ausgeliefert ist der Schalter an und die Schwelle passt sich dem Fenster an', () => {
+    expect(DEFAULT_SETTINGS.autoCompact).toBe(true)
+    // 0 ist keine Schwelle mehr, sondern "passend zum Fenster".
     expect(usableThreshold(DEFAULT_SETTINGS.autoCompactThreshold)).toBeNull()
+    expect(resolveCompactThreshold(DEFAULT_SETTINGS, 32768)).toBe(adaptiveCompactThreshold(32768))
   })
 
-  it('mit den ausgelieferten Einstellungen liefert maybeAutoCompact null', async () => {
+  it('mit den ausgelieferten Einstellungen wird das Fenster gefragt', async () => {
     const convId = seedGespraech()
-    useSettingsStore.setState({ settings: DEFAULT_SETTINGS })
     expect(await maybeAutoCompact({ conversationId: convId, activeModel: MODELL })).toBeNull()
+    // Kurzer Chat, also 'below'. Gefragt wurde trotzdem, das Feature ist an.
+    expect(fensterAufloesen).toHaveBeenCalled()
   })
 
-  it('ein gespeichertes Profil ohne das Feld ist aus, nicht 0.3', async () => {
-    // STORE_VERSION 21 hat fuer diesen Schluessel keinen Sprung bekommen, das
-    // Feld kommt also bei Bestandsnutzern als undefined an. Ein Default, der
-    // sich hier einschliche, waere das Feature bei allen von ihnen an.
+  it('ein gespeichertes Profil ohne den Schalter ist an', async () => {
     const convId = seedGespraech()
-    setzeProfilOhneFeld()
-    expect(useSettingsStore.getState().settings.autoCompactThreshold).toBeUndefined()
-    expect(await maybeAutoCompact({ conversationId: convId, activeModel: MODELL })).toBeNull()
+    setzeProfilOhneSchalter()
+    expect(useSettingsStore.getState().settings.autoCompact).toBeUndefined()
+    await maybeAutoCompact({ conversationId: convId, activeModel: MODELL })
+    expect(fensterAufloesen).toHaveBeenCalled()
   })
 
-  it('auch eine Schwelle ausserhalb des erlaubten Bereichs bleibt aus', async () => {
+  it('ab Werk auf einem 8K-Modell nie, auch wenn der Chat voll ist (18.10.2026)', async () => {
     const convId = seedGespraech()
-    // 0.2 liegt unter MIN_THRESHOLD. Die Zahl ist wahr, aber unbrauchbar —
-    // die UI darf sie nicht liefern, und wenn doch, entscheidet der Trigger.
-    setzeSchwelle(0.2)
+    for (let i = 0; i < 40; i++) {
+      useChatStore.getState().addMessage(convId, {
+        id: `voll${i}`, role: i % 2 === 0 ? 'user' : 'assistant', content: 'x'.repeat(4000), timestamp: 100 + i,
+      })
+    }
+    const zusammenfassen = vi.mocked(runCompactSummary)
+    zusammenfassen.mockClear()
+    fensterAufloesen.mockResolvedValueOnce({ ctx: 8192, gemessen: true })
     expect(await maybeAutoCompact({ conversationId: convId, activeModel: MODELL })).toBeNull()
+    expect(zusammenfassen).not.toHaveBeenCalled()
+  })
+
+  it('eine Schwelle ausserhalb des Bereichs heisst "passend zum Fenster", nicht aus', () => {
+    expect(resolveCompactThreshold({ autoCompact: true, autoCompactThreshold: 0.2 }, 32768))
+      .toBe(adaptiveCompactThreshold(32768))
   })
 })
 
@@ -162,12 +183,13 @@ describe('Reihenfolge: das Billige zuerst, denn das laeuft bei jedem Senden', ()
     vi.restoreAllMocks()
   })
 
-  it('ohne Schwelle wird weder der Store gelesen noch das Fenster aufgeloest', async () => {
+  it('ausgeschaltet wird weder der Store gelesen noch das Fenster aufgeloest', async () => {
     // Das ist die Eigenschaft, die das Feature bezahlbar macht: dieser Aufruf
-    // steht in jedem Sende-Pfad und muss ohne Opt-in ein Vergleich sein und
+    // steht in jedem Sende-Pfad und muss ausgeschaltet ein Vergleich sein und
     // sonst nichts. Ein Store-Lesen waere noch billig, das Fenster-Aufloesen
     // ist ein Netzweg zum Backend — auf jeder Nachricht, fuer nichts.
     const convId = seedGespraech()
+    setzeAus()
     const store = beobachteStore()
 
     expect(await maybeAutoCompact({ conversationId: convId, activeModel: MODELL })).toBeNull()
@@ -265,6 +287,38 @@ describe('Verdrahtung: jeder Sende-Pfad ruft maybeAutoCompact', () => {
 })
 
 
+describe('Verdrahtung: jede Werkzeugschleife verdichtet mitten im Lauf (3.0.7)', () => {
+  /** Hooks mit einer Werkzeugschleife: wer die Arbeitshistorie mechanisch kuerzt. */
+  const schleifenHooks = () =>
+    readdirSync(hooksDir)
+      .filter((f) => f.startsWith('use') && f.endsWith('.ts'))
+      .filter((f) => /\btrimWorkingHistory\s*\(/.test(lies(f)))
+      .sort()
+
+  it('die Ableitung findet Agent (mit Chat Tools) und Code', () => {
+    expect(schleifenHooks()).toEqual(expect.arrayContaining(['useAgentChat.ts', 'useCodex.ts']))
+  })
+
+  it.each(schleifenHooks())('%s fragt compactRunMidway, bevor das Fenster des Schritts gebaut wird', (datei) => {
+    // Bis 3.1.0 stand hier "vor jedem trimWorkingHistory": der Trim ersetzte
+    // die Arbeitshistorie, und danach gab es nichts mehr zusammenzufassen.
+    // Seit 3.1.1 (Supportfall E8b) verwirft der Trim nichts mehr. Er liefert
+    // nur das Fenster dieses Schritts, die Historie des Laufs bleibt ganz,
+    // damit derselbe Verlauf in jedem Schritt an derselben Stelle geschnitten
+    // wird. Die Zusammenfassung wird nach diesem Fenster gefragt, und nach
+    // ihr wird es neu bestimmt, bevor der Builder es bekommt.
+    const text = lies(datei)
+    const frage = text.search(/\bcompactRunMidway\s*\(/)
+    const neu = frage + text.slice(frage).search(/stepWindow = windowOf\((agentMessages|messages)\)\n\s*\}\n/)
+    const bau = text.indexOf('buildRequestMessages(stepWindow, {')
+    expect(frage, datei).toBeGreaterThan(-1)
+    expect(neu, datei).toBeGreaterThan(frage)
+    expect(bau, datei).toBeGreaterThan(neu)
+    // Der Trim wird der Historie des Laufs nie wieder zugewiesen.
+    expect(text).not.toMatch(/\b(agentMessages|messages) = trimWorkingHistory\(/)
+  })
+})
+
 // ── Der stumme Fehlschlag ─────────────────────────────────────────────────
 
 describe('Auto-Kompaktierung, die schiefgeht, sagt es', () => {
@@ -308,6 +362,37 @@ describe('Auto-Kompaktierung, die schiefgeht, sagt es', () => {
     expect(w[0].content).toContain('Auto-compaction did not go through')
     // Der Grund steht mit drin, nicht nur die Tatsache.
     expect(w[0].content).toContain('did not produce a usable summary')
+  })
+
+  it('the run status says Compacting for as long as the summary is written, and not a moment longer', async () => {
+    setzeSchwelle(0.5)
+    const id = vollesGespraech()
+    const during: unknown[] = []
+    zusammenfassen.mockImplementation((async () => {
+      during.push(useRunActivityStore.getState().activity[id])
+      return { ok: false, reason: 'unusable' }
+    }) as never)
+
+    expect(useRunActivityStore.getState().activity[id]).toBeUndefined()
+    await maybeAutoCompact({ conversationId: id, activeModel: MODELL })
+    expect(during).toEqual([{ label: 'Compacting', kind: 'compacting' }])
+    expect(deriveRunStatus({ activity: during[0] as never })).toEqual({ kind: 'compacting', word: 'Compacting', detail: undefined })
+    expect(useRunActivityStore.getState().activity[id]).toBeUndefined()
+
+    // A summary that throws takes the line back as well.
+    zusammenfassen.mockRejectedValue(new Error('boom'))
+    await maybeAutoCompact({ conversationId: id, activeModel: MODELL }).catch(() => undefined)
+    expect(useRunActivityStore.getState().activity[id]).toBeUndefined()
+  })
+
+  it('a chat below the threshold never shows Compacting', async () => {
+    setzeSchwelle(0.5)
+    const id = seedGespraech(MIN_MESSAGES_TO_COMPACT + 4)
+    const seen: unknown[] = []
+    const off = useRunActivityStore.subscribe((state) => { seen.push(state.activity[id]) })
+    await maybeAutoCompact({ conversationId: id, activeModel: MODELL })
+    off()
+    expect(seen.filter(Boolean)).toEqual([])
   })
 
   it('wiederholt dieselbe Warnung nicht bei jedem Senden', async () => {
@@ -415,24 +500,12 @@ describe('Auto-Kompaktierung, die schiefgeht, sagt es', () => {
     expect(hinweise(id)).toHaveLength(0)
   })
 
-  it('meldet den Erfolg GENAU einmal — und zwar am Ende', async () => {
-    // Diese Zusicherung hiess bis zum 03.09.2026 „schreibt nichts in den
-    // Verlauf, wenn es geklappt hat", begruendet mit: der Erfolg habe seine
-    // eigene Darstellung, den Compact-Block an der Schnittstelle, ein
-    // zusaetzlicher Hinweis waere dasselbe zweimal.
-    //
-    // Die Praemisse stimmt zur Haelfte. Den Block gibt es wirklich
-    // (CompactBlock, verankert per compactionAnchors) — aber er steht am
-    // SCHNITTPUNKT, also mitten in einem Gespraech, das gerade lang genug
-    // geworden ist, um verdichtet zu werden. Der Leser steht in diesem Moment
-    // unten am Eingabefeld, dreissig Nachrichten weiter. Eine Persona hat
-    // genau dort gestanden, den Ueberlauf komplett verpasst und ihn erst im
-    // Netzwerkverkehr gefunden.
-    //
-    // Die Sorge des alten Tests bleibt trotzdem richtig, deshalb steht sie
-    // jetzt als Zahl da: GENAU eine Notiz, nicht zwei. Der Block sagt, WO
-    // geschnitten wurde; die Notiz sagt, DASS es eben passiert ist, an der
-    // Stelle, auf die der Leser ohnehin schaut.
+  it('meldet den Erfolg GENAU einmal: als Linie, nicht als zweite Notiz', async () => {
+    // Bis 3.0.8 schrieb der Erfolg zusaetzlich eine Notiz ans Ende, weil die
+    // Linie am Schnittpunkt mitten im Gespraech stand und der Leser dreissig
+    // Nachrichten weiter unten (Persona 03.09.2026). Seit 3.0.9 beginnt die
+    // aktuelle Ansicht AN der Linie (lib/compact-layers.ts): sie steht damit
+    // genau dort, wo der Leser schaut, und eine Notiz waere dasselbe zweimal.
     setzeSchwelle(0.5)
     const id = vollesGespraech()
     zusammenfassen.mockResolvedValue({
@@ -442,7 +515,7 @@ describe('Auto-Kompaktierung, die schiefgeht, sagt es', () => {
 
     const rec = await maybeAutoCompact({ conversationId: id, activeModel: MODELL })
     expect(rec).not.toBeNull()
-    expect(hinweise(id)).toHaveLength(1)
+    expect(hinweise(id)).toHaveLength(0)
   })
 })
 
@@ -549,39 +622,84 @@ describe('Auto-Kompaktierung, die klappt, sagt es auch', () => {
     (useChatStore.getState().conversations.find((c) => c.id === id)?.messages ?? [])
       .filter((m) => m.role === 'system' && !!m.notice)
 
-  it('hinterlaesst eine sichtbare Notiz im Verlauf', async () => {
+  it('hinterlaesst die Linie oben in der aktuellen Ansicht, mit den Zahlen des Zaehlers', async () => {
     setzeSchwelle(0.5)
     const id = vollesGespraech()
     zusammenfassen.mockResolvedValue({ ok: true, summary: ZUSAMMENFASSUNG } as never)
 
     const rec = await maybeAutoCompact({ conversationId: id, activeModel: MODELL })
     expect(rec).not.toBeNull()
+    // Die ganze Nutzlast vorher und nachher, nicht nur die ersetzten Zuege:
+    // das ist die Zahl, die der Zaehler zeigt (David, REA-Test 27.10.).
+    expect(rec!.contextBefore).toBeGreaterThan(0)
+    expect(rec!.contextAfter).toBeLessThan(rec!.contextBefore!)
+    expect(rec!.contextBefore! - rec!.contextAfter!).toBe(Math.max(0, rec!.tokensBefore - rec!.tokensAfter))
 
-    const n = hinweise(id)
-    expect(n).toHaveLength(1)
-    // Kein 'warn': es ist nichts schiefgegangen, es ist etwas passiert.
-    expect(n[0].notice).toBe('info')
-    expect(n[0].content).toContain('Summarised')
-    // Der Satz, der die Angst nimmt — der Verlauf ist nicht weg, nur die
-    // Nutzlast ist kuerzer. Ohne ihn liest sich die Notiz wie ein Datenverlust.
-    expect(n[0].content).toContain('The full conversation is still here')
+    const conv = useChatStore.getState().conversations.find((c) => c.id === id)!
+    const jetzt = layerItems(conv.messages, compactCuts(conv.messages, conv.compactions), null)
+    expect(jetzt[0]).toMatchObject({ kind: 'line', cut: { key: rec!.id } })
+    // Und keine Notiz daneben.
+    expect(hinweise(id)).toHaveLength(0)
   })
 
-  it('die Notiz steht NACH den Nachrichten, die sie ersetzt', async () => {
+  it('eine schon angelegte, leere Antwort gehoert nicht zum Stand davor', async () => {
+    // Mac-Lauf 28.10.: die Agent-Schleife legt die Antwort an, bevor sie
+    // verdichtet. Als Ende genommen zeigte die Ebene "vorher" die spaetere
+    // Antwort mit.
+    setzeSchwelle(0.5)
+    const id = vollesGespraech()
+    useChatStore.getState().addMessage(id, { id: 'offen', role: 'assistant', content: '', timestamp: 9999, agentBlocks: [] })
+    zusammenfassen.mockResolvedValue({ ok: true, summary: ZUSAMMENFASSUNG } as never)
+    const rec = await maybeAutoCompact({ conversationId: id, activeModel: MODELL })
+    expect(rec!.endMessageId).toBe('lang39')
+  })
+
+  it('die Linie steht NACH den Nachrichten, die sie ersetzt', async () => {
     // Am Schnittpunkt, nicht am Anfang: sonst behauptet sie, das ganze
-    // Gespraech sei zusammengefasst.
+    // Gespraech sei zusammengefasst. Was davor stand, liegt eine Ebene tiefer.
     setzeSchwelle(0.5)
     const id = vollesGespraech()
     zusammenfassen.mockResolvedValue({ ok: true, summary: ZUSAMMENFASSUNG } as never)
 
-    await maybeAutoCompact({ conversationId: id, activeModel: MODELL })
-    const alle = useChatStore.getState().conversations.find((c) => c.id === id)!.messages
-    expect(alle[alle.length - 1].notice).toBe('info')
+    const rec = await maybeAutoCompact({ conversationId: id, activeModel: MODELL })
+    const conv = useChatStore.getState().conversations.find((c) => c.id === id)!
+    const cuts = compactCuts(conv.messages, conv.compactions)
+    const ids = (items: ReturnType<typeof layerItems>) =>
+      items.flatMap((it) => (it.kind === 'message' ? [it.message.id] : []))
+    const vorher = ids(layerItems(conv.messages, cuts, 0))
+    expect(vorher).toContain(rec!.upToMessageId)
+    expect(ids(layerItems(conv.messages, cuts, null))).not.toContain(rec!.upToMessageId)
   })
 
-  it('der manuelle Weg verdoppelt die Notiz nicht', async () => {
-    // /compact zeigt sein Ergebnis selbst an. Zwei Notizen fuer einen Vorgang
-    // waeren eine Falschmeldung ueber die Anzahl der Vorgaenge.
+  it('ein schon gekuerzter Zug macht "nachher" nicht zu 0', async () => {
+    // T1 29.10.: eine Antwort mit 82 500 Zeichen, gesendet nur gekuerzt. Der
+    // Zaehler las 737, die ersetzten Zuege zaehlten roh ueber 20 000, und die
+    // Linie sagte "Compacted, 737 → 0". Nachher stehen mindestens die
+    // Zusammenfassung und die behaltenen Nachrichten.
+    setzeSchwelle(0.5)
+    const id = seedGespraech(MIN_MESSAGES_TO_COMPACT + 4)
+    useChatStore.getState().addMessage(id, { id: 'riesig', role: 'assistant', content: 'y'.repeat(82_500), timestamp: 999 })
+    for (let i = 0; i < 12; i++) {
+      useChatStore.getState().addMessage(id, {
+        id: `kurz${i}`, role: i % 2 === 0 ? 'user' : 'assistant', content: 'z'.repeat(200), timestamp: 1000 + i,
+      })
+    }
+    const n = useChatStore.getState().conversations.find((c) => c.id === id)!.messages.length
+    useSendSizeStore.getState().report(id, { tokens: 737, window: 8192, atMessageCount: n, trimmedResults: 0, savedChars: 0 })
+    zusammenfassen.mockResolvedValue({ ok: true, summary: ZUSAMMENFASSUNG } as never)
+
+    const out = await runCompactForConversation({ conversationId: id, activeModel: MODELL, trigger: 'manual', window: 8192 })
+    expect(out.ok).toBe(true)
+    const rec = out.ok ? out.record : null
+    expect(rec!.tokensBefore).toBeGreaterThan(rec!.contextBefore!)
+    expect(rec!.contextAfter).toBeGreaterThan(0)
+    expect(rec!.contextAfter).toBeGreaterThanOrEqual(rec!.tokensAfter)
+    expect(rec!.contextAfter).toBeLessThanOrEqual(rec!.contextBefore!)
+    useSendSizeStore.getState().clear(id)
+  })
+
+  it('der manuelle Weg schreibt auch keine Notiz', async () => {
+    // /compact zeigt sein Ergebnis als dieselbe Linie (der Datensatz).
     setzeSchwelle(0.5)
     const id = vollesGespraech()
     zusammenfassen.mockResolvedValue({ ok: true, summary: ZUSAMMENFASSUNG } as never)

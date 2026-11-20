@@ -56,7 +56,7 @@ describe('the notice is written to be seen', () => {
 
 describe('the coding view renders it as a notice, not as the model talking', () => {
   it('has a branch for it before the bubble branch', () => {
-    const list = codexView.slice(codexView.indexOf('messages.filter(msg => !msg.hidden)'))
+    const list = codexView.slice(codexView.indexOf('shownItems.map((item) =>'))
     const branch = list.indexOf("msg.role === 'system' && msg.notice")
     const bubble = list.indexOf("msg.role === 'user' ? 'flex-row-reverse' : ''")
     expect(branch).toBeGreaterThan(-1)
@@ -66,7 +66,7 @@ describe('the coding view renders it as a notice, not as the model talking', () 
   it('a warn notice looks different from a confirmation', () => {
     // Hier stand einmal `toContain('amber')`. Das war schon vorher der
     // schwaechere Test: er nagelte eine Farbe fest statt der Aussage, und die
-    // Farbe hat David am 04.09.2026 aus der ganzen Oberflaeche geworfen
+    // Farbe hat am 04.09.2026 aus der ganzen Oberflaeche geworfen
     // ("kein gelb mehr ohne farbe"). Seitdem gibt es zwei Toene und keinen
     // dritten (`lib/hinweis.ts`), und welcher der beiden hier steht, ist eine
     // Frage der Regel, nicht dieses Tests. Was der Test schuldet, ist die

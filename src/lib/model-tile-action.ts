@@ -1,7 +1,7 @@
 /**
  * What the one button on a Discover tile does, for every state a tile can be in.
  *
- * GH #118 (nayffy, 2026-08-27): "the Get button doesn't do anything as the
+ * GH #118 (2026-08-27): "the Get button doesn't do anything as the
  * files are still downloaded". Two halves. The badge was wrong, which the
  * filesystem rule in lib/discover-installed.ts fixes, and the right badge was
  * an inert pill: a text model that IS installed showed "Installed" and offered

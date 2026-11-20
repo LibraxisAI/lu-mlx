@@ -1,5 +1,5 @@
 /**
- * A14 (2.6.8), David: "Use auf einer LU-Engine-Kachel, waehrend Ollama aktiv
+ * A14 (2.6.8), der Inhaber: "Use auf einer LU-Engine-Kachel, waehrend Ollama aktiv
  * ist: schaltet den Chat-Provider auf die LU Engine um. Wenn die LU Engine als
  * Provider gar nicht angelegt ist, muss Use sie anlegen."
  *

@@ -11,7 +11,7 @@
  * instead of each call site re-deciding:
  *
  *  1. GATE — on lu-cloud a silent call needs `settings.memoryCloudOptIn`.
- *     Since David's decision of 12.09.2026 that setting ships ON, so a fresh
+ *     Since the owner's decision of 12.09.2026 that setting ships ON, so a fresh
  *     profile does extract on a cloud conversation; a profile that already
  *     carries the old `false` keeps it, and `autoExtractEnabled` in the memory
  *     settings switches the whole thing off in one click.
@@ -34,8 +34,7 @@
  * lu-cloud text models ranked cheapest-first, restricted to plain instruct
  * models (no reasoner burns hidden output tokens, no vision surcharge).
  *
- * Derived from the server catalogue (`lib/chat/tier-models.ts`, wholesale
- * $/1M in + out, refreshed 2026-08-09). The first two are on EVERY plan; the
+ * Derived from the server catalogue. The first two are on EVERY plan; the
  * rest are the Pro-catalogue fallbacks for the (impossible today, possible
  * tomorrow) case that the hosted shortlist changes under us.
  *
@@ -43,15 +42,14 @@
  * server actually serves this account right now. Nothing here is required to
  * exist — an id that vanishes from the catalogue is skipped, and if none of
  * them survive, `pickSilentCallModel` falls back to the live size heuristic
- * and finally to the active model. Prices drift daily (see the price-drift
- * guard on the server side), so treat the ORDER as the durable part.
+ * and finally to the active model. Treat the ORDER as the durable part.
  */
 export const CHEAP_CLOUD_TEXT_MODELS: readonly string[] = [
-  'meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo', // $0.02 / $0.04, hosted
-  'Sao10K/L3-8B-Lunaris-v1-Turbo',               // $0.04 / $0.05, hosted
-  'mistralai/Mistral-Small-3.2-24B-Instruct-2506', // $0.075 / $0.20, pro
-  'meta-llama/Llama-4-Scout-17B-16E-Instruct',   // $0.10 / $0.30, pro
-  'meta-llama/Llama-3.3-70B-Instruct-Turbo',     // $0.10 / $0.32, pro
+  'meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo', // hosted
+  'Sao10K/L3-8B-Lunaris-v1-Turbo',               // hosted
+  'mistralai/Mistral-Small-3.2-24B-Instruct-2506', // pro
+  'meta-llama/Llama-4-Scout-17B-16E-Instruct',   // pro
+  'meta-llama/Llama-3.3-70B-Instruct-Turbo',     // pro
 ]
 
 /** Provider ids that bill against the user's LU Cloud credits. */

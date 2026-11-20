@@ -1,0 +1,216 @@
+name: SignPath stage 1, build the app and submit the app binary
+description: >-
+  Builds the app, keeps everything the installers need as a workflow
+  artifact, and submits the app binary to SignPath without waiting for it.
+  Stages 2 and 3 run later, in other runs on the same tag
+  (.github/workflows/windows-signpath.yml). Publishes nothing.
+
+# SignPath signs artifacts that were uploaded to GitHub, after the build;
+# Tauri would sign during the build. So the build is split, and SignPath is
+# asked twice. A production request waits for a person to approve it, which
+# may take days, so no job waits: each stage ends with a submitted request
+# and leaves its state behind (scripts/signpath-stages.mjs, header).
+#
+#   Stage 1, here, in the release run on the tag:
+#     1. `tauri build --no-bundle` compiles the app and stops.
+#     2. The binary is staged twice, marked for NSIS and for MSI
+#        (scripts/windows-signpath.mjs explains why), and uploaded.
+#     3. The llama.cpp files and the rest of the build output the bundler
+#        packs are uploaded as `windows-bundle-input`, with a record of the
+#        llama.cpp source and the sha256 of every file.
+#     4. Request one (artifact configuration "windows-app") is submitted.
+#        The action waits only until SignPath has fetched the artifact.
+#   Stage 2 (.github/actions/windows-signpath-installers):
+#     the signed binary is placed into that build output, `tauri bundle`
+#     packs the NSIS installer and the MSI around it, request two
+#     ("windows-installers") is submitted.
+#   Stage 3 (.github/actions/windows-signpath-finish):
+#     the updater archives and their minisign signatures are made from the
+#     signed installers, so the updater checks the same bytes a user
+#     downloads, and the signatures are verified.
+#
+# Every other file in the installers stays unsigned on purpose: the llama.cpp
+# server and its libraries are built from upstream source, and the terms of
+# the SignPath Foundation allow its certificate for this project's own
+# binaries only (https://signpath.org/terms, read 2026-10-08).
+#
+# Started again on the same label, the first step finds the earlier request:
+# while it waits or after it completed, nothing is built and nothing is
+# submitted. Only a request that ended without a signature (denied, failed,
+# canceled) is replaced.
+#
+# The caller must have checked out the repository, installed Node, Rust and
+# the npm dependencies, and built the llama.cpp sidecar from source. Every job
+# of the workflow has to run on a GitHub-hosted runner, or SignPath refuses,
+# and the job needs `actions: read`: SignPath fetches the artifact with the
+# job's token.
+#
+# Used by release.yml (label: the tag) and signpath-probe.yml (label:
+# probe-<run id>).
+
+inputs:
+  api-token:
+    description: API token of the SignPath CI user that may submit to the signing policy.
+    required: true
+  organization-id:
+    description: SignPath organization ID.
+    required: true
+  project-slug:
+    description: SignPath project slug.
+    required: true
+  signing-policy-slug:
+    description: SignPath signing policy slug, for example test-signing or release-signing.
+    required: true
+  app-artifact-configuration-slug:
+    description: Slug of the artifact configuration in .signpath/artifact-configurations/windows-app.xml.
+    default: windows-app
+  label:
+    description: Name of the chain of stages, the tag of a release or probe-<run id>.
+    required: true
+  github-token:
+    description: Token that reads the state artifacts of earlier runs (actions read).
+    default: ${{ github.token }}
+
+outputs:
+  submitted:
+    description: true when this run submitted the app binary, false when an earlier request stands.
+    value: ${{ steps.plan.outputs.run }}
+  app-signing-request:
+    description: URL of the signing request of the app binary in SignPath, this run's or the earlier one.
+    value: ${{ steps.sign-app.outputs.signing-request-web-url || steps.plan.outputs.app-request-url }}
+  app-request-id:
+    description: ID of that signing request.
+    value: ${{ steps.sign-app.outputs.signing-request-id || steps.plan.outputs.app-request-id }}
+
+runs:
+  using: composite
+  steps:
+    - name: Is the app binary of this label submitted already
+      id: plan
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        SIGNPATH_API_TOKEN: ${{ inputs.api-token }}
+        SIGNPATH_ORGANIZATION_ID: ${{ inputs.organization-id }}
+        LABEL: ${{ inputs.label }}
+      run: node scripts/signpath-stages.mjs plan build "$LABEL"
+
+    - name: Build the app without bundling
+      if: steps.plan.outputs.run == 'true'
+      shell: bash
+      run: npx tauri build --no-bundle
+
+    - name: Stage the app binary for signing
+      id: stage-app
+      if: steps.plan.outputs.run == 'true'
+      shell: bash
+      run: node scripts/windows-signpath.mjs stage-app "$RUNNER_TEMP/signpath/app-unsigned"
+
+    - name: Record where the llama.cpp files come from
+      if: steps.plan.outputs.run == 'true'
+      shell: bash
+      run: node scripts/signpath-stages.mjs provenance x86_64-pc-windows-msvc src-tauri/target/signpath/llama-cpp-provenance.json
+
+    # What `tauri bundle` packs besides the app binary, for stage 2 on another
+    # runner: the llama.cpp server and libraries built in this run, the
+    # programs cargo left in target/release, and the provenance record. All
+    # paths sit under src-tauri, so stage 2 downloads into src-tauri. Kept 90
+    # days, the longest a public repository keeps an artifact, because the
+    # approval of request one may take that long.
+    - name: Keep the build output the installers are packed from
+      if: steps.plan.outputs.run == 'true'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: windows-bundle-input
+        path: |
+          src-tauri/bin/
+          src-tauri/resources/llama/
+          src-tauri/target/release/*.exe
+          src-tauri/target/release/*.dll
+          src-tauri/target/signpath/
+        if-no-files-found: error
+        retention-days: 90
+        overwrite: true
+
+    # SignPath takes its input from GitHub's artifact store, not from the
+    # runner, so that what it signs is what this workflow run produced. Kept as
+    # long as the build output: stage "app" of windows-signpath.yml submits
+    # this same file again after a denied request.
+    - name: Upload the unsigned app binary
+      id: upload-app
+      if: steps.plan.outputs.run == 'true'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: windows-app-unsigned
+        path: ${{ steps.stage-app.outputs.dir }}
+        if-no-files-found: error
+        retention-days: 90
+        overwrite: true
+
+    # wait-for-completion false: the action returns once SignPath has fetched
+    # the artifact (the job's token is only valid while the job runs), and the
+    # approval happens whenever it happens.
+    - name: Submit the app binary to SignPath
+      id: sign-app
+      if: steps.plan.outputs.run == 'true'
+      uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+      with:
+        api-token: ${{ inputs.api-token }}
+        organization-id: ${{ inputs.organization-id }}
+        project-slug: ${{ inputs.project-slug }}
+        signing-policy-slug: ${{ inputs.signing-policy-slug }}
+        artifact-configuration-slug: ${{ inputs.app-artifact-configuration-slug }}
+        github-artifact-id: ${{ steps.upload-app.outputs.artifact-id }}
+        wait-for-completion: false
+        wait-for-completion-timeout-in-seconds: '900'
+        parameters: |
+          version: "${{ steps.stage-app.outputs.version }}"
+
+    - name: Write the state of stage 1
+      id: state
+      if: steps.plan.outputs.run == 'true'
+      shell: bash
+      env:
+        LABEL: ${{ inputs.label }}
+        REQUEST_ID: ${{ steps.sign-app.outputs.signing-request-id }}
+        REQUEST_URL: ${{ steps.sign-app.outputs.signing-request-web-url }}
+        VERSION: ${{ steps.stage-app.outputs.version }}
+        POLICY: ${{ inputs.signing-policy-slug }}
+        ATTEMPT: ${{ steps.plan.outputs.app-attempt }}
+      run: |
+        set -euo pipefail
+        node scripts/signpath-stages.mjs write-state "$RUNNER_TEMP/signpath/state-app" "$LABEL" app \
+          "requestId=$REQUEST_ID" "requestUrl=$REQUEST_URL" "version=$VERSION" "policy=$POLICY" \
+          "buildRunId=$GITHUB_RUN_ID" "attempt=$((ATTEMPT + 1))"
+        cp src-tauri/target/signpath/llama-cpp-provenance.json "$RUNNER_TEMP/signpath/state-app/"
+
+    - name: Keep the state of stage 1
+      if: steps.plan.outputs.run == 'true'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: ${{ steps.state.outputs.name }}
+        path: ${{ steps.state.outputs.dir }}
+        if-no-files-found: error
+        retention-days: 90
+
+    - name: Say what waits for approval
+      shell: bash
+      env:
+        LABEL: ${{ inputs.label }}
+        SUBMITTED: ${{ steps.plan.outputs.run }}
+        REQUEST_URL: ${{ steps.sign-app.outputs.signing-request-web-url || steps.plan.outputs.app-request-url }}
+      run: |
+        {
+          if [ "$SUBMITTED" = "true" ]; then
+            echo "### SignPath: the app binary of $LABEL waits for approval"
+          else
+            echo "### SignPath: the app binary of $LABEL was submitted by an earlier run"
+          fi
+          echo ""
+          echo "Signing request: $REQUEST_URL"
+          echo ""
+          case "$LABEL" in
+            probe-*) echo "Next, after the approval: \`gh workflow run signpath-probe.yml --ref $GITHUB_REF_NAME -f stage=installers -f label=$LABEL\`." ;;
+            *) echo "After the approval in SignPath the watcher of windows-signpath.yml starts stage 2 (installers) on the tag within about 15 minutes. By hand: \`gh workflow run windows-signpath.yml --ref $LABEL -f stage=installers\`." ;;
+          esac
+        } >> "$GITHUB_STEP_SUMMARY"

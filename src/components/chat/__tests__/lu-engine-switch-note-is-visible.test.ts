@@ -232,7 +232,7 @@ describe('the bar is wired into every surface that can trigger it', () => {
     return readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), p), 'utf8')
   }
 
-  // 21.09.2026: die Zeile ist aus beiden Composern ausgezogen. David, am
+  // 21.09.2026: die Zeile ist aus beiden Composern ausgezogen. Der Inhaber, am
   // echten Windows-Bau und mehrfach: „NICHTS im prompt fenster!" Der Satz
   // handelt vom Modell und steht jetzt dort, wo man das Modell waehlt, ganz
   // oben im Aufklapper des Waehlers, der in genau diesen beiden Composern

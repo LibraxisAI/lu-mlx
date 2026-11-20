@@ -110,7 +110,7 @@ describe('D-S02/D-A9: das Zeichen ist da und ist sichtbar', () => {
   })
 })
 
-describe('D-S05: der Block sitzt mittig, in jeder Lage (David, 19.09.2026)', () => {
+describe('D-S05: der Block sitzt mittig, in jeder Lage (19.09.2026)', () => {
   it('mittig im Chat und mittig im Code, keine Bedingung mehr dazwischen', () => {
     // Bis 05.09.2026 stand hier „unten verankert im Chat, mittig im Code":
     // die Annahme war, ein Block, der in der Mitte einer leeren Flaeche
@@ -122,7 +122,7 @@ describe('D-S05: der Block sitzt mittig, in jeder Lage (David, 19.09.2026)', () 
     // der Fensterhoehe, weil `justify-end` den Block an den Composer
     // nagelt statt an die Mitte. Der Code-Bereich stand mit
     // `justify-center` schon richtig (-0,9 bis -1,9 Prozent, leicht ueber
-    // der Mitte). David: „er soll mittig sitzen." Beide Lagen bekommen
+    // der Mitte). Der Inhaber: „er soll mittig sitzen." Beide Lagen bekommen
     // seither dieselbe Regel, ohne Bedingung.
     const home = VIEW_CODE.slice(VIEW_CODE.indexOf('key="home"'), VIEW_CODE.indexOf('key="chat"'))
     expect(home).toContain("flex-1 flex flex-col items-center justify-center min-h-0 px-3 pb-4")
@@ -154,7 +154,7 @@ describe('D-S06: eine Kontextanzeige, nicht zwei', () => {
   })
 
   it('der Knopf zeigt „ctx N" nur noch, wenn es keinen Fuellstand gibt', () => {
-    expect(DROPDOWN).toMatch(/\{hasFill \? children : <span>ctx \{formatContextWindow\(ctx\.contextWindow\)\}<\/span>\}/)
+    expect(DROPDOWN).toMatch(/\{hasFill \? children : <span>ctx \{formatContextWindow\(cloud \? ctx\.sendWindow : ctx\.contextWindow\)\}<\/span>\}/)
   })
 
   it('und die beiden Schreibweisen koennen nicht gleichzeitig auf dem Schirm stehen', () => {
@@ -178,7 +178,6 @@ describe('D-S18: was vor dem ersten Inhalt steht', () => {
   const strip = VIEW_CODE.indexOf('data-testid="chat-session-strip"')
   const list = VIEW_CODE.indexOf('<MessageList')
   const composer = VIEW_CODE.indexOf('<ChatInput')
-  const plan = VIEW_CODE.indexOf('<PlanBar />')
 
   it('die Sitzungsleiste steht unter dem Transkript, nicht darueber', () => {
     expect(strip).toBeGreaterThan(-1)
@@ -197,9 +196,8 @@ describe('D-S18: was vor dem ersten Inhalt steht', () => {
     expect(above.slice(0, 200)).not.toContain('chat-session-strip')
   })
 
-  it('der Plan bleibt oben — der ist das Einzige, was vor dem Inhalt gehoert', () => {
-    expect(plan).toBeGreaterThan(-1)
-    expect(list).toBeGreaterThan(plan)
-    expect(VIEW_CODE.match(/<PlanBar\b/g)).toHaveLength(1)
+  it('der Plan steht nicht mehr davor, er haengt unter der neuesten Nachricht', () => {
+    // Seit CA (13.11.2026) im Transkript angeheftet (MessageList, PlanBar.tsx).
+    expect(VIEW_CODE).not.toMatch(/<PlanBar\b/)
   })
 })

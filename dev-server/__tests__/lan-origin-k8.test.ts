@@ -1,5 +1,5 @@
 /**
- * K8 (GH #134, eloieloie, `npm run dev --host`): a deliberately LAN-exposed
+ * K8 (GH #134, `npm run dev --host`): a deliberately LAN-exposed
  * dev server rejected its own onboarding write requests: the page loaded
  * from the machine's LAN IP (e.g. `http://192.168.1.23:5273`), which is
  * neither `tauri://localhost` nor the loopback regex, so the guard's Origin

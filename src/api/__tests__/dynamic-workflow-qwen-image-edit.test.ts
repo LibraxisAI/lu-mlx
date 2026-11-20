@@ -38,6 +38,7 @@ const QWEN_NODES = {
   ModelSamplingAuraFlow: { input: { required: { model: ['MODEL'], shift: ['FLOAT'] } } },
   EmptySD3LatentImage: { input: { required: {} } },
   KSampler: { input: { required: {} } },
+  VAEEncode: { input: { required: {} } },
   VAEDecode: { input: { required: {} } },
   SaveImage: { input: { required: {} } },
   LoadImage: { input: { required: { image: [[]] } } },
@@ -63,11 +64,13 @@ const ALLOWED = new Set([
   'UNETLoader',
   'CLIPLoader',
   'VAELoader',
+  'CLIPTextEncode',
   'TextEncodeQwenImageEditPlus',
   'TextEncodeQwenImageEdit',
   'ModelSamplingAuraFlow',
   'EmptySD3LatentImage',
   'KSampler',
+  'VAEEncode',
   'VAEDecode',
   'SaveImage',
   'LoadImage',
@@ -80,8 +83,8 @@ beforeEach(() => {
 })
 
 describe('Qwen Image Edit is not a checkpoint', () => {
-  it('classifies the 2511 file as qwen_image_edit', () => {
-    expect(classifyModel(QWEN)).toBe('qwen_image_edit')
+  it('classifies the 2511 file as qwenimage1', () => {
+    expect(classifyModel(QWEN)).toBe('qwenimage1')
   })
 
   it('never emits the Qwen file as CheckpointLoaderSimple.ckpt_name', async () => {
@@ -94,15 +97,18 @@ describe('Qwen Image Edit is not a checkpoint', () => {
     expect(clip?.[1].inputs.type).toBe('qwen_image')
     expect(clip?.[1].inputs.clip_name).toBe('qwen_2.5_vl_7b_fp8_scaled.safetensors')
     expect(nodeOf(wf, 'VAELoader')?.[1].inputs.vae_name).toBe('qwen_image_vae.safetensors')
-    expect(nodeOf(wf, 'TextEncodeQwenImageEditPlus')).toBeDefined()
-    expect(nodeOf(wf, 'ModelSamplingAuraFlow')?.[1].inputs.shift).toBe(3.1)
+    expect(nodeOf(wf, 'CLIPTextEncode')).toBeDefined()
+    expect(nodeOf(wf, 'ModelSamplingAuraFlow')?.[1].inputs.shift).toBe(3)
     expect(nodeOf(wf, 'EmptySD3LatentImage')).toBeDefined()
   })
 
   it('attaches a source still to the edit encoder, not to a checkpoint graph', async () => {
     const wf = await buildDynamicWorkflow({ ...base, model: QWEN, inputImage: 'src.png', denoise: 0.7 } as never)
     expect(nodeOf(wf, 'CheckpointLoaderSimple')).toBeUndefined()
-    expect(nodeOf(wf, 'VAEEncode')).toBeUndefined()
+    expect(nodeOf(wf, 'EmptySD3LatentImage')).toBeUndefined()
+    const [encId] = nodeOf(wf, 'VAEEncode')!
+    expect(nodeOf(wf, 'KSampler')?.[1].inputs.latent_image).toEqual([encId, 0])
+    expect(nodeOf(wf, 'KSampler')?.[1].inputs.denoise).toBe(1)
     const encoders = classTypes(wf).filter((k) => k === 'TextEncodeQwenImageEditPlus')
     expect(encoders.length).toBeGreaterThan(0)
     const withImage = Object.values(wf).find((n) => n.class_type === 'TextEncodeQwenImageEditPlus' && n.inputs?.image1)

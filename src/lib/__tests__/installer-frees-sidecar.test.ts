@@ -2,7 +2,7 @@
  * The Windows installer has to free our own engine before it copies over it,
  * and it may free NOTHING ELSE.
  *
- * aldrich_ironhart, 2026-08-10: the update died on "Error opening file for
+ * A user, 2026-08-10: the update died on "Error opening file for
  * writing: D:\Locally Uncensored\llama-server.exe". Windows locks a running
  * image, and the hook that kills our processes was compiled away in every
  * normal build (it sat behind a productName check that is false today), so
@@ -122,7 +122,7 @@ describe('a lock we cannot clear must not end the update', () => {
 })
 
 /**
- * GitHub #120 (AnnSdf1969, Ubuntu 26.04, 2026-08-28): the sidecar was called
+ * GitHub #120 (Ubuntu 26.04, 2026-08-28): the sidecar was called
  * llama-server, Tauri's deb bundler copies external binaries straight into
  * /usr/bin, and Debian's own llama.cpp-tools package owns
  * /usr/bin/llama-server. dpkg refused the entire install over the collision.

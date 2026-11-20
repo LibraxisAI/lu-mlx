@@ -215,7 +215,7 @@ pub(crate) fn requirements_fallback_log(folder: &str, reason: &str) -> String {
 
 /// The line every finished run leaves behind.
 ///
-/// David, 03.09.: a run that worked has to say so. The cancel already had a
+/// 03.09.: a run that worked has to say so. The cancel already had a
 /// closing sentence and the success had none, so the abort was better labelled
 /// than the success (A13 Befund 1a), and three full repairs of six to eight
 /// minutes each ended with the card simply vanishing. The requirements hint is
@@ -313,10 +313,10 @@ mod tests {
     #[test]
     fn the_closing_line_says_what_is_missing_afterwards() {
         let notice = requirements_fallback_notice(
-            "C:\\Users\\ddrob\\ComfyUI",
+            "C:\\Users\\alice\\ComfyUI",
             requirements_failure_reason(INVENTED_PACKAGE),
         );
-        assert!(notice.contains("C:\\Users\\ddrob\\ComfyUI"), "got: {notice}");
+        assert!(notice.contains("C:\\Users\\alice\\ComfyUI"), "got: {notice}");
         assert!(notice.contains("LU checked the packages it knows about"), "got: {notice}");
         assert!(notice.contains("installed the ones that were missing"), "got: {notice}");
         // The half the report asked for: the user has to learn that ComfyUI is
@@ -337,14 +337,14 @@ mod tests {
         assert_eq!(json["notice_kind"], serde_json::json!(""));
     }
 
-    /// David, 03.09.: a run that worked says so, every time. And it does not
+    /// 03.09.: a run that worked says so, every time. And it does not
     /// say it in the colour of a warning (A15 review).
     #[test]
     fn a_run_that_worked_leaves_a_closing_line_of_its_own() {
         for done in [
             "Install finished. ComfyUI is ready to start.",
             "Repair finished. ComfyUI is ready.",
-            "Update finished. Restart ComfyUI to load the new nodes.",
+            "Update finished. ComfyUI is starting again with the new nodes.",
         ] {
             let (line, kind) = finished_notice(done, None);
             assert_eq!(line, done);
@@ -358,13 +358,13 @@ mod tests {
     #[test]
     fn a_finished_run_that_skipped_the_file_says_both_halves() {
         let fallback = (
-            "C:\\Users\\ddrob\\ComfyUI".to_string(),
+            "C:\\Users\\alice\\ComfyUI".to_string(),
             requirements_failure_reason(INVENTED_PACKAGE),
         );
         let (line, kind) = finished_notice("Repair finished. ComfyUI is ready.", Some(&fallback));
         assert!(line.starts_with("Repair finished. ComfyUI is ready. "), "got: {line}");
         assert!(line.contains("could not be used"), "got: {line}");
-        assert!(line.contains("C:\\Users\\ddrob\\ComfyUI"), "got: {line}");
+        assert!(line.contains("C:\\Users\\alice\\ComfyUI"), "got: {line}");
         // Negative control on the substitution: the success half is not
         // replaced by the warning, which is what a run that finished deserves.
         assert!(line.contains("Repair finished"), "got: {line}");

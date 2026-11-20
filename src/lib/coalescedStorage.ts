@@ -56,7 +56,23 @@
 import type { PersistStorage, StateStorage, StorageValue } from 'zustand/middleware'
 import { log } from './logger'
 
-export interface CoalescedOptions {
+export interface CoalescedOptions<S> {
+  /**
+   * Runs right before a write and may return a lighter value to store (the
+   * chat store moves image bytes out of the history here). It must not cost
+   * the write: if it throws, the value is written as it came in.
+   */
+  prepare?: (value: StorageValue<S>) => Promise<StorageValue<S>>
+  /** Called after a prepared value landed, with what came in and what went out. */
+  prepared?: (before: StorageValue<S>, after: StorageValue<S>) => void
+  /**
+   * False until the store has hydrated. zustand writes on every set(), also
+   * the ones that happen while hydration is still reading, and what it would
+   * write then is the DEFAULT state: no chats. Such writes are dropped, not
+   * deferred. Hydration replaces that state wholesale anyway, and a store
+   * whose read failed never becomes ready, so it is never written over.
+   */
+  ready?: () => boolean
   /** Quiet period after the last change before writing. */
   waitMs?: number
   /** Hard cap on how long a continuously-changing store stays unwritten. */
@@ -70,7 +86,7 @@ export interface CoalescedStorage<S> extends PersistStorage<S> {
 
 export function coalescedJSONStorage<S>(
   base: StateStorage,
-  { waitMs = 250, maxWaitMs = 2000 }: CoalescedOptions = {}
+  { waitMs = 250, maxWaitMs = 2000, prepare, prepared, ready }: CoalescedOptions<S> = {}
 ): CoalescedStorage<S> {
   let pending: { name: string; value: StorageValue<S> } | null = null
   let timer: ReturnType<typeof setTimeout> | null = null
@@ -99,9 +115,20 @@ export function coalescedJSONStorage<S>(
         const next = pending
         pending = null
         firstQueuedAt = 0
+        let value = next.value
+        if (prepare) {
+          try {
+            value = await prepare(next.value)
+          } catch (err) {
+            // Losing the lighter form is fine, losing the chat is not.
+            log.error('[coalescedStorage] prepare failed, writing the state as it is', { key: next.name, err: String(err) })
+            value = next.value
+          }
+        }
         try {
           // The single stringify this whole module exists to make rare.
-          await base.setItem(next.name, JSON.stringify(next.value))
+          await base.setItem(next.name, JSON.stringify(value))
+          if (value !== next.value) prepared?.(next.value, value)
         } catch (err) {
           log.error('[coalescedStorage] persist write failed', { key: next.name, err: String(err) })
         }
@@ -138,10 +165,14 @@ export function coalescedJSONStorage<S>(
       // idbStorage answers synchronously when IndexedDB is absent (node tests,
       // degraded webview). Staying synchronous there keeps hydration synchronous,
       // which is what those tests rely on.
+      // Nothing is migrated here. Hydration waits on this read, and every
+      // second it takes is a second in which the store holds no chats; any
+      // lighter form is produced by the next ordinary write (see `prepare`).
       return raw instanceof Promise ? raw.then(parse) : parse(raw)
     },
 
     setItem: (name, value) => {
+      if (ready && !ready()) return
       pending = { name, value }
       schedule()
     },

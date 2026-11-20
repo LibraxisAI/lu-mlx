@@ -3,7 +3,7 @@
  *
  * ── DER BEFUND ─────────────────────────────────────────────────────────────
  *
- * David am 02.09.2026: "Der left Sidepanel bei Chat Agent und Code ist
+ * Am 02.09.2026: "Der left Sidepanel bei Chat Agent und Code ist
  * Textmaessig als Sessionname und Datum nicht sauber bis zum Ende durchgezogen
  * bzw dynamisch mit vergroesserung anpassend."
  *
@@ -45,7 +45,7 @@
  *
  * Und umgekehrt genauso: eine ziehbare Spalte OHNE den CSS-Schnitt waere
  * wertlos. Bei 480 px stuenden dort weiterhin 30 Zeichen und 179 leere Pixel —
- * fast der halbe Kasten. Die zwei Haelften von Davids Satz sind eine Aenderung,
+ * fast der halbe Kasten. Die zwei Haelften vom Satz des Inhabers sind eine Aenderung,
  * und keine der beiden traegt allein.
  *
  * ── WARUM EIN DRITTEL UND NICHT DIE HAELFTE ────────────────────────────────

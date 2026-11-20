@@ -40,7 +40,7 @@ Write-Host "    ##     ## ##  #### ##       ##       ##  ####       ## ##     ##
 Write-Host "    ##     ## ##   ### ##    ## ##       ##   ### ##    ## ##     ## ##    ##  ##       ##     ##" -ForegroundColor DarkMagenta
 Write-Host "     #######  ##    ##  ######  ######## ##    ##  ######   #######  ##     ## ######## ########" -ForegroundColor Magenta
 Write-Host ""
-Write-Host "    Private, local AI. No cloud. No censorship. No data collection." -ForegroundColor DarkGray
+Write-Host "    Private, local AI on your own machine. No censorship." -ForegroundColor DarkGray
 Write-Host "    =================================================================" -ForegroundColor Magenta
 Write-Host ""
 

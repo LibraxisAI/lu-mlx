@@ -32,6 +32,7 @@ import { resolve } from 'node:path'
 import { toolRegistry, DEFAULT_PERMISSIONS } from '../index'
 import { gateCreateTools } from '../../../lib/tool-selection'
 import { estimateTokens } from '../../../lib/context-compaction'
+import { NOT_IN_CODE_TAB } from '../../../lib/browser-tools'
 
 /** Mirrors CODEX_CATEGORIES in useCodex.ts (same reason as the sibling tests). */
 const CODEX_CATEGORIES = ['filesystem', 'terminal', 'system', 'web', 'image', 'video', 'workflow']
@@ -42,7 +43,7 @@ const PLAIN_CODING_ASK = 'fix the failing test in parser.ts and run the suite'
 const codingCatalog = () =>
   toolRegistry
     .getAvailableTools(DEFAULT_PERMISSIONS)
-    .filter((t) => CODEX_CATEGORIES.includes(t.category))
+    .filter((t) => CODEX_CATEGORIES.includes(t.category) && !NOT_IN_CODE_TAB.has(t.name))
 
 /** Exactly the object useCodex builds for the request (`tools:` on the wire). */
 function wireTools(defs: { name: string; description: string; inputSchema: unknown }[]) {
@@ -108,11 +109,58 @@ const fullWire = () => JSON.stringify(wireTools(codingCatalog()))
  *
  * Der codierende Zug ist der, den jeder Refactor bezahlt, und er bleibt
  * gleich. Das ist der Grund, warum das Tor existiert.
+ *
+ * ── 30.09.2026: file_edit bekommt `edits` und `replace_all` ───────────────
+ * Kundenfall ein Nutzer: jede Aenderung an derselben Datei war ein eigener
+ * Roundtrip mit vollem Kontext. `edits` buendelt sie in einen Aufruf. Die
+ * Beschreibung ist dafuer gekuerzt, der codierende Zug bleibt unter 7600;
+ * der volle Katalog steht bei 17.946 Zeichen, Deckel gemessen plus Rand.
+ *
+ * ── 3.0.7: image_generate und video_generate bekommen `character` ─────────
+ * Ein trainierter Charakter soll im Chat nutzbar sein: das Modell nennt ihn,
+ * die App setzt Modell, LoRA und Triggerwort selbst. Ein Schemafeld je
+ * Werkzeug, die Beschreibung auf 103 Zeichen gekuerzt:
+ *
+ *   voller Katalog   17.976 -> 18.330 Zeichen (+354)
+ *   codierender Zug  unveraendert, beide Werkzeuge fahren dort nicht mit
+ *
+ * Deckel gemessen plus zwei Promille.
  */
 const CODING_CHAR_CEILING = 7600
 const CODING_TOKEN_CEILING = 1730
-const FULL_CHAR_CEILING = 17880
-const FULL_TOKEN_CEILING = 4090
+// 3.0.8 (A11): +762 Zeichen fuer get_settings und set_setting im VOLLEN
+// Katalog (18.370 -> 19.132). Der codierende Zug bleibt gleich: beide stehen
+// hinter dem Tor und fahren nur auf einer Nachricht ueber Einstellungen mit.
+// 3.1.0 (C60): +2.153 Zeichen fuer set_settings, lu_models, lu_service,
+// lu_download und lu_open_settings im VOLLEN Katalog (19.170 -> 21.323). Der
+// codierende Zug bleibt gleich: alle fuenf stehen hinter demselben Tor wie
+// get_settings und fahren nur auf einer Nachricht ueber LU selbst mit. Die
+// Beschreibungen sind auf einen Satz gekuerzt; die Token-Decke ist geschaetzt
+// (Zeichen / 4 auf die alte Decke), der Tokenizer-Lauf ist hier uebersprungen.
+// 3.1.0 (C60-S5): +1.370 Zeichen fuer workflow_find/_inspect/_install/_assign
+// im VOLLEN Katalog (zusammen mit C60 gemessen 23.161, mit brief-Feldern). Der codierende Zug bleibt gleich: die
+// vier stehen hinter dem Tor und fahren nur auf einer Nachricht ueber einen
+// ComfyUI-Workflow mit. Token-Decke geschaetzt im selben Verhaeltnis.
+// C59 A6–A8: +1.365 Zeichen fuer memory, skill_view, skill_save und
+// session_search im VOLLEN Katalog (19.170 -> 20.535 allein). Der codierende Zug
+// bleibt gleich: alle vier stehen hinter dem Tor (GATE_KEYWORDS), auch wenn
+// ein kreativer Zug das Tor fuer die Medienwerkzeuge oeffnet.
+// integ/310: C60, C60-S5, C59 und P-L (web_research) zusammen, gemessen
+// 25.032 Zeichen. Token-Decke geschaetzt im selben Verhaeltnis wie oben
+// (5040 / 23200).
+// T1 (CA rebuild): +88 Zeichen fuer den einen Satz in shell_execute, dass ein
+// Befehl ueber die Zeitgrenze hinaus als Hintergrundaufgabe weiterlaeuft.
+// Gemessen 25.120, Deckel plus Rand. Der codierende Zug bleibt unter seiner
+// Decke.
+// Waechter: +3.293 Zeichen fuer watcher_create/_list/_update/_delete im
+// VOLLEN Katalog (25.032 -> 28.325, Beschreibungen schon auf Stichworte
+// gekuerzt). Der codierende Zug bleibt gleich: die vier stehen hinter ihrem
+// Tor (WATCHER_GATE_WORDS) und fahren nur auf einer Nachricht ueber eine
+// spaetere Zeit oder eine Wiederholung mit. Token-Decke im selben Verhaeltnis.
+// Beide zusammen (CA-Satz und Waechter): gemessen 28.441 Zeichen, Deckel plus
+// Rand. Token-Decke im selben Verhaeltnis wie beim Waechter (6170 / 28380).
+const FULL_CHAR_CEILING = 28470
+const FULL_TOKEN_CEILING = 6190
 
 describe('the coding step carries a catalog the diet actually shrank', () => {
   it('the gate really is what a plain coding turn gets', () => {
@@ -151,7 +199,10 @@ describe('the coding step carries a catalog the diet actually shrank', () => {
     // this is the correction itself, not a proxy for it.
     const catalog = estimateTokens(codingWire())
     expect(catalog).toBeGreaterThan(1500)
-    expect(catalog).toBeLessThanOrEqual(CODING_CHAR_CEILING / 4 + 1)
+    // Five percent over chars / 4: since 3.0.7 a digit in a schema costs a
+    // whole token (lib/token-estimate.ts). Qwen2.5 and Gemma 3 count this
+    // catalog at 1,677 and 1,739 tokens, so the estimate still errs high.
+    expect(catalog).toBeLessThanOrEqual(Math.ceil((CODING_CHAR_CEILING / 4) * 1.05) + 1)
   })
 
   it('the mobile catalog went on the same diet, or it drifts from here', () => {

@@ -40,7 +40,7 @@ describe.each([
 
   it('derives the budget from the effective send window', () => {
     expect(source).toMatch(/effectiveSendWindow\(\{/)
-    expect(source).toMatch(/sendWindowTokens: settings\.codexSendWindowTokens/)
+    expect(source).toMatch(/sendWindowTokens: sendWindowFor\(settings, \w+\)/)
     expect(source).toMatch(/capEnabled: decayOn/)
   })
 
@@ -59,9 +59,12 @@ describe.each([
     // The catalog is its own field on the wire, so the message estimate above
     // cannot see it. It is picked after the build, which is why it arrives as
     // a second call instead of riding in the report.
-    expect(source).toMatch(
-      /reportTools\(convId, estimateTokens\(JSON\.stringify\(tools\)\)\)/,
-    )
+    // useCodex measures it once into a variable since GH #140: its
+    // context-overflow retry reads the same number to size the cut.
+    const direct = /reportTools\(convId, estimateTokens\(JSON\.stringify\(tools\)\)\)/.test(source)
+    const viaVariable = /stepToolsEstimate = estimateTokens\(JSON\.stringify\(tools\)\)/.test(source)
+      && /reportTools\(convId, stepToolsEstimate\)/.test(source)
+    expect(direct || viaVariable).toBe(true)
   })
 
   it('leaves a decay row in the tool audit so support can see it', () => {
@@ -86,8 +89,11 @@ describe.each([
 })
 
 describe('useCodex keeps the working history whole for the store', () => {
-  it('still persists the hidden tool chain from the untouched array', () => {
-    expect(codex).toMatch(/const toolHistoryAll = messages\.slice\(messagesStartLen\)/)
+  it('still persists the hidden tool chain, by identity across trims', () => {
+    // 30.09.2026: an index into `messages` pointed at the wrong place once a
+    // long run had been trimmed, and the chain lost its ledger.
+    expect(codex).toMatch(/const toolHistoryAll = runLog/)
+    expect(codex).toMatch(/logRun\(\)\s*\n\s*const beforeTrim = new Set\(messages\)/)
   })
 
   it('shortens restored tool messages of PREVIOUS turns', () => {
@@ -102,14 +108,14 @@ describe('useCodex keeps the working history whole for the store', () => {
 
 describe('the builder runs before the model call, every step', () => {
   it('useCodex builds inside the iteration loop, ahead of the transports', () => {
-    const buildAt = codex.indexOf('const built = buildRequestMessages(messages, {')
+    const buildAt = codex.indexOf('const built = buildRequestMessages(stepWindow, {')
     const nativeAt = codex.indexOf("if (strategy === 'native') {")
     expect(buildAt).toBeGreaterThan(-1)
     expect(buildAt).toBeLessThan(nativeAt)
   })
 
   it('useAgentChat builds ahead of its transports too', () => {
-    const buildAt = agent.indexOf('const built = buildRequestMessages(agentMessages, {')
+    const buildAt = agent.indexOf('const built = buildRequestMessages(stepWindow, {')
     const nativeAt = agent.indexOf("if (strategy === 'native') {")
     expect(buildAt).toBeGreaterThan(-1)
     expect(buildAt).toBeLessThan(nativeAt)

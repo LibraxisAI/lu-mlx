@@ -17,38 +17,58 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
-const SEITE = readFileSync(resolve(__dirname, '..', 'ModelManager.tsx'), 'utf8')
+const lies = (...teile: string[]) => readFileSync(resolve(__dirname, '..', ...teile), 'utf8')
 
-/** Die sichtbare Beschriftung hinter einem Icon, also das, was ein Mensch liest. */
-function beschriftung(abschnitt: string): string {
-  return (abschnitt.match(/\/>\s*([A-Za-z][A-Za-z ]*)/)?.[1] ?? '').trim()
-}
+/** Die Seite: sie entscheidet, welcher Knopf wohin fuehrt und wie er heisst. */
+const SEITE = lies('ModelManager.tsx')
 
-/** Wie der Reiter `tab` in der Reiterleiste heisst. */
-function reiterName(tab: string): string {
-  const knopf = SEITE.indexOf(`aria-pressed={tab === '${tab}'}`)
-  expect(knopf, `kein Reiterknopf fuer ${tab}`).toBeGreaterThan(0)
-  const name = beschriftung(SEITE.slice(knopf, SEITE.indexOf('</button>', knopf)))
+/**
+ * Die beiden Fassungen der Seite (seit dem 08.10.2026: klassisch auf Windows
+ * und Linux, neu auf dem Mac). Jede zeichnet die Reiterleiste selbst, also
+ * wird der Name des Reiters in jeder nachgelesen.
+ *
+ * Die sichtbare Beschriftung ist das, was ein Mensch liest. In der klassischen
+ * Fassung steht vor jeder Beschriftung ein Icon, und die Suche haengt an
+ * dessen `/>`. Die Reiter der Mac-Fassung tragen nur ihr Wort: der erste Text
+ * mit grossem Anfangsbuchstaben hinter einem schliessenden `>`.
+ */
+const FASSUNGEN = [
+  { name: 'klassisch', quelle: lies('skin', 'classic.tsx'), beschriftung: (a: string) => (a.match(/\/>\s*([A-Za-z][A-Za-z ]*)/)?.[1] ?? '').trim() },
+  { name: 'Mac', quelle: lies('skin', 'mac.tsx'), beschriftung: (a: string) => (a.match(/>\s*([A-Z][A-Za-z ]*)/)?.[1] ?? '').trim() },
+] as const
+
+/** Wie der Reiter `tab` in der Reiterleiste einer Fassung heisst. */
+function reiterName(fassung: typeof FASSUNGEN[number], tab: string): string {
+  const knopf = fassung.quelle.indexOf(`aria-pressed={tab === '${tab}'}`)
+  expect(knopf, `${fassung.name}: kein Reiterknopf fuer ${tab}`).toBeGreaterThan(0)
+  // Der Knopf fuehrt auch wirklich auf den Reiter, den er als gedrueckt meldet.
+  expect(fassung.quelle.slice(knopf - 80, knopf), `${fassung.name}: ${tab}`).toContain(`onClick={() => onTab('${tab}')}`)
+  const name = fassung.beschriftung(fassung.quelle.slice(knopf, fassung.quelle.indexOf('</button>', knopf)))
   expect(name.length).toBeGreaterThan(0)
   return name
 }
 
-/** Jeder Knopf, der auf den Reiter fuehrt, mit seiner Beschriftung. */
+/**
+ * Jeder Knopf der Seite, der auf den Reiter fuehrt, mit seiner Beschriftung.
+ * Die Seite reicht Wort und Ziel als ein Paar an die Fassung, die den Knopf
+ * zeichnet. Eine Vorlage (`Get new ${...} models`) zaehlt mit ihrem festen
+ * Anfang.
+ */
 function knoepfeZumReiter(tab: string): string[] {
-  const muster = new RegExp(`onClick=\\{\\(\\) => setTab\\('${tab}'\\)\\}([\\s\\S]*?)</button>`, 'g')
-  return [...SEITE.matchAll(muster)].map((m) => beschriftung(m[1]))
+  const muster = new RegExp("label: (['`])([^'`]*)\\1, onClick: \\(\\) => setTab\\('" + tab + "'\\)", 'g')
+  return [...SEITE.matchAll(muster)].map((m) => m[2])
 }
 
-describe('die Knoepfe der Models-Seite nennen ihre Reiter richtig', () => {
-  const getNew = reiterName('discover')
+describe.each(FASSUNGEN)('die Knoepfe der Models-Seite nennen ihre Reiter richtig ($name)', (fassung) => {
+  const getNew = reiterName(fassung, 'discover')
 
   it('der Reiter heisst "Get new"', () => {
     expect(getNew).toBe('Get new')
-    expect(reiterName('installed')).toBe('Installed')
+    expect(reiterName(fassung, 'installed')).toBe('Installed')
   })
 
   it('alle drei Wege dorthin nennen ihn so', () => {
-    const knoepfe = knoepfeZumReiter('discover')
+    const knoepfe = [getNew, ...knoepfeZumReiter('discover')]
     // Der Reiter selbst, der Leerzustand ohne jedes Modell, der Leerzustand
     // eines Kategoriefilters. Faellt einer weg, faellt diese Zahl auf, statt
     // dass ein leeres Ergebnis gruen durchgeht.
@@ -58,13 +78,19 @@ describe('die Knoepfe der Models-Seite nennen ihre Reiter richtig', () => {
     }
   })
 
+  it('die Fassung zeichnet das Wort, das die Seite ihr reicht, und kein eigenes', () => {
+    expect(fassung.quelle).toMatch(/onClick=\{action\.onClick\}[\s\S]{0,400}\{action\.label\}/)
+  })
+
   // NEGATIVKONTROLLE: genau der alte Text muss durchfallen, und "Discover"
   // steht auf keinem Knopf mehr, der irgendwohin fuehrt.
   it('der alte Text waere aufgefallen', () => {
-    expect(beschriftung('<Sparkles size={11} /> Discover {modeMeta.label.toLowerCase()} models'))
+    expect(fassung.beschriftung('<Sparkles size={11} /> Discover {modeMeta.label.toLowerCase()} models'))
       .not.toContain(getNew)
+    expect('Discover ${modeMeta.label.toLowerCase()} models').not.toContain(getNew)
     for (const k of knoepfeZumReiter('discover')) {
       expect(k).not.toContain('Discover')
     }
+    expect(fassung.quelle).not.toMatch(/>\s*Discover\b/)
   })
 })

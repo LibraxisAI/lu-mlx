@@ -1,5 +1,5 @@
 /**
- * Thought-only empty-reply fix (live find 2026-06-11, David: "siehst du
+ * Thought-only empty-reply fix (live find 2026-06-11, the owner: "siehst du
  * überhaupt das die ganze zeit keine antwort kommt?").
  *
  * Root cause chain, proven by replaying LU's exact /api/chat body: the memory

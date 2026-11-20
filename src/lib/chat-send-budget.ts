@@ -23,9 +23,11 @@
  * budget while the count climbs past the proxy's 400-message gate.
  */
 
-import { compactMessages, estimateMessageTokens } from './context-compaction'
+import { COMPACT_TRIGGER_RATIO, compactMessagesWithCount, estimateMessageTokens } from './context-compaction'
 import { ageOutImages } from './context-images'
-import { effectiveSendWindow } from './send-window'
+import { effectiveSendWindow, isPaidProvider } from './send-window'
+import { budgetBelowTheFit } from './fit-to-window'
+import { injectPersonaNote, noteTokens, type PersonaNote } from './persona-note'
 
 export interface ChatSendBudgetInput {
   /** Provider id of the model this payload goes to. */
@@ -39,6 +41,51 @@ export interface ChatSendBudgetInput {
   /** Whether this payload goes to a machine on this network. See
    *  lib/lan-openai-slot; a LAN server in the `openai` slot is not a bill. */
   localBackend?: boolean
+  /** settings.maxTokens: the answer length the user set, 0 or absent = auto.
+   *  A local conversation keeps exactly this much of its window free for the
+   *  answer (GH #201), see chatAnswerReserve. */
+  answerTokens?: number
+}
+
+/** What a local conversation keeps free for the answer when no answer length
+ *  is set: 8 percent of the window, at least 512 and at most 8192 tokens. */
+export const CHAT_ANSWER_RESERVE_SHARE = 0.08
+export const CHAT_ANSWER_RESERVE_MIN = 512
+export const CHAT_ANSWER_RESERVE_MAX = 8192
+
+/**
+ * The part of a LOCAL model's window a conversation keeps free for the answer
+ * (GH #201). num_ctx covers prompt plus completion, so a prompt filled to the
+ * brim leaves no room to reply.
+ *
+ * The answer length the user set, else 8 percent of the window between 512
+ * and 8192 tokens; never more than a quarter of the window. Up to a 100K
+ * window that is where the trim engaged before (0.92 of the window), so a
+ * small model is trimmed no earlier than it was. Above it the room stops
+ * growing with the window: a 256K pick keeps 8K free instead of 52K.
+ */
+export function chatAnswerReserve(window: number, answerTokens?: number): number {
+  const quarter = Math.floor(window / 4)
+  const want = typeof answerTokens === 'number' && answerTokens > 0
+    ? Math.floor(answerTokens)
+    : Math.min(CHAT_ANSWER_RESERVE_MAX, Math.max(CHAT_ANSWER_RESERVE_MIN, Math.floor(window * CHAT_ANSWER_RESERVE_SHARE)))
+  return Math.max(1, Math.min(want, quarter))
+}
+
+/**
+ * Whether a conversation payload to this provider is trimmed with the A3
+ * hysteresis (wait for 1.15 x budget, then drop to 0.7 x budget).
+ *
+ * GH #201: only a paid one. The hysteresis is a cache argument for a billed
+ * prefix, and on a chat it never even held the prefix still: the stored
+ * conversation is always the full one, so once it was over the trigger EVERY
+ * send dropped to 0.7 x 0.8 = 0.56 of the window. A 256K local model in a
+ * group chat sent about 128K-131K tokens, round after round, and told the
+ * model an agent's "re-read that file". A local chat is trimmed to its budget
+ * and no further.
+ */
+export function chatBudgetHysteresis(input: Pick<ChatSendBudgetInput, 'providerId' | 'localBackend'>): boolean {
+  return isPaidProvider(input.providerId, input.localBackend)
 }
 
 /**
@@ -109,6 +156,13 @@ export function chatBudgetApplies(_providerId: string, contextDecay?: boolean): 
  */
 export function chatSendBudget(input: ChatSendBudgetInput): number | null {
   if (!chatBudgetApplies(input.providerId, input.contextDecay)) return null
+  // GH #201: a local model's budget is the window the user picked for it,
+  // less the answer's room. It used to be 0.8 of the window, which on 256K
+  // held back 52K tokens of history for an answer of a few thousand.
+  if (!isPaidProvider(input.providerId, input.localBackend)) {
+    const w = Number.isFinite(input.modelWindow) && input.modelWindow > 0 ? Math.floor(input.modelWindow) : 0
+    return w > 0 ? w - chatAnswerReserve(w, input.answerTokens) : null
+  }
   const window = effectiveSendWindow({
     providerId: input.providerId,
     modelWindow: input.modelWindow,
@@ -116,7 +170,10 @@ export function chatSendBudget(input: ChatSendBudgetInput): number | null {
     capEnabled: true,
     localBackend: input.localBackend,
   })
-  return window > 0 ? window : null
+  // 3.1.1: a paid conversation is trimmed with the hysteresis, and its trim
+  // has to engage before the last check (fitToWindow) starts to shorten
+  // turns to the token on every send. See budgetBelowTheFit.
+  return window > 0 ? budgetBelowTheFit(window, input.modelWindow) : null
 }
 
 /**
@@ -139,11 +196,24 @@ export interface ChatSendResult<T> {
   promptTokens: number
   /** Attachments left behind by the image rule. */
   droppedImages: number
+  /** Older messages the token budget left out of this payload (GH #201). */
+  droppedMessages: number
+  /** Messages that went out cut to fit (the pinned first user message). */
+  shortenedMessages?: number
 }
 
 export interface ApplyBudgetOptions {
   /** How many of the newest user turns keep their attachments. */
   keepImages?: number
+  /** GH #181: the speaker's persona reminder (lib/persona-note.ts). */
+  note?: PersonaNote | null
+  /** The A3 hysteresis, on unless said otherwise. A local conversation
+   *  turns it off (chatBudgetHysteresis, GH #201). */
+  hysteresis?: boolean
+  /** Who reads the trim notice: an agent run (default) or a conversation. */
+  notice?: 'agent' | 'chat'
+  /** Told how many older messages the budget left out, when it left any. */
+  onTrimmed?: (dropped: number) => void
 }
 
 /**
@@ -169,24 +239,76 @@ export function applySendBudget<T extends { role: string; content?: unknown }>(
       budget: null,
       promptTokens: estimateMessageTokens(messages as unknown as Estimated),
       droppedImages: 0,
+      droppedMessages: 0,
     }
   }
   const aged = ageOutImages(messages, { keepRecent: opts.keepImages })
-  const compacted = compactMessages(aged.messages as unknown as Estimated, budget, {
-    hysteresis: true,
-  }) as unknown as T[]
+  const compacted = compactMessagesWithCount(aged.messages as unknown as Estimated, budget, {
+    hysteresis: opts.hysteresis !== false,
+    notice: opts.notice,
+  })
+  const out = compacted.messages as unknown as T[]
+  if (compacted.dropped > 0) opts.onTrimmed?.(compacted.dropped)
   return {
-    messages: compacted,
+    messages: out,
     budget,
-    promptTokens: estimateMessageTokens(compacted as unknown as Estimated),
+    promptTokens: estimateMessageTokens(out as unknown as Estimated),
     droppedImages: aged.strippedImages,
+    droppedMessages: compacted.dropped,
+    shortenedMessages: compacted.shortened,
   }
 }
 
-/** Resolve the budget for one model and apply it in one call. */
+/**
+ * Resolve the budget for one model and apply it in one call.
+ *
+ * With a persona reminder (GH #181) the history is held to the budget less
+ * what the reminder costs, and the reminder goes in after that. So the
+ * payload stays within the budget, the reminder is placed relative to what
+ * actually goes out, and a trim never takes it away with an old turn.
+ * Without one this is exactly the call it always was.
+ */
 export function applyChatSendBudget<T extends { role: string; content?: unknown }>(
   messages: T[],
   input: ChatSendBudgetInput & ApplyBudgetOptions,
 ): ChatSendResult<T> {
-  return applySendBudget(messages, chatSendBudget(input), { keepImages: input.keepImages })
+  const budget = chatSendBudget(input)
+  const note = input.note ?? null
+  const how = {
+    keepImages: input.keepImages,
+    hysteresis: input.hysteresis ?? chatBudgetHysteresis(input),
+    notice: input.notice,
+    onTrimmed: input.onTrimmed,
+  }
+  if (!note) return applySendBudget(messages, budget, how)
+  const reserved = budget !== null ? Math.max(1, budget - noteTokens(note)) : null
+  const sent = applySendBudget(messages, reserved, how)
+  const out = injectPersonaNote(sent.messages, note)
+  return {
+    ...sent,
+    messages: out,
+    budget,
+    promptTokens: estimateMessageTokens(out as unknown as Parameters<typeof estimateMessageTokens>[0]),
+  }
+}
+
+/**
+ * Whether applyChatSendBudget would trim these messages mechanically, by the
+ * same budget, the same hysteresis trigger and the same estimate (3.0.7).
+ *
+ * Plain chat asks this before auto compact, so a summary is written before
+ * the trim drops old turns instead of after (see maybeAutoCompact,
+ * trimImminent). The message count cap is not part of the question: a chat
+ * of many short turns is the count cap's business, not a summary's.
+ */
+export function sendBudgetWouldTrim<T extends { role: string; content?: unknown }>(
+  messages: T[],
+  input: ChatSendBudgetInput & { note?: PersonaNote | null },
+): boolean {
+  const budget = chatSendBudget(input)
+  if (budget === null) return false
+  const note = input.note ?? null
+  const held = note ? Math.max(1, budget - noteTokens(note)) : budget
+  const used = estimateMessageTokens(messages as unknown as Parameters<typeof estimateMessageTokens>[0])
+  return used > (chatBudgetHysteresis(input) ? Math.floor(held * COMPACT_TRIGGER_RATIO) : held)
 }

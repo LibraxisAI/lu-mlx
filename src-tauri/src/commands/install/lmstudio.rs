@@ -16,8 +16,12 @@
 //! sieben Sekunden, und der Wähler fragt alle 1,5 s — das war die Ursache
 //! des eingefrorenen Fensters, nicht die Anfrage selbst.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+use tokio_util::sync::CancellationToken;
 
 use crate::os_error;
 
@@ -61,7 +65,7 @@ pub(crate) fn lmstudio_lms_path() -> Option<PathBuf> {
 
     // System-wide install path: when LM Studio's installer is run "for all
     // users" (or installed via an MSI deployment), it lands in
-    // %PROGRAMFILES%\LM Studio\. techx69 confirmed (2026-05-06): the
+    // %PROGRAMFILES%\LM Studio\. A user confirmed (2026-05-06): the
     // per-user-only lookup made LU report "no LM Studio detected" even with
     // `~/.lmstudio/models/` already populated.
     for env_var in ["PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432"] {
@@ -112,29 +116,67 @@ pub(crate) fn lmstudio_lms_path() -> Option<PathBuf> {
     None
 }
 
-/// Soft-detect LM Studio by scanning `~/.lmstudio/models/` for GGUF files.
-/// Returns the number of GGUF files found (0 if the dir is missing or empty).
+/// True when a GGUF under `~/.lmstudio/models/` is a model the chat picker
+/// will list once the server runs. `rel` is the lowercased path below the
+/// models dir (`publisher/repo/file.gguf`).
 ///
-/// Rationale: even when `lms.exe` isn't on any search path (system-wide
-/// install missed by our fallback, GUI never launched, etc.), the presence
-/// of GGUFs in the canonical models dir is a strong signal that the user
-/// *has* LM Studio and just hasn't started the server. Surfacing that in the
-/// onboarding lets us show "LM Studio models detected — start server?" instead
-/// of the dead-end "no LM Studio".
-fn lmstudio_models_present() -> u32 {
-    let home = match dirs::home_dir() {
-        Some(h) => h,
-        None => return 0,
+/// The line in the picker says "N models on disk" next to its Start button,
+/// and after the click the list has to show N rows. Counting every GGUF said 8
+/// where the list showed 7 (Windows box, 05.10.2026). Three kinds of file are
+/// no row of their own:
+///   - an embedding model: the picker drops those by name, with the patterns
+///     of `EMBEDDING_GGUF_PATTERNS` in src/api/engine.ts, repeated here;
+///   - a vision projector (`mmproj-*.gguf`), which rides along with its model;
+///   - the further parts of a split model (`-00002-of-00003.gguf`).
+fn lmstudio_chat_model_file(rel: &str) -> bool {
+    const EMBEDDING_MARKS: [&str; 5] = ["embed", "bge-", "e5-", "gte-", "sentence-"];
+    if EMBEDDING_MARKS.iter().any(|m| rel.contains(m)) {
+        return false;
+    }
+    let file = rel.rsplit(['/', '\\']).next().unwrap_or(rel);
+    if file.contains("mmproj") {
+        return false;
+    }
+    // "<name>-00002-of-00003.gguf": only the first part stands for the model.
+    let stem = file.strip_suffix(".gguf").unwrap_or(file);
+    if let Some((head, total)) = stem.rsplit_once("-of-") {
+        let all_digits = |t: &str| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit());
+        if let Some((_, part)) = head.rsplit_once('-') {
+            if all_digits(total) && all_digits(part) {
+                return part.trim_start_matches('0') == "1";
+            }
+        }
+    }
+    true
+}
+
+/// What `~/.lmstudio/models/` holds.
+#[derive(Default)]
+struct LmStudioModelsOnDisk {
+    /// Any GGUF at all. Even when `lms.exe` isn't on any search path
+    /// (system-wide install missed by our fallback, GUI never launched), a
+    /// GGUF in the canonical models dir is a strong signal that the user *has*
+    /// LM Studio and just hasn't started the server.
+    any: bool,
+    /// The models the chat picker will list, see `lmstudio_chat_model_file`.
+    chat_models: u32,
+}
+
+/// Soft-detect LM Studio by scanning `~/.lmstudio/models/` for GGUF files.
+fn lmstudio_models_present() -> LmStudioModelsOnDisk {
+    let mut found = LmStudioModelsOnDisk::default();
+    let models_dir = match dirs::home_dir() {
+        Some(h) => h.join(".lmstudio").join("models"),
+        None => return found,
     };
-    let models_dir = home.join(".lmstudio").join("models");
     if !models_dir.exists() {
-        return 0;
+        return found;
     }
     // The standard layout is ~/.lmstudio/models/<publisher>/<repo>/<file>.gguf —
     // up to three levels deep. We walk lazily and stop after the first 1000
     // matches; the user does not care about the exact count past "many".
-    fn walk(dir: &Path, depth: u32, found: &mut u32) {
-        if *found >= 1000 || depth > 4 {
+    fn walk(root: &Path, dir: &Path, depth: u32, found: &mut LmStudioModelsOnDisk) {
+        if found.chat_models >= 1000 || depth > 4 {
             return;
         }
         let entries = match std::fs::read_dir(dir) {
@@ -144,18 +186,21 @@ fn lmstudio_models_present() -> u32 {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                walk(&path, depth + 1, found);
+                walk(root, &path, depth + 1, found);
             } else if path.extension().and_then(|e| e.to_str()).map(|s| s.eq_ignore_ascii_case("gguf")).unwrap_or(false) {
-                *found += 1;
-                if *found >= 1000 {
-                    return;
+                found.any = true;
+                let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_lowercase();
+                if lmstudio_chat_model_file(&rel) {
+                    found.chat_models += 1;
+                    if found.chat_models >= 1000 {
+                        return;
+                    }
                 }
             }
         }
     }
-    let mut count: u32 = 0;
-    walk(&models_dir, 0, &mut count);
-    count
+    walk(&models_dir, &models_dir, 0, &mut found);
+    found
 }
 
 #[cfg(target_os = "windows")]
@@ -290,6 +335,17 @@ pub async fn start_lmstudio_server() -> Result<serde_json::Value, String> {
         .map_err(|e| format!("start_lmstudio_server task: {e}"))?
 }
 
+/// The arguments LU starts LM Studio's server with.
+///
+/// Until 3.0.6 they carried `--cors`. LM Studio's server has no login, and
+/// with that flag it answers any origin: a web page open in the user's
+/// browser could list the models and run them. LU does not need it, every
+/// request to a local backend goes through the Rust proxy (`proxy_localhost`),
+/// which is no browser and knows no origin rule.
+pub(super) fn lms_server_args() -> [String; 4] {
+    ["server".into(), "start".into(), "--port".into(), LMSTUDIO_DEFAULT_PORT.to_string()]
+}
+
 fn start_lmstudio_server_blocking() -> Result<serde_json::Value, String> {
     if lmstudio_server_running() {
         return Ok(serde_json::json!({"status": "already_running"}));
@@ -297,8 +353,7 @@ fn start_lmstudio_server_blocking() -> Result<serde_json::Value, String> {
     match lmstudio_lms_path() {
         Some(p) => {
             let mut srv = crate::process_util::foreign_system_command(&p);
-            srv.args(["server", "start", "--cors", "--port"])
-                .arg(LMSTUDIO_DEFAULT_PORT.to_string())
+            srv.args(lms_server_args())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
             crate::process_util::suppress_window(&mut srv);
@@ -322,15 +377,16 @@ fn start_lmstudio_server_blocking() -> Result<serde_json::Value, String> {
 #[tauri::command]
 pub async fn lmstudio_server_status() -> Result<serde_json::Value, String> {
     tokio::task::spawn_blocking(|| -> Result<serde_json::Value, String> {
-        let model_count = lmstudio_models_present();
+        let on_disk = lmstudio_models_present();
         Ok(serde_json::json!({
             "running": lmstudio_server_running(),
             "port": LMSTUDIO_DEFAULT_PORT,
             "lms_present": lmstudio_lms_path().is_some(),
             // Soft-detect signals — onboarding shows "Start LM Studio server?"
             // when models are present even if lms.exe couldn't be located.
-            "models_detected": model_count > 0,
-            "model_count": model_count,
+            "models_detected": on_disk.any,
+            // The rows the chat picker will show, not the files on disk.
+            "model_count": on_disk.chat_models,
         }))
     })
     .await
@@ -346,10 +402,10 @@ pub async fn lmstudio_server_status() -> Result<serde_json::Value, String> {
 // selector — without it LM-Studio rows have no on/off affordance even
 // though the underlying engine does the same load-into-VRAM dance.
 //
-// Backport from uselu E2E pass (2026-05-19). Body is 1:1; signature
-// adapted from uselu's bridge-daemon convention to Tauri command, and
+// Backport from the web app E2E pass (2026-05-19). Body is 1:1; signature
+// adapted from the web app's bridge-daemon convention to Tauri command, and
 // the lms-CLI lookup uses desktop's richer `lmstudio_lms_path()` helper
-// instead of uselu's lighter `os_paths::find_lms_cli()`.
+// instead of the web app's lighter `os_paths::find_lms_cli()`.
 
 // ASYNC + spawn_blocking + fast port pre-check (see lmstudio_server_status /
 // lmstudio_port_open). Polled every ~1.5 s by the model selector while open —
@@ -358,10 +414,14 @@ pub async fn lmstudio_server_status() -> Result<serde_json::Value, String> {
 #[tauri::command]
 pub async fn lmstudio_list_loaded() -> Result<serde_json::Value, String> {
     tokio::task::spawn_blocking(|| -> Result<serde_json::Value, String> {
-        let empty = || serde_json::json!({ "loaded": Vec::<String>::new() });
+        // `readable: false` is "the list could not be read", which is not the
+        // same as "nothing is loaded". The picker's poll treats both as an
+        // empty list; whoever reports the result of a load or unload to a
+        // person must not (api/lmstudio.ts, readLoadedLmStudioModels).
+        let unreadable = || serde_json::json!({ "loaded": Vec::<String>::new(), "readable": false });
         // Down server → return empty in <=300 ms instead of a 2–7 s connect.
         if !lmstudio_port_open() {
-            return Ok(empty());
+            return Ok(unreadable());
         }
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_millis(1500))
@@ -372,43 +432,250 @@ pub async fn lmstudio_list_loaded() -> Result<serde_json::Value, String> {
         let url = format!("http://127.0.0.1:{}/api/v0/models", LMSTUDIO_DEFAULT_PORT);
         let resp = match client.get(&url).send() {
             Ok(r) => r,
-            Err(_) => return Ok(empty()),
+            Err(_) => return Ok(unreadable()),
         };
         if !resp.status().is_success() {
-            return Ok(empty());
+            return Ok(unreadable());
         }
         let body: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
-        let loaded: Vec<String> = body
-            .get("data")
-            .and_then(|d| d.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter(|m| m.get("state").and_then(|s| s.as_str()) == Some("loaded"))
-                    .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok(serde_json::json!({ "loaded": loaded }))
+        Ok(serde_json::json!({ "loaded": loaded_ids(&body), "readable": true }))
     })
     .await
     .map_err(|e| format!("lmstudio_list_loaded task: {e}"))?
 }
 
+/// The ids `/api/v0/models` reports with `state: "loaded"`.
+fn loaded_ids(body: &serde_json::Value) -> Vec<String> {
+    body.get("data")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter(|m| m.get("state").and_then(|s| s.as_str()) == Some("loaded"))
+                .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+// ── A load or unload has an end ────────────────────────────────
+//
+// `lms load` blocks until the model is in memory, and `Command::output()`
+// waited with it for as long as that took: no limit, and nothing the app
+// could do to stop. The same hand test that found the Ollama switch turning
+// forever (10.10.2026) applies here unchanged.
+//
+// Every `lms` call that changes state now runs through `run_lms`: it polls
+// the child, and ends it at the limit or when the caller cancels.
+//
+// Ending it is two steps. `lms load` asks LM Studio to cancel its load when it
+// is interrupted (its SIGINT handler aborts the request and exits; read from
+// the source of `lms`, not measured against an LM Studio), so where the system
+// has an interrupt for a child, that is sent first and the process is given a
+// moment to leave by itself. Whatever is still there after that, and every
+// `lms` on Windows, loses its process tree.
+//
+// A killed `lms` does NOT end the load: LM Studio 0.4.12 was seen to go on
+// loading for 26 to 46 s after its client was gone, and to keep the model
+// (hand test on Windows, 11.10.2026). So the end of this call is never taken
+// as the end of the load. The frontend tells LM Studio to unload the model
+// as soon as it reports the load, keeps watching, and unloads it once it has
+// arrived if that first unload was not taken (api/lmstudio.ts, the ended
+// loads).
+
+/// How long a load may take when the caller names no limit. Five minutes, the
+/// limit an Ollama load has (api/ollama.ts), plus the slack that lets the
+/// frontend's own limit be the one that ends the call.
+const LMS_LOAD_LIMIT: Duration = Duration::from_secs(305);
+/// The same for an unload.
+const LMS_UNLOAD_LIMIT: Duration = Duration::from_secs(20);
+/// No caller may ask for a longer wait than this.
+const LMS_LIMIT_CEILING: Duration = Duration::from_secs(900);
+const LMS_POLL: Duration = Duration::from_millis(50);
+/// How long a finished `lms` call is given to hand over what it wrote.
+const LMS_OUTPUT_GRACE: Duration = Duration::from_secs(1);
+/// How long an interrupted `lms` is given to cancel its load and exit.
+const LMS_INTERRUPT_GRACE: Duration = Duration::from_secs(1);
+
+/// The loads that are running, by the id the frontend minted for each, so
+/// `lmstudio_cancel_load` can end one. The registry keeps a cancel that
+/// arrives before its load registered (cancel_registry.rs).
+static LMS_LOADS: once_cell::sync::Lazy<crate::cancel_registry::CancelRegistry> =
+    once_cell::sync::Lazy::new(crate::cancel_registry::CancelRegistry::new);
+
+fn lms_limit(timeout_ms: Option<u64>, default: Duration) -> Duration {
+    timeout_ms
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(default)
+        .min(LMS_LIMIT_CEILING)
+}
+
+/// How an `lms` call ended.
+#[derive(Debug)]
+enum LmsEnd {
+    Exited { success: bool, stdout: String, stderr: String },
+    Cancelled,
+    TimedOut,
+}
+
+/// What a child wrote to one of its pipes, collected while it runs.
+struct Drained {
+    bytes: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    closed: std::sync::mpsc::Receiver<()>,
+}
+
+/// Read `pipe` to its end on a thread of its own: a child that fills a pipe
+/// nobody reads blocks, and then it never exits.
+fn drain(pipe: Option<Box<dyn Read + Send>>) -> Drained {
+    let bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (tx, closed) = std::sync::mpsc::channel::<()>();
+    let sink = bytes.clone();
+    std::thread::spawn(move || {
+        if let Some(mut pipe) = pipe {
+            let mut chunk = [0u8; 4096];
+            while let Ok(n) = pipe.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                sink.lock().unwrap_or_else(|p| p.into_inner()).extend_from_slice(&chunk[..n]);
+            }
+        }
+        let _ = tx.send(());
+    });
+    Drained { bytes, closed }
+}
+
+impl Drained {
+    /// Everything the child wrote, once it has exited.
+    ///
+    /// The pipe closes with the child, at once, unless the child left a
+    /// process behind that still holds it (`lms` starts LM Studio's service
+    /// when that is not running). Such a pipe never closes, so the wait for
+    /// it has an end, and what was written until then is what is returned.
+    fn text(&self) -> String {
+        let _ = self.closed.recv_timeout(LMS_OUTPUT_GRACE);
+        String::from_utf8_lossy(&self.bytes.lock().unwrap_or_else(|p| p.into_inner())).into_owned()
+    }
+}
+
+/// Run `cmd` until it exits, `deadline` passes or `cancel` fires, whichever
+/// comes first. On the last two the process is interrupted, then its tree is
+/// killed if it is still there, and nothing of its output is read.
+fn run_lms(mut cmd: Command, deadline: Instant, cancel: &CancellationToken) -> std::io::Result<LmsEnd> {
+    // No stdin: `lms` asks on it when a model key is ambiguous, and a question
+    // nobody answers is a call that never returns.
+    cmd.stdin(Stdio::null());
+    let mut child = crate::process_util::spawn_piped(cmd)?;
+    let stdout = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let stderr = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(LmsEnd::Exited {
+                success: status.success(),
+                stdout: stdout.text(),
+                stderr: stderr.text(),
+            });
+        }
+        let cancelled = cancel.is_cancelled();
+        if cancelled || Instant::now() >= deadline {
+            if crate::process_util::interrupt(&child) {
+                let leave_by = Instant::now() + LMS_INTERRUPT_GRACE;
+                while Instant::now() < leave_by && child.try_wait()?.is_none() {
+                    std::thread::sleep(LMS_POLL);
+                }
+            }
+            // kill_tree reaps the child itself; the readers end when the
+            // pipes close and are not waited for.
+            if child.try_wait()?.is_none() {
+                let _ = crate::process_util::kill_tree(&mut child);
+            }
+            return Ok(if cancelled { LmsEnd::Cancelled } else { LmsEnd::TimedOut });
+        }
+        std::thread::sleep(LMS_POLL);
+    }
+}
+
+/// What a call that was ended answers with.
+const LMS_CANCELLED: &str = "lms load cancelled";
+const LMS_LOAD_TIMED_OUT: &str = "lms load timed out";
+const LMS_UNLOAD_TIMED_OUT: &str = "lms unload timed out";
+
 // ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread,
-// so every millisecond spent here is a frozen window. Same treatment
-// `lmstudio_server_status` already got — this one was simply missed.
+// so every millisecond spent here is a frozen window.
+//
+// `timeout_ms` is the limit of the whole call, `call_id` the handle
+// `lmstudio_cancel_load` ends it by. Both are optional: a caller that names
+// neither gets the default limit and a load only the limit ends.
 #[tauri::command]
 #[allow(non_snake_case)]
-pub async fn lmstudio_load_model(model: String, contextLength: Option<u32>) -> Result<serde_json::Value, String> {
-    tokio::task::spawn_blocking(move || lmstudio_load_model_blocking(model, contextLength))
+pub async fn lmstudio_load_model(
+    model: String,
+    contextLength: Option<u32>,
+    timeout_ms: Option<u64>,
+    call_id: Option<String>,
+    ttlSeconds: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    // Registered here, before the blocking pool is asked for a thread, so a
+    // cancel finds the load from its first moment on.
+    let (cancel, guard) = match call_id {
+        Some(id) => {
+            let (token, guard) = LMS_LOADS.register(id);
+            (token, Some(guard))
+        }
+        None => (CancellationToken::new(), None),
+    };
+    let deadline = Instant::now() + lms_limit(timeout_ms, LMS_LOAD_LIMIT);
+    let result = tokio::task::spawn_blocking(move || lmstudio_load_model_blocking(model, contextLength, ttlSeconds, deadline, &cancel))
         .await
-        .map_err(|e| format!("lmstudio_load_model task: {e}"))?
+        .map_err(|e| format!("lmstudio_load_model task: {e}"));
+    drop(guard);
+    result?
+}
+
+/// The arguments of `lms load`: `-c` for a context length, `--ttl` for the
+/// idle time from Settings (GH #235), both only when set.
+fn lms_load_args(model: &str, context_length: Option<u32>, ttl_seconds: Option<u32>) -> Vec<String> {
+    let mut args = vec!["load".to_string(), model.to_string(), "-y".to_string()];
+    if let Some(ctx) = context_length.filter(|c| *c > 0) {
+        args.push("-c".into());
+        args.push(ctx.to_string());
+    }
+    if let Some(ttl) = ttl_seconds.filter(|t| *t > 0) {
+        args.push("--ttl".into());
+        args.push(ttl.to_string());
+    }
+    args
+}
+
+/// True when `lms load` failed because it does not know `--ttl`.
+fn lms_refused_ttl(end: &LmsEnd) -> bool {
+    match end {
+        LmsEnd::Exited { success: false, stdout, stderr } => {
+            let text = format!("{stderr}\n{stdout}").to_lowercase();
+            text.contains("ttl") && (text.contains("unknown") || text.contains("unexpected") || text.contains("unrecognized"))
+        }
+        _ => false,
+    }
+}
+
+/// End the load that was started with this `call_id`. The `lms` process is
+/// killed and the load command answers with an error.
+#[tauri::command]
+pub fn lmstudio_cancel_load(call_id: String) -> Result<(), String> {
+    LMS_LOADS.cancel(&call_id);
+    Ok(())
 }
 
 #[allow(non_snake_case)]
-fn lmstudio_load_model_blocking(model: String, contextLength: Option<u32>) -> Result<serde_json::Value, String> {
+fn lmstudio_load_model_blocking(
+    model: String,
+    contextLength: Option<u32>,
+    ttlSeconds: Option<u32>,
+    deadline: Instant,
+    cancel: &CancellationToken,
+) -> Result<serde_json::Value, String> {
     let lms = lmstudio_lms_path()
-        .ok_or_else(|| "lms CLI not found — install LM Studio first".to_string())?;
+        .ok_or_else(|| "lms CLI not found. Install LM Studio first.".to_string())?;
     // `lms load` blocks until the model is in memory. The caller is expected
     // to render a spinner while the request is in flight (same pattern as
     // the Ollama per-row toggle).
@@ -431,39 +698,51 @@ fn lmstudio_load_model_blocking(model: String, contextLength: Option<u32>) -> Re
     // with `-c <N>` (`lms load --context-length`). Without a context length
     // this stays a plain load (the B3 power toggle path, unchanged).
     if contextLength.is_some() {
-        // Hide the console window the `lms` CLI would otherwise flash on
-        // Windows (CREATE_NO_WINDOW) — these run during normal model
-        // switching / the VRAM hand-off, not just at install time.
+        // `run_lms` hides the console window the `lms` CLI would otherwise
+        // flash on Windows: these run during normal model switching and the
+        // VRAM hand-off, not just at install time.
         let mut unload = crate::process_util::foreign_system_command(&lms);
         unload.args(["unload", &model]);
-        crate::process_util::suppress_window(&mut unload);
-        let _ = unload.output();
+        match run_lms(unload, deadline, cancel) {
+            Ok(LmsEnd::Cancelled) => return Err(LMS_CANCELLED.to_string()),
+            Ok(LmsEnd::TimedOut) => return Err(LMS_LOAD_TIMED_OUT.to_string()),
+            // Best effort, as before: nothing loaded is not a failure.
+            Ok(LmsEnd::Exited { .. }) | Err(_) => {}
+        }
     }
-    let ctx = contextLength.unwrap_or(0);
-    let ctx_str = ctx.to_string();
-    let mut args: Vec<&str> = vec!["load", model.as_str(), "-y"];
-    if ctx > 0 {
-        args.push("-c");
-        args.push(ctx_str.as_str());
-    }
+    let args = lms_load_args(&model, contextLength, ttlSeconds);
     let mut cmd = crate::process_util::foreign_system_command(&lms);
     cmd.args(&args);
-    crate::process_util::suppress_window(&mut cmd);
-    let output = cmd
-        .output()
+    let mut end = run_lms(cmd, deadline, cancel)
         .map_err(|e| format!("spawn lms load: {}", os_error::english(&e)))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        eprintln!(
-            "[lmstudio_load_model] FAILED model='{}' ctx={:?} code={:?}\n  stderr={:?}\n  stdout={:?}",
-            model,
-            contextLength,
-            output.status.code(),
-            stderr.trim(),
-            stdout.trim()
-        );
-        return Err(format!("lms load failed: {}", stderr.trim()));
+    // GH #235: an `lms` older than the idle TTL (LM Studio 0.3.9) refuses
+    // `--ttl`; the model then loads as before, without it.
+    if ttlSeconds.is_some() && lms_refused_ttl(&end) {
+        let mut cmd = crate::process_util::foreign_system_command(&lms);
+        cmd.args(lms_load_args(&model, contextLength, None));
+        end = run_lms(cmd, deadline, cancel)
+            .map_err(|e| format!("spawn lms load: {}", os_error::english(&e)))?;
+    }
+    match end {
+        LmsEnd::Cancelled => {
+            eprintln!("[lmstudio_load_model] CANCELLED model='{}' ctx={:?}", model, contextLength);
+            return Err(LMS_CANCELLED.to_string());
+        }
+        LmsEnd::TimedOut => {
+            eprintln!("[lmstudio_load_model] TIMED OUT model='{}' ctx={:?}", model, contextLength);
+            return Err(LMS_LOAD_TIMED_OUT.to_string());
+        }
+        LmsEnd::Exited { success: false, stdout, stderr } => {
+            eprintln!(
+                "[lmstudio_load_model] FAILED model='{}' ctx={:?}\n  stderr={:?}\n  stdout={:?}",
+                model,
+                contextLength,
+                stderr.trim(),
+                stdout.trim()
+            );
+            return Err(format!("lms load failed: {}", stderr.trim()));
+        }
+        LmsEnd::Exited { success: true, .. } => {}
     }
     eprintln!("[lmstudio_load_model] OK model='{}' ctx={:?}", model, contextLength);
     Ok(serde_json::json!({ "ok": true, "model": model, "contextLength": contextLength }))
@@ -527,29 +806,496 @@ pub async fn lmstudio_model_context(model: String) -> Result<serde_json::Value, 
 }
 
 // ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread,
-// so every millisecond spent here is a frozen window. Same treatment
-// `lmstudio_server_status` already got — this one was simply missed.
+// so every millisecond spent here is a frozen window.
 #[tauri::command]
-pub async fn lmstudio_unload_model(model: String) -> Result<serde_json::Value, String> {
-    tokio::task::spawn_blocking(move || lmstudio_unload_model_blocking(model))
+pub async fn lmstudio_unload_model(model: String, timeout_ms: Option<u64>) -> Result<serde_json::Value, String> {
+    let deadline = Instant::now() + lms_limit(timeout_ms, LMS_UNLOAD_LIMIT);
+    tokio::task::spawn_blocking(move || lmstudio_unload_model_blocking(model, deadline))
         .await
         .map_err(|e| format!("lmstudio_unload_model task: {e}"))?
 }
 
-fn lmstudio_unload_model_blocking(model: String) -> Result<serde_json::Value, String> {
+fn lmstudio_unload_model_blocking(model: String, deadline: Instant) -> Result<serde_json::Value, String> {
+    // Nothing to unload from an LM Studio that is not running, and `lms`
+    // would start it to find that out (box runs d307-b and d307-c, H4: every
+    // VRAM hand-off before a render left "LM Studio.exe --run-as-service"
+    // behind on a box where LM Studio had been closed).
+    if !should_run_lms_unload(lmstudio_daemon_answers(), lmstudio_process_running) {
+        eprintln!("[lmstudio_unload_model] skipped model='{}': LM Studio is not running", model);
+        return Ok(serde_json::json!({ "ok": true, "model": model, "skipped": "not_running" }));
+    }
     let lms = lmstudio_lms_path()
         .ok_or_else(|| "lms CLI not found".to_string())?;
     let mut cmd = crate::process_util::foreign_system_command(&lms);
     cmd.args(["unload", &model]);
-    crate::process_util::suppress_window(&mut cmd);
-    let output = cmd
-        .output()
+    let end = run_lms(cmd, deadline, &CancellationToken::new())
         .map_err(|e| format!("spawn lms unload: {}", os_error::english(&e)))?;
-    if !output.status.success() {
-        return Err(format!(
-            "lms unload failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+    match end {
+        LmsEnd::Exited { success: true, .. } => Ok(serde_json::json!({ "ok": true, "model": model })),
+        LmsEnd::Exited { success: false, stderr, .. } => Err(format!("lms unload failed: {}", stderr.trim())),
+        LmsEnd::Cancelled | LmsEnd::TimedOut => Err(LMS_UNLOAD_TIMED_OUT.to_string()),
     }
-    Ok(serde_json::json!({ "ok": true, "model": model }))
+}
+
+// ── Is LM Studio running at all ────────────────────────────────
+//
+// `lms unload` does not fail on a closed LM Studio, it wakes it: the CLI asks
+// its daemon for `/lms-status` on a fixed list of loopback ports and, when
+// nobody answers, spawns the app from `~/.lmstudio/.internal/
+// app-install-location.json` with `--run-as-service` (or the headless
+// `llmster` from `llmster-install-location.json`). Read from the `lms` 0.4.15
+// bundle on a Mac (`findOrStartLlmster`, `wakeUpServiceFromLocation`,
+// `apiServerPorts`). The port 1234 probe above cannot stand in for this: it is
+// the OpenAI server, which can be off while the app runs with a model loaded.
+//
+// So the unload asks the same question `lms` asks first, and only when that
+// comes back empty does it look at the process table as a second opinion, in
+// case a later `lms` moved its ports. A process only counts as "not LM Studio"
+// when neither its name nor its executable path says LM Studio in any
+// spelling: "LM Studio.exe" on Windows (box run d307-c), "LM Studio" and its
+// helpers inside "LM Studio.app" on the Mac, the node worker under
+// `~/.lmstudio/.internal`, an AppImage named lm-studio, or `llmster`. Too wide
+// a match only costs the old behaviour (an unload that wakes nothing new).
+
+/// The loopback ports `lms` 0.4.15 probes for its daemon (`apiServerPorts`).
+const LMSTUDIO_DAEMON_PORTS: [u16; 5] = [41343, 52993, 16141, 39414, 22931];
+
+/// Whether a `/lms-status` reply is LM Studio's: `lms` accepts a 200 with a
+/// string `package` and a string `version`, and so does this.
+fn is_lms_status(body: &serde_json::Value) -> bool {
+    body.get("package").and_then(|p| p.as_str()).is_some()
+        && body.get("version").and_then(|v| v.as_str()).is_some()
+}
+
+/// One daemon port, bounded like `lmstudio_port_open`: a closed port refuses
+/// in at most 300 ms, an open one gets 800 ms to answer.
+fn lmstudio_daemon_at(port: u16) -> bool {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    if TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_err() {
+        return false;
+    }
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(800))
+        .connect_timeout(Duration::from_millis(400))
+        .no_proxy()
+        .build()
+    else {
+        return false;
+    };
+    match client.get(format!("http://127.0.0.1:{port}/lms-status")).send() {
+        Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().map(|b| is_lms_status(&b)).unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// Whether LM Studio's daemon answers on any of its ports. The ports are asked
+/// side by side, so the closed case costs one 300 ms refusal, not five.
+fn lmstudio_daemon_answers() -> bool {
+    std::thread::scope(|s| {
+        let asks: Vec<_> = LMSTUDIO_DAEMON_PORTS
+            .iter()
+            .map(|&p| s.spawn(move || lmstudio_daemon_at(p)))
+            .collect();
+        asks.into_iter().any(|h| h.join().unwrap_or(false))
+    })
+}
+
+/// Whether a name or path says LM Studio: lower case, with spaces, dashes and
+/// underscores dropped, it contains "lmstudio" or "llmster".
+fn says_lmstudio(text: &str) -> bool {
+    let squeezed: String = text
+        .chars()
+        .filter(|c| !matches!(c, ' ' | '-' | '_'))
+        .flat_map(char::to_lowercase)
+        .collect();
+    squeezed.contains("lmstudio") || squeezed.contains("llmster")
+}
+
+/// Whether any process in the list is LM Studio, by its name or the path of
+/// its executable. The command line is left out on purpose: LU's own engine
+/// can run a model file that lies under `~/.lmstudio/models`.
+fn lmstudio_in_process_list<'a>(procs: impl IntoIterator<Item = (&'a str, Option<&'a Path>)>) -> bool {
+    procs
+        .into_iter()
+        .any(|(name, exe)| says_lmstudio(name) || exe.is_some_and(|p| says_lmstudio(&p.to_string_lossy())))
+}
+
+/// The live process table through [`lmstudio_in_process_list`].
+fn lmstudio_process_running() -> bool {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_exe(UpdateKind::OnlyIfNotSet),
+    );
+    let names: Vec<(String, Option<PathBuf>)> = sys
+        .processes()
+        .values()
+        .map(|p| (p.name().to_string_lossy().into_owned(), p.exe().map(Path::to_path_buf)))
+        .collect();
+    lmstudio_in_process_list(names.iter().map(|(n, e)| (n.as_str(), e.as_deref())))
+}
+
+/// Whether `lms unload` may run: when the daemon answers, or failing that,
+/// when any LM Studio process is there. Skipped only when both say no.
+fn should_run_lms_unload(daemon_answers: bool, process_running: impl FnOnce() -> bool) -> bool {
+    daemon_answers || process_running()
+}
+
+/// The llama.cpp runtime LM Studio runs GGUF models with, e.g. "2.55.0".
+///
+/// N1, 30.10.2026: Liquid LFM3 needs LM Studio's llama.cpp runtime 2.65.1 or
+/// newer (model card of LiquidAI/LFM3-1.7B-GGUF). LM Studio keeps the runtime
+/// it uses per format in `~/.lmstudio/.internal/backend-preferences-v1.json`
+/// (read on the Mac: `[{"model_format":"gguf","name":"llama.cpp-mac-arm64-
+/// apple-metal-advsimd","version":"2.55.0"}, …]`). An internal file, so
+/// anything that does not read as that shape answers None and LU says nothing.
+/// Read only; LU never changes LM Studio's runtime.
+#[tauri::command]
+pub fn lmstudio_gguf_runtime() -> Option<String> {
+    let path = dirs::home_dir()?.join(".lmstudio").join(".internal").join("backend-preferences-v1.json");
+    gguf_runtime_of(&std::fs::read_to_string(path).ok()?)
+}
+
+fn gguf_runtime_of(preferences: &str) -> Option<String> {
+    let entries: Vec<serde_json::Value> = serde_json::from_str(preferences).ok()?;
+    entries.iter().find_map(|e| {
+        let gguf = e.get("model_format")?.as_str()? == "gguf";
+        let llama = e.get("name")?.as_str()?.starts_with("llama.cpp");
+        let version = e.get("version")?.as_str()?;
+        (gguf && llama && !version.is_empty()).then(|| version.to_string())
+    })
+}
+
+#[cfg(test)]
+mod gguf_runtime_tests {
+    use super::gguf_runtime_of;
+
+    #[test]
+    fn the_gguf_runtime_is_read_from_lm_studios_preferences() {
+        // The file as it lies on the Mac (LM Studio, 30.10.2026).
+        let mac = r#"[{"model_format":"gguf","name":"llama.cpp-mac-arm64-apple-metal-advsimd","version":"2.55.0"},{"model_format":"safetensors","name":"mlx-llm-mac-arm64-apple-metal-nax-advsimd","version":"1.13.1"}]"#;
+        assert_eq!(gguf_runtime_of(mac).as_deref(), Some("2.55.0"));
+        let windows = r#"[{"model_format":"gguf","name":"llama.cpp-win-x86_64-nvidia-cuda12-avx2","version":"2.66.0"}]"#;
+        assert_eq!(gguf_runtime_of(windows).as_deref(), Some("2.66.0"));
+    }
+
+    #[test]
+    fn another_shape_says_nothing() {
+        assert_eq!(gguf_runtime_of("{}"), None);
+        assert_eq!(gguf_runtime_of("not json"), None);
+        assert_eq!(gguf_runtime_of(r#"[{"model_format":"safetensors","name":"mlx","version":"1.0"}]"#), None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Security pass of 2026-10-13: the server was started with a flag that
+    /// lets any web page read it.
+    #[test]
+    fn the_server_start_does_not_open_lm_studio_to_every_web_page() {
+        let args = super::lms_server_args();
+        assert_eq!(args, ["server", "start", "--port", "1234"]);
+        let flag = ["\"--", "cors\""].concat();
+        for (name, source) in [
+            ("lmstudio.rs", include_str!("lmstudio.rs")),
+            ("lmstudio_install.rs", include_str!("lmstudio_install.rs")),
+        ] {
+            assert!(!source.contains(&flag), "{name} passes the open flag again");
+        }
+    }
+
+    use super::lmstudio_chat_model_file;
+    use super::{lms_limit, loaded_ids, LMS_LIMIT_CEILING, LMS_LOAD_LIMIT};
+    use std::time::Duration;
+
+    #[test]
+    fn a_limit_is_the_callers_or_the_default_and_never_endless() {
+        assert_eq!(lms_limit(None, LMS_LOAD_LIMIT), LMS_LOAD_LIMIT);
+        assert_eq!(lms_limit(Some(0), LMS_LOAD_LIMIT), LMS_LOAD_LIMIT);
+        assert_eq!(lms_limit(Some(1500), LMS_LOAD_LIMIT), Duration::from_millis(1500));
+        assert_eq!(lms_limit(Some(u64::MAX), LMS_LOAD_LIMIT), LMS_LIMIT_CEILING);
+    }
+
+    mod is_lm_studio_running {
+        use super::super::{is_lms_status, lmstudio_in_process_list, should_run_lms_unload};
+        use std::path::Path;
+
+        fn list<'a>(rows: &'a [(&'a str, Option<&'a str>)]) -> impl Iterator<Item = (&'a str, Option<&'a Path>)> + 'a {
+            rows.iter().map(|(n, e)| (*n, e.map(Path::new)))
+        }
+
+        /// The processes of a closed LM Studio are none of these, and then
+        /// the unload must not run (it would start the service).
+        #[test]
+        fn a_box_without_lm_studio_skips_the_unload() {
+            let rows = [
+                ("Locally Uncensored.exe", Some(r"C:\Program Files\Locally Uncensored\Locally Uncensored.exe")),
+                ("lu-llama-server.exe", Some(r"C:\Program Files\Locally Uncensored\lu-llama-server.exe")),
+                ("python.exe", Some(r"C:\ComfyUI\venv\Scripts\python.exe")),
+                ("ollama.exe", Some(r"C:\Users\u\AppData\Local\Programs\Ollama\ollama.exe")),
+                ("explorer.exe", None),
+            ];
+            assert!(!lmstudio_in_process_list(list(&rows)));
+            assert!(!should_run_lms_unload(false, || lmstudio_in_process_list(list(&rows))));
+        }
+
+        /// The service LM Studio leaves running, by name alone.
+        #[test]
+        fn the_windows_service_counts() {
+            let rows = [("explorer.exe", None), ("LM Studio.exe", None)];
+            assert!(lmstudio_in_process_list(list(&rows)));
+        }
+
+        /// What this Mac shows with LM Studio 0.4.15 running as a service.
+        #[test]
+        fn the_mac_app_its_helpers_and_its_node_worker_count() {
+            for row in [
+                ("LM Studio", Some("/Applications/LM Studio.app/Contents/MacOS/LM Studio")),
+                (
+                    "LM Studio Helper (GPU)",
+                    Some("/Applications/LM Studio.app/Contents/Frameworks/LM Studio Helper (GPU).app/Contents/MacOS/LM Studio Helper (GPU)"),
+                ),
+                ("node", Some("/Users/u/.lmstudio/.internal/utils/node")),
+            ] {
+                assert!(lmstudio_in_process_list(list(&[row])), "{row:?}");
+            }
+        }
+
+        /// Spellings no box has shown yet, matched on purpose: too wide only
+        /// costs an unload that wakes nothing new.
+        #[test]
+        fn an_appimage_and_llmster_count() {
+            assert!(lmstudio_in_process_list(list(&[("lm-studio", Some("/tmp/.mount_LM-StuAbc/lm-studio"))])));
+            assert!(lmstudio_in_process_list(list(&[("AppRun", Some("/home/u/Apps/LM_Studio-0.4.15.AppImage"))])));
+            assert!(lmstudio_in_process_list(list(&[("llmster", Some("/home/u/.cache/lm-studio/llmster"))])));
+        }
+
+        /// A model file under ~/.lmstudio/models in LU's own engine is not LM
+        /// Studio: only the name and the executable are read, never the argv.
+        #[test]
+        fn lus_engine_on_an_lm_studio_model_file_does_not_count() {
+            let rows = [("lu-llama-server", Some("/Applications/LU.app/Contents/MacOS/lu-llama-server"))];
+            assert!(!lmstudio_in_process_list(list(&rows)));
+        }
+
+        /// The daemon answering is enough, the process table is not even read.
+        #[test]
+        fn a_daemon_that_answers_runs_the_unload_without_the_table() {
+            assert!(should_run_lms_unload(true, || panic!("the process table must not be read")));
+            assert!(should_run_lms_unload(false, || true));
+        }
+
+        #[test]
+        fn only_lm_studios_status_reply_counts() {
+            assert!(is_lms_status(&serde_json::json!({ "package": "lmstudio", "version": "0.4.15+2" })));
+            assert!(!is_lms_status(&serde_json::json!({ "package": "lmstudio" })));
+            assert!(!is_lms_status(&serde_json::json!({ "status": "ok" })));
+            assert!(!is_lms_status(&serde_json::json!(null)));
+        }
+    }
+
+    #[test]
+    fn only_models_in_state_loaded_count_as_loaded() {
+        let body = serde_json::json!({ "data": [
+            { "id": "a", "state": "loaded" },
+            { "id": "b", "state": "not-loaded" },
+            { "id": "c" },
+        ]});
+        assert_eq!(loaded_ids(&body), vec!["a".to_string()]);
+        assert!(loaded_ids(&serde_json::json!({})).is_empty());
+    }
+
+    /// A stand-in for an `lms load` that never comes back.
+    #[cfg(unix)]
+    mod a_call_that_hangs {
+        use super::super::{run_lms, LmsEnd};
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+        use tokio_util::sync::CancellationToken;
+
+        fn sleeper() -> Command {
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", "sleep 30"]);
+            cmd
+        }
+
+        #[test]
+        fn ends_at_its_limit() {
+            let started = Instant::now();
+            let end = run_lms(sleeper(), started + Duration::from_millis(300), &CancellationToken::new()).unwrap();
+            assert!(matches!(end, LmsEnd::TimedOut), "{end:?}");
+            assert!(started.elapsed() < Duration::from_secs(5));
+        }
+
+        /// Ending the call means the process is gone, not that nobody waits
+        /// for it any more: a load that keeps running would still arrive.
+        #[test]
+        fn ends_when_it_is_cancelled_and_the_process_is_gone() {
+            let dir = tempfile::tempdir().unwrap();
+            let pid_file = dir.path().join("pid");
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(format!("echo $$ > '{}'; sleep 30", pid_file.display()));
+            let cancel = CancellationToken::new();
+            let later = cancel.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(400));
+                later.cancel();
+            });
+            let started = Instant::now();
+            let end = run_lms(cmd, started + Duration::from_secs(30), &cancel).unwrap();
+            assert!(matches!(end, LmsEnd::Cancelled), "{end:?}");
+            assert!(started.elapsed() < Duration::from_secs(5));
+
+            let pid: i32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+            // kill_tree reaps on a thread of its own after its grace.
+            let gone_by = Instant::now() + Duration::from_secs(5);
+            // Declared here: the libc crate is a dependency of the macOS build only.
+            extern "C" {
+                fn kill(pid: i32, sig: i32) -> i32;
+            }
+            while unsafe { kill(pid, 0) } == 0 {
+                assert!(Instant::now() < gone_by, "the process {pid} outlived its cancel");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+
+        /// `lms load` cancels its load in LM Studio on an interrupt and
+        /// drops it on a kill, so the interrupt has to arrive first.
+        #[test]
+        fn a_cancelled_call_is_interrupted_before_it_is_killed() {
+            let dir = tempfile::tempdir().unwrap();
+            let heard = dir.path().join("heard");
+            let ready = dir.path().join("ready");
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(format!(
+                "trap 'echo int > \"{}\"; exit 1' INT; echo up > \"{}\"; while :; do sleep 0.05; done",
+                heard.display(),
+                ready.display()
+            ));
+            let cancel = CancellationToken::new();
+            let later = cancel.clone();
+            let trap_set = ready.clone();
+            std::thread::spawn(move || {
+                let give_up = Instant::now() + Duration::from_secs(10);
+                while !trap_set.exists() && Instant::now() < give_up {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                later.cancel();
+            });
+            let started = Instant::now();
+            let end = run_lms(cmd, started + Duration::from_secs(30), &cancel).unwrap();
+            assert!(matches!(end, LmsEnd::Cancelled), "{end:?}");
+            assert!(started.elapsed() < Duration::from_secs(15));
+            assert_eq!(std::fs::read_to_string(&heard).unwrap_or_default().trim(), "int");
+        }
+
+        #[test]
+        fn a_cancel_that_came_first_starts_nothing_that_stays() {
+            let cancel = CancellationToken::new();
+            cancel.cancel();
+            let started = Instant::now();
+            let end = run_lms(sleeper(), started + Duration::from_secs(30), &cancel).unwrap();
+            assert!(matches!(end, LmsEnd::Cancelled), "{end:?}");
+            assert!(started.elapsed() < Duration::from_secs(5));
+        }
+
+        /// `lms` starts LM Studio's service when it is not running, and that
+        /// process keeps the pipes of the call that started it.
+        #[test]
+        fn a_process_left_behind_does_not_hold_the_finished_call() {
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", "sleep 20 & echo why >&2; exit 2"]);
+            let started = Instant::now();
+            let end = run_lms(cmd, started + Duration::from_secs(30), &CancellationToken::new()).unwrap();
+            match end {
+                LmsEnd::Exited { success, stderr, .. } => {
+                    assert!(!success);
+                    assert_eq!(stderr.trim(), "why");
+                }
+                other => panic!("{other:?}"),
+            }
+            assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+        }
+
+        #[test]
+        fn hands_back_what_a_finished_call_wrote() {
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", "echo out; echo why >&2; exit 3"]);
+            let end = run_lms(cmd, Instant::now() + Duration::from_secs(30), &CancellationToken::new()).unwrap();
+            match end {
+                LmsEnd::Exited { success, stdout, stderr } => {
+                    assert!(!success);
+                    assert_eq!(stdout.trim(), "out");
+                    assert_eq!(stderr.trim(), "why");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    /// The picker line says "N models on disk" and the list then shows N rows.
+    /// Windows box, 05.10.2026: every GGUF was counted, the line said 8, the
+    /// list showed 7.
+    #[test]
+    fn counts_what_the_chat_picker_lists() {
+        let on_disk = [
+            "lmstudio-community/qwen3-8b-gguf/qwen3-8b-q4_k_m.gguf",
+            "lmstudio-community/gemma-3-12b-it-gguf/gemma-3-12b-it-q4_k_m.gguf",
+            "lmstudio-community/gemma-3-12b-it-gguf/mmproj-model-f16.gguf",
+            "nomic-ai/nomic-embed-text-v1.5-gguf/nomic-embed-text-v1.5.q4_k_m.gguf",
+            "baai/bge-m3-gguf/bge-m3-q8_0.gguf",
+            "bartowski/big-model-gguf/big-model-q4_k_m-00001-of-00003.gguf",
+            "bartowski/big-model-gguf/big-model-q4_k_m-00002-of-00003.gguf",
+            "bartowski/big-model-gguf/big-model-q4_k_m-00003-of-00003.gguf",
+        ];
+        let listed: Vec<&str> = on_disk.iter().copied().filter(|f| lmstudio_chat_model_file(f)).collect();
+        assert_eq!(
+            listed,
+            [
+                "lmstudio-community/qwen3-8b-gguf/qwen3-8b-q4_k_m.gguf",
+                "lmstudio-community/gemma-3-12b-it-gguf/gemma-3-12b-it-q4_k_m.gguf",
+                "bartowski/big-model-gguf/big-model-q4_k_m-00001-of-00003.gguf",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_windows_path_and_an_ordinary_name_with_of_in_it_count() {
+        assert!(lmstudio_chat_model_file("publisher\\repo\\model-q4_k_m.gguf"));
+        assert!(!lmstudio_chat_model_file("publisher\\repo\\mmproj-model-f16.gguf"));
+        assert!(lmstudio_chat_model_file("publisher/repo/best-of-breed-7b.gguf"));
+        assert!(lmstudio_chat_model_file("publisher/repo/tales-of-2024-q4.gguf"));
+    }
+}
+
+#[cfg(test)]
+mod idle_ttl_tests {
+    use super::{lms_load_args, lms_refused_ttl, LmsEnd};
+
+    /// GH #235: the idle time from Settings reaches `lms load` as `--ttl`.
+    #[test]
+    fn a_set_idle_time_loads_with_lm_studios_ttl() {
+        assert_eq!(lms_load_args("qwen", None, Some(1800)), ["load", "qwen", "-y", "--ttl", "1800"]);
+        assert_eq!(lms_load_args("qwen", Some(8192), Some(600)), ["load", "qwen", "-y", "-c", "8192", "--ttl", "600"]);
+    }
+
+    #[test]
+    fn negative_control_no_idle_time_loads_as_before() {
+        assert_eq!(lms_load_args("qwen", None, None), ["load", "qwen", "-y"]);
+        assert_eq!(lms_load_args("qwen", Some(0), Some(0)), ["load", "qwen", "-y"]);
+        assert_eq!(lms_load_args("qwen", Some(4096), None), ["load", "qwen", "-y", "-c", "4096"]);
+    }
+
+    #[test]
+    fn an_lms_that_does_not_know_ttl_is_told_apart_from_a_failed_load() {
+        let old = LmsEnd::Exited { success: false, stdout: String::new(), stderr: "error: unknown option '--ttl'".into() };
+        assert!(lms_refused_ttl(&old));
+        let oom = LmsEnd::Exited { success: false, stdout: String::new(), stderr: "Failed to load model: out of memory".into() };
+        assert!(!lms_refused_ttl(&oom));
+        assert!(!lms_refused_ttl(&LmsEnd::TimedOut));
+        assert!(!lms_refused_ttl(&LmsEnd::Exited { success: true, stdout: String::new(), stderr: String::new() }));
+    }
 }

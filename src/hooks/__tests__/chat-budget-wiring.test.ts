@@ -24,7 +24,7 @@ const agent = read('useAgentChat.ts')
 describe('plain chat sends under the A2 budget', () => {
   it('routes the built array through the budget', () => {
     expect(chat).toMatch(/applyChatSendBudget\(/)
-    expect(chat).toMatch(/sendWindowTokens: settings\.codexSendWindowTokens/)
+    expect(chat).toMatch(/sendWindowTokens: sendWindowFor\(settings, \w+\)/)
   })
 
   it('keeps the message-count cap as the second barrier', () => {
@@ -47,7 +47,7 @@ describe('a group round is budgeted per model', () => {
       chat.indexOf('export function useChat'),
     )
     expect(groupTurn).toMatch(/applyChatSendBudget\(/)
-    expect(groupTurn).toMatch(/await getModelMaxTokens\(model\)/)
+    expect(groupTurn).toMatch(/await getChatWindowTokens\(model\)/)
     expect(groupTurn).toMatch(/capMessageCount\(\[/)
     expect(groupTurn).toMatch(/contextDecay: settings\.contextDecay/)
   })
@@ -61,7 +61,8 @@ describe('a group round is budgeted per model', () => {
 describe('compare caps the shared base before the fan-out', () => {
   it('takes the tightest budget of the two sides', () => {
     expect(compare).toMatch(/sharedChatSendBudget\(/)
-    expect(compare).toMatch(/applySendBudget\(chatMessages, budget\)/)
+    // GH #201: with the hysteresis only where a side is paid.
+    expect(compare).toMatch(/applySendBudget\(chatMessages, budget, \{ hysteresis, notice: 'chat' \}\)/)
   })
 
   it('streams the budgeted array to BOTH sides, not the raw history', () => {

@@ -1,8 +1,10 @@
 /**
  * Kein Mac-Fix gilt als ausgeliefert.
  *
- * 3.0.0 baut Windows und Linux. `.github/workflows/release.yml` fuehrt keine
- * macOS-Strecke, der Kommentar in der Matrix sagt es ausdruecklich. Der Eintrag
+ * 3.0.0 baut Windows und Linux. Die Matrix von `build-tauri` in
+ * `.github/workflows/release.yml` fuehrt keine macOS-Strecke. Der Mac-Bau der
+ * spaeteren Versionen laeuft im eigenen Job `build-tauri-macos`, der nicht in
+ * dieser Matrix steht; an der Aussage ueber 3.0.0 aendert er nichts. Der Eintrag
  * zu GitHub 127 beschrieb die Reparatur des MLX-Schnappschusses trotzdem wie
  * eine erledigte Sache. Genau der Melder haette in 3.0.0 nachgesehen und nichts
  * gefunden, weil es fuer seine Maschine gar keinen Bau gibt: die Aenderung liegt

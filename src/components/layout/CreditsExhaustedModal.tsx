@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Zap } from 'lucide-react'
 import { Modal } from '../ui/Modal'
-import { CREDITS_EXHAUSTED_EVENT, PRICING_URL, type ExhaustedReason } from '../../lib/credits-exhausted'
+import { ModalActions, ModalButton } from '../ui/ModalActions'
+import { CREDITS_EXHAUSTED_EVENT, PRICING_LINK, type ExhaustedReason } from '../../lib/credits-exhausted'
 import { CLOUD_SUBSCRIBER_LINE } from '../../lib/cloud-pitch'
 import { openExternal } from '../../api/backend'
 
@@ -10,10 +11,10 @@ import { openExternal } from '../../api/backend'
  * Create hooks fire CREDITS_EXHAUSTED_EVENT for one of three server codes
  * (lib/credits-exhausted.ts); this turns it into a readable next step instead
  * of a dead-end error line. The title and body follow the reason carried on
- * the event, matching apps/web/components/layout/CreditsExhaustedModal.tsx
+ * the event, matching the web app
  * (R5-51): the same refusal must not read differently on the two apps.
  *
- * R5-51, Entscheid David vom 12.09.2026: der Knopf oeffnet die PREISSEITE im
+ * R5-51, Entscheid vom 12.09.2026: der Knopf oeffnet die PREISSEITE im
  * Browser, nicht die Aufladeseite, fuer alle drei Gruende. Wer leer ist,
  * waehlt zwischen einem Plan und einem Paket; ein Knopf, der direkt in einen
  * Kauf springt, nimmt ihm diese Wahl ab. Gekauft wird auf der Website; ein
@@ -65,26 +66,22 @@ export function CreditsExhaustedModal() {
         <p className="text-xs text-gray-500 dark:text-gray-400">
           {CLOUD_SUBSCRIBER_LINE}
         </p>
-        <div className="flex flex-col gap-2">
-          <button
-            type="button"
+        <ModalActions>
+          <ModalButton variant="quiet" onClick={() => setOpen(false)}>
+            Not now
+          </ModalButton>
+          <ModalButton
+            variant="primary"
+            data-autofocus
             onClick={() => {
-              void openExternal(PRICING_URL)
+              void openExternal(PRICING_LINK)
               setOpen(false)
             }}
-            className="inline-flex items-center justify-center gap-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-semibold px-4 py-2.5 transition-colors"
           >
-            <Zap size={16} />
+            <Zap size={14} />
             See plans and packs
-          </button>
-          <button
-            type="button"
-            onClick={() => setOpen(false)}
-            className="rounded-xl px-4 py-2 text-sm text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white transition-colors"
-          >
-            Not now
-          </button>
-        </div>
+          </ModalButton>
+        </ModalActions>
       </div>
     </Modal>
   )

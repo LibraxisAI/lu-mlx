@@ -1,5 +1,5 @@
 /**
- * Feedback 2026-08-21 (yaserrieh@gmail.com, hosted-pro, route /): "Error:
+ * Feedback 2026-08-21 (a user, hosted-pro, route /): "Error:
  * [network] HTTP 400 too many messages". The plain chat path sends the WHOLE
  * conversation on every turn (unlike the agent and coding loops, which
  * compact), so once a hosted conversation crosses the server's message-count

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * R3-19, Entscheid David vom 12.09.2026: das Abmelden fragt nach, wenn
+ * R3-19, Entscheid vom 12.09.2026: das Abmelden fragt nach, wenn
  * Kontoerinnerungen noch nicht in der Wolke stehen.
  *
  * Das Abmelden raeumt die Kontosammlung aus der Ansicht. Wer nie

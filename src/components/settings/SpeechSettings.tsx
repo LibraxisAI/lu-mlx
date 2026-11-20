@@ -2,11 +2,13 @@ import { useCallback, useEffect, useReducer, useState } from 'react'
 import { Check, Download, Loader2, Mic, Volume2, X } from 'lucide-react'
 import { withInstallerOutput } from '../../lib/error-text'
 import { HINWEIS_TEXT } from '../../lib/hinweis'
-import { backendCall } from '../../api/backend'
+import { backendCall, getOllamaBase, isTauri } from '../../api/backend'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useVoiceStore } from '../../stores/voiceStore'
-import { checkWhisperAvailable, checkTtsAvailable, downloadPiperVoice, listInstalledPiperVoices } from '../../api/voice'
+import { checkWhisperAvailable, checkTtsAvailable, downloadPiperVoice, listInstalledPiperVoices, ollamaSpeechUrls, OLLAMA_SPEECH_MODEL } from '../../api/voice'
 import { InlineToggle } from './InlineToggle'
+import { MicrophoneSetting } from './MicrophoneSetting'
+import { ParakeetSetting } from './ParakeetSetting'
 import { initialProbe, makeProbeReducer, needsInstall, showsHint } from './probe-install'
 
 /**
@@ -219,7 +221,7 @@ export function SpeechSettings() {
   // re-check the installed list + TTS availability. The selection is applied
   // optimistically (so the dropdown reflects the pick) but REVERTED if the
   // download fails — otherwise piperVoice pointed at a missing model and every
-  // read fell back to the Windows SAPI voice (#77, ElBiggus).
+  // read fell back to the Windows SAPI voice (#77).
   const handlePickVoice = async (id: string) => {
     setVoiceError(null)
     const prev = voiceSettings.piperVoice
@@ -246,6 +248,8 @@ export function SpeechSettings() {
       <p className="text-[0.55rem] text-gray-500 leading-snug">
         Cloud mode: dictation and read-aloud run on lu-labs.ai (hosted Whisper speech-to-text + MiniMax text-to-speech) and are metered against your credits. No local installs needed.
       </p>
+      {/* Voice is not offered in cloud mode, so the choice covers dictation only. */}
+      <MicrophoneSetting coversVoice={false} />
       <InlineToggle label="Enable read-aloud" enabled={voiceSettings.ttsEnabled} onChange={() => voiceSettings.updateVoiceSettings({ ttsEnabled: !voiceSettings.ttsEnabled })} icon={<Volume2 size={11} className="text-gray-500" />} />
       {voiceSettings.ttsEnabled && (
         <InlineToggle label="Auto-read new responses" enabled={voiceSettings.autoReadAloud} onChange={() => voiceSettings.updateVoiceSettings({ autoReadAloud: !voiceSettings.autoReadAloud })} icon={<Volume2 size={11} className="text-gray-500" />} />
@@ -295,11 +299,41 @@ export function SpeechSettings() {
     {whisper.installError && (
       <p className={`text-[0.55rem] leading-snug ${HINWEIS_TEXT.fehler}`}>{whisper.installError}</p>
     )}
-    {showsHint(whisper) && (
+    {/* N1: with an external dictation engine faster-whisper is not required. */}
+    {showsHint(whisper) && voiceSettings.sttMode === 'whisper' && (
       <p className="text-[0.55rem] text-gray-500 leading-snug">
         Required for the microphone. Installs faster-whisper into LU's Python; first run also downloads a small model.
       </p>
     )}
+
+    {/* N1: dictation through an OpenAI-compatible transcription endpoint,
+        e.g. Ollama serving Liquid AI LFM3 Audio, instead of faster-whisper. */}
+    <EngineSwitch
+      label="Dictation"
+      value={voiceSettings.sttMode}
+      options={isTauri()
+        ? [['whisper', 'faster-whisper'], ['parakeet', 'Parakeet'], ['external', 'External HTTP'], ['engine', 'LU Engine']]
+        : [['whisper', 'faster-whisper'], ['external', 'External HTTP'], ['engine', 'LU Engine']]}
+      onPick={(m) => {
+        // Leaving Parakeet frees the memory its server holds (#233).
+        if (voiceSettings.sttMode === 'parakeet' && m !== 'parakeet') void backendCall('parakeet_stop').catch(() => {})
+        voiceSettings.updateVoiceSettings({ sttMode: m })
+      }}
+    />
+    {voiceSettings.sttMode === 'parakeet' && <ParakeetSetting />}
+    {voiceSettings.sttMode === 'engine' && <EngineSpeechNote what="hears" />}
+    {voiceSettings.sttMode === 'external' && (
+      <div className="space-y-1.5">
+        <SettingInput value={voiceSettings.externalSttUrl} onChange={(v) => voiceSettings.updateVoiceSettings({ externalSttUrl: v })} placeholder="http://localhost:11434/v1/audio/transcriptions" />
+        <SettingInput value={voiceSettings.externalSttModel} onChange={(v) => voiceSettings.updateVoiceSettings({ externalSttModel: v })} placeholder="model (e.g. lfm3-audio:2b)" />
+        <OllamaSpeechPreset onUse={() => voiceSettings.updateVoiceSettings({ externalSttUrl: ollamaSpeechUrls(getOllamaBase()).stt, externalSttModel: OLLAMA_SPEECH_MODEL })} />
+        <p className="t-micro text-gray-500 leading-snug">
+          Any OpenAI-compatible speech-to-text endpoint. With Ollama 0.40.13 or newer, LFM3 Audio (lfm3-audio:2b, 1.6 GB) transcribes the microphone; get it in Models first. Stays on your machine when the endpoint is local.
+        </p>
+      </div>
+    )}
+
+    <MicrophoneSetting coversVoice />
 
     {/* Text-to-Speech, Piper neural (read responses aloud) */}
     <div className="flex items-center gap-2 text-[0.65rem] pt-1">
@@ -336,7 +370,8 @@ export function SpeechSettings() {
         {voiceSettings.ttsFallbackReason} If an antivirus quarantined Piper, whitelist it or reinstall the voice below.
       </p>
     )}
-    {showsHint(tts) && (
+    {/* N1: Piper is only required when it is the engine that reads aloud. */}
+    {showsHint(tts) && voiceSettings.ttsMode === 'piper' && (
       <p className="text-[0.55rem] text-gray-500 leading-snug">
         Required for read-aloud. Installs Piper + a neural voice locally (~63 MB).
       </p>
@@ -345,13 +380,13 @@ export function SpeechSettings() {
     <InlineToggle label="Enable read-aloud" enabled={voiceSettings.ttsEnabled} onChange={() => voiceSettings.updateVoiceSettings({ ttsEnabled: !voiceSettings.ttsEnabled })} icon={<Volume2 size={11} className="text-gray-500" />} />
     {/* Auto-read is a SEPARATE opt-in (default OFF). The toggle above only
         surfaces the per-message Speaker button; this one also reads each
-        finished response aloud (#77, ElBiggus, the old single toggle was
+        finished response aloud (#77, the old single toggle was
         labelled "Read responses aloud" but never auto-read). */}
     {voiceSettings.ttsEnabled && (
       <InlineToggle label="Auto-read new responses" enabled={voiceSettings.autoReadAloud} onChange={() => voiceSettings.updateVoiceSettings({ autoReadAloud: !voiceSettings.autoReadAloud })} icon={<Volume2 size={11} className="text-gray-500" />} />
     )}
     {/* Neural voice picker (Piper), replaces the old Microsoft/browser
-        voices (David 2026-06-06). Picking one not yet on disk downloads
+        voices (2026-06-06). Picking one not yet on disk downloads
         it (~63 MB). Browser-only rate/pitch knobs dropped, they didn't
         apply to Piper. */}
     <div className="flex items-center justify-between gap-2">
@@ -379,7 +414,7 @@ export function SpeechSettings() {
     <div className="flex items-center justify-between gap-2 pt-1">
       <span className="text-[0.7rem] text-gray-500">Engine</span>
       <div className="flex items-center gap-1 text-[0.6rem]">
-        {(['piper', 'external'] as const).map((m) => (
+        {(['piper', 'external', 'engine'] as const).map((m) => (
           <button
             key={m}
             onClick={() => voiceSettings.updateVoiceSettings({ ttsMode: m })}
@@ -395,11 +430,19 @@ export function SpeechSettings() {
                 : 'text-gray-500 border-white/8 hover:text-gray-300')
             }
           >
-            {m === 'piper' ? 'Piper neural' : 'External HTTP'}
+            {m === 'piper' ? 'Piper neural' : m === 'external' ? 'External HTTP' : 'LU Engine'}
           </button>
         ))}
       </div>
     </div>
+    {voiceSettings.ttsMode === 'engine' && (
+      <div className="space-y-1.5">
+        <EngineSpeechNote what="speaks" />
+        {voiceSettings.ttsFallbackReason && (
+          <p className={`t-micro leading-snug ${HINWEIS_TEXT.fehler}`}>{voiceSettings.ttsFallbackReason}</p>
+        )}
+      </div>
+    )}
     {voiceSettings.ttsMode === 'external' && (
       <div className="space-y-1.5">
         <input
@@ -416,10 +459,75 @@ export function SpeechSettings() {
           spellCheck={false}
           className="w-full px-2 py-1 rounded bg-transparent border border-white/8 text-[0.65rem] text-gray-300 placeholder-gray-600 focus:outline-none focus:border-white/20"
         />
-        <p className="text-[0.55rem] text-gray-500 leading-snug">
-          Any OpenAI-compatible TTS endpoint (e.g. Kokoro-FastAPI). Used for read-aloud instead of Piper. Stays on your machine when the endpoint is local.
+        <SettingInput value={voiceSettings.externalTtsModel} onChange={(v) => voiceSettings.updateVoiceSettings({ externalTtsModel: v })} placeholder="model (empty sends tts-1)" />
+        <OllamaSpeechPreset onUse={() => voiceSettings.updateVoiceSettings({ externalTtsUrl: ollamaSpeechUrls(getOllamaBase()).tts, externalTtsModel: OLLAMA_SPEECH_MODEL, externalTtsVoice: '' })} />
+        <p className="t-micro text-gray-500 leading-snug">
+          Any OpenAI-compatible TTS endpoint (e.g. Kokoro-FastAPI, or Ollama 0.40.13+ with LFM3 Audio). Used for read-aloud instead of Piper. With a model and no voice, the engine speaks in the model's own voice. Stays on your machine when the endpoint is local.
         </p>
+        {/* B11: the external voice fell back to the system voice in silence. */}
+        {voiceSettings.ttsFallbackReason && (
+          <p className={`t-micro leading-snug ${HINWEIS_TEXT.fehler}`}>{voiceSettings.ttsFallbackReason}</p>
+        )}
       </div>
     )}
   </>)
+}
+
+function SettingInput({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder: string }) {
+  return (
+    <input
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      spellCheck={false}
+      className="w-full px-2 py-1 rounded bg-transparent border border-white/8 t-micro text-gray-300 placeholder-gray-600 focus:outline-none focus:border-white/20"
+    />
+  )
+}
+
+/** Fills in the local Ollama address and LFM3 Audio (N1). Fills only, it pulls nothing. */
+function OllamaSpeechPreset({ onUse }: { onUse: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onUse}
+      className="px-2 py-0.5 rounded border border-white/8 t-micro text-gray-400 hover:text-gray-200 transition-colors"
+    >
+      Use LFM3 Audio in Ollama
+    </button>
+  )
+}
+
+function EngineSwitch<T extends string>({ label, value, options, onPick }: { label: string; value: T; options: [T, string][]; onPick: (v: T) => void }) {
+  return (
+    <div className="flex items-center justify-between gap-2 pt-1">
+      <span className="t-micro text-gray-500">{label}</span>
+      <div className="flex items-center gap-1 t-micro">
+        {options.map(([m, text]) => (
+          <button
+            key={m}
+            onClick={() => onPick(m)}
+            aria-pressed={value === m}
+            className={
+              'px-2 py-0.5 rounded border transition-colors ' +
+              (value === m
+                ? 'bg-lu-accent-soft text-gray-900 dark:text-white border-lu-accent-edge dark:border-lu-accent'
+                : 'text-gray-500 border-white/8 hover:text-gray-300')
+            }
+          >
+            {text}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** N1: what "LU Engine" means for speech. The engine runs one model, the chat model. */
+function EngineSpeechNote({ what }: { what: 'hears' | 'speaks' }) {
+  return (
+    <p className="t-micro text-gray-500 leading-snug">
+      The LU Engine {what} with the model it has loaded, so that model must take sound: LFM3 Audio or LFM3 Omni (get them in Models). Chat with it in the LU Engine, and dictation and read-aloud use the same model. Nothing is installed.
+    </p>
+  )
 }

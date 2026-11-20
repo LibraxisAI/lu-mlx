@@ -1,22 +1,35 @@
-import {
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { ChevronDown, Check, Search } from 'lucide-react'
+import { ChevronDown, Search } from 'lucide-react'
+import { usePopoverPlatz } from '../../../hooks/usePopoverPlatz'
 import { cn } from './cn'
 
 export interface SelectOption {
   value: string
   label: string
   sublabel?: string
+  /** Tooltip der Zeile und des geschlossenen Feldes, etwa der Dateiname hinter
+   *  einem Anzeigenamen. Die Suche findet den Eintrag auch darueber. */
+  title?: string
   /** Ueberschrift ueber diesem und den folgenden Eintraegen derselben Gruppe. */
   group?: string
-  badge?: { label: string; color: string }
+  badge?: SelectTag
+  /** Kleine Marken hinter dem Namen, nur in der aufgeklappten Liste (etwa Stufe und Herkunft). */
+  tags?: SelectTag[]
+  /** Listed, but not pickable right now; `sublabel` says why (Swap Character:
+   *  Kling "one person only" with several people). */
+  disabled?: boolean
+  /** Small picture before the name, in the list and in a closed `text`
+   *  field (the avatar of a character in the Character area). */
+  lead?: ReactNode
+}
+
+/** Eine Marke im Etiketten-Stil der Modellwaehler (index.css, .lu-picker-tag):
+ *  Haarlinie und Grau. 'accent' ist der eine Akzent, 'quiet' tritt zurueck. */
+export interface SelectTag {
+  label: string
+  tone?: 'accent' | 'quiet'
 }
 
 interface Props {
@@ -28,20 +41,15 @@ interface Props {
   size?: 'sm' | 'md'
   align?: 'left' | 'right'
   className?: string
+  /** Hoeher wird die Liste nie, auch im grossen Fenster nicht. */
   maxHeight?: number
   /** Beschriftung fuer Bedienhilfen, wo kein sichtbarer Text danebensteht. */
   ariaLabel?: string
-}
-
-interface MenuPosition {
-  top?: number
-  bottom?: number
-  left?: number
-  right?: number
-  width: number
-  maxWidth: number
-  maxHeight: number
-  dropUp: boolean
+  /** 'text': no box, the value as text with a small arrow, as the model
+   *  choice in the chat (Character area, sketches v2). Default 'box'. */
+  variant?: 'box' | 'text'
+  /** Class of the closed field's text (the `text` variant). */
+  textClassName?: string
 }
 
 export function Select({
@@ -55,33 +63,53 @@ export function Select({
   className,
   maxHeight = 280,
   ariaLabel,
+  variant = 'box',
+  textClassName,
 }: Props) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
-  const [menuPosition, setMenuPosition] =
-    useState<MenuPosition | null>(null)
 
   const triggerRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
+  // GitHub #149: the menu used to do its own sums against the window height
+  // and kept a minimum height, so in a short or zoomed window it ended up
+  // under the window edge. Placement is the app-wide rule now: the side with
+  // room, capped to that room, the list scrolls.
+  const menu = usePopoverPlatz(menuRef, open, {
+    anker: triggerRef,
+    rolle: listRef,
+    fest: align === 'right' ? 'rechts' : 'links',
+  })
 
   const current = options.find((option) => option.value === value)
 
   const filtered = useMemo(() => {
-    if (!query.trim()) return options
+    // One row per value. A row's key is its value, and two rows with one key
+    // are not two rows to React: filtering them left a third, stale one behind
+    // (Discord 30.10.2026, a model listed twice showed three times after
+    // typing "tur"). Two rows with one value are one choice anyway.
+    const seen = new Set<string>()
+    const unique = options.filter((option) => !seen.has(option.value) && !!seen.add(option.value))
+    if (!query.trim()) return unique
 
-    const normalizedQuery = query.toLowerCase()
+    // Spaces, underscores, dashes and dots do not count, so "euler a",
+    // "euler_a" and "Euler a" are one search, as are "dpmpp sde" and
+    // "dpmpp_sde" (C24, sampler names written two ways).
+    const loose = (text: string) => text.toLowerCase().replace(/[\s_.-]+/g, '')
+    const normalizedQuery = loose(query)
 
-    return options.filter(
+    return unique.filter(
       (option) =>
-        option.label.toLowerCase().includes(normalizedQuery) ||
-        option.sublabel?.toLowerCase().includes(normalizedQuery),
+        loose(option.label).includes(normalizedQuery) ||
+        (option.sublabel !== undefined && loose(option.sublabel).includes(normalizedQuery)) ||
+        (option.title !== undefined && loose(option.title).includes(normalizedQuery)),
     )
   }, [options, query])
 
   const closeMenu = () => {
     setOpen(false)
     setQuery('')
-    setMenuPosition(null)
   }
 
   const toggle = () => {
@@ -121,115 +149,10 @@ export function Select({
     }
   }, [open])
 
-  useLayoutEffect(() => {
-    if (!open || !triggerRef.current) return
-
-    const updatePosition = () => {
-      const trigger = triggerRef.current
-      if (!trigger) return
-
-      const rect = trigger.getBoundingClientRect()
-      const viewportPadding = 8
-      const gap = 4
-
-      const spaceBelow =
-        window.innerHeight - rect.bottom - viewportPadding - gap
-      const spaceAbove =
-        rect.top - viewportPadding - gap
-
-      const searchHeight = searchable ? 48 : 0
-      const menuChromeHeight = searchHeight + 8
-      const estimatedRowsHeight =
-        Math.max(filtered.length, 1) * 32
-
-      const desiredHeight = Math.min(
-        maxHeight + menuChromeHeight,
-        estimatedRowsHeight + menuChromeHeight,
-      )
-
-      // Prefer opening downward whenever there is enough usable space.
-      // The menu can scroll internally when all options do not fit.
-      const minimumUsefulHeight = Math.min(desiredHeight, 160)
-      const dropUp =
-        spaceBelow < minimumUsefulHeight &&
-        spaceAbove > spaceBelow
-
-      const availableSpace = Math.max(
-        80,
-        dropUp ? spaceAbove : spaceBelow,
-      )
-
-      // The trigger width is the menu's MINIMUM: options with sublabels
-      // (model prices) may need more room, so the menu grows with its
-      // content. Right-aligned menus anchor their right edge and grow
-      // leftward; both stay clamped inside the viewport via maxWidth.
-      const width = rect.width
-      const maxWidth =
-        window.innerWidth - viewportPadding * 2
-
-      const left =
-        align === 'right'
-          ? undefined
-          : Math.min(
-              Math.max(viewportPadding, rect.left),
-              Math.max(
-                viewportPadding,
-                window.innerWidth - width - viewportPadding,
-              ),
-            )
-      const right =
-        align === 'right'
-          ? Math.max(
-              viewportPadding,
-              window.innerWidth - rect.right,
-            )
-          : undefined
-
-      setMenuPosition({
-        top: dropUp ? undefined : rect.bottom + gap,
-        bottom: dropUp
-          ? window.innerHeight - rect.top + gap
-          : undefined,
-        left,
-        right,
-        width,
-        maxWidth,
-        maxHeight: Math.min(desiredHeight, availableSpace),
-        dropUp,
-      })
-    }
-
-    updatePosition()
-
-    window.addEventListener('resize', updatePosition)
-    window.addEventListener('scroll', updatePosition, true)
-
-    const resizeObserver = new ResizeObserver(updatePosition)
-    resizeObserver.observe(triggerRef.current)
-
-    return () => {
-      window.removeEventListener('resize', updatePosition)
-      window.removeEventListener('scroll', updatePosition, true)
-      resizeObserver.disconnect()
-    }
-  }, [
-    align,
-    filtered.length,
-    maxHeight,
-    open,
-    searchable,
-  ])
-
   const controlHeight =
     size === 'sm'
       ? 'h-[var(--control-h-sm)]'
       : 'h-[var(--control-h-md)]'
-
-  const optionsMaxHeight = Math.max(
-    64,
-    (menuPosition?.maxHeight ?? maxHeight) -
-      (searchable ? 48 : 8),
-  )
 
   return (
     <>
@@ -244,22 +167,23 @@ export function Select({
           aria-haspopup="listbox"
           aria-expanded={open}
           className={cn(
-            't-control inline-flex w-full items-center justify-between gap-2 px-2.5',
-            'rounded-[var(--radius-control)] transition-colors',
-            'bg-white/[0.04] border border-white/[0.08]',
-            'hover:border-white/15 text-gray-200',
-            controlHeight,
+            variant === 'text'
+              ? 'inline-flex max-w-full items-center gap-1.5 rounded-md text-gray-200 hover:text-white transition-colors'
+              : cn(
+                't-control inline-flex w-full items-center justify-between gap-2 px-2.5',
+                'rounded-[var(--radius-control)] transition-colors',
+                'bg-white/[0.04] border border-white/[0.08]',
+                'hover:border-white/15 text-gray-200',
+                controlHeight,
+              ),
+            variant === 'text' && textClassName,
           )}
         >
           <span className="flex min-w-0 items-center gap-1.5">
-            {current?.badge && (
-              <Badge
-                color={current.badge.color}
-                label={current.badge.label}
-              />
-            )}
+            {current?.badge && <Badge tag={current.badge} />}
+            {variant === 'text' && current?.lead}
 
-            <span className="truncate">
+            <span className="truncate" title={current?.title}>
               {current?.label ?? placeholder}
             </span>
           </span>
@@ -274,6 +198,10 @@ export function Select({
         </button>
       </div>
 
+      {/* Dieselbe Flaeche und dieselbe Zeilengrammatik wie die Modellauswahl im
+          Chat (index.css, .lu-picker): Haarlinie, einzeilige klebende
+          Gruppenkoepfe, 24 px Zeile, Akzentstrich an der gewaehlten. Aufbau,
+          Inhalte und Verhalten sind die alten. */}
       {typeof document !== 'undefined' &&
         createPortal(
           <AnimatePresence>
@@ -282,7 +210,7 @@ export function Select({
                 ref={menuRef}
                 initial={{
                   opacity: 0,
-                  y: menuPosition?.dropUp ? 4 : -4,
+                  y: menu.nachOben ? 4 : -4,
                   scale: 0.98,
                 }}
                 animate={{
@@ -292,56 +220,38 @@ export function Select({
                 }}
                 exit={{
                   opacity: 0,
-                  y: menuPosition?.dropUp ? 4 : -4,
+                  y: menu.nachOben ? 4 : -4,
                   scale: 0.98,
                 }}
                 transition={{ duration: 0.12 }}
-                style={{
-                  top: menuPosition?.top,
-                  bottom: menuPosition?.bottom,
-                  left: menuPosition?.left,
-                  right: menuPosition?.right,
-                  minWidth: menuPosition?.width,
-                  maxWidth: menuPosition?.maxWidth,
-                  maxHeight:
-                    menuPosition?.maxHeight ?? maxHeight,
-                  visibility: menuPosition
-                    ? 'visible'
-                    : 'hidden',
-                }}
-                className={cn(
-                  'lu-elevated fixed z-[100] min-w-0',
-                  'rounded-[var(--radius-panel)]',
-                  'p-1 overflow-hidden',
-                )}
+                style={menu.style}
+                className="lu-elevated lu-picker fixed z-[100] flex min-w-0 flex-col overflow-hidden"
               >
                 {searchable && (
-                  <div className="mb-1 flex items-center gap-1.5 border-b border-white/[0.06] px-2 py-1.5">
-                    <Search
-                      size={13}
-                      className="text-gray-500"
-                    />
+                  <div className="lu-picker-search">
+                    <Search size={13} aria-hidden="true" />
 
                     <input
                       autoFocus
+                      aria-label={ariaLabel ? `Search ${ariaLabel}` : 'Search'}
                       value={query}
                       onChange={(event) =>
                         setQuery(event.target.value)
                       }
                       placeholder="Search..."
-                      className="t-control w-full bg-transparent text-gray-200 outline-none placeholder-gray-600"
                     />
                   </div>
                 )}
 
                 <div
+                  ref={listRef}
                   role="listbox"
-                  className="overflow-y-auto overscroll-contain scrollbar-thin"
-                  style={{ maxHeight: optionsMaxHeight }}
+                  className="lu-picker-list min-h-0 overflow-y-auto scrollbar-thin pt-1"
+                  style={{ maxHeight }}
                   onWheel={(event) => event.stopPropagation()}
                 >
                   {filtered.length === 0 && (
-                    <div className="t-control px-2.5 py-2 text-gray-600">
+                    <div className="lu-picker-empty">
                       No matches
                     </div>
                   )}
@@ -358,50 +268,42 @@ export function Select({
                     return (
                       <div key={option.value}>
                       {head && (
-                        <div className="t-control px-2.5 pt-2 pb-1 text-gray-600">
-                          {head}
+                        <div className="lu-picker-head" data-group={head}>
+                          <b>{head}</b>
+                          <span className="n">{filtered.filter((x) => x.group === head).length}</span>
                         </div>
                       )}
                       <button
                         type="button"
                         role="option"
                         aria-selected={selected}
+                        aria-disabled={option.disabled || undefined}
+                        disabled={option.disabled}
+                        title={option.title}
                         onClick={() => {
+                          if (option.disabled) return
                           onChange(option.value)
                           closeMenu()
                         }}
-                        className={cn(
-                          't-control flex w-full items-center justify-between gap-2',
-                          'rounded-[6px] px-2.5 py-1.5 text-left transition-colors',
-                          selected
-                            ? 'bg-white/10 text-white'
-                            : 'text-gray-300 hover:bg-white/[0.06]',
-                        )}
+                        className={cn('lu-picker-row w-[calc(100%-8px)] text-left', option.disabled && 'cursor-not-allowed opacity-45')}
                       >
-                        <span className="flex min-w-0 items-center gap-1.5">
-                          {option.badge && (
-                            <Badge
-                              color={option.badge.color}
-                              label={option.badge.label}
-                            />
-                          )}
+                        {option.badge && <Badge tag={option.badge} />}
+                        {option.lead}
 
-                          <span className="truncate">
-                            {option.label}
-                          </span>
-
-                          {option.sublabel && (
-                            <span className="t-mono truncate text-gray-600">
-                              {option.sublabel}
-                            </span>
-                          )}
+                        <span className="lu-picker-name truncate">
+                          {option.label}
                         </span>
 
-                        {selected && (
-                          <Check
-                            size={13}
-                            className="shrink-0 text-gray-300"
-                          />
+                        {option.tags?.map((t) => (
+                          <Badge key={t.label} tag={t} />
+                        ))}
+
+                        <span className="lu-picker-fill" />
+
+                        {option.sublabel && (
+                          <span className="lu-picker-sub t-mono">
+                            {option.sublabel}
+                          </span>
                         )}
                       </button>
                       </div>
@@ -417,22 +319,16 @@ export function Select({
   )
 }
 
-function Badge({
-  color,
-  label,
-}: {
-  color: string
-  label: string
-}) {
+function Badge({ tag }: { tag: SelectTag }) {
   return (
     <span
       className={cn(
-        'shrink-0 rounded px-1.5 py-0.5',
-        'text-[0.55rem] font-semibold',
-        color,
+        't-micro lu-picker-tag',
+        tag.tone === 'accent' && 'is-accent',
+        tag.tone === 'quiet' && 'is-quiet',
       )}
     >
-      {label}
+      {tag.label}
     </span>
   )
 }

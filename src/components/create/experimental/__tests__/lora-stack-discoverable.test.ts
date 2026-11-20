@@ -1,5 +1,5 @@
 /**
- * GH #109 (ElBiggus): "I put a couple in ...\ComfyUI\models\loras but I can't
+ * GH #109: "I put a couple in ...\ComfyUI\models\loras but I can't
  * see any way of activating them."
  *
  * Der LoRA-Stack existierte laengst: Store, Slider, Multi-LoRA-Kettung im
@@ -7,7 +7,7 @@
  * die Sektion war unsichtbar, solange die Liste leer war, und die Liste wurde
  * genau einmal beim Connect geholt. Wer eine Datei danach in den Ordner legte,
  * sah bis zum App-Neustart nichts, und wer den Ordner nicht kannte, erfuhr ihn
- * nirgends. Genau ElBiggus' Lauf.
+ * nirgends. Genau a user's Lauf.
  *
  * Quellgepinnt, weil beide Fixes reine Sichtbarkeits- und Verdrahtungs-
  * bedingungen sind, die kein bestehender Test bemerkt.

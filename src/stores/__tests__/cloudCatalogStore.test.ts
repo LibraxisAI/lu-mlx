@@ -49,7 +49,10 @@ beforeEach(() => {
 describe('cloudCatalogStore', () => {
   it('falls back to the static seed before any fetch', () => {
     expect(cloudModelsFor('image').length).toBeGreaterThan(0)
-    expect(defaultCloudModel('image')?.id).toBe('flux-schnell')
+    // 02.10.2026: der neue Standard fuer Bild steht im Notvorrat (klassisch), der
+    // fuer Video (minimax-h3-t2v, ein Studio-Modell) nicht: ohne Server bleibt
+    // es beim ersten klassischen Videomodell.
+    expect(defaultCloudModel('image')?.id).toBe('z-image-turbo')
     expect(defaultCloudModel('video')?.id).toBe('wan-2.2-720p')
     expect(isEditCapable('flux-dev')).toBe(true)
     expect(isEditCapable('flux-schnell')).toBe(false)
@@ -72,7 +75,8 @@ describe('cloudCatalogStore', () => {
     const editCapable = CLOUD_MODEL_SEED.filter((m) => m.edit).map((m) => m.id)
     expect(editCapable).toEqual(['flux-dev'])
     const negPrompt = CLOUD_MODEL_SEED.filter((m) => m.negative_prompt).map((m) => m.id)
-    expect(negPrompt).toEqual(['wan-2.2-720p', 'wan-2.2-fast', 'hunyuan-video'])
+    // hunyuan-video stand hier bis zum 24.10.2026 (retired-models.ts).
+    expect(negPrompt).toEqual(['wan-2.2-720p', 'wan-2.2-fast'])
   })
 
   it('defaultCloudModel never explodes on an all-specialized kind (audio)', () => {
@@ -160,8 +164,19 @@ describe('cloudCatalogStore', () => {
       expect(runCredits('image', 'edit', 'some-t2i-only', undefined, 999)).toBe(300)
     })
 
-    it('unknown model falls back to the quota figure', () => {
+    it('an unknown pick is priced as the model the run really uses, the default', () => {
+      // Seit 02.10.2026 faengt modelForOp eine Wahl ab, die der Katalog nicht
+      // (mehr) kennt, und Zaehler und Start rechnen beide mit dem Standard.
       useCloudCatalogStore.getState().setCatalog(serverCatalog)
+      expect(runCredits('image', 'generate', 'not-in-catalog', undefined, 321)).toBe(300)
+    })
+
+    it('falls back to the quota figure when the entry carries no price', () => {
+      useCloudCatalogStore.getState().setCatalog({
+        ...serverCatalog,
+        models: [{ id: 'flux-9', label: 'Flux 9', kind: 'image' }],
+      })
+      expect(runCredits('image', 'generate', 'flux-9', undefined, 321)).toBe(321)
       expect(runCredits('image', 'generate', 'not-in-catalog', undefined, 321)).toBe(321)
     })
   })
@@ -244,7 +259,7 @@ describe('cloudCatalogStore', () => {
     }
 
     it('music follows the length slider, not a static 60 s quote', () => {
-      // sockenmonster's exact run: 3:10 = 190 s at 30 cr/s.
+      // a user's exact run: 3:10 = 190 s at 30 cr/s.
       expect(modelCostHint(ace, 'music', 190)).toBe('5,700 cr')
       expect(modelCostHint(ace, 'music', 60)).toBe('1,800 cr')
     })

@@ -8,7 +8,7 @@
  *   1. quant in a subfolder, not at root  (Q5_K_M/<file>.gguf)
  *   2. quant split into multiple parts     (-00001-of-00002.gguf)
  *   3. guessed single-file name is a 404
- * David: "mach dann alle hf models bestätigt korrekt downloaden."
+ * The owner: "mach dann alle hf models bestätigt korrekt downloaden."
  *
  * The tree fixtures below mirror the real shapes returned by
  *   https://huggingface.co/api/models/<repo>/tree/main?recursive=true
@@ -107,5 +107,39 @@ describe('selectGgufFromTree', () => {
     expect(r!.sharded).toBe(false)
     expect(r!.quant).toBe('IQ4_XS')
     expect(r!.files[0].filename).toBe('Foo-IQ4_XS.gguf')
+  })
+})
+
+// ─── The image part of a repository (October 2026) ───
+// An image part is a GGUF with a quant token of its own. Before this it was a
+// candidate like any other, so a repository without a Q4_K_M could hand its
+// `mmproj-F16.gguf` out as the model.
+describe('a repository that ships an image part', () => {
+  const tree: HfTreeEntry[] = [
+    { type: 'file', path: 'mmproj-BF16.gguf', size: 931146432, lfs: { oid: 'b'.repeat(64) } },
+    { type: 'file', path: 'mmproj-F16.gguf', size: 927607488, lfs: { oid: 'a'.repeat(64) } },
+    { type: 'file', path: 'Model-Q5_K_M.gguf', size: 19_000_000_000 },
+    { type: 'file', path: 'Model-Q6_K.gguf', size: 22_000_000_000 },
+  ]
+
+  it('never offers the part as the model', () => {
+    const r = selectGgufFromTree(tree, 'a/b')!
+    expect(r.files.map(f => f.filename)).toEqual(['Model-Q5_K_M.gguf'])
+    expect(selectGgufFromTree(tree, 'a/b', 'F16')!.files[0].filename).toBe('Model-Q5_K_M.gguf')
+  })
+
+  it('returns the part beside the model, F16 first, with size and digest', () => {
+    const r = selectGgufFromTree(tree, 'a/b', 'Q6_K')!
+    expect(r.files[0].filename).toBe('Model-Q6_K.gguf')
+    expect(r.imagePart).toEqual({
+      url: 'https://huggingface.co/a/b/resolve/main/mmproj-F16.gguf',
+      sizeBytes: 927607488,
+      sha256: 'a'.repeat(64),
+    })
+  })
+
+  it('returns no part for a repository without one, and nothing for one with only a part', () => {
+    expect(selectGgufFromTree(tree.slice(2), 'a/b')!.imagePart).toBeUndefined()
+    expect(selectGgufFromTree(tree.slice(0, 2), 'a/b')).toBeNull()
   })
 })

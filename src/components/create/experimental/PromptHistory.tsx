@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { usePopoverPlatz } from '../../../hooks/usePopoverPlatz'
 import { motion, AnimatePresence } from 'framer-motion'
 import { History, Trash2, X } from 'lucide-react'
 import { useCreateStore } from '../../../stores/createStore'
@@ -25,6 +26,8 @@ export function PromptHistory({ onPick }: { onPick: (p: string) => void }) {
   const clearPromptHistory = useCreateStore((s) => s.clearPromptHistory)
   const removeFromPromptHistory = useCreateStore((s) => s.removeFromPromptHistory)
   const [open, setOpen] = useState(false)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const panel = usePopoverPlatz(panelRef, open, { bevorzugt: 'oben', abstand: 6 })
   const [armed, setArmed] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const armTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -63,11 +66,13 @@ export function PromptHistory({ onPick }: { onPick: (p: string) => void }) {
       <AnimatePresence>
         {open && (
           <motion.div
-            initial={{ opacity: 0, y: 4 }}
+            ref={panelRef}
+            style={panel.style}
+            initial={{ opacity: 0, y: panel.nachOben ? 4 : -4 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 4 }}
+            exit={{ opacity: 0, y: panel.nachOben ? 4 : -4 }}
             transition={{ duration: 0.12 }}
-            className="lu-elevated absolute bottom-full mb-1.5 left-0 z-50 w-72 rounded-lg p-1"
+            className={cn('lu-elevated absolute left-0 z-50 w-72 rounded-lg p-1 overflow-y-auto scrollbar-thin', panel.nachOben ? 'bottom-full mb-1.5' : 'top-full mt-1.5')}
           >
             <div className="flex items-center justify-between gap-2 px-1.5 pb-1 mb-1 border-b border-white/[0.06]">
               <span className="t-label text-gray-500">Prompt history</span>

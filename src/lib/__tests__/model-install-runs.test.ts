@@ -133,3 +133,19 @@ describe('cancel and subscription', () => {
     expect(isInstalling('lipsync')).toBe(false)
   })
 })
+
+describe('anyInstallRunning', () => {
+  it('is true exactly while a run is going, whichever lane started it', async () => {
+    const { anyInstallRunning } = await import('../model-install-runs')
+    resetInstallRuns()
+    expect(anyInstallRunning()).toBe(false)
+    let fail: (e: Error) => void = () => {}
+    startInstallRun('capability:rmbg', () => new Promise<void>((_, reject) => { fail = reject }))
+    expect(anyInstallRunning()).toBe(true)
+    fail(new Error('git clone failed'))
+    await new Promise((r) => setTimeout(r, 0))
+    // The error stays readable, but nothing is running any more.
+    expect(getInstallRun('capability:rmbg').err).toBe('git clone failed')
+    expect(anyInstallRunning()).toBe(false)
+  })
+})

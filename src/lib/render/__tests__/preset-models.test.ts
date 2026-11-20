@@ -1,14 +1,14 @@
 // Ein Modell, das in einem Preset-Schritt auswaehlbar ist, muss diesen Schritt
 // auch wirklich rechnen koennen.
 //
-// 19.09.2026, Entscheid von David: der Kunde waehlt im Preset selbst, welches
+// 19.09.2026, Entscheid des Inhabers: der Kunde waehlt im Preset selbst, welches
 // Modell den Schritt faehrt. Damit ist jede Liste hier ein Versprechen. Der
 // Fall unten loest es ein: fuer jedes Mitglied gibt es einen Preis auf beiden
 // Seiten und einen Op, den die Submit-Route annimmt.
 //
 // Desktop port (P2): zwei Web-Faelle sind gestrichen, nicht angepasst.
 // "Der Worker hat fuer jedes Mitglied eine Route" liest
-// services/render-worker/src/providers/wavespeed.ts, eine Serverdatei, die es
+// the render worker, eine Serverdatei, die es
 // im Desktop-Checkout gar nicht gibt (Portplan Abschnitt 2.3: Worker NICHT
 // portiert). "jedes Mitglied hat einen Preis, und der klassische ist der der
 // Route" vergleicht gegen creditCost aus app/api/jobs/route.ts, ebenfalls
@@ -24,25 +24,27 @@
 // behaupten, die die Testumgebung ohne Netz gar nicht hat.
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
-  ALL_ROLES, classicCredits, presetModels, requiredRoleInputs, roleForModel,
+  ALL_ROLES, SWAP_ROLES, classicCredits, presetModels, requiredRoleInputs, roleForModel,
   roleHasChoice, roleInputs,
 } from '../preset-models'
 import { CREATE_PRESETS } from '../create-presets'
 import { STUDIO_MODELS } from '../studio-contract'
-import { CLOUD_MODEL_SEED } from '../cloud-models'
 import { cloudModelById, cloudModelSupportsOp, useCloudCatalogStore } from '../../../stores/cloudCatalogStore'
 import { videoDurations } from '../video-duration'
+import { neuerServer } from './fixtures/test-catalogs'
 
 // Review B1 (Runde 2): `presetModels()` is what the Preset Workshop (P6)
 // calls directly, and the workshop is only ever reachable when the live
 // catalog already announces Studio (`quote_required`, PresetShelf.tsx hides
 // itself otherwise). This whole file tests that reachable state, so it
-// seeds one, the same way create-studio.test.ts does for the Composer's
-// OWN gate. Without this, `allPresetModels()`'s "a classic id yields to its
-// live studio twin" skip (preset-models.ts) turns off by default and every
-// twin pair here would double up.
+// seeds the catalog of the newest server (every studio model listed, with
+// tier and weights), the same way create-studio.test.ts does for the
+// Composer's OWN gate. Studio members are offered per model since 02.10.2026
+// (`studioKnown`): a catalog that lacks one hides it, and the "a classic id
+// yields to its live studio twin" skip only fires for a twin the server lists.
+// alter-server.test.ts holds the opposite state.
 beforeEach(() => {
-  useCloudCatalogStore.setState({ models: [...CLOUD_MODEL_SEED, { id: 'test-studio-marker', label: 'x', kind: 'image', quote_required: true }] })
+  useCloudCatalogStore.setState({ models: neuerServer() })
 })
 
 // Die Ops, die die Submit-Route pro Art annimmt. Spiegel von SUPPORTED_OPS in
@@ -52,6 +54,8 @@ const SUPPORTED_OPS: Record<string, readonly string[]> = {
   image: ['studio', 'generate', 'edit', 'removebg', 'eraser', 'upscale', 'lora-train'],
   video: ['studio', 'generate', 'animate', 'upscale', 'lipsync', 'extend', 'motion', 'lora-train'],
   audio: ['studio', 'music', 'tts'],
+  // 3.1.0: 3D runs as a studio model only (SUPPORTED_OPS['3d'] on the server).
+  '3d': ['studio'],
 }
 
 describe('jedes waehlbare Modell faehrt seinen Schritt', () => {
@@ -132,8 +136,17 @@ describe('jedes waehlbare Modell faehrt seinen Schritt', () => {
   })
 
   it('jedes Studio-Modell gehoert zu genau einer Rolle', () => {
-    for (const id of Object.keys(STUDIO_MODELS)) {
-      const roles = ALL_ROLES.filter((r) => presetModels(r).some((m) => m.id === id))
+    // Ein noch nicht gemessenes Modell (studio-contract.ts, unmeasuredHidden)
+    // gehoert zu keiner, solange der Server es nicht fuer die Messung freigibt.
+    for (const id of Object.keys(STUDIO_MODELS).filter((id) => STUDIO_MODELS[id].unmeasured)) {
+      expect(ALL_ROLES.filter((r) => presetModels(r).some((m) => m.id === id)), id).toEqual([])
+    }
+    for (const id of Object.keys(STUDIO_MODELS).filter((id) => !STUDIO_MODELS[id].unmeasured)) {
+      // Swap Character uses SCAIL 2 of Motion on purpose (SWAP_ROLES, as on
+      // the web). The rule holds for every other role; a model that is only
+      // in a swap role belongs to that one.
+      const others = ALL_ROLES.filter((r) => !SWAP_ROLES.includes(r) && presetModels(r).some((m) => m.id === id))
+      const roles = others.length ? others : ALL_ROLES.filter((r) => presetModels(r).some((m) => m.id === id))
       expect(roles, id).toHaveLength(1)
       expect(roleForModel(id), id).toBe(roles[0])
     }
@@ -183,6 +196,6 @@ describe('jedes waehlbare Modell faehrt seinen Schritt', () => {
 
   it('genau die Rollen ohne Alternative zeigen keine Auswahl', () => {
     const ohne = ALL_ROLES.filter((r) => !roleHasChoice(r))
-    expect(ohne.sort()).toEqual(['angles', 'presenter', 'restyle'])
+    expect(ohne.sort()).toEqual(['angles', 'presenter'])
   })
 })

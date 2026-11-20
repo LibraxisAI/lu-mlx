@@ -58,6 +58,8 @@ export default defineConfig([
     'dist',
     'dist-ssr',
     'src-tauri/target',
+    // Bauordner von Gradle in den Plugins: der Kotlin-Test legt dort einen HTML-Bericht mit report.js ab.
+    'src-tauri/plugins/**/android/build/**',
     'coverage',
     'playwright-report',
     'blob-report',
@@ -66,6 +68,20 @@ export default defineConfig([
     '.vite',
     '.llama-build',
     '.preview-mobile',
+    '.design-shots',
+    // Laeufe des Abnahmerahmens: der Trockenlauf legt dort den Vite-Cache seiner Vorschau ab (gebuendelte Abhaengigkeiten).
+    'mobile-tests/out',
+    // Kopien der Wasm-Dateien der Gesichtserkennung aus node_modules (scripts/copy-face-assets.mjs), in public/face/.gitignore.
+    'public/face/vision_wasm_*',
+    // Rohdaten eines Geraeteberichts: Rumpfstuecke, die der Treiber als Funktionskoerper ausfuehrt
+    // (oberstes return und await), keine Module. Genau dieser eine Ordner, nicht mobile-docs.
+    'mobile-docs/r25/kurzpruefung-paket-10/ios/skripte',
+    // Dasselbe fuer den iOS-Bericht von Paket 11.
+    'mobile-docs/r27/pruefung-paket-11/ios/skripte',
+    // Dasselbe fuer den iOS-Bericht von Paket 15.
+    'mobile-docs/r34/pruefung-paket-15/ios/skripte',
+    // Dasselbe fuer den iOS-Bericht von Paket 16.
+    'mobile-docs/r36/pruefung-paket-16/ios/skripte',
     '.claude',
   ]),
 

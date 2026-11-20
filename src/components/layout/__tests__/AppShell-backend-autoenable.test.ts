@@ -4,7 +4,7 @@
  * If they skipped or dismissed the modal, LM Studio / vLLM / etc. stayed
  * disabled and their models never appeared in the chat model dropdown.
  *
- * Reported on Discord #help-chat (2026-04-21, user djoks.exe, "LU does not
+ * Reported on Discord #help-chat (2026-04-21, user a user, "LU does not
  * recognize the models"). Fix: always pre-enable the first non-Ollama
  * openai-compat backend that was detected, even when multiple are running.
  * The selector modal is kept as an educational picker so the user can still

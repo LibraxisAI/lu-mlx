@@ -76,11 +76,9 @@ export async function alleKlopfen(urls: Iterable<string>): Promise<Map<string, H
  * das Adress-Tor wird ROT, sobald eine Adresse von hier wieder antwortet. Wer
  * einen Eintrag hier ablegt, muss den Grund im Katalog selbst dokumentieren.
  */
-export const BEKANNT_TOT: Record<string, string> = {
-  'https://huggingface.co/huihui-ai/Huihui-DeepSeek-V4-Flash-abliterated-GGUF/resolve/main/DeepSeek-V4-Flash-UD-IQ1_M.gguf':
-    'Repo privat oder geloescht (HTTP 401), kein geprueftes Ersatz-Repo · Begruendung bei den Eintraegen in discover.ts',
-  'https://huggingface.co/huihui-ai/Huihui-DeepSeek-V4-Flash-abliterated-GGUF/resolve/main/ggml-model-Q3_K_S.gguf':
-    'Repo privat oder geloescht (HTTP 401), kein geprueftes Ersatz-Repo · Begruendung bei den Eintraegen in discover.ts',
-}
+// Leer seit dem 08.10.2026: die zwei Adressen von
+// `huihui-ai/Huihui-DeepSeek-V4-Flash-abliterated-GGUF` (HTTP 401) standen hier,
+// bis ihre Katalogeintraege durch das gepruefte 0731-Repo ersetzt wurden.
+export const BEKANNT_TOT: Record<string, string> = {}
 
 export const istBekanntTot = (url: string): boolean => url in BEKANNT_TOT

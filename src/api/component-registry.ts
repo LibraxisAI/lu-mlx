@@ -1,6 +1,6 @@
 // ─── Component Registry: What each model type needs to work ───
 //
-// K9 (GH #136, atobo, Krea 2 classification): this table used to be typed
+// K9 (GH #136, Krea 2 classification): this table used to be typed
 // out TWICE, once in comfyui.ts (matchPatterns/downloadFilename/clipType,
 // read by findMatchingVAE/findMatchingCLIP and the workflow builders) and
 // once in discover.ts (patterns/downloadName/downloadUrl/subfolder, read by
@@ -28,6 +28,12 @@ export interface ComponentSpec {
   downloadUrl?: string
   /** ComfyUI\models subfolder this component's download lands in. */
   subfolder?: string
+  /** Size, for the "download N GB now?" question in Create. */
+  sizeGB?: number
+  /** The file's sha256 where the component is not in the bundle catalogue
+   *  (B45: the Krea 2 style reference LoRA). The download is checked
+   *  against it; a catalogue file takes its digest from the catalogue. */
+  sha256?: string
 }
 
 export interface ComponentRequirements {
@@ -39,6 +45,10 @@ export interface ComponentRequirements {
   clip?: ComponentSpec
   /** A second required text encoder (FLUX v1's clip_l alongside its T5). */
   clipSecondary?: ComponentSpec
+  /** A separate sound autoencoder (MiniMax H3 decodes its audio with it). */
+  audioVae?: ComponentSpec
+  /** A latent upscaler the graph runs between its two passes (LTX 2.5). */
+  upscaler?: ComponentSpec
   /** The CLIPLoader `type` widget value for this architecture, when the
    *  loader is CLIPLoader (single encoder). */
   clipType?: string
@@ -89,7 +99,7 @@ export const COMPONENT_REGISTRY: Record<string, ComponentRequirements> = {
   // Qwen-Image-Edit 2511 (ComfyUI 0.33). Same CLIPLoader type as Z-Image, but
   // the 7B VL encoder and the older qwen_image VAE. Patterns stay off the 2.1
   // filenames above so a box that has both files does not complete the wrong one.
-  qwen_image_edit: {
+  qwenimage1: {
     loader: 'UNETLoader', needsSeparateVAE: true, needsSeparateCLIP: true, clipType: 'qwen_image',
     vae: { matchPatterns: ['qwen_image_vae'], downloadFilename: 'qwen_image_vae.safetensors', subfolder: 'vae' },
     clip: { matchPatterns: ['qwen_2.5_vl', 'qwen2.5'], downloadFilename: 'qwen_2.5_vl_7b_fp8_scaled.safetensors', subfolder: 'text_encoders' },
@@ -120,6 +130,30 @@ export const COMPONENT_REGISTRY: Record<string, ComponentRequirements> = {
     loader: 'UNETLoader', needsSeparateVAE: false, needsSeparateCLIP: true, clipType: 'ltxv',
     clip: { matchPatterns: ['gemma'], downloadFilename: 'gemma_3_12B_it_fp8_scaled.safetensors', downloadUrl: 'https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it_fp8_scaled.safetensors', subfolder: 'text_encoders' },
   },
+  // LTX 2.5 (ComfyUI 0.32.0). The official repo Lightricks/LTX-2.5 is gated (a
+  // download needs a Hugging Face token), so the companions come from free
+  // mirrors with the same byte counts and SHA-256 (see the bundle in
+  // model-bundles.ts). The 2.3 entry above keeps Gemma 3; these are the 2.5
+  // files of the official template video_ltx2_5_t2v. Sizes are GiB.
+  ltx25: {
+    loader: 'UNETLoader', needsSeparateVAE: true, needsSeparateCLIP: true, clipType: 'ltxv',
+    vae: { matchPatterns: ['ltx-2.5-video-vae'], downloadFilename: 'ltx-2.5-video-vae-bf16.safetensors', downloadUrl: 'https://huggingface.co/comfyicu/LTX-2.5/resolve/main/vae/ltx-2.5-video-vae-bf16.safetensors', subfolder: 'vae', sizeGB: 1.37 },
+    clip: { matchPatterns: ['gemma4', 'ltx-2.5'], downloadFilename: 'gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors', downloadUrl: 'https://huggingface.co/deAPI-ai/ltx2-5-22b-dist-int8/resolve/main/text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors', subfolder: 'text_encoders', sizeGB: 14.32 },
+    audioVae: { matchPatterns: ['ltx-2.5-audio-vae'], downloadFilename: 'ltx-2.5-audio-vae-bf16.safetensors', downloadUrl: 'https://huggingface.co/comfyicu/LTX-2.5/resolve/main/vae/ltx-2.5-audio-vae-bf16.safetensors', subfolder: 'vae', sizeGB: 0.34 },
+    upscaler: { matchPatterns: ['ltx-2.5-latent-spatial-upscaler'], downloadFilename: 'ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors', downloadUrl: 'https://huggingface.co/comfyicu/LTX-2.5/resolve/main/latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors', subfolder: 'latent_upscale_models', sizeGB: 0.93 },
+  },
+  // MiniMax H3 (Discord, throwaway 2026-09-26): one model for picture and sound. The
+  // video VAE comes from here, the audio VAE is a second file the builder
+  // finds through findMiniMaxAudioVAE.
+  minimaxh3: {
+    loader: 'UNETLoader', needsSeparateVAE: true, needsSeparateCLIP: true, clipType: 'minimax',
+    vae: { matchPatterns: ['minimax_h3_video_vae', 'minimax'], downloadFilename: 'minimax_h3_video_vae_int8_convrot.safetensors', downloadUrl: 'https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_int8_convrot.safetensors', subfolder: 'vae', sizeGB: 2.8 },
+    clip: { matchPatterns: ['minimax_h3_nvfp4', 'minimax'], downloadFilename: 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors', downloadUrl: 'https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors', subfolder: 'text_encoders', sizeGB: 15.7 },
+    audioVae: { matchPatterns: ['minimax_h3_audio_vae'], downloadFilename: 'minimax_h3_audio_vae_fp32.safetensors', downloadUrl: 'https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors', subfolder: 'vae', sizeGB: 0.6 },
+  },
+  // YuE2 (Comfy-Org/YuE2, ComfyUI 0.36.0): model, text model and audio VAE in
+  // one checkpoint, like ACE Step, so there is nothing separate to fetch.
+  yue2: { loader: 'CheckpointLoaderSimple', needsSeparateVAE: false, needsSeparateCLIP: false },
   mochi: {
     loader: 'UNETLoader', needsSeparateVAE: true, needsSeparateCLIP: true, clipType: 'mochi',
     vae: { matchPatterns: ['mochi'], downloadFilename: 'mochi_vae.safetensors', downloadUrl: 'https://huggingface.co/Comfy-Org/mochi_preview_repackaged/resolve/main/split_files/vae/mochi_vae.safetensors', subfolder: 'vae' },

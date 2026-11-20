@@ -13,7 +13,7 @@
 //! the same ones a human reader would miss in a quick skim, which is the
 //! scope this map serves anyway.
 //!
-//! Ported 1:1 from uselu's `apps/bridge/src/commands/repo_map.rs` — the
+//! Ported 1:1 from the bridge daemon — the
 //! PageRank algorithm and per-language import regexes are battle-tested
 //! upstream. Only the outermost `repo_map` function is wrapped in
 //! `#[tauri::command]` for the desktop IPC bridge.
@@ -202,7 +202,7 @@ pub fn resolve_ts_import(
 /// Splits on BOTH `/` and `\\` so Windows-host runs work — `Path::join`
 /// uses `\\` on Windows, which would otherwise survive into the file-set
 /// lookup and miss every match. The lookup set is always POSIX-style.
-/// uselu's Linux-only test fixture never exposed this divergence.
+/// the web app's Linux-only test fixture never exposed this divergence.
 pub fn normalize_rel(p: &Path) -> String {
     let mut parts: Vec<&str> = Vec::new();
     for part in p.to_str().unwrap_or("").split(['/', '\\']) {

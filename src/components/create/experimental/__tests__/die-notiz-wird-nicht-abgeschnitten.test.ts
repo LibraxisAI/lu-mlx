@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
-// Ticket 0004 (sockenmonster, 2026-09-05): the setup failure under the Set up
+// Ticket 0004 (2026-09-05): the setup failure under the Set up
 // trainer button was cut after one line, "...CHECK THAT YOU ARE ONLINE AN...",
 // so the customer never saw the cause the sentence went on to name, and neither
 // did the mods who read his screenshot. A note that carries a diagnosis and a

@@ -16,6 +16,7 @@ vi.mock('../backend', async () => {
 
 import { backendCall } from '../backend'
 import { installCustomNodes, assertNodeInstallOk, comfyNodeInstallGate, __resetCustomNodeInstallLatchForTests } from '../discover'
+import { CUSTOM_NODE_REGISTRY } from '../model-bundles'
 
 const mockedCall = vi.mocked(backendCall)
 
@@ -95,6 +96,7 @@ describe('installCustomNodes (#72)', () => {
     expect(mockedCall).toHaveBeenCalledWith('install_custom_node', {
       repoUrl: 'https://github.com/1038lab/ComfyUI-RMBG',
       nodeName: 'ComfyUI-RMBG',
+      commit: CUSTOM_NODE_REGISTRY.rmbg.commit,
     })
   })
 
@@ -109,5 +111,20 @@ describe('installCustomNodes (#72)', () => {
     const installs = mockedCall.mock.calls.filter((c) => c[0] === 'install_custom_node')
     expect(installs).toHaveLength(1)
     error.mockRestore()
+  })
+
+  // The box, 03.10.2026: the head of ComfyUI-RMBG stopped loading on Windows.
+  // The registry pins the pack to a commit that was seen loading, and the pin
+  // has to reach the installer.
+  it('sends the pinned commit of a pinned pack', async () => {
+    mockedCall.mockResolvedValue({ status: 'updated', path: 'C:/x' })
+
+    await installCustomNodes(['rmbg'])
+    expect(CUSTOM_NODE_REGISTRY.rmbg.commit).toMatch(/^[0-9a-f]{40}$/)
+    expect(mockedCall).toHaveBeenCalledWith('install_custom_node', {
+      repoUrl: 'https://github.com/1038lab/ComfyUI-RMBG',
+      nodeName: 'ComfyUI-RMBG',
+      commit: CUSTOM_NODE_REGISTRY.rmbg.commit,
+    })
   })
 })

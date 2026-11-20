@@ -10,7 +10,7 @@ import { TOOLBAR_LABEL_TEXT } from './AgentModeToggle'
  * Was eine Runde auf dem gewaehlten Modell dieses Konto kostet, als kleiner
  * Hinweis in der Sitzungsleiste statt als stehendes Band ueber der Eingabe.
  *
- * David, 19.09.2026: das alte Band stand dauerhaft ueber dem Eingabefeld, sah
+ * 19.09.2026: das alte Band stand dauerhaft ueber dem Eingabefeld, sah
  * schlecht aus und schob den Agent-Schalter, die Kontextanzeige und Memories
  * nach oben. Der Hinweis ist jetzt ein einzeiliges Etikett neben dem
  * Agent-Schalter, das ein Popup oeffnet statt Platz zu beanspruchen. Bauart
@@ -22,7 +22,7 @@ import { TOOLBAR_LABEL_TEXT } from './AgentModeToggle'
  * plus ein Nachtrag desselben Tages.
  *   1. Die gruene "No credits"-Marke UEBER dem Eingabefeld ist weg, dieses
  *      Etikett hier ersetzt sie. Der Nachtrag ging weiter: die ganze Zeile
- *      ueber dem Eingabefeld (auch "No refusals") ist geloescht, nicht nur
+ *      ueber dem Eingabefeld (auch "No Filter") ist geloescht, nicht nur
  *      entkoppelt. In der Modellauswahl selbst bleiben beide Marken stehen
  *      (`ModelRowMarks.tsx`, unberuehrt, siehe `ModelSelector.tsx`).
  *   2. Das Popup hatte einen leeren Streifen ohne sichtbares X und neun Saetze

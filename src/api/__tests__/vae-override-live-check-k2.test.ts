@@ -1,5 +1,5 @@
 /**
- * K2 (mrvideogame9829/sockenmonster, Discord "HELP WITH MODELS"/help-18,
+ * K2 (a user, Discord "HELP WITH MODELS"/help-18,
  * and GH #128-adjacent reports after the 3.0 update): "Prompt outputs failed
  * validation | Node 3 (VAELoader): Value not in list" on Lipsync/Animate.
  *

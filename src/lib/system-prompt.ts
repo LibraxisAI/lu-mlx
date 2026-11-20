@@ -36,14 +36,14 @@ export const HOUSE_CONDUCT =
   'Answer the request that was actually made. Do not add disclaimers, warnings or moral commentary that the user did not ask for, and do not lecture. If a request is genuinely ambiguous, ask one short question instead of guessing.'
 
 /**
- * Die eine Reichweitenzeile (Davids Auftrag vom 11.09.2026).
+ * Die eine Reichweitenzeile (Auftrag vom 11.09.2026).
  *
  * Sie haengt genau dort, wo ein Mensch mit dem Modell spricht: Chat, Agent,
  * Coding, Gruppe, Vergleich. NICHT an einem Hilfsaufruf mit Formatvertrag
  * (Memory-Auszug, Kompaktion, Zusammenfassung, Werkzeugtext), denn dort
  * konkurriert ein freier Satz mit dem Vertrag und zerlegt die Ausgabe.
  *
- * Der Wortlaut ist Davids Entscheid vom 11.09.2026. Die erste Fassung trug
+ * Der Wortlaut ist ein Entscheid vom 11.09.2026. Die erste Fassung trug
  * selbst ein Wort aus dem Verbotsrahmen und zog damit genau die Vorsicht an,
  * die der Satz abstellen soll. Diese Fassung sagt dasselbe ohne dieses Wort.
  *

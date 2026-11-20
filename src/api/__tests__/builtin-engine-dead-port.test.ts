@@ -1,6 +1,6 @@
 /**
  * A fresh install must not greet people with a proxy stack trace
- * (applejames, Discord 2026-08-01, Windows 10, 2.5.10):
+ * (Discord 2026-08-01, Windows 10, 2.5.10):
  *
  *   Error: proxy_localhost_stream_chunked: error sending request for url
  *   (http://127.0.0.1:8127/v1/chat/completions)

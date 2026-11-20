@@ -1,5 +1,5 @@
 /**
- * Read-your-writes for Stage-and-Approve (codexStageMode).
+ * Read-your-writes for Stage-and-Approve (Ask mode, lib/codex-mode).
  *
  * Staged file_write / file_edit calls never touch the disk — they sit in
  * stagedChangesStore until the user applies them. Without an overlay the

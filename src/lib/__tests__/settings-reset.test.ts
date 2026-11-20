@@ -36,7 +36,7 @@ describe('SETTINGS_TAB_RESET_KEYS (#59)', () => {
 
   it('agent tab covers codex + search-provider + budget keys', () => {
     const a = SETTINGS_TAB_RESET_KEYS.agent
-    for (const k of ['searchProvider', 'braveApiKey', 'tavilyApiKey', 'codexStageMode', 'codexReviewMode', 'agentMaxToolCalls', 'agentMaxIterations'] as const) {
+    for (const k of ['searchProvider', 'braveApiKey', 'tavilyApiKey', 'codexAutoApply', 'codexReviewMode', 'agentMaxToolCalls', 'agentMaxIterations'] as const) {
       expect(a, `agent tab missing ${k}`).toContain(k)
     }
   })

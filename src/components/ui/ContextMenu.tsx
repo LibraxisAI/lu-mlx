@@ -22,6 +22,8 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { clampMenuPosition, type MenuAction } from './menu-actions'
 import { closeDialog, isTopDialog, nextFocusIndex, openDialog } from './dialog-a11y'
+import { kastenFaktor } from '../../lib/popover-placement'
+import { massstab } from '../../hooks/usePopoverPlatz'
 
 export interface ContextMenuProps {
   readonly items: readonly MenuAction[]
@@ -79,7 +81,7 @@ export function ContextMenu({ items, x, y, label, onClose }: ContextMenuProps) {
 
   const [active, setActive] = useState(0)
   const [pos, setPos] = useState(() =>
-    clampMenuPosition(x, y, { width: EST_WIDTH, height: items.length * EST_ROW + EST_PAD }, viewport()),
+    menuPositionUnderZoom(x, y, { width: EST_WIDTH, height: items.length * EST_ROW + EST_PAD }, viewport(), wurzelZoom(), wurzelZoom()),
   )
 
   // (1) Stapel-Anmeldung, vor den Tastatur-Effekten — wie in ui/Modal.
@@ -94,7 +96,8 @@ export function ContextMenu({ items, x, y, label, onClose }: ContextMenuProps) {
     const el = menuRef.current
     if (!el) return
     const r = el.getBoundingClientRect()
-    const next = clampMenuPosition(x, y, { width: r.width, height: r.height }, viewport())
+    const m = massstab(el)
+    const next = menuPositionUnderZoom(x, y, { width: r.width, height: r.height }, viewport(), m.zoom, m.verhaeltnis)
     setPos(prev => (prev.left === next.left && prev.top === next.top ? prev : next))
   }, [x, y, items.length])
 
@@ -201,6 +204,38 @@ export function ContextMenu({ items, x, y, label, onClose }: ContextMenuProps) {
       </div>
     </div>
   )
+}
+
+/**
+ * Die App-Wurzel liegt unter `zoom` (--ui-scale). Der Zeiger und das Fenster
+ * kommen in sichtbaren Pixeln, `left`/`top` des Menues zaehlen aber in den
+ * Pixeln der gezoomten Wurzel. Ohne Umrechnung sitzt das Menue um den
+ * Zoomfaktor neben dem Zeiger und klemmt gegen einen Rand, der nicht stimmt
+ * (dieselbe Einheitenmischung wie GitHub #149). Der gemessene Kasten kommt je
+ * nach Engine in der einen oder der anderen Einheit, `kastenFaktor` erkennt es.
+ */
+export function menuPositionUnderZoom(
+  x: number,
+  y: number,
+  box: { width: number; height: number },
+  view: { width: number; height: number },
+  zoom: number,
+  verhaeltnis: number,
+) {
+  const z = zoom > 0 ? zoom : 1
+  const f = kastenFaktor(z, verhaeltnis)
+  return clampMenuPosition(
+    x / z,
+    y / z,
+    { width: box.width / f, height: box.height / f },
+    { width: view.width / z, height: view.height / z },
+  )
+}
+
+/** Zoom der App-Wurzel fuer den ersten Anstrich, bevor das Menue im Baum haengt. */
+function wurzelZoom(): number {
+  const root = document.getElementById('root')
+  return (root && parseFloat(getComputedStyle(root).zoom)) || 1
 }
 
 function viewport() {

@@ -12,12 +12,14 @@ import { promptIdeas } from '../../../../lib/render/prompt-ideas'
 import { useCreateStore } from '../../../../stores/createStore'
 import { useCloudCatalogStore } from '../../../../stores/cloudCatalogStore'
 import { CLOUD_MODEL_SEED, type CloudModel } from '../../../../lib/render/cloud-models'
+import { neuerServer } from '../../../../lib/render/__tests__/fixtures/test-catalogs'
+import { sortByTier } from '../../../../lib/render/model-tier'
 import { CloudJobError } from '../../../../api/cloud/client'
 import { QuoteChangedError } from '../../../../api/cloud/jobs'
 import { StudioQuoteChangedError } from '../../../../api/cloud/studio'
 
-// Portiert aus uselu apps/web/components/create/experimental/__tests__/
-// preset-workshop.test.tsx (Quelle: cloud-create-presets-20260919). Desktop-
+// Portiert aus the web app
+// (Quelle: cloud-create-presets-20260919). Desktop-
 // Anpassungen (P6):
 //  - kein Handy-Zweig: `ShelfMitZustand` haelt weiterhin nur den Auf-Zu-
 //    Zustand der Schiene fuer den Aufrufer, jetzt ohne die MobileCreateTools-
@@ -60,17 +62,10 @@ function WerkstattFenster({ preset, onClosed }: { preset: CreatePreset; onClosed
 // Feld. Im echten Betrieb heilt das die erste Katalogaktualisierung, hier
 // braucht es einen Preis, damit die klassischen Faelle unten (Modellwechsel,
 // Frames/Fps) ueberhaupt einen bestaetigbaren Preis sehen.
-const QUOTE_REQUIRED_CATALOG: CloudModel[] = [
-  ...CLOUD_MODEL_SEED.map((m) =>
-    m.id === 'flux-schnell' ? { ...m, credits: { base: 300 } }
-      : m.id === 'wan-2.2-720p' ? { ...m, credits: { base: 5000, long: 8000 } }
-        : m),
-  // Sentinel: der Katalog eines Servers, der Studio kennt, traegt dieses
-  // Feld auf mindestens einem Eintrag. Der genaue Modellname ist beliebig;
-  // jeder Fall unten, der presetModels()/roleForModel() live neu berechnet,
-  // bleibt in sich konsistent, ob dieser Testeintrag mitzaehlt oder nicht.
-  { id: 'quote-required-test-marker', label: 'Test Studio Marker', kind: 'image', quote_required: true },
-]
+const QUOTE_REQUIRED_CATALOG: CloudModel[] = neuerServer().map((m) =>
+  m.id === 'flux-schnell' ? { ...m, credits: { base: 300 } }
+    : m.id === 'wan-2.2-720p' ? { ...m, credits: { base: 5000, long: 8000 } }
+      : m)
 
 const mocks = vi.hoisted(() => ({
   submit: vi.fn(), poll: vi.fn(), refresh: vi.fn(), upload: vi.fn(), getJob: vi.fn(), cancel: vi.fn(),
@@ -275,16 +270,18 @@ const eigenes = (role: 'image' | 'animate', model: string, kind: 'image' | 'vide
 // `role="option"` (Web: nur ein `<button>` ohne Rollen-Override), also wird
 // nach `option` statt nach `button` gefragt.
 const aufklappen = (name: string) => { const k = screen.getByLabelText(name); fireEvent.click(k); return k }
-const eintraege = (name: string) => { aufklappen(name); const liste = screen.getAllByRole('option').filter((b) => b.closest('.lu-elevated')); const namen = liste.map((b) => b.textContent ?? ''); fireEvent.click(screen.getByLabelText(name)); return namen }
-const waehlen = (name: string, text: string) => { aufklappen(name); const treffer = screen.getAllByRole('option').find((b) => b.closest('.lu-elevated') && (b.textContent ?? '').trim() === text); if (!treffer) throw new Error(`Eintrag nicht gefunden: ${text}`); fireEvent.click(treffer) }
+// Nur der Name zaehlt: Marken (Best, Open weights) und Preis stehen daneben.
+const nameVon = (b: HTMLElement) => (b.querySelector('.truncate')?.textContent ?? b.textContent ?? '').trim()
+const eintraege = (name: string) => { aufklappen(name); const liste = screen.getAllByRole('option').filter((b) => b.closest('.lu-elevated')); const namen = liste.map((b) => nameVon(b)); fireEvent.click(screen.getByLabelText(name)); return namen }
+const waehlen = (name: string, text: string) => { aufklappen(name); const treffer = screen.getAllByRole('option').find((b) => b.closest('.lu-elevated') && nameVon(b) === text); if (!treffer) throw new Error(`Eintrag nicht gefunden: ${text}`); fireEvent.click(treffer) }
 
 it('ein Preset mit Freigabe bietet nur die offenen Modelle an', async () => {
   // Ein gefilterter Endpunkt verweigert einen Horror- oder Spicy-Lauf und
   // kostet die Credits trotzdem. Er steht dort also gar nicht erst.
   render(<PresetWorkshop preset={CREATE_PRESETS[0]} onClose={() => {}} onGenerate={() => {}} />)
   const namen = eintraege('Model')
-  expect(namen).toEqual(presetModels('image', true).map((m) => m.label))
-  expect(namen).toContain('Chroma Spicy')
+  expect(namen).toEqual(sortByTier(presetModels('image', true)).map((m) => m.label))
+  expect(namen).toContain('Chroma Uncensored')
   expect(namen).not.toContain('Flux Schnell (fast)')
 })
 
@@ -294,7 +291,7 @@ it('laesst den Kunden das Modell des Schrittes wechseln und bucht das gewechselt
   const namen = eintraege('Model')
   expect(namen).toContain('Flux Schnell (fast)')
   // Derselbe Endpunkt steht nicht zweimal drin, einmal als Studio-Zwilling.
-  expect(namen.filter((n) => n === 'Chroma Spicy')).toHaveLength(1)
+  expect(namen.filter((n) => n === 'Chroma Uncensored')).toHaveLength(1)
 
   fireEvent.change(screen.getByLabelText('Preset prompt'), { target: { value: 'a portrait in warm light' } })
   await waitFor(() => expect((screen.getByRole('button', { name: 'Generate' }) as HTMLButtonElement).disabled).toBe(false), { timeout: 3000 })
@@ -373,7 +370,7 @@ it('bleibt waehrend der Generation offen und meldet den Start nur', async () => 
 
 it('bietet Continue oben in der Leiste an und nicht als Banner ueber dem Bild', () => {
   const weiter = vi.fn()
-  render(<ShelfMitZustand onSelect={() => {}} resume={{ title: 'Spicy Anime', onResume: weiter }} />)
+  render(<ShelfMitZustand onSelect={() => {}} resume={{ title: 'Uncensored Anime', onResume: weiter }} />)
   fireEvent.click(screen.getByRole('button', { name: 'Expand presets' }))
   const knopf = screen.getByRole('button', { name: 'Continue' })
   expect(knopf.parentElement?.textContent).toContain(`Presets · ${CREATE_PRESETS.length}`)
@@ -573,4 +570,35 @@ it('das X schliesst die Werkstatt', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Close' }))
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
   expect(closed).toHaveBeenCalledTimes(1)
+})
+
+// Bug hunt 01.10.2026 (K3). The request id was only renewed with a new quote,
+// so Generate after a failed step sent the old one, and the server handed the
+// failed job back instead of starting a new one.
+it('sends a new request id when Generate is pressed again after a failed step', async () => {
+  render(<PresetWorkshop preset={CREATE_PRESETS[1]} onClose={() => {}} onGenerate={() => {}} />)
+  fireEvent.change(screen.getByLabelText('Preset prompt'), { target: { value: 'A misty forest creature' } })
+  const generate = () => screen.getByRole('button', { name: 'Generate' }) as HTMLButtonElement
+  await waitFor(() => expect(generate().disabled).toBe(false), { timeout: 3000 })
+  fireEvent.click(generate())
+  await waitFor(() => expect(screen.getAllByText(/Stopped before provider call/).length).toBeGreaterThan(0))
+  await waitFor(() => expect(generate().disabled).toBe(false))
+  fireEvent.click(generate())
+  await waitFor(() => expect(mocks.submit).toHaveBeenCalledTimes(2))
+  const ids = mocks.submit.mock.calls.map((c) => c[0].params.client_request_id)
+  expect(ids[0]).toBeTruthy()
+  expect(ids[1]).toBeTruthy()
+  expect(ids[1]).not.toBe(ids[0])
+})
+
+// Same hunt: after a success the quote is dropped, and Try again left the same
+// inputs, so no new quote came and Generate stayed disabled.
+it('can generate again after Try again on a finished step', async () => {
+  mocks.poll.mockResolvedValue({ id: 'test-job', status: 'succeeded', kind: 'image', model: 'preset-chroma', result_url: 'https://x/y.png', created_at: '2026-10-01T00:00:00Z' })
+  render(<PresetWorkshop preset={CREATE_PRESETS[1]} onClose={() => {}} onGenerate={() => {}} />)
+  fireEvent.change(screen.getByLabelText('Preset prompt'), { target: { value: 'A misty forest creature' } })
+  await waitFor(() => expect((screen.getByRole('button', { name: 'Generate' }) as HTMLButtonElement).disabled).toBe(false), { timeout: 3000 })
+  fireEvent.click(screen.getByRole('button', { name: 'Generate' }))
+  fireEvent.click(await screen.findByRole('button', { name: /Try again/ }))
+  await waitFor(() => expect((screen.getByRole('button', { name: 'Generate' }) as HTMLButtonElement).disabled).toBe(false), { timeout: 3000 })
 })

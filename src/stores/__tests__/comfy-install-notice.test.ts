@@ -27,7 +27,7 @@ const { useComfyInstallStore } = await import('../comfyInstallStore')
 const store = () => useComfyInstallStore.getState()
 
 const SKIPPED =
-  "The requirements.txt in C:\\Users\\ddrob\\ComfyUI could not be used (pip found no " +
+  "The requirements.txt in C:\\Users\\alice\\ComfyUI could not be used (pip found no " +
   'installable version for a package it names), so LU checked the packages it knows ' +
   'about and installed the ones that were missing. Anything that file asks for on top ' +
   'of that list is not installed.'
@@ -60,7 +60,7 @@ describe('a repair that had to skip the requirements.txt says so at the end', ()
     // The panel renders `notice` exactly while the phase is idle, so this is
     // the line the user is left looking at.
     expect(store().notice).toBe(SKIPPED)
-    expect(store().notice).toContain('C:\\Users\\ddrob\\ComfyUI')
+    expect(store().notice).toContain('C:\\Users\\alice\\ComfyUI')
     expect(store().notice).toContain('is not installed')
   })
 

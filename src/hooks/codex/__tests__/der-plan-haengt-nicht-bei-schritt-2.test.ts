@@ -1,21 +1,20 @@
 /**
- * Fehler D, Symptom 2. Discord, aldrich_ironhart, 08.09.2026, Windows 11,
+ * Fehler D, Symptom 2. Discord, 08.09.2026, Windows 11,
  * LU 2.6.8, Ollama, Code Reiter: "during code generation the plan hangs at
  * step 2, sometimes restarts at 0".
  *
  * ── WAS HIER ECHT LAEUFT ───────────────────────────────────────────────────
  * Der wirkliche Ollama Transport (`streamOllamaChatWithTools`) gegen einen
  * NDJSON Strom, wie Ollama ihn schickt; der wirkliche `todoStore` ueber
- * `writeTodos`; die wirkliche `PlanStaleness` und der wirkliche
- * `AgentLoopGuard`. Nur `localFetchStream` ist ersetzt, also genau das Kabel.
+ * `writeTodos` und der wirkliche `AgentLoopGuard`. Nur `localFetchStream` ist ersetzt, also genau das Kabel.
  * Das ist die "Schrittmaschine" des Plans: einen Schritt weiterzaehlen kann in
  * LU ausschliesslich das Modell ueber `todo_write`, der Speicher ersetzt die
  * Liste jedes Mal ganz.
  *
  * ── WAS DER LAUF ZEIGT ─────────────────────────────────────────────────────
  * Ein Plan aus zwei Schritten kommt ueber Schritt 2 hinaus, ohne dass eine der
- * Bremsen dazwischenfaehrt: die Schleifenwache haelt nicht an, der
- * Frische Waechter mahnt nicht, und die Luecke schliesst sich am Ende. Der
+ * Bremsen dazwischenfaehrt: die Schleifenwache haelt nicht an, und die
+ * Luecke schliesst sich am Ende. Der
  * Haenger sitzt also NICHT in dieser Kette.
  *
  * ── WO ER SITZEN KANN, UND WAS DAFUER FEHLTE ───────────────────────────────
@@ -29,7 +28,7 @@
  * Schleife nicht von einem Modell zu unterscheiden, das fertig ist: keine
  * Werkzeugaufrufe, also `break-no-toolcalls`, Lauf zu Ende, kein Wort. Der
  * Plan steht danach genau da, wo er stand, auf seinem offenen Schritt. Und
- * der naechste Zug bekommt ueber den Anker und den Frische Waechter die
+ * der naechste Zug bekommt ueber den Anker die
  * Aufforderung, die VOLLSTAENDIGE Liste noch einmal zu schicken; ein Modell,
  * dem der Verlauf weggeschnitten wurde, schickt sie dann von vorn. Das ist
  * beides, was der Melder beschreibt.
@@ -49,7 +48,6 @@ import { streamOllamaChatWithTools } from '../../../lib/ollama-stream-tools'
 import { localFetchStream } from '../../../api/backend'
 import { useTodoStore, writeTodos, type TodoItem } from '../../../stores/todoStore'
 import { openPlanGap } from '../../../lib/plan-reconcile'
-import { PlanStaleness } from '../../../lib/plan-staleness'
 import { AgentLoopGuard } from '../../../lib/agent-loop-guard'
 import { codexCutoffNote } from '../turn-cutoff'
 import type { ToolCall, ToolDefinition } from '../../../api/providers/types'
@@ -130,7 +128,6 @@ beforeEach(() => {
 
 describe('ein Plan aus zwei Schritten kommt ueber Schritt 2 hinaus', () => {
   it('zaehlt 0 zu 2, dann 1 zu 2, dann zu', async () => {
-    const stale = new PlanStaleness()
     const guard = new AgentLoopGuard()
 
     // Zug 1: das Modell schreibt den Plan.
@@ -141,13 +138,11 @@ describe('ein Plan aus zwei Schritten kommt ueber Schritt 2 hinaus', () => {
       done: 0, total: 2, next: 'read the parser',
     })
     expect(guard.recordBatch(guardBatch(t1.toolCalls)).action).toBe('ok')
-    expect(stale.recordBatch(namesOf(t1.toolCalls), true)).toBe(false)
 
     // Zug 2: echte Arbeit, kein todo_write. Eine stille Runde ist noch keine.
     const t2 = await turn(callLine('file_read', { path: 'src/parser.ts' }), doneLine('stop'))
     expect(namesOf(t2.toolCalls)).toEqual(['file_read'])
     expect(guard.recordBatch(guardBatch(t2.toolCalls)).action).toBe('ok')
-    expect(stale.recordBatch(namesOf(t2.toolCalls), true)).toBe(false)
 
     // Zug 3: Schritt 1 fertig, Schritt 2 ist dran. DAS ist der Uebergang, an
     // dem der Melder haengenbleibt.

@@ -24,7 +24,7 @@ const SUPABASE_ANON = process.env.LU_E2E_SUPABASE_ANON_KEY
 const APP = process.env.LU_E2E_APP_URL ?? 'https://lu-labs.ai'
 const enabled = Boolean(email && password && SUPABASE_URL && SUPABASE_ANON)
 
-/** The models DeepInfra refuses a native `tools` payload for. */
+/** The models the upstream refuses a native `tools` payload for. */
 const UNRESTRICTED = [
   'Sao10K/L3-8B-Lunaris-v1-Turbo',
   'Gryphe/MythoMax-L2-13b',
@@ -91,22 +91,24 @@ test('production says every catalogue model can call tools', () => {
   expect([...flags.values()].every((v) => v === true)).toBe(true)
 })
 
-test('the chat picker marks the unrestricted models as tool capable', async ({ page }) => {
+test('the chat picker offers the unrestricted models without a chat-only tag', async ({ page }) => {
   test.skip(!enabled, 'needs the live catalogue')
   await bootIntoCloud(page)
   await openPicker(page)
 
-  // One row per unrestricted model, each carrying the wrench the app uses for
-  // "this one runs Agent and Code", not the ban marker.
+  // One row per unrestricted model. Since the picker of 3.0.5 a row shows the
+  // exception and not the normal case: a model that can call tools carries no
+  // sign for it, and only one that cannot is tagged "Chat only".
+  const menu = page.getByTestId('model-picker-menu')
   for (const id of UNRESTRICTED) {
     const label = (liveCatalogue.data.find((m) => m.id === id)?.name as string) ?? id
-    const row = page.getByRole('button', { name: label, exact: false }).filter({ hasText: label })
+    const row = menu.getByRole('option').filter({ hasText: label })
     await row.first().scrollIntoViewIfNeeded()
     await expect(row.first(), `${label} is offered`).toBeVisible({ timeout: 15_000 })
     await expect(
-      row.first().locator('[title*="Supports tool calling"]'),
-      `${label} is marked tool capable`,
-    ).toHaveCount(1)
+      row.first().locator('[data-mark="chat-only"]'),
+      `${label} is not marked as unable to call tools`,
+    ).toHaveCount(0)
   }
   expect(await page.locator('[title*="does not support tool calling"]').count()).toBe(0)
 
@@ -125,5 +127,5 @@ test('the code surface offers them too, where they used to be hidden', async ({ 
   const label =
     (liveCatalogue.data.find((m) => m.id === 'Sao10K/L3.1-70B-Euryale-v2.2')?.name as string) ??
     'Euryale'
-  await expect(page.locator('div', { hasText: label }).last()).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByTestId('model-picker-menu').getByRole('option').filter({ hasText: label }).first()).toBeVisible({ timeout: 15_000 })
 })

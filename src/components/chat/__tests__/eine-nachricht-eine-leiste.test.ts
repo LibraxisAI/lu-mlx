@@ -109,40 +109,45 @@ describe('D-S07: das Verstecken ist nur mit dem zweiten Weg vertretbar', () => {
   })
 })
 
-describe('D-S08: ein Avatar-Rezept, nicht zwei (und nicht drei)', () => {
-  it('das Rezept steht genau einmal, in einer eigenen Datei', () => {
-    expect(SLOT).toMatch(/export const AVATAR_SLOT =/)
-    expect(SLOT).toContain('border border-gray-200 dark:border-white/10')
-    expect(SLOT).toContain('bg-gray-100 dark:bg-white/8')
+describe('the avatar column: a chip for the user, the bare mark for the model', () => {
+  it('the recipe stands once, in its own file', () => {
+    expect(SLOT).toMatch(/const PLACE = 'w-6 h-6 flex items-center justify-center shrink-0'/)
+    expect(SLOT).toMatch(/export const AVATAR_SLOT = `\$\{PLACE\} /)
+    expect(SLOT).toMatch(/export const MODEL_MARK = 'w-5 h-5 object-contain/)
   })
 
-  it('Chat und Code ziehen beide daraus', () => {
-    expect(CODE).toMatch(/<div className=\{AVATAR_SLOT\}>/)
-    expect(CODEX_CODE).toMatch(/<div className=\{AVATAR_SLOT\}>/)
-    expect(BUBBLE).toMatch(/import \{ AVATAR_SLOT \} from '\.\/avatar-slot'/)
-    expect(CODEX).toMatch(/import \{ AVATAR_SLOT \} from '\.\/avatar-slot'/)
+  it('the model has no chip: no surface and no frame behind its mark', () => {
+    // Its place is the bare place, nothing added.
+    expect(SLOT).toMatch(/export const MODEL_MARK_SLOT = PLACE\n/)
+    expect(/const PLACE = '([^']*)'/.exec(SLOT)![1]).not.toMatch(/bg-|border|rounded/)
+    // The chip stays what it was, for the user.
+    expect(SLOT).toContain('rounded-md overflow-hidden bg-gray-100 dark:bg-white/8 border border-gray-200 dark:border-white/10`')
   })
 
-  it('keine der beiden Dateien buchstabiert einen eigenen Slot daneben aus', () => {
-    // Die alten Fassungen: `w-6 h-6 rounded-md overflow-hidden` im Chat,
-    // `w-5 h-5 rounded overflow-hidden` in Code. Beide sind weg.
-    for (const [name, code] of [['MessageBubble', CODE], ['CodexView', CODEX_CODE]] as const) {
-      expect(code, `${name}`).not.toMatch(/w-6 h-6 rounded-md overflow-hidden/)
-      expect(code, `${name}`).not.toMatch(/w-5 h-5 rounded overflow-hidden/)
+  it('the mark is as large as the mark that shows while the model works', () => {
+    // w-5 is 20 px, and so is the grid of the working mark.
+    expect(read('../status/glyph-geometry.ts')).toMatch(/export const GRID = 20\b/)
+    expect(SLOT).toMatch(/MODEL_MARK = 'w-5 h-5 /)
+  })
+
+  it('chat and code view both draw from it, and the chip belongs to the user alone', () => {
+    for (const [name, code, user] of [['MessageBubble', CODE, 'isUser'], ['CodexView', CODEX_CODE, "msg.role === 'user'"]] as const) {
+      expect(code, name).toContain(`{${user} ? (\n`)
+      expect(code.match(/className=\{AVATAR_SLOT\}/g), name).toHaveLength(1)
+      expect(code.match(/className=\{MODEL_MARK_SLOT\}/g), name).toHaveLength(1)
+      expect(code, name).toContain('<img src={MONOGRAM} alt="" className={`${MODEL_MARK} ${MONOGRAM_INVERT}`} />')
+      const chip = code.slice(code.indexOf('className={AVATAR_SLOT}'), code.indexOf('className={MODEL_MARK_SLOT}'))
+      expect(chip, name).not.toContain('MONOGRAM')
     }
+    expect(BUBBLE).toMatch(/import \{ AVATAR_SLOT, MODEL_MARK, MODEL_MARK_SLOT \} from '\.\/avatar-slot'/)
+    expect(CODEX).toMatch(/import \{ AVATAR_SLOT, MODEL_MARK, MODEL_MARK_SLOT \} from '\.\/avatar-slot'/)
   })
 
-  it('der Rahmen haengt nicht mehr an `isUser`', () => {
-    // Genau das war der Befund: der Rahmen war die Nutzerseite, das Monogramm
-    // stand nackt daneben.
-    const slot = CODE.slice(CODE.indexOf('<div className={AVATAR_SLOT}>'), CODE.indexOf('</div>', CODE.indexOf('<div className={AVATAR_SLOT}>')))
-    expect(slot).not.toMatch(/isUser \?[^:]*border/)
-  })
-
-  it('und das Monogramm fuellt den Chip nicht randlos aus', () => {
-    // `w-full h-full` im Chip hiesse: Zeichen bis an die Kante, ohne Luft.
-    // 70 % laesst den Chip als Flaeche lesbar und das Zeichen als Zeichen.
-    expect(CODE).toMatch(/src=\{MONOGRAM\} alt="" className=\{`w-\[70%\] h-\[70%\]/)
-    expect(CODEX_CODE).toMatch(/src=\{MONOGRAM\} alt="" className=\{`w-\[70%\] h-\[70%\]/)
+  it('neither file spells out a slot of its own next to it', () => {
+    for (const [name, code] of [['MessageBubble', CODE], ['CodexView', CODEX_CODE]] as const) {
+      expect(code, name).not.toMatch(/w-6 h-6 rounded-md overflow-hidden/)
+      expect(code, name).not.toMatch(/w-5 h-5 rounded overflow-hidden/)
+      expect(code, name).not.toMatch(/w-\[70%\] h-\[70%\]/)
+    }
   })
 })

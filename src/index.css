@@ -77,11 +77,24 @@
 @source "../index.html";
 @source "./";
 @source not "./**/__tests__/**";
+/* The mobile shell (src/mobile) brings its own plain CSS with classes m-*
+   and uses no utilities. Its files are not scanned, so a word in them can
+   never put a class into the desktop stylesheet. */
+@source not "./mobile/**";
 
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* Hover without the media query (A27, 3.0.8). Tailwind 4 wraps every `hover:`
+   and `group-hover:` in `@media (hover: hover)`. WebKitGTK answers that query
+   from the GDK seat, and a seat without a pointer capability (seen as missing
+   delete buttons on Linux, liam_2007 on Bazzite/KDE) makes it `hover: none`:
+   every control revealed on hover then stays invisible for good, even though
+   the mouse moves and `:hover` itself matches. This is a desktop app driven by
+   a pointer, so a plain `:hover` is the honest rule here. */
+@custom-variant hover (&:hover);
+
 /* ─────────────────────────────────────────────────────────────────────
-   Visual layer aligned with the uselu web companion (DD 2026-06-05)
+   Visual layer aligned with the web companion (DD 2026-06-05)
    The previous build collapsed the whole cool-accent family
    (blue/indigo/violet/purple/sky/cyan) onto ONE muted-violet ramp via a
    @theme override, which tinted the entire app lilac. The web companion
@@ -93,7 +106,7 @@
    carry no colour identity.
    ───────────────────────────────────────────────────────────────────── */
 @theme {
-  /* ── Neutral ramp — spread for depth (uselu base, widened) ──────────
+  /* ── Neutral ramp — spread for depth (the web app base, widened) ──────────
      D-T06, am 01.09.2026 nachgezaehlt. Der Kommentar, der hier stand, war
      an einer Stelle schlicht falsch: `--color-lu-base` hiess „app canvas",
      aber die Leinwand der App ist #141414, nicht #202020. Gemessen im
@@ -139,7 +152,8 @@
   --color-lu-canvas: #141414;   /* Leinwand, Titelleiste, Header */
   --color-lu-base: #202020;     /* zwei Modalflaechen, NICHT die Leinwand */
   --color-lu-panel: #262626;    /* sidebar, panels */
-  --color-lu-overlay: #363636;  /* Schwebeblatt — siehe .lu-elevated */
+  --color-lu-overlay: #363636;  /* raised side panels (documents panel, tool card) */
+  --color-lu-sheet: #151515;    /* floating sheet: menus, popovers, tooltips, see .lu-elevated */
 
   /* ── Form: EINE Radiusleiter ────────────────────────────────────────
      D-T08. Vorher liefen zwei Systeme nebeneinander: die rem-abgeleitete
@@ -238,20 +252,16 @@
      sie acht handgeschriebene Ketten mit sechs verschiedenen Flaechen und
      drei verschiedenen Schattenstufen.
 
-     `--shadow-2xl` bleibt vorerst stehen, obwohl kein `var()` es aufruft
-     und alle sechs Utility-Call-Sites Schwebeblaetter sind, die auf
-     `.lu-elevated` gehoeren. Grund: die Zeile hier zu LOESCHEN entfernt
-     den Schatten nicht, sie faellt auf Tailwinds Werkswert zurueck — also
-     genau der stille Halbbesitz, den dieser Absatz beseitigt. Die Stufe
-     geht, wenn ihre letzte Call-Site geht, nicht vorher.
+     `--shadow-2xl` went with the pop-up redesign: its last six call
+     sites were floating sheets and dialogs, which now take `.lu-elevated`
+     or `.lu-dialog`.
      Bewacht von radius-schatten-hoehe-und-bewegung.test.ts. ── */
   --shadow-lg: 0 8px 24px -6px rgba(0, 0, 0, 0.6), 0 2px 6px -2px rgba(0, 0, 0, 0.4);
   --shadow-xl: 0 16px 48px -12px rgba(0, 0, 0, 0.7), 0 4px 12px -4px rgba(0, 0, 0, 0.5);
-  --shadow-2xl: 0 24px 64px -16px rgba(0, 0, 0, 0.8);
 
   /* ── Create surface accent — the disciplined violet promoted from the
      progress-bar rgb(160,148,248). Ported from the lu-labs create tokens
-     (apps/web/app/globals.css). The desktop Create port referenced
+     (the web app). The desktop Create port referenced
      `bg-lu-accent` / `text-lu-accent` but never defined the colour, so the
      progress fill and accents resolved to nothing. ── */
   --color-lu-accent: #a094f8;
@@ -271,8 +281,24 @@
   --color-lu-on-accent: #111827;
   --color-lu-accent-edge: #8b7cf0;
 
+  /* ── Accent as TEXT on a light surface (Model Manager, 08.10.2026) ──
+     In the dark the accent carries a word by itself: #a094f8 stands 6.42:1
+     on the pane (#1e1e1e) and 5.83:1 on a tile. On white it reaches 2.60:1,
+     and the light-mode edge #8b7cf0 reaches 3.37:1, which is enough for a
+     border (1.4.11) and not for a word. So the light mode gets an ink of
+     its own, the same hue taken down until it reads:
+
+       #5746d9 on #ffffff                6.40:1
+               on #f9fafb, a tile        6.12:1
+               on the tonal fill         5.56:1   (accent at 12 % over a tile)
+
+     Callers pair the two, as the edge is paired above:
+     `text-lu-accent-ink dark:text-lu-accent`. The numbers are computed, not
+     copied, in models/__tests__/the-accent-leads-to-the-action.test.ts. */
+  --color-lu-accent-ink: #5746d9;
+
   /* ── Die ruhige Fokus-Haarlinie an Texteingaben (21.09.2026) ────────
-     David, am Windows-Bau, zuerst fuer das Nachrichtenfeld und dann fuer
+     Der Inhaber, am Windows-Bau, zuerst fuer das Nachrichtenfeld und dann fuer
      die Preset-Werkstatt, auf Nachfrage fuer die ganze App: „der lila
      balken um das prompt fenster geht garnicht ... nirgends."
 
@@ -358,7 +384,7 @@
 
 /* ─────────────────────────────────────────────────────────────────────
    Create design tokens — ported verbatim from the lu-labs web companion
-   (apps/web/app/globals.css). The Create surface was ported WITHOUT these
+   (the web app). The Create surface was ported WITHOUT these
    definitions, so every `t-*` typography class fell back to the raw 18.4px
    root (≈33% oversized vs Chat) and every `h-[var(--control-h-*)]` became an
    invalid/auto height — which is what oversized the Create tab relative to
@@ -618,7 +644,7 @@ button:not(:disabled) {
   background: transparent;
 }
 
-/* Global scrollbar (David 2026-06-02): every scrollable surface — not only
+/* Global scrollbar (2026-06-02): every scrollable surface — not only
    .scrollbar-thin containers — gets the themed scrollbar so the bare white
    Windows/WebView2 default never shows (it was visible on the coding file-tree
    and other panes). .scrollbar-thin above still wins for the slim 6px variant. */
@@ -653,7 +679,7 @@ button:not(:disabled) {
   background: transparent;
 }
 
-/* ── Themed scrollbars via the STANDARD properties (David 2026-06-02 r2) ──
+/* ── Themed scrollbars via the STANDARD properties (2026-06-02 r2) ──
    The `::-webkit-scrollbar` rules ABOVE were being IGNORED on every
    `.scrollbar-thin` container: when `scrollbar-width: thin` is active (it is,
    via the scrollbar-thin utility), Chromium/WebView2 (Edge 148) switches to
@@ -666,6 +692,19 @@ button:not(:disabled) {
 }
 .light {
   scrollbar-color: rgba(0, 0, 0, 0.24) transparent;
+}
+/* C79 (3.1.0): a native <select> in LU Dark. Its list is drawn by the
+   system, and Windows 10 drew it white while the field's light grey text
+   (text-gray-200) went with it: unreadable (Discord, help-chat 11.11.2026).
+   `color-scheme` asks for the dark list, the option colours hold where the
+   system ignores it. `.lu-field-dark` below sets its own background on top. */
+.dark select {
+  color-scheme: dark;
+}
+.dark select option,
+.dark select optgroup {
+  background-color: var(--color-lu-base);
+  color: #e5e7eb;
 }
 .scrollbar-thin {
   scrollbar-width: thin;
@@ -821,7 +860,7 @@ input[type="range"]::-webkit-slider-thumb {
    Warum die Regel ihre drei Werte aus Variablen liest: damit es bei EINER
    Regel bleibt, obwohl es zwei Fokusbilder gibt.
 
-   David, 05.09.2026, am Windows-Bau: „wenn man in das nachrichten feld
+   05.09.2026, am Windows-Bau: „wenn man in das nachrichten feld
    klickt kommt eine starke lila umrandung, die soll komplett weg." Gemessen
    an der fokussierten Textarea des Chat-Composers: `outline: solid 1,739px
    rgb(160,148,248)` mit 1,739px Abstand, also diese Hausregel; das
@@ -998,15 +1037,532 @@ input:is(
    Kontext ist voll"). Diese Regel wuerde die Kante ueberschreiben, also
    nimmt die Stelle nur das Flaechentoken und behaelt ihre eigene Kante.
    ───────────────────────────────────────────────────────────────────── */
+/* Since the pop-up redesign the sheet is dark glass, the small sibling of
+   `.lu-dialog` below: near black instead of the grey overlay tone, denser
+   than the dialog because a menu lies right on top of text. Opaque where
+   `backdrop-filter` is missing. */
 .lu-elevated {
-  background: var(--color-lu-overlay);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: var(--shadow-xl);
+  background: var(--color-lu-sheet);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), var(--shadow-xl);
 }
 .light .lu-elevated {
   background: #ffffff;
   border: 1px solid rgba(0, 0, 0, 0.1);
   box-shadow: var(--shadow-lg);
+}
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .lu-elevated {
+    background: rgba(18, 18, 18, 0.94);
+    -webkit-backdrop-filter: blur(20px) saturate(150%);
+    backdrop-filter: blur(20px) saturate(150%);
+  }
+  .light .lu-elevated {
+    background: rgba(255, 255, 255, 0.96);
+    -webkit-backdrop-filter: blur(20px) saturate(160%);
+    backdrop-filter: blur(20px) saturate(160%);
+  }
+}
+
+/* `.lu-dialog`: the dialog sheet. Dark glass instead of the flat grey
+   overlay tone: a near black, slightly see-through surface that blurs what
+   lies behind it, a hairline edge, a soft light from the top and a deep
+   shadow. Where `backdrop-filter` is missing or switched off (older
+   WebKitGTK), the surface is simply opaque. The glass itself is dense
+   (94 percent): a WebKit that claims support and then does not blur, as
+   the Playwright WebKit build does, must not let the page read through. `.lu-dialog-scrim` is the dimmed app
+   behind it. */
+.lu-dialog {
+  background: #121212;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 32px 80px -20px rgba(0, 0, 0, 0.85),
+    0 8px 24px -8px rgba(0, 0, 0, 0.6);
+}
+.light .lu-dialog {
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 32px 80px -24px rgba(0, 0, 0, 0.35),
+    0 8px 24px -8px rgba(0, 0, 0, 0.12);
+}
+.lu-dialog-scrim {
+  background: rgba(0, 0, 0, 0.55);
+}
+.light .lu-dialog-scrim {
+  background: rgba(20, 20, 20, 0.28);
+}
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .lu-dialog {
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0) 140px),
+      rgba(14, 14, 14, 0.94);
+    -webkit-backdrop-filter: blur(28px) saturate(150%);
+    backdrop-filter: blur(28px) saturate(150%);
+  }
+  /* C25 (3.1.0): light stays fully opaque. At 95 percent white the text,
+     cards and images of the page behind showed through every dialog, the
+     dark glass hides that, white glass does not. */
+  .light .lu-dialog {
+    background: #ffffff;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+/* The dialog button bar (components/ui/ModalActions). The colours are set
+   here for both themes and not through utilities, because the light rescue
+   layer below turns a bare `text-white` dark, which would break a solid red
+   button. */
+.lu-dialog-actions {
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(0, 0, 0, 0.22);
+  border-bottom-left-radius: inherit;
+  border-bottom-right-radius: inherit;
+}
+.light .lu-dialog-actions {
+  border-top-color: rgba(0, 0, 0, 0.07);
+  background: rgba(0, 0, 0, 0.025);
+}
+.lu-dialog-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 14px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  font-size: 0.7rem;
+  line-height: 1.2;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
+}
+.lu-dialog-btn:disabled { cursor: not-allowed; opacity: 0.45; }
+.lu-dialog-btn-secondary { border-color: rgba(255, 255, 255, 0.14); color: #e5e7eb; background: rgba(255, 255, 255, 0.04); }
+.lu-dialog-btn-secondary:hover:not(:disabled) { background: rgba(255, 255, 255, 0.1); }
+.lu-dialog-btn-quiet { color: #9ca3af; }
+.lu-dialog-btn-quiet:hover:not(:disabled) { color: #ffffff; background: rgba(255, 255, 255, 0.08); }
+.lu-dialog-btn-danger { background: #dc2626; border-color: #dc2626; color: #ffffff; }
+.lu-dialog-btn-danger:hover:not(:disabled) { background: #ef4444; border-color: #ef4444; }
+.light .lu-dialog-btn-secondary { border-color: rgba(0, 0, 0, 0.16); color: #1f2937; background: transparent; }
+.light .lu-dialog-btn-secondary:hover:not(:disabled) { background: rgba(0, 0, 0, 0.05); }
+.light .lu-dialog-btn-quiet { color: #4b5563; }
+.light .lu-dialog-btn-quiet:hover:not(:disabled) { color: #111827; background: rgba(0, 0, 0, 0.05); }
+
+/* Model pickers: one row grammar.
+   The chat model picker in Cloud mode (components/models/CloudModelPicker)
+   and the Create select (components/create/ui/Select) are two components and
+   one look: the elevated sheet, a hairline, one-line sticky group heads, a
+   24 px row with the accent bar on the selected one, hairline tags. Greys
+   plus the one accent, state dots in green, grey and red, no yellow. Both
+   themes are set here through variables, so neither component names a colour
+   of its own. Same classes and values as the web app (globals.css). */
+/* The service line stands in the local list and the rate popover is lifted
+   out to the body, so each brings the palette along. So does a tag. */
+.lu-picker,
+.lu-picker-tag,
+.lu-picker-service,
+.lu-picker-rate {
+  --pk-sheet: var(--color-lu-sheet);
+  --pk-edge: rgba(255, 255, 255, 0.08);
+  --pk-hair: rgba(255, 255, 255, 0.07);
+  --pk-hover: rgba(255, 255, 255, 0.07);
+  --pk-t1: #f3f4f6;
+  --pk-t2: #d1d5db;
+  --pk-t3: #9ca3af;
+  --pk-accent: var(--color-lu-accent);
+  --pk-ok: #34d399;
+  --pk-err: #f87171;
+  --pk-off: #6b7280;
+}
+.lu-picker {
+  border-radius: 10px;
+  color: var(--pk-t2);
+}
+.light .lu-picker,
+.light .lu-picker-tag,
+.light .lu-picker-service,
+.light .lu-picker-rate {
+  --pk-sheet: #ffffff;
+  --pk-edge: rgba(0, 0, 0, 0.1);
+  --pk-hair: rgba(0, 0, 0, 0.08);
+  --pk-hover: rgba(0, 0, 0, 0.05);
+  --pk-t1: #111827;
+  --pk-t2: #374151;
+  --pk-t3: #6b7280;
+  --pk-accent: var(--color-lu-cloud);
+  --pk-ok: #059669;
+  --pk-err: #dc2626;
+  --pk-off: #9ca3af;
+}
+
+.lu-picker-search {
+  flex: none;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px 0 12px;
+  border-bottom: 1px solid var(--pk-hair);
+  color: var(--pk-t3);
+}
+.lu-picker-search input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  background: none;
+  border: 0;
+  box-shadow: none;
+  color: var(--pk-t1);
+  font-size: var(--text-control);
+  /* The field has the keyboard for as long as the menu is open, so a ring
+     around it says nothing. The house focus rule reads its width here; the
+     lens lights up instead, and the cursor row shows where Enter goes. */
+  --lu-focus-w: 0px;
+}
+.lu-picker-search:focus-within { color: var(--pk-t2); }
+.lu-picker-search input::placeholder { color: var(--pk-t3); }
+.lu-picker-text-btn {
+  flex: none;
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-size: var(--text-label);
+  font-weight: 600;
+  color: var(--pk-t2);
+}
+.lu-picker-text-btn:hover:not(:disabled) { color: var(--pk-t1); background: var(--pk-hover); }
+.lu-picker-text-btn:disabled { opacity: 0.6; }
+
+/* The one line for what needs attention now. No box: a dot and a sentence. */
+.lu-picker-note {
+  flex: none;
+  min-height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 10px 3px 12px;
+  border-bottom: 1px solid var(--pk-hair);
+  font-size: var(--text-mono);
+  line-height: 1.35;
+  color: var(--pk-t2);
+}
+.lu-picker-note.is-err { color: var(--pk-err); }
+.lu-picker-note > span:not(.lu-picker-dot) { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+
+.lu-picker-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--pk-off); }
+.lu-picker-dot.is-accent { background: var(--pk-accent); }
+.lu-picker-dot.is-ok { background: var(--pk-ok); }
+.lu-picker-dot.is-err { background: var(--pk-err); }
+
+.lu-picker-chips {
+  flex: none;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.lu-picker-chips::-webkit-scrollbar { display: none; }
+.lu-picker-chip {
+  flex: none;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--pk-hair);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-label);
+  font-weight: 500;
+  color: var(--pk-t3);
+  white-space: nowrap;
+  transition: background-color 120ms, color 120ms, border-color 120ms;
+}
+.lu-picker-chip:hover { color: var(--pk-t1); }
+.lu-picker-chip[aria-pressed='true'] { background: var(--pk-hover); color: var(--pk-t1); border-color: var(--pk-edge); }
+.lu-picker-chip i { font-style: normal; font-variant-numeric: tabular-nums; opacity: 0.7; }
+
+.lu-picker-cap {
+  flex: none;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 40px 0 16px;
+  border-bottom: 1px solid var(--pk-hair);
+  font-size: var(--text-label);
+  font-weight: 500;
+  color: var(--pk-t3);
+  opacity: 0.8;
+}
+
+.lu-picker-list {
+  /* Rows measure their place against the list (CloudModelPicker keeps the
+     keyboard cursor in view by hand). */
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-bottom: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--pk-edge) transparent;
+}
+.lu-picker-empty { padding: 18px 16px; font-size: var(--text-mono); color: var(--pk-t3); text-align: center; }
+
+/* Group head: one line of 22 px that sticks to the top while its rows scroll. */
+.lu-picker-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 14px 0 16px;
+  background: var(--pk-sheet);
+  font-size: var(--text-label);
+  color: var(--pk-t3);
+}
+.lu-picker-head b { font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap; }
+.lu-picker-head .n { margin-left: auto; font-variant-numeric: tabular-nums; opacity: 0.8; }
+div + div > .lu-picker-head { margin-top: 2px; }
+
+/* A local service in one line: state dot, a short sentence, a text button.
+   Stands above the local model list, which keeps its own look. */
+.lu-picker-service {
+  flex: none;
+  min-height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--pk-hair);
+  font-size: var(--text-label);
+  color: var(--pk-t2);
+}
+.lu-picker-service .st { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lu-picker-service.is-err .st { color: var(--pk-err); }
+.lu-picker-service .lu-picker-text-btn { border: 1px solid var(--pk-edge); color: var(--pk-t1); }
+
+.lu-picker-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  margin: 0 4px;
+  padding: 0 6px 0 12px;
+  border-radius: 6px;
+  font-size: var(--text-control);
+  line-height: 1.2;
+  color: var(--pk-t2);
+  /* The sticky head above must not cover a row the keyboard scrolls to. */
+  scroll-margin-top: 24px;
+}
+.lu-picker-row:hover,
+.lu-picker-row[data-cursor='true'] { background: var(--pk-hover); color: var(--pk-t1); }
+/* Selected: an option of either picker. */
+.lu-picker-row[aria-selected='true'] { color: var(--pk-t1); }
+.lu-picker-row[aria-selected='true'] .lu-picker-name { font-weight: 500; }
+.lu-picker-row[aria-selected='true']::before {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--pk-accent);
+}
+/* The part of a row that picks the model. A button of its own, because the
+   row also carries the rate control, and a button cannot hold another one. */
+.lu-picker-pick {
+  flex: 1;
+  min-width: 0;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-align: left;
+  color: inherit;
+  font-weight: inherit;
+}
+.lu-picker-row .lu-picker-pick:focus-visible { outline: 0; }
+.lu-picker-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lu-picker-name mark {
+  background: none;
+  color: var(--pk-t1);
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: var(--pk-accent);
+  text-underline-offset: 2px;
+}
+/* Name, marks and the quiet note as one part of the row: the note stands
+   after the name where there is room and wraps under it where there is not. */
+.lu-picker-lead {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1px 6px;
+  padding: 3px 0;
+}
+.lu-picker-lead .lu-picker-name { max-width: 100%; }
+/* Plain muted text, no frame and no colour: it is a note, not a mark. */
+.lu-picker-quiet {
+  flex: none;
+  font-size: var(--text-micro);
+  line-height: 1.2;
+  color: var(--pk-t3);
+  white-space: nowrap;
+}
+.lu-picker-sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--pk-t3); }
+.lu-picker-fill { flex: 1; min-width: 0; }
+
+.lu-picker-tag {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: 14px;
+  padding: 0 5px;
+  border-radius: 4px;
+  border: 1px solid var(--pk-hair);
+  font-weight: 500;
+  line-height: 1;
+  color: var(--pk-t3);
+  white-space: nowrap;
+}
+.lu-picker-tag.is-accent { color: var(--pk-accent); }
+.lu-picker-tag.is-bright { color: var(--pk-t1); }
+.lu-picker-tag.is-quiet { opacity: 0.7; }
+/* The statement: the one tag that carries the accent as text, edge and tint.
+   The measured mark next to it in the catalogue is the plain grey tag, so the
+   colour alone tells the two apart. */
+.lu-picker-tag.is-statement {
+  color: var(--pk-accent);
+  border-color: color-mix(in srgb, var(--pk-accent) 55%, transparent);
+  background: color-mix(in srgb, var(--pk-accent) 9%, transparent);
+  font-weight: 600;
+}
+/* On white the tint eats into the contrast of the word, so it is thinner
+   there (measured in e2e/uncensored-mark.spec.ts: at least 4.5 to 1). */
+.light .lu-picker-tag.is-statement {
+  background: color-mix(in srgb, var(--pk-accent) 5%, transparent);
+}
+
+/* The Beta mark (components/ui/BetaMark, the list in lib/beta.ts). One look
+   wherever it stands: the word in a full hairline frame, brighter than a
+   quiet tag so it is not overlooked next to a switch, and without a colour,
+   because Beta is neither a warning nor an error (lib/hinweis.ts). It brings
+   its own two greys, so it reads the same on a panel, a dialog and a sheet. */
+.lu-beta {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: 14px;
+  padding: 0 5px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.34);
+  font-size: var(--text-micro);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: #e5e7eb;
+  white-space: nowrap;
+  vertical-align: middle;
+  cursor: help;
+}
+.light .lu-beta { border-color: rgba(0, 0, 0, 0.36); color: #1f2937; }
+
+.lu-picker-icons { flex: none; display: grid; grid-template-columns: 14px 14px; column-gap: 4px; color: var(--pk-t3); }
+.lu-picker-icons svg { display: block; opacity: 0.85; }
+.lu-picker-num {
+  flex: none;
+  min-width: 38px;
+  text-align: right;
+  font-size: var(--text-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--pk-t3);
+  white-space: nowrap;
+}
+.lu-picker-row:hover .lu-picker-num,
+.lu-picker-row[data-cursor='true'] .lu-picker-num,
+.lu-picker-row[aria-selected='true'] .lu-picker-num { color: var(--pk-t2); }
+
+/* The tiny question mark at the end of a row: what the model draws. */
+/* The slot keeps its width on a row without one, so the context column
+   stays in line. */
+.lu-picker-rate-anchor { flex: none; width: 14px; height: 14px; display: inline-flex; }
+.lu-picker-rate-btn {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid var(--pk-edge);
+  display: inline-grid;
+  place-items: center;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--pk-t3);
+}
+.lu-picker-rate-btn:hover,
+.lu-picker-rate-btn[aria-expanded='true'] { color: var(--pk-t1); border-color: var(--pk-t3); }
+/* Lifted out to the body and placed by hooks/usePopoverPlatz, which sets the
+   coordinates, the width and the height it may take. */
+.lu-picker-rate {
+  position: fixed;
+  z-index: 100;
+  overflow-y: auto;
+  padding: 7px 10px 8px;
+  border-radius: 8px;
+  background: var(--pk-sheet);
+  border: 1px solid var(--pk-edge);
+  box-shadow: 0 8px 24px -6px rgba(0, 0, 0, 0.45);
+  font-size: var(--text-mono);
+  font-weight: 400;
+  line-height: 1.4;
+  color: var(--pk-t2);
+  white-space: normal;
+  text-align: left;
+}
+.lu-picker-rate h4 { margin: 0 0 3px; font-size: var(--text-label); font-weight: 500; color: var(--pk-t3); }
+.lu-picker-rate dl { margin: 0; min-width: 146px; display: grid; grid-template-columns: 1fr auto; column-gap: 16px; }
+.lu-picker-rate > span { display: block; max-width: 220px; }
+.lu-picker-rate dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; color: var(--pk-t1); }
+
+.lu-picker-foot {
+  flex: none;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px 0 16px;
+  border-top: 1px solid var(--pk-hair);
+  font-size: var(--text-label);
+  color: var(--pk-t3);
+  white-space: nowrap;
+}
+.lu-picker-foot > span:not(.lu-picker-keys) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.lu-picker-keys { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; }
+.lu-picker-keys kbd {
+  font: inherit;
+  font-size: 9px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 3px;
+  border: 1px solid var(--pk-hair);
+  display: inline-grid;
+  place-items: center;
 }
 
 /* ─────────────────────────────────────────────────────────────────────
@@ -1162,6 +1718,41 @@ input:is(
 
 .light .placeholder-gray-500::placeholder,
 .light .placeholder-gray-600::placeholder { color: rgb(75 85 99); }
+
+/* Hover-Gegenstueck zur Rettung oben (Discord-Meldung 20.10.2026: Symbole im
+   Hellmodus unsichtbar). `.light .hover\:text-white:hover` stand schon hier,
+   die grauen Hover-Farben fehlten. Ein Knopf mit `text-gray-500
+   hover:text-gray-300` wurde im Hellmodus beim Ueberfahren hellgrau auf
+   Weiss, das Symbol verschwand genau in dem Moment, in dem man es treffen
+   will. Gut hundert Stellen tragen das Muster ohne `dark:`. Ziel ist
+   gray-900 wie bei `hover:text-white`: im Hellen heisst Hervorheben dunkler. */
+.light .hover\:text-gray-100:hover,
+.light .hover\:text-gray-200:hover,
+.light .hover\:text-gray-300:hover,
+.light .group:hover .group-hover\:text-gray-300 { color: rgb(17 24 39); }
+
+/* Flaechen, die in BEIDEN Modi dunkel sind: Bedienknoepfe ueber einem Bild
+   oder Video (`bg-black/55` auf der Kachel), die schwarze Lightbox. Die
+   Rettung oben dreht dort `text-gray-100` und `text-white` auf Dunkelgrau,
+   und das Symbol steht dunkel auf Schwarz (gemessen 1,06:1 bis 1,41:1).
+   `lu-on-dark` am Element oder an der dunklen Flaeche nimmt die Rettung
+   zurueck und setzt genau die Werte, die der Dunkelmodus dort zeigt. Der
+   Dunkelmodus selbst bleibt unberuehrt, jede Regel haengt an `.light`. */
+.light .lu-on-dark.text-white, .light .lu-on-dark .text-white { color: #fff; }
+.light .lu-on-dark.text-gray-100, .light .lu-on-dark .text-gray-100 { color: var(--color-gray-100); }
+.light .lu-on-dark.text-gray-200, .light .lu-on-dark .text-gray-200 { color: var(--color-gray-200); }
+.light .lu-on-dark.text-gray-300, .light .lu-on-dark .text-gray-300 { color: var(--color-gray-300); }
+.light .lu-on-dark.text-gray-400, .light .lu-on-dark .text-gray-400 { color: var(--color-gray-400); }
+.light .lu-on-dark:is(.text-gray-500, .text-gray-600),
+.light .lu-on-dark :is(.text-gray-500, .text-gray-600) { color: rgb(156 163 175); }
+.light .lu-on-dark.hover\:text-white:hover, .light .lu-on-dark .hover\:text-white:hover { color: #fff; }
+.light .lu-on-dark.hover\:text-gray-100:hover, .light .lu-on-dark .hover\:text-gray-100:hover { color: var(--color-gray-100); }
+.light .lu-on-dark.hover\:text-gray-200:hover, .light .lu-on-dark .hover\:text-gray-200:hover { color: var(--color-gray-200); }
+.light .lu-on-dark.hover\:text-gray-300:hover, .light .lu-on-dark .hover\:text-gray-300:hover { color: var(--color-gray-300); }
+.light .lu-on-dark .hover\:text-gray-900:hover { color: var(--color-gray-100); }
+.light .lu-on-dark.bg-white\/10, .light .lu-on-dark .bg-white\/10 { background-color: rgb(255 255 255 / 0.10); }
+.light .lu-on-dark.hover\:bg-white\/20:hover, .light .lu-on-dark .hover\:bg-white\/20:hover { background-color: rgb(255 255 255 / 0.20); }
+.light .lu-on-dark .border-white\/\[0\.08\] { border-color: rgb(255 255 255 / 0.08); }
 
 /* ─────────────────────────────────────────────────────────────────────
    Create typography + surface helpers — the classes the Create components
@@ -1395,6 +1986,66 @@ input:is(
   padding: 0;
 }
 
+/* The variant that shows its edge at rest. In a toolbar the controls stand in
+   a row and the row is their container. Alone on a card (Stop, Remove, the
+   size picker, Get on a model that does not fit this machine) a control
+   without an edge reads as a label, and that was the Model Manager's
+   complaint on 08.10.2026: nobody could tell what was there to be pressed.
+   The edge is the one the pressed state draws anyway, so no new value. */
+.lu-control--outline { border-color: rgba(255, 255, 255, 0.14); }
+.light .lu-control--outline { border-color: rgba(0, 0, 0, 0.14); }
+
+/* The light switch of the Voice surface: a wall rocker that stands in the
+   "on" position for as long as the voice engine is in memory. Same height,
+   radius and timing as the controls next to it. The rocker is the picture,
+   the number next to it says how much memory a click gives back. */
+.lu-light-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  height: var(--control-h-sm);
+  padding: 0 8px 0 5px;
+  border: 1px solid rgb(255 255 255 / 0.12);
+  border-radius: var(--radius-control);
+  background-color: transparent;
+  transition:
+    background-color var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) var(--motion-ease);
+}
+.light .lu-light-switch { border-color: rgb(0 0 0 / 0.14); }
+.lu-light-switch:hover:not(:disabled) { background-color: rgb(255 255 255 / 0.06); }
+.light .lu-light-switch:hover:not(:disabled) { background-color: rgb(0 0 0 / 0.05); }
+.lu-light-switch:disabled { opacity: 0.6; cursor: default; }
+.lu-light-switch__rocker {
+  position: relative;
+  width: 10px;
+  height: 16px;
+  border-radius: 3px;
+  border: 1px solid rgb(255 255 255 / 0.28);
+  background-color: rgb(255 255 255 / 0.06);
+}
+.light .lu-light-switch__rocker {
+  border-color: rgb(0 0 0 / 0.3);
+  background-color: rgb(0 0 0 / 0.04);
+}
+/* The pressed half of the rocker: up means on. */
+.lu-light-switch__rocker::after {
+  content: '';
+  position: absolute;
+  left: 1px;
+  right: 1px;
+  top: 1px;
+  height: 6px;
+  border-radius: 2px;
+  background-color: var(--color-lu-accent);
+  transition: top var(--motion-fast) var(--motion-ease), background-color var(--motion-fast) var(--motion-ease);
+}
+.lu-light-switch:disabled .lu-light-switch__rocker::after {
+  top: 7px;
+  background-color: rgb(156 163 175);
+}
+
 /* Der Aufnahme-Puls. Ein Control, das gerade zuhoert, sagt das lauter als
    „aktiv" — aber nicht in Rot: das Mikrofon nimmt auf, es ist nicht kaputt,
    und Rot heisst in dieser App an rund hundert Stellen „kaputt oder wird
@@ -1532,6 +2183,130 @@ input:is(
   cursor: not-allowed;
 }
 
+/* ──────────────────────────────────────────────────────────────────
+   .lu-tonal: the action of a card in a grid.
+
+   Between the two recipes above there was nothing. `.lu-primary` is the one
+   filled accent of a screen (Send, Generate, Sign in), `.lu-control` is
+   neutral. A catalogue shows the same action once per card, up to 53 times
+   on one screen. Filled, that is a wall of violet, which is why the tiles of
+   the Model Manager kept their Get neutral until now. Neutral, it is what
+   The owner said about that page on 08.10.2026: one cannot tell where to click.
+
+   So the card action is tinted and not filled: the accent at 12 % as its
+   surface, the accent as its word, an edge of the same hue. It leads the eye
+   to the one thing a card is for and stays quiet in a grid of them.
+   `.lu-primary` keeps its place as the action of a surface that has exactly
+   one: the engine setup, an empty state.
+
+   Geometry is the neutral recipe's own (height, radius, type size), so a Get
+   stands in one line with the Stop or the picker next to it.
+
+   Contrast of the word on its own fill, computed in
+   models/__tests__/the-accent-leads-to-the-action.test.ts. The fill is 12 %
+   and not the 14 % of `--color-lu-accent-soft`: at 14 % the word drops to
+   4.48:1 the moment the tile under it is hovered and lightens.
+     dark   accent on the fill over a tile    4.84:1   tile hovered 4.64:1
+            hover, 20 % and the lifted accent 4.81:1
+     light  ink on the fill over a tile       5.56:1   tile hovered 5.28:1
+            hover, 20 %                       4.98:1
+   Focus is the ring of the house, which lies on the tile and not on the
+   fill. Disabled loses its colour like `.lu-primary` does: a Get that waits
+   for another download must not look like the one that can be pressed.
+   ───────────────────────────────────────────────────────────────── */
+.lu-tonal {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  height: var(--control-h-sm);
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--color-lu-accent) 30%, transparent);
+  border-radius: var(--radius-control);
+  background-color: color-mix(in srgb, var(--color-lu-accent) 12%, transparent);
+  color: var(--color-lu-accent);
+  font-size: 0.6rem;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  transition:
+    background-color var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) var(--motion-ease),
+    color var(--motion-fast) var(--motion-ease),
+    scale var(--motion-fast) var(--motion-ease);
+}
+.light .lu-tonal {
+  border-color: color-mix(in srgb, var(--color-lu-accent-ink) 30%, transparent);
+  color: var(--color-lu-accent-ink);
+}
+.lu-tonal:hover:not(:disabled) {
+  border-color: var(--color-lu-accent-ring);
+  background-color: color-mix(in srgb, var(--color-lu-accent) 20%, transparent);
+  color: var(--color-lu-accent-hover);
+}
+.light .lu-tonal:hover:not(:disabled) {
+  border-color: var(--color-lu-accent-ink);
+  color: var(--color-lu-accent-ink);
+}
+.lu-tonal:disabled {
+  filter: grayscale(1);
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ──────────────────────────────────────────────────────────────────
+   .lu-tile: the card of a catalogue grid.
+
+   The chat tile, the bundle tile, the Mac media tile, the installed row and
+   the loading skeleton each spelled the same surface by hand, five chains
+   that had to be changed together and were not. One recipe: surface, edge,
+   corner and the hover that says the card is alive.
+
+   Depth comes from the edge and not from a shadow. On the dark pane a shadow
+   tops out at 1.26:1 (the arithmetic stands at `.dark .shadow-sm` above), so
+   a raised card is a brighter edge. `--lead` is that brighter edge at rest,
+   for the cards a page puts first. `--active` is the one that is in use: the
+   soft accent ground and the accent edge, the same pair the Settings
+   navigation and the Models rail mark their selection with, and it holds
+   while the pointer is over it.
+
+   Padding stays with the caller: a tile and a list row share the surface,
+   not the measure.
+   ───────────────────────────────────────────────────────────────── */
+.lu-tile {
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: var(--radius-xl);
+  background-color: rgba(255, 255, 255, 0.03);
+  transition:
+    background-color var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) var(--motion-ease);
+}
+.lu-tile:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+  background-color: rgba(255, 255, 255, 0.045);
+}
+.lu-tile--lead { border-color: rgba(255, 255, 255, 0.14); }
+.light .lu-tile {
+  border-color: rgba(0, 0, 0, 0.09);
+  background-color: rgb(249 250 251);
+}
+.light .lu-tile:hover {
+  border-color: rgba(0, 0, 0, 0.16);
+  background-color: rgb(243 244 246);
+}
+.light .lu-tile--lead { border-color: rgba(0, 0, 0, 0.16); }
+.lu-tile--active,
+.lu-tile--active:hover {
+  border-color: var(--color-lu-accent-ring);
+  background-color: var(--color-lu-accent-soft);
+}
+.light .lu-tile--active,
+.light .lu-tile--active:hover {
+  border-color: var(--color-lu-accent-edge);
+  background-color: var(--color-lu-accent-soft);
+}
+
 /* Checkerboard backing so transparent (background-removed) PNGs don't read
    as solid black in the Stage / gallery. */
 .lu-checker {
@@ -1544,7 +2319,7 @@ input:is(
   background-position: 0 0, 0 8px, 8px -8px, -8px 0;
 }
 
-/* Tool-call band (2.6.0, David 2026-07-31): the running tool's name gets a
+/* Tool-call band (2.6.0, 2026-07-31): the running tool's name gets a
    soft violet sweep and trailing dots, so a live call reads as "working"
    without a chip per step. Text shimmer needs background-clip, so light and
    dark pick their own base grey. */
@@ -1724,3 +2499,788 @@ select.lu-field-dark {
 select.lu-field-dark option {
   background-color: var(--color-lu-base);
 }
+
+/* Computer control has LU's window while it works on the screen: the small
+   panel in the corner of the display, or the paused view
+   (components/computer/ComputerSurface). The page under it stays mounted and
+   is not shown. On Windows the window is see-through, so nothing of the page
+   may paint around the panel. */
+html[data-computer-surface]:not([data-computer-surface='window']),
+html[data-computer-surface]:not([data-computer-surface='window']) body {
+  background: transparent !important;
+}
+html[data-computer-surface]:not([data-computer-surface='window']) #root {
+  visibility: hidden;
+}
+
+/* The panel. In the app the window is exactly as large as the panel, so a
+   shadow that reaches outside would be cut off at the edge of the window:
+   the panel is drawn by its surface and its hairline alone. An opaque
+   window (macOS) has square corners, and the panel fills it to the edge. */
+.lu-computer-panel {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  transition: border-color var(--motion-slow) var(--motion-ease);
+}
+.light .lu-computer-panel {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+.lu-computer-panel--flush {
+  border: 0;
+}
+.lu-computer-head {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+/* Pause and Stop stand next to the line that says what LU does: small
+   enough to leave that line its room, the same height as each other. */
+.lu-computer-head > .lu-dialog-btn {
+  min-height: 20px;
+  padding: 0 7px;
+  font-size: 11px;
+  line-height: 16px;
+  border-radius: 6px;
+}
+/* What LU does right now: small, one line, level with the middle of the logo. */
+.lu-computer-word {
+  font-size: 12px;
+  line-height: 20px;
+  font-weight: 500;
+}
+.light .lu-computer-head {
+  border-bottom-color: rgba(0, 0, 0, 0.07);
+}
+
+/* The grip: a short bar in the padding at the top edge of the panel. It
+   takes no room of its own, so nothing in the panel moves for it, and it
+   stays quiet until the pointer is on it. */
+.lu-computer-grip {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  z-index: 1;
+  width: 64px;
+  height: 12px;
+  margin-left: -32px;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: grab;
+  touch-action: none;
+}
+.lu-computer-grip:active {
+  cursor: grabbing;
+}
+.lu-computer-grip::before {
+  content: '';
+  position: absolute;
+  top: 4px;
+  left: 18px;
+  width: 28px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.16);
+  transition: background-color var(--motion-base) var(--motion-ease);
+}
+.lu-computer-grip:hover::before,
+.lu-computer-grip:focus-visible::before {
+  background: rgba(255, 255, 255, 0.5);
+}
+.light .lu-computer-grip::before {
+  background: rgba(0, 0, 0, 0.14);
+}
+.light .lu-computer-grip:hover::before,
+.light .lu-computer-grip:focus-visible::before {
+  background: rgba(0, 0, 0, 0.45);
+}
+.lu-computer-grip:focus-visible {
+  outline: none;
+}
+/* On a page that is larger than the window (a browser), the panel changes
+   corners the way the window does in the app: one slide that comes to rest. */
+.lu-computer-surface--placed {
+  transition: left 240ms cubic-bezier(0.22, 1, 0.36, 1), top 240ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* LU waits for the user: a question is open, or the session is paused.
+   Nothing runs until the user answers, so the panel says so in the one
+   accent: its edge takes the colour and breathes slowly, and the line in
+   the head takes it too. #b1a6ff on the panel is 9.5:1, #7c3aed on white
+   5.7:1. */
+.lu-computer-surface[data-waiting] .lu-computer-panel {
+  border-color: var(--color-lu-accent);
+  animation: lu-computer-wait 2.4s ease-in-out infinite;
+}
+.lu-computer-surface[data-waiting] .lu-computer-word {
+  color: var(--color-lu-accent-hover);
+}
+.light .lu-computer-surface[data-waiting] .lu-computer-word {
+  color: var(--color-lu-cloud);
+}
+@keyframes lu-computer-wait {
+  0%,
+  100% {
+    box-shadow: inset 0 0 0 1px transparent;
+  }
+  50% {
+    box-shadow: inset 0 0 0 1px var(--color-lu-accent), inset 0 0 18px var(--color-lu-accent-soft);
+  }
+}
+
+/* What changes inside the panel fades in. The panel itself keeps its size. */
+.lu-computer-enter {
+  animation: lu-computer-enter var(--motion-slow) var(--motion-ease) both;
+}
+@keyframes lu-computer-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+/* A question of computer control (components/computer/ComputerQuestion).
+   In the panel it is the lower part of the panel, under a hairline. Above
+   an input field it is a sheet of its own. */
+.lu-computer-question {
+  padding: 12px 14px;
+}
+.lu-computer-question--panel {
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(0, 0, 0, 0.22);
+  animation: lu-computer-enter var(--motion-slow) var(--motion-ease) both;
+}
+.light .lu-computer-question--panel {
+  border-top-color: rgba(0, 0, 0, 0.07);
+  background: rgba(0, 0, 0, 0.025);
+}
+/* The answers: two to a row, each as wide as its half and high enough to
+   hit without aiming. The main one stands last. */
+.lu-computer-answers {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.lu-computer-answers > .lu-dialog-btn {
+  min-height: 34px;
+  padding: 0 10px;
+  font-size: var(--text-control);
+}
+/* Above an input field the sheet is wide and the window may be low (Voice
+   at 900 by 600): the answers stand in one row on the right, each wide
+   enough to hit. */
+.lu-computer-question:not(.lu-computer-question--panel) .lu-computer-answers {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.lu-computer-question:not(.lu-computer-question--panel) .lu-computer-answers > .lu-dialog-btn {
+  min-width: 112px;
+  min-height: 32px;
+}
+/* The Autonomous switch. Two lines of text have room with the switch on
+   and with it off, so pressing it moves nothing. */
+.lu-computer-autonomy {
+  height: 44px;
+  transition: border-color var(--motion-base) var(--motion-ease), background-color var(--motion-base) var(--motion-ease);
+}
+.lu-computer-autonomy[data-on='true'] {
+  border-color: rgba(34, 197, 94, 0.4);
+  background: rgba(34, 197, 94, 0.06);
+}
+/* The two shortcuts, at the foot of the panel while no question stands there. */
+/* The note of computer control above the input field: one small line in
+   the middle. It hangs above its place and takes no room, so nothing moves
+   when it comes and goes. */
+.lu-computer-note {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 6px);
+  transform: translateX(-50%);
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: min(94%, 30rem);
+  padding: 3px 10px;
+  border-radius: 9999px;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  color: #e5e7eb;
+  background: rgba(24, 24, 27, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+  animation: lu-computer-note-in var(--motion-base, 180ms) ease-out both;
+}
+.light .lu-computer-note {
+  color: #1f2937;
+  background: rgba(255, 255, 255, 0.96);
+  border-color: rgba(0, 0, 0, 0.1);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.1);
+}
+/* A stop with its reason can be long: it may wrap, the passing note never does. */
+.lu-computer-note[data-kind='stopped'] {
+  white-space: normal;
+  border-radius: 12px;
+}
+.lu-computer-note--passing {
+  animation: lu-computer-note-pass 2500ms ease-in-out both;
+}
+.lu-computer-note-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 9999px;
+  background: var(--color-lu-accent);
+}
+.lu-computer-note-close {
+  flex: none;
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 9999px;
+  color: #9ca3af;
+}
+.lu-computer-note-close:hover {
+  color: inherit;
+}
+@keyframes lu-computer-note-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 3px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+@keyframes lu-computer-note-pass {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 3px);
+  }
+  8%,
+  88% {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, 0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lu-computer-note,
+  .lu-computer-note--passing {
+    animation: none;
+  }
+}
+.lu-computer-keys {
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+.light .lu-computer-keys {
+  border-top-color: rgba(0, 0, 0, 0.07);
+}
+.lu-computer-keys kbd {
+  font: inherit;
+  padding: 1px 5px;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05);
+  color: #d1d5db;
+}
+.light .lu-computer-keys kbd {
+  border-color: rgba(0, 0, 0, 0.14);
+  background: rgba(0, 0, 0, 0.03);
+  color: #374151;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lu-computer-surface[data-waiting] .lu-computer-panel,
+  .lu-computer-enter,
+  .lu-computer-question--panel {
+    animation: none;
+  }
+  .lu-computer-surface--placed,
+  .lu-computer-grip::before {
+    transition: none;
+  }
+}
+
+/* Where the window does not shrink, the bar of computer control lies over
+   the top of the main panel and says how far down it reaches
+   (--computer-bar-clear, ComputerControlHost). In Voice the question of
+   computer control stands above the controls of the session, and in a low
+   window or before the first words that is right under the title row
+   (2.5rem): the transcript keeps the reach of the bar free, and so does the
+   lower part while it stands alone. */
+.lu-voice-transcript {
+  min-height: max(0px, calc(var(--computer-bar-clear, 0px) - 2.5rem));
+}
+.lu-voice-lower--alone {
+  padding-top: max(0.5rem, calc(var(--computer-bar-clear, 0px) - 2rem));
+  /* Centred while there is room. In a low window the content starts at the
+     top instead of growing out of it on both sides. */
+  justify-content: safe center;
+}
+
+/* Create in chat: the placeholder while a result is being made
+   (components/chat/create/CreateMedia.tsx). Same block as on the web
+   (the web app), so the mirrored card looks the same. */
+@keyframes lu-develop {
+  0% { background-position: 0% 0%, 200% 50%; }
+  100% { background-position: 0% 0%, 0% 50%; }
+}
+.lu-develop {
+  background-color: #1b1b1b;
+  background-image:
+    radial-gradient(120% 90% at 20% 110%, rgba(160, 148, 248, 0.16), transparent 60%),
+    linear-gradient(110deg, rgba(255, 255, 255, 0.015) 30%, rgba(255, 255, 255, 0.07) 50%, rgba(255, 255, 255, 0.015) 70%);
+  background-size: 100% 100%, 200% 100%;
+  animation: lu-develop 2.4s linear infinite;
+}
+/* Light mode: the same placeholder on a light ground, so the line inside it
+   (dark type in light mode) stays readable. */
+.light .lu-develop {
+  background-color: #ececec;
+  background-image:
+    radial-gradient(120% 90% at 20% 110%, rgba(160, 148, 248, 0.24), transparent 60%),
+    linear-gradient(110deg, rgba(0, 0, 0, 0.01) 30%, rgba(0, 0, 0, 0.06) 50%, rgba(0, 0, 0, 0.01) 70%);
+}
+@media (prefers-reduced-motion: reduce) {
+  .lu-develop { animation: none; }
+}
+
+/* ──────────────────────────────────────────────────────────────────
+   Neurons introduction (N2, 3.0.9). Calm loops of 3–6 s, nothing that
+   blinks. Colours from the house tokens: the accent for what the user
+   adds, the greys of the page for the model. With reduced motion every
+   drawing stands still in its finished state.
+   ───────────────────────────────────────────────────────────────── */
+.neuron-intro .nintro-label { font-size: 10px; font-weight: 600; letter-spacing: 0.04em; }
+.neuron-intro .nintro-code { font-size: 12px; font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace; fill: #111827; }
+.dark .neuron-intro .nintro-code { fill: #f3f4f6; }
+.neuron-intro .nintro-muted-text { fill: #6b7280; }
+.dark .neuron-intro .nintro-muted-text { fill: #9ca3af; }
+.neuron-intro .nintro-accent-text { fill: var(--color-lu-accent); }
+.neuron-intro .nintro-accent-stroke { stroke: var(--color-lu-accent); }
+.neuron-intro .nintro-accent-fill { fill: var(--color-lu-accent); }
+.neuron-intro .nintro-accent-fill-soft { fill: color-mix(in srgb, var(--color-lu-accent) 16%, transparent); }
+.neuron-intro .nintro-track { stroke: #d1d5db; }
+.dark .neuron-intro .nintro-track { stroke: rgba(255, 255, 255, 0.16); }
+.neuron-intro .nintro-knob-fill { fill: #ffffff; stroke: #9ca3af; stroke-width: 1.5; }
+.dark .neuron-intro .nintro-knob-fill { fill: #2a2a2a; stroke: #6b7280; }
+.neuron-intro .nintro-knob { animation: lu-nintro-knob 4.2s ease-in-out infinite; }
+.neuron-intro .nintro-card { fill: #ffffff; stroke: #e5e7eb; stroke-width: 1; }
+.dark .neuron-intro .nintro-card { fill: rgba(255, 255, 255, 0.04); stroke: rgba(255, 255, 255, 0.10); }
+.neuron-intro .nintro-card--accent { fill: color-mix(in srgb, var(--color-lu-accent) 8%, transparent); stroke: color-mix(in srgb, var(--color-lu-accent) 45%, transparent); }
+/* WebKit draws no clip-path on SVG groups: the code slides in instead of being typed. */
+.neuron-intro .nintro-type { opacity: 0; animation: lu-nintro-type 5s ease-out infinite; }
+.neuron-intro .nintro-glow { opacity: 0; animation: lu-nintro-glow 5s ease-in-out infinite; }
+.neuron-intro .nintro-dash { stroke-dashoffset: 40; animation: lu-nintro-dash 5s linear infinite; }
+.neuron-intro .nintro-arrive { opacity: 0; animation: lu-nintro-arrive 5s ease-out infinite; }
+
+@keyframes lu-nintro-knob {
+  0%, 100% { transform: translateY(0); }
+  45%, 70% { transform: translateY(var(--nintro-to, 0px)); }
+}
+@keyframes lu-nintro-type {
+  0% { opacity: 0; transform: translateX(-8px); }
+  25%, 100% { opacity: 1; transform: none; }
+}
+@keyframes lu-nintro-glow {
+  0%, 25% { opacity: 0; }
+  35%, 80% { opacity: 1; }
+  100% { opacity: 0; }
+}
+@keyframes lu-nintro-dash {
+  0%, 35% { stroke-dashoffset: 40; opacity: 0; }
+  40% { opacity: 1; }
+  100% { stroke-dashoffset: 0; opacity: 1; }
+}
+@keyframes lu-nintro-arrive {
+  0%, 50% { opacity: 0; }
+  60%, 100% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .neuron-intro .nintro-knob,
+  .neuron-intro .nintro-type,
+  .neuron-intro .nintro-glow,
+  .neuron-intro .nintro-dash,
+  .neuron-intro .nintro-arrive { animation: none; }
+  .neuron-intro .nintro-type,
+  .neuron-intro .nintro-glow,
+  .neuron-intro .nintro-arrive,
+  .neuron-intro .nintro-dash { opacity: 1; }
+  .neuron-intro .nintro-knob { transform: translateY(var(--nintro-to, 0px)); }
+}
+
+/* Neurons introduction, new drawings (3.1.0). Same rules as the old ones:
+   calm loops, the accent for what the user adds, greys for the model, and
+   with reduced motion every drawing stands still in its finished state. */
+.neuron-intro .nintro-plane { stroke: #d1d5db; stroke-width: 1; }
+.dark .neuron-intro .nintro-plane { stroke: rgba(255, 255, 255, 0.13); }
+.neuron-intro .nintro-plane--hit { animation: lu-nintro-plane 8s ease-in-out infinite; }
+.neuron-intro .nintro-wire { fill: none; stroke: #9ca3af; stroke-width: 1; stroke-linecap: round; }
+.dark .neuron-intro .nintro-wire { stroke: rgba(255, 255, 255, 0.30); }
+.neuron-intro .nintro-wire--bent,
+.dark .neuron-intro .nintro-wire--bent { stroke: var(--color-lu-accent); stroke-dasharray: 100; stroke-dashoffset: 100; animation: lu-nintro-bend 8s cubic-bezier(0.45, 0, 0.2, 1) infinite; }
+.neuron-intro .nintro-ghost { animation: lu-nintro-ghost 8s ease-in-out infinite; }
+.neuron-intro .nintro-pulse { fill: none; stroke: #111827; stroke-width: 1.6; stroke-linecap: round; stroke-dasharray: 2.4 97.6; stroke-dashoffset: 100; animation: lu-nintro-pulse 3.2s linear infinite; }
+.dark .neuron-intro .nintro-pulse { stroke: #ffffff; }
+.neuron-intro .nintro-bentgroup { opacity: 0; animation: lu-nintro-bentgroup 8s ease-in-out infinite; }
+.neuron-intro .nintro-thumb { animation: lu-nintro-thumb 8s cubic-bezier(0.45, 0, 0.2, 1) infinite; }
+.neuron-intro .nintro-when { opacity: 0; animation: lu-nintro-when 8s ease-in-out infinite; }
+.neuron-intro .nintro-text { fill: #111827; }
+.dark .neuron-intro .nintro-text { fill: #f3f4f6; }
+.neuron-intro .nintro-small { font-size: 9px; font-weight: 500; letter-spacing: 0.02em; }
+.neuron-intro .nintro-name { font-size: 11px; font-weight: 500; }
+
+@keyframes lu-nintro-plane {
+  0%, 18%, 94%, 100% { stroke: #d1d5db; }
+  30%, 82% { stroke: var(--color-lu-accent); }
+}
+.dark .neuron-intro .nintro-plane--hit { animation-name: lu-nintro-plane-dark; }
+@keyframes lu-nintro-plane-dark {
+  0%, 18%, 94%, 100% { stroke: rgba(255, 255, 255, 0.13); }
+  30%, 82% { stroke: var(--color-lu-accent); }
+}
+@keyframes lu-nintro-bend {
+  0%, 18% { stroke-dashoffset: 100; }
+  34%, 100% { stroke-dashoffset: 0; }
+}
+@keyframes lu-nintro-bentgroup {
+  0%, 17% { opacity: 0; }
+  19%, 84% { opacity: 1; }
+  94%, 100% { opacity: 0; }
+}
+@keyframes lu-nintro-ghost {
+  0%, 18%, 94%, 100% { opacity: 1; }
+  32%, 84% { opacity: 0.22; }
+}
+@keyframes lu-nintro-pulse {
+  from { stroke-dashoffset: 100; }
+  to { stroke-dashoffset: 0; }
+}
+@keyframes lu-nintro-thumb {
+  0%, 17%, 95%, 100% { transform: translateY(0); }
+  29%, 84% { transform: translateY(-22px); }
+}
+@keyframes lu-nintro-when {
+  0%, 22%, 92%, 100% { opacity: 0; }
+  32%, 84% { opacity: 1; }
+}
+
+/* Four ways into one slider: one way at a time, 2 s each. */
+.neuron-intro .nintro-way { opacity: 0.45; animation: lu-nintro-way 8s ease-in-out infinite; }
+.neuron-intro .nintro-way-wire { fill: none; stroke: #d1d5db; stroke-width: 1; }
+.dark .neuron-intro .nintro-way-wire { stroke: rgba(255, 255, 255, 0.14); }
+.neuron-intro .nintro-way-run { fill: none; stroke: var(--color-lu-accent); stroke-width: 1.6; stroke-linecap: round; stroke-dasharray: 100; stroke-dashoffset: 100; opacity: 0; animation: lu-nintro-way-run 8s cubic-bezier(0.45, 0, 0.2, 1) infinite; }
+.neuron-intro .nintro-way-mark { fill: #9ca3af; stroke: #9ca3af; }
+.dark .neuron-intro .nintro-way-mark { fill: #9ca3af; stroke: #9ca3af; }
+.neuron-intro .nintro-way-name { opacity: 0; animation: lu-nintro-way-name 8s ease-in-out infinite; }
+.neuron-intro .nintro-way-knob { animation: lu-nintro-way-knob 8s cubic-bezier(0.45, 0, 0.2, 1) infinite; }
+@keyframes lu-nintro-way {
+  0%, 25%, 100% { opacity: 0.45; }
+  3%, 22% { opacity: 1; }
+}
+@keyframes lu-nintro-way-run {
+  0% { stroke-dashoffset: 100; opacity: 0; }
+  2% { opacity: 1; }
+  11%, 21% { stroke-dashoffset: 0; opacity: 1; }
+  25%, 100% { stroke-dashoffset: 0; opacity: 0; }
+}
+@keyframes lu-nintro-way-name {
+  0%, 8% { opacity: 0; }
+  12%, 22% { opacity: 1; }
+  25%, 100% { opacity: 0; }
+}
+@keyframes lu-nintro-way-knob {
+  0%, 8% { transform: translateX(34px); }
+  13%, 33% { transform: translateX(-30px); }
+  38%, 58% { transform: translateX(20px); }
+  63%, 83% { transform: translateX(-10px); }
+  88%, 100% { transform: translateX(34px); }
+}
+
+/* Step 4: one answer, a line wipes across it. */
+.neuron-intro .nintro-wipe { position: relative; width: 100%; max-width: 400px; height: 100px; }
+.neuron-intro .nintro-wipe-a { position: absolute; left: 0; right: 0; top: 30px; margin: 0; font-size: 15px; line-height: 1.5; }
+.neuron-intro .nintro-wipe-a--before { color: #6b7280; clip-path: inset(0 0 0 30%); animation: lu-nintro-wipe-before 9s cubic-bezier(0.45, 0, 0.2, 1) infinite; }
+.dark .neuron-intro .nintro-wipe-a--before { color: #8b919c; }
+.neuron-intro .nintro-wipe-a--after { color: #111827; clip-path: inset(0 70% 0 0); animation: lu-nintro-wipe-after 9s cubic-bezier(0.45, 0, 0.2, 1) infinite; }
+.dark .neuron-intro .nintro-wipe-a--after { color: #f3f4f6; }
+.neuron-intro .nintro-wipe-bar { position: absolute; top: 22px; bottom: 0; left: 30%; width: 1.5px; margin-left: -0.75px; background: var(--color-lu-accent); animation: lu-nintro-wipe-bar 9s cubic-bezier(0.45, 0, 0.2, 1) infinite; }
+.neuron-intro .nintro-wipe-bar::after { content: ''; position: absolute; left: -4px; top: 50%; width: 9.5px; height: 22px; margin-top: -11px; border-radius: 5px; background: var(--color-lu-accent); }
+.neuron-intro .nintro-wipe-tag { position: absolute; top: 0; font-size: 10px; font-weight: 600; letter-spacing: 0.04em; }
+.neuron-intro .nintro-wipe-tag--on { left: 0; color: var(--color-lu-accent); }
+.neuron-intro .nintro-wipe-tag--off { right: 0; color: #6b7280; }
+.dark .neuron-intro .nintro-wipe-tag--off { color: #9ca3af; }
+@keyframes lu-nintro-wipe-bar { 0%, 8%, 100% { left: 6%; } 45%, 62% { left: 94%; } }
+@keyframes lu-nintro-wipe-after { 0%, 8%, 100% { clip-path: inset(0 94% 0 0); } 45%, 62% { clip-path: inset(0 6% 0 0); } }
+@keyframes lu-nintro-wipe-before { 0%, 8%, 100% { clip-path: inset(0 0 0 6%); } 45%, 62% { clip-path: inset(0 0 0 94%); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .neuron-intro .nintro-plane--hit,
+  .neuron-intro .nintro-wire--bent,
+  .neuron-intro .nintro-ghost,
+  .neuron-intro .nintro-pulse,
+  .neuron-intro .nintro-bentgroup,
+  .neuron-intro .nintro-thumb,
+  .neuron-intro .nintro-when,
+  .neuron-intro .nintro-way,
+  .neuron-intro .nintro-way-run,
+  .neuron-intro .nintro-way-name,
+  .neuron-intro .nintro-way-knob,
+  .neuron-intro .nintro-wipe-a--before,
+  .neuron-intro .nintro-wipe-a--after,
+  .neuron-intro .nintro-wipe-bar { animation: none; }
+  .neuron-intro .nintro-pulse,
+  .neuron-intro .nintro-way-run { opacity: 0; }
+  .neuron-intro .nintro-plane--hit { stroke: var(--color-lu-accent); }
+  .neuron-intro .nintro-wire--bent { stroke-dashoffset: 0; }
+  .neuron-intro .nintro-bentgroup,
+  .neuron-intro .nintro-when,
+  .neuron-intro .nintro-way { opacity: 1; }
+  .neuron-intro .nintro-ghost { opacity: 0.22; }
+  .neuron-intro .nintro-thumb { transform: translateY(-22px); }
+  .neuron-intro .nintro-way-name--first { opacity: 1; }
+  .neuron-intro .nintro-way-knob { transform: translateX(-30px); }
+  .neuron-intro .nintro-wipe-bar { left: 50%; }
+  .neuron-intro .nintro-wipe-a--after { clip-path: inset(0 50% 0 0); }
+  .neuron-intro .nintro-wipe-a--before { clip-path: inset(0 0 0 50%); }
+}
+
+/* Neurons slider (N2): the house range (track and knob above), with a
+   mark at 0 so "unchanged" can be seen, and a taller hit area. */
+input[type="range"].neuron-range,
+.light input[type="range"].neuron-range {
+  height: 18px;
+  cursor: pointer;
+  background:
+    linear-gradient(to right, transparent calc(50% - 1px), rgba(0, 0, 0, 0.35) calc(50% - 1px), rgba(0, 0, 0, 0.35) calc(50% + 1px), transparent calc(50% + 1px)) center / 100% 12px no-repeat,
+    linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)) center / 100% 4px no-repeat;
+}
+.dark input[type="range"].neuron-range {
+  background:
+    linear-gradient(to right, transparent calc(50% - 1px), rgba(255, 255, 255, 0.35) calc(50% - 1px), rgba(255, 255, 255, 0.35) calc(50% + 1px), transparent calc(50% + 1px)) center / 100% 12px no-repeat,
+    linear-gradient(rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.1)) center / 100% 4px no-repeat;
+}
+input[type="range"].neuron-range:disabled { cursor: not-allowed; opacity: 0.5; }
+
+/* Neurons job bar while the share is not known yet (model loading): a
+   short piece runs along the track instead of a bar stuck at 0 %. */
+.neuron-bar-wait { animation: lu-neuron-wait 1.6s ease-in-out infinite; }
+@keyframes lu-neuron-wait {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .neuron-bar-wait { animation: none; transform: none; }
+}
+
+/* ── Chat look (3.1.0, C58 / C42) ──────────────────────────────────────
+   Rules for components/chat/ChatLookScope.tsx. Every colour arrives as a
+   custom property that lib/chat-look.ts has already checked for 4.5:1
+   against the pane in the current mode, and a rule only applies when the
+   scope carries its class, i.e. when the user picked that colour. With no
+   choice made, nothing here matches and the chat looks as before.
+   Unlayered on purpose: these must win over the Tailwind utilities on the
+   same elements (text-gray-800, leading-relaxed, max-w-[80%]). */
+
+/* The reading zoom. The ONE sanctioned zoom besides --ui-scale on the app
+   root (ein-massstab.test.ts): it is the user's own text size, set with
+   Ctrl/Cmd + wheel like browser zoom, on the message column only. */
+.lu-chat-zoom { zoom: var(--lu-chat-zoom, 1); }
+
+.lu-look-model-color .lu-msg-model-text .markdown-content { color: var(--lu-look-model-text); }
+.lu-look-user-color .lu-msg-user-text { color: var(--lu-look-user-text); }
+.lu-look-user-bubble .lu-msg-user-bubble {
+  background-color: var(--lu-look-user-bubble);
+  border-color: color-mix(in srgb, var(--lu-look-user-bubble), currentColor 14%);
+}
+.lu-look-quotes .lu-quote { color: var(--lu-look-quote); }
+.lu-look-actions .lu-msg-text em,
+.lu-look-actions .lu-action { color: var(--lu-look-action); font-style: italic; }
+.lu-look-font .lu-msg-text { font-family: var(--lu-look-font); }
+/* Line spacing. Not only the line height inside a wrapped paragraph: a
+   roleplay reply is mostly short paragraphs and one-line messages, where that
+   alone moved almost nothing, and the slider looked broken (report 14.11.2026).
+   Paragraph gaps and the gap between messages follow the same value; at the
+   default (1.625) they equal the classes they replace (mb-3, py-1), so the
+   slider has no jump when it first moves. Prose in the Code transcript and
+   in agent notes follows too; code blocks keep their own height. */
+.lu-look-leading .lu-msg-text,
+.lu-look-leading .lu-msg-text :is(p, li),
+.lu-look-leading .markdown-content :is(p, li, blockquote, td, th) { line-height: var(--lu-look-leading); }
+.lu-look-leading .markdown-content :is(p, ul, ol, blockquote) { margin-bottom: calc(var(--lu-look-leading) * 0.46rem); }
+.lu-look-leading .lu-msg-row { padding-block: calc(var(--lu-look-leading) * 0.154rem); }
+
+/* Layout "bubbles": the reply gets a bubble too. */
+.lu-look-bubbles .lu-msg-model-bubble {
+  border-radius: 0.5rem;
+  padding: 0.375rem 0.625rem;
+  background-color: var(--lu-look-model-bubble, #f3f4f6);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+}
+.lu-look-bubbles[data-mode="dark"] .lu-msg-model-bubble {
+  background-color: var(--lu-look-model-bubble, rgba(255, 255, 255, 0.04));
+  border-color: rgba(255, 255, 255, 0.07);
+}
+
+/* Layout "document": one flowing text, no avatars, every turn left. */
+.lu-look-document .lu-msg-row { flex-direction: row; }
+.lu-look-document [data-msg-avatar] { display: none; }
+.lu-look-document .lu-msg-column { max-width: 100%; flex: 1 1 auto; min-width: 0; }
+.lu-look-document .lu-msg-row-user .lu-msg-column > * { justify-content: flex-start; }
+.lu-look-document .lu-msg-user-bubble {
+  background-color: transparent;
+  border-width: 0 0 0 2px;
+  border-radius: 0;
+  padding-left: 0.625rem;
+}
+
+/* The background picture lies BEHIND the transcript (isolation makes the
+   scope a stacking context, the picture sits at -1 inside it) under a scrim
+   of the pane colour, whose strength has a floor (lib/chat-look SCRIM_MIN). */
+.lu-look-has-bg { isolation: isolate; }
+.lu-look-has-bg > .lu-chat-bg {
+  z-index: -1;
+  /* Soft edge toward the session strip and the prompt box below, which
+     keep the plain pane colour: no hard line under the last message. */
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 64px), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 64px), transparent);
+}
+.lu-chat-scrim { background-color: #ffffff; }
+.lu-look[data-mode="dark"] .lu-chat-scrim { background-color: #1e1e1e; }
+.lu-look-has-bg .lu-msg-text { text-shadow: 0 0 6px rgba(255, 255, 255, 0.55); }
+.lu-look-has-bg[data-mode="dark"] .lu-msg-text { text-shadow: 0 0 6px rgba(0, 0, 0, 0.6); }
+
+/* ─────────────────────────────────────────────────────────────────────
+   Character area (3.1.0 part B, David's sketches v2 of 14.11.2026,
+   uebergabe-310/SWAP-HUB-bilder/mockups-v2/stil-notizen.md).
+   The colours of the sketches as tokens, measured from the Create screens:
+   hairlines, three text greys, the accent. Not a card style: the area is
+   rows on the surface, and the only framed part is the bar at its foot.
+   Own tokens because the rescue layer above lifts `.dark .text-gray-500`
+   to gray-400, and the sketches keep the two greys apart (muted, dim).
+   ───────────────────────────────────────────────────────────────────── */
+.lu-hub {
+  --hub-sep: rgba(255, 255, 255, 0.06);
+  --hub-edge: rgba(255, 255, 255, 0.10);
+  --hub-fill: rgba(255, 255, 255, 0.03);
+  --hub-hov: rgba(255, 255, 255, 0.045);
+  --hub-text: #f3f4f6;
+  --hub-muted: #9ca3af;
+  --hub-dim: #6b7280;
+  --hub-acc: #a094f8;
+  --hub-soft: rgba(160, 148, 248, 0.14);
+}
+.light .lu-hub {
+  --hub-sep: #eceef1;
+  --hub-edge: #e5e7eb;
+  --hub-fill: #f9fafb;
+  --hub-hov: #f5f6f8;
+  --hub-text: #111827;
+  --hub-muted: #4b5563;
+  --hub-dim: #8b919c;
+  --hub-acc: #5746d9;
+  --hub-soft: rgba(87, 70, 217, 0.09);
+}
+.lu-hub .hub-text { color: var(--hub-text); }
+.lu-hub .hub-muted { color: var(--hub-muted); }
+.lu-hub .hub-dim { color: var(--hub-dim); }
+.lu-hub .hub-acc { color: var(--hub-acc); }
+.lu-hub .hub-line { border-color: var(--hub-sep); }
+.lu-hub .hub-hover:hover { background-color: var(--hub-hov); }
+.lu-hub .hub-soft { background-color: var(--hub-soft); }
+/* No picture: the initial on grey. */
+.lu-hub .hub-none { background-color: var(--hub-edge); }
+/* The role of a person in Swap reads as text until it is typed over. */
+.lu-hub .hub-role::placeholder { color: var(--hub-text); }
+/* The type of the Character area: the sizes of the sketches in rendered
+   pixels (Inter 14 / 13 / 12.5 / 12 / 11 / 10), divided by the app's
+   --ui-scale, so a line of the area reads exactly as in the sketch. One
+   place for them instead of a `text-[…]` per call site (die-typo-leiter). */
+.hub-fs-14 { font-size: calc(14px / var(--ui-scale, 1.15)); line-height: 1.4; }
+.hub-fs-13 { font-size: calc(13px / var(--ui-scale, 1.15)); line-height: 1.4; }
+.hub-fs-125 { font-size: calc(12.5px / var(--ui-scale, 1.15)); line-height: 1.4; }
+.hub-fs-12 { font-size: calc(12px / var(--ui-scale, 1.15)); line-height: 1.4; }
+.hub-fs-11 { font-size: calc(11px / var(--ui-scale, 1.15)); line-height: 1.3; }
+.hub-fs-10 { font-size: calc(10px / var(--ui-scale, 1.15)); line-height: 1.3; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 600; }
+/* The segments of the area (Sound, Resolution) take the sketch's 12 px. */
+.hub-seg { --text-control: calc(12px / var(--ui-scale, 1.15)); }
+.hub-fs-20 { font-size: calc(20px / var(--ui-scale, 1.15)); line-height: 1.2; letter-spacing: -0.01em; }
+
+/* The area is one column of the prompt window's width (660), centred, over
+   that window (David, 16.11.2026: the same container in every tab of
+   Create). The row is a grid of three: the space left of the column, the
+   column, and the rails of the gallery and the presets at the right. Both
+   sides are always equally wide (the left keeps free what the rails take,
+   --hub-rails), so the column stands exactly over the window at every
+   width; with little room it gets narrower, it never leaves the middle.
+   The row of the characters alone may use the whole room between the two
+   sides, so a wide window shows more names. The stage in it: the tabs, the character as a head (a small
+   picture, beside it the name and every action it has), then the inputs of
+   the action and its photos, which scroll. Nothing here moves by itself. */
+.lu-hub-row { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+.lu-hub-row > .hub-column { grid-column: 1; grid-row: 1; display: flex; flex-direction: column; align-items: center; min-width: 0; min-height: 0; overflow: hidden; padding-inline: var(--hub-rails, 16px); }
+.lu-hub-row > .hub-column > * { width: 100%; max-width: 660px; }
+.lu-hub-row > .hub-column > .hub-stage { max-width: none; align-items: center; }
+.lu-hub .hub-stage > .hub-scroll { width: 100%; max-width: 660px; }
+.lu-hub-rails { grid-column: 1; grid-row: 1; justify-self: end; position: relative; z-index: 1; display: flex; min-width: 0; min-height: 0; padding-left: 16px; }
+/* A phone-wide window: the area takes the whole width, as before. */
+@media (max-width: 520px) {
+  .lu-hub-rails { display: none; }
+}
+.lu-hub .hub-stage { display: flex; flex-direction: column; flex: 1 1 0%; min-height: 0; }
+/* Everything stands on the middle axis of the prompt window: the row of
+   the characters around the middle, the head centred over the photos, the
+   photos as a centred grid. */
+.lu-hub .hub-tabs { flex: none; display: flex; justify-content: center; width: 100%; min-height: 38px; }
+/* Lines of the row are balanced: nothing wraps alone under the others. */
+.lu-hub .hub-tablist { display: block; min-width: 0; text-align: center; text-wrap: balance; }
+.lu-hub .hub-tab { display: inline-flex; align-items: center; gap: 7px; min-height: 37px; margin: 0 10px; vertical-align: top; white-space: nowrap; border-bottom: 1.5px solid transparent; }
+.lu-hub .hub-tab--on { border-bottom-color: var(--hub-text); }
+.lu-hub .hub-tabs[data-hub-tabs-fit="pictures"] .hub-tab { margin: 0 6px; }
+.lu-hub .hub-scroll { display: flex; flex-direction: column; flex: 1 1 0%; min-width: 0; min-height: 0; overflow-y: auto; border-top: 1px solid var(--hub-sep); }
+/* Shorter than the room: in its middle. Longer: from the top (the auto
+   margins are then nothing). */
+.lu-hub .hub-center { flex: none; width: 100%; margin-block: auto; }
+.lu-hub .hub-card { display: flex; flex-direction: column; align-items: center; min-width: 0; padding: 14px 0 12px; text-align: center; }
+.lu-hub .hub-card > .hub-portrait { width: 64px; margin-bottom: 8px; }
+.lu-hub .hub-body { min-width: 0; }
+.lu-hub .hub-portrait { display: block; aspect-ratio: 4 / 5; border-radius: 8px; background-size: cover; background-position: 50% 20%; }
+.lu-hub .hub-portrait--none { display: grid; place-items: center; background: var(--hub-edge); }
+.lu-hub .hub-initial { font-size: calc(26px / var(--ui-scale, 1.15)); font-weight: 600; line-height: 1; }
+.lu-hub .hub-photos { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.lu-hub .hub-photos li { width: 104px; }
+.lu-hub .hub-photos img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 6px; }
+/* The row over the prompt window: Image, Swap, Motion, Talk as text, with
+   one quiet ground for the one that is picked. */
+.lu-hub .hub-act { display: inline-flex; gap: 2px; }
+.lu-hub .hub-act-item { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 1px solid transparent; border-radius: 6px; color: var(--hub-muted); white-space: nowrap; }
+.lu-hub .hub-act-item--on { border-color: var(--hub-edge); background: var(--hub-hov); color: var(--hub-text); font-weight: 500; }
+@media (max-width: 520px) {
+  .lu-hub .hub-act-item { padding: 0 8px; }
+  .lu-hub .hub-act-item svg { display: none; }
+}
+
+/* The pages of the area: "New character" and the training. */
+.lu-hub .hub-page { display: flex; flex-direction: column; flex: 1 1 0%; min-height: 0; }
+.lu-hub .hub-new { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); align-content: start; gap: 28px; flex: 1 1 0%; min-height: 0; overflow-y: auto; padding: 16px 0 12px; }
+@media (max-width: 760px) {
+  .lu-hub .hub-new { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+}
+.lu-hub .hub-drop { border: 1px dashed color-mix(in srgb, var(--hub-dim) 60%, transparent); border-radius: 8px; }
+.lu-hub .hub-drop--over { border-color: var(--hub-acc); background: var(--hub-fill); }
+.lu-hub .hub-thumb { display: block; width: 84px; height: 84px; object-fit: cover; border-radius: 6px; }
+.lu-hub .hub-name-field { border-color: var(--hub-edge); }
+.lu-hub input.hub-name-field:not(.hub-fs-20) { font-size: calc(16px / var(--ui-scale, 1.15)); line-height: 1.4; }
+.lu-hub .hub-path { font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace; font-size: calc(12px / var(--ui-scale, 1.15)); }
+.lu-hub .hub-radio { position: relative; width: 15px; height: 15px; border: 1.5px solid var(--hub-dim); border-radius: 50%; }
+.lu-hub .hub-radio--on { border-color: var(--hub-acc); }
+.lu-hub .hub-radio--on::after { content: ''; position: absolute; inset: 3px; border-radius: 50%; background: var(--hub-acc); }
+
+/* No character yet: the three steps and the one button, in the middle. */
+.lu-hub .hub-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1 1 0%; min-height: 0; overflow-y: auto; padding: 16px 0; }
+.lu-hub .hub-steps { width: 100%; max-width: 420px; border-top: 1px solid var(--hub-sep); }
+/* The NEW mark on the Character pill: accent on a faint accent ground. */
+.lu-new-mark { font-size: 7px; font-weight: 600; letter-spacing: 0.06em; line-height: 1.4; }

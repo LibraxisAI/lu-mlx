@@ -1,5 +1,5 @@
 /**
- * R5-27 und R2-48, Entscheid David vom 12.09.2026: die automatische
+ * R5-27 und R2-48, Entscheid vom 12.09.2026: die automatische
  * Erinnerungs-Extraktion steht ab Werk AN.
  *
  * Drei Tore standen davor, und im Desktop war das dritte still zu. Die zwei

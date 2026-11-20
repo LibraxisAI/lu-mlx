@@ -1,6 +1,6 @@
 // Prompt-Vorgaben fuer die Preset-Schritte.
 //
-// 19.09.2026, Entscheid von David: ein leeres Feld hilft niemandem. Neben dem
+// 19.09.2026, Entscheid des Inhabers: ein leeres Feld hilft niemandem. Neben dem
 // Modell steht eine Liste von Anfaengen, die der Kunde anklickt und dann mit
 // eigenen Worten weiterschreibt. Die Vorgabe ersetzt seinen Text nie, sie
 // haengt sich davor, damit beides zusammen rausgeht.

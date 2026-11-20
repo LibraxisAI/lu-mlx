@@ -11,7 +11,7 @@
  * MediaRef[]. Er wird nicht ersetzt, sondern erweitert, gefiltert und
  * geleert — und keiner dieser drei Wege gab je etwas zurück:
  *
- *   - `addTrainImages` wirft Namensdubletten weg und kappt bei 30,
+ *   - `addTrainImages` wirft erneut fallen gelassene Dateien weg und kappt bei 30,
  *   - `removeTrainImage` filtert einen heraus,
  *   - `clearTrainImages` leert alles (der Cloud-Trainingslauf ruft das nach
  *     jedem Submit, `useCloudCreate.ts:367`).
@@ -43,9 +43,11 @@ beforeEach(() => {
   useCreateStore.setState({ trainImages: [], audioInput: null, videoInput: null })
 })
 
-/** Eine Datei, wie der Dateidialog sie liefert. */
+/** Eine Datei, wie der Dateidialog sie liefert. Dieselbe Datei von der
+ *  Platte hat bei jedem Pick dieselbe Änderungszeit; daran (mit Name und
+ *  Größe) erkennt das Set einen erneuten Drop. */
 function file(name: string): File {
-  return new File([new Uint8Array([1, 2, 3])], name, { type: 'image/png' })
+  return new File([new Uint8Array([1, 2, 3])], name, { type: 'image/png', lastModified: 1 })
 }
 
 /** Genau das, was `TrainSetBoard.addFiles` (Stage.tsx) mit einem Drop tut. */
@@ -65,7 +67,7 @@ describe('das Trainingsset gibt seine Blob-URLs zurück', () => {
     // Zweimal denselben Ordner fallen lassen ist der Normalfall, nicht der
     // Sonderfall: der Nutzer sieht nicht, dass die Bilder schon drin sind.
     // Die Dublette bekommt in `addFiles` eine EIGENE, frische URL und wird
-    // dann von der Namens-Dedupe weggeworfen — unerreichbar, aber gepinnt.
+    // dann von der Dedupe weggeworfen — unerreichbar, aber gepinnt.
     drop('a.png')
     const kept = useCreateStore.getState().trainImages[0].url
     drop('a.png')
@@ -74,11 +76,19 @@ describe('das Trainingsset gibt seine Blob-URLs zurück', () => {
     expect(live.size).toBe(1)
   })
 
-  it('was die 30er-Kappe abschneidet, gibt seine Datei frei', () => {
+  it('was die Cloud-Kappe (30) abschneidet, gibt seine Datei frei', () => {
     // Diese Grenze hat gar keine UI: der Schnitt passiert still.
+    useCreateStore.setState({ backend: 'cloud' })
     drop(...Array.from({ length: 34 }, (_, i) => `f${i}.png`))
     expect(useCreateStore.getState().trainImages).toHaveLength(30)
     expect(live.size).toBe(30)
+  })
+
+  it('lokal liegt die Kappe bei 100 (GH #121), und auch dort wird frei, was sie abschneidet', () => {
+    useCreateStore.setState({ backend: 'local' })
+    drop(...Array.from({ length: 104 }, (_, i) => `f${i}.png`))
+    expect(useCreateStore.getState().trainImages).toHaveLength(100)
+    expect(live.size).toBe(100)
   })
 
   it('das Leeren des Sets gibt jede Datei zurück, die es hielt', () => {

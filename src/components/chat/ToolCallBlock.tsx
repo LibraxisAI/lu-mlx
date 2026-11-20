@@ -1,14 +1,39 @@
 import { useState, useEffect, memo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Search, Globe, FileText, FileEdit, Terminal, Image, Film, Loader2, Check, X, Clock, AlertCircle, FolderOpen, Monitor, GitBranch, GitCommitHorizontal, GitPullRequest, FlaskConical, History, Users, Database, Download, Square } from 'lucide-react'
+import { Search, Globe, BookOpenText, AppWindowMac as AppWindow, FileText, FileEdit, Terminal, Image, Film, Loader2, Check, X, Clock, AlertCircle, FolderOpen, Monitor, GitBranch, GitCommitHorizontal, GitPullRequest, FlaskConical, History, Users, Database, Download, Square } from 'lucide-react'
 import type { AgentToolCall } from '../../types/agent-mode'
+import { getBlockToolCalls } from '../../api/agents/block-helpers'
 import { getComfyHost, getComfyPort, downloadComfyFile } from '../../api/backend'
+import { useComfyViewRescueState, isInlineVideoUrl } from './comfyViewRescue'
 import { useModelPickStore } from '../../stores/modelPickStore'
 import { useGenerationStore } from '../../stores/generationStore'
 import { ModelPickerCard, ChangeModelInline, pickKindForToolCall } from './ModelPickerCard'
+import { CopyText } from '../create/experimental/CopyText'
 import { DiffView } from './DiffView'
+import { ScreenTaskSteps } from './ScreenTaskSteps'
+import { ScreenShotStrip } from '../computer/ScreenShotStrip'
+import { ComputerChatPermission, useComputerChatAsk } from '../computer/ComputerChatPermission'
+import { SettingChangeAsk, SettingChangeDone, SelfControlDone } from './SettingChangeCard'
+import { WebSourceCards, WebUrlAsk } from './WebSourceCards'
+import { BrowserControls, BrowserShot } from './BrowserControls'
+import { parseSourceCards, stripSourcesMarker } from '../../lib/web-evidence'
+import { useWebUrlConfirmStore, pendingUrlForCall } from '../../stores/webUrlConfirmStore'
+import { useSettingsConfirmStore, pendingForCall } from '../../stores/settingsConfirmStore'
+import { parseSettingChanges } from '../../api/mcp/settings-tools'
+import { parseSelfControlAction } from '../../api/mcp/self-control-defs'
+import { WorkflowCardAsk, WorkflowCardDone } from './WorkflowInstallCard'
+import { useWorkflowCardStore, workflowCardForCall } from '../../stores/workflowInstallConfirmStore'
+import { parseWorkflowMark } from '../../api/mcp/workflow-mark'
+import { isSelfControlToolName } from '../../lib/settings-tool-names'
+import { useChatStore } from '../../stores/chatStore'
+import { useCommandRulesStore } from '../../stores/commandRulesStore'
+import { useCodexConfirmStore } from '../../stores/codexConfirmStore'
+import { suggestRuleFor } from '../../lib/agent-core/command-rules'
+import { toolCallTitle, diffStat, shellExitCode, hasToolTitle, stripAnsi } from '../../lib/tool-call-title'
+import { toolRegistry } from '../../api/mcp/tool-registry'
 import { commandIcon } from '../../lib/shell-command-classify'
 import { requestGenerationCancel } from '../../api/vram-handoff'
+import { cancelBackgroundJob } from '../../lib/background-cancels'
 import { fileUrlToPath, readLocalFileAsBlobUrl, displayableMedia, type MediaRead } from '../../lib/local-media-url'
 import { hiddenFromTranscript } from '../../lib/transcript-visibility'
 import { MOTION_S } from '../ui/motion'
@@ -20,17 +45,25 @@ import { HINWEIS_TEXT } from '../../lib/hinweis'
 // ComfyUI /view URL whose exact form depends on the runtime:
 //   - packaged desktop (Tauri):     http://localhost:8188/view?filename=…
 //   - custom / remote ComfyUI host: http://<host>:<port>/view?filename=…
-//   - browser / dev (Vite proxy):   /comfyui/view?filename=…   ← konata's case
+//   - browser / dev (Vite proxy):   /comfyui/view?filename=…   ← a user's case
 // The original localhost-only regex silently failed on the latter two, so
-// konata (running the web build behind the /comfyui proxy) saw the raw
+// A user (running the web build behind the /comfyui proxy) saw the raw
 // "/comfyui/view?…" text and NO image. comfyViewUrlFromResult() now accepts any
 // of those forms, but ONLY when the URL points at OUR ComfyUI — a relative
 // proxy path, a loopback host, or the user-configured comfy host — and carries
 // a filename. A third-party URL in a tool result is never auto-loaded (CSP +
 // privacy). Exported for unit testing (see __tests__/ToolCallBlock-image.test.ts).
+/** Where a result line keeps its address: the last line of a multi-line
+ *  result (A13). The prompt is quoted on the first one, and an address in the
+ *  prompt was shown instead of the picture. One-line results stay whole. */
+function mediaLine(result: string): string {
+  const at = result.lastIndexOf('\n')
+  return at < 0 ? result : result.slice(at + 1)
+}
+
 export function comfyViewUrlFromResult(result: string | null | undefined): string | null {
   if (!result) return null
-  const m = result.match(/(https?:\/\/[^\s)\]]+\/view\?[^\s)\]]+|\/comfyui\/view\?[^\s)\]]+|\/view\?[^\s)\]]+)/i)
+  const m = mediaLine(result).match(/(https?:\/\/[^\s)\]]+\/view\?[^\s)\]]+|\/comfyui\/view\?[^\s)\]]+|\/view\?[^\s)\]]+)/i)
   if (!m) return null
   const url = m[1]
   if (!/[?&]filename=/i.test(url)) return null               // must be a real ComfyUI output view
@@ -43,23 +76,11 @@ export function comfyViewUrlFromResult(result: string | null | undefined): strin
   return null
 }
 
-// Feature EE (v2.5.0): video_generate can produce .mp4 (VHS_VideoCombine) or
-// .webm outputs. We render those in a <video> element instead of an <img>.
-// Animated .webp (SaveAnimatedWEBP) animates fine inside <img>, so it stays on
-// the image path. The output filename rides in the `filename=` query param of
-// the /view URL, so we inspect THAT, not the URL tail (which ends in `&t=…`).
-// Exported for unit testing.
-export function isInlineVideoUrl(url: string): boolean {
-  try {
-    const m = /[?&]filename=([^&]+)/i.exec(url)
-    const name = m ? decodeURIComponent(m[1]) : url
-    return /\.(mp4|webm)$/i.test(name)
-  } catch {
-    return /\.(mp4|webm)(?=[?&]|$)/i.test(url)
-  }
-}
+// Feature EE (v2.5.0): .mp4/.webm outputs render in a <video>, see
+// isInlineVideoUrl in comfyViewRescue.ts (shared with the reply's Markdown).
+export { isInlineVideoUrl }
 
-// David 2026-06-12 ("alle tools in chat, mit download"): pull the ComfyUI
+// 2026-06-12 ("alle tools in chat, mit download"): pull the ComfyUI
 // filename/subfolder/type back out of a /view URL so the inline image/video
 // gets a Download button (downloadComfyFile fetches the real bytes → native
 // Save-As in Tauri / anchor download in the browser). Returns null if the URL
@@ -90,7 +111,7 @@ export function localMediaUrlFromResult(result: string | null | undefined): stri
   // app already wrote, so it still resolves after a restart. `blob:` only
   // appears in conversations recorded BEFORE that change, where it is already
   // dead; it stays matched so those messages can say so plainly.
-  const m = result.match(/(file:\/\/[^\s)\]]+|blob:[^\s)\]]+|data:[a-z0-9.+-]+\/[a-z0-9.+-]+;base64,[^\s)\]]+)/i)
+  const m = mediaLine(result).match(/(file:\/\/[^\s)\]]+|blob:[^\s)\]]+|data:[a-z0-9.+-]+\/[a-z0-9.+-]+;base64,[^\s)\]]+)/i)
   return m ? m[1] : null
 }
 
@@ -155,9 +176,18 @@ interface Props {
 // a surgical file_edit like a plain write. Every builtin has a face now.
 // Since the 2.6.6 merge, shell_execute derives its face from the COMMAND
 // (commandIcon), so a commit still looks like a commit.
+/** Web tools: they may ask before an address and they carry source cards. */
+const WEB_URL_TOOLS: ReadonlySet<string> = new Set(['web_fetch', 'web_research', 'browser_open', 'browser_snapshot', 'browser_scroll', 'browser_click_link', 'browser_screenshot'])
+
 const TOOL_ICONS: Record<string, typeof Search> = {
   web_search: Search,
   web_fetch: Globe,
+  web_research: BookOpenText,
+  browser_open: AppWindow,
+  browser_snapshot: AppWindow,
+  browser_scroll: AppWindow,
+  browser_click_link: AppWindow,
+  browser_screenshot: AppWindow,
   file_read: FileText,
   file_write: FileEdit,
   file_edit: FileEdit,
@@ -166,6 +196,8 @@ const TOOL_ICONS: Record<string, typeof Search> = {
   shell_execute: Terminal,
   pr_resume: GitPullRequest,
   screenshot: Monitor,
+  computer_use: Monitor,
+  computer_task: Monitor,
   image_generate: Image,
   video_generate: Film,
   run_workflow: GitBranch,
@@ -220,6 +252,19 @@ const STATUS_ICONS = {
 // surface already owns must not mount the block at all, and an early return
 // inside ToolCallBlockImpl would have to come after its hooks. See
 // lib/transcript-visibility.ts for which calls those are and why.
+/** The conversation whose agent turn holds this tool call, or null. */
+export function conversationOfToolCall(callId: string): string | null {
+  const { conversations, activeConversationId } = useChatStore.getState()
+  for (const conv of conversations) {
+    for (const m of conv.messages) {
+      for (const block of m.agentBlocks ?? []) {
+        if (getBlockToolCalls(block).some((c) => c.id === callId)) return conv.id
+      }
+    }
+  }
+  return activeConversationId
+}
+
 export const ToolCallBlock = memo(function ToolCallBlockGate(props: Props) {
   if (hiddenFromTranscript(props.toolCall)) return null
   return <ToolCallBlockImpl {...props} />
@@ -242,16 +287,55 @@ function ToolCallBlockImpl({ toolCall, onApprove, onReject }: Props) {
   const isRunning = toolCall.status === 'running'
   const isPending = toolCall.status === 'pending_approval'
   const isFailed = toolCall.status === 'failed' || toolCall.status === 'rejected'
-  // Real cancel (David 2026-06-16): only image/video generation supports a true
+  // The Code tab keeps a call 'running' while its confirm card waits; the row
+  // says it waits, not that it runs (CA U1).
+  const waitsOnCard = useCodexConfirmStore((st) =>
+    isRunning && !!st.pending && st.pending.toolName === toolCall.toolName
+    && JSON.stringify(st.pending.args ?? {}) === JSON.stringify(toolCall.args ?? {}),
+  )
+  const title = toolCallTitle(toolCall.toolName, toolCall.args, waitsOnCard ? 'pending_approval' : toolCall.status, toolRegistry.displayName(toolCall.toolName))
+  const stat = diffStat(toolCall.diff)
+  const isShell = toolCall.toolName === 'shell_execute'
+  const exitCode = isShell ? shellExitCode(toolCall.result) : null
+  // The raw arguments where the title cannot say what the call does, and on
+  // every call that waits for a yes: what it would write is part of the question.
+  const knownTool = hasToolTitle(toolCall.toolName) && !(isPending && !isShell)
+  // CA K4: "Always allow `npm test` here", for a waiting shell call that knows its folder.
+  const alwaysRule = isPending && toolCall.toolName === 'shell_execute' && toolCall.ruleScope && typeof toolCall.args?.command === 'string'
+    ? suggestRuleFor(toolCall.args.command)
+    : null
+  // The first use of computer control in a chat waits here for the user's yes.
+  const chatAsk = useComputerChatAsk(toolCall.toolName, isRunning, useChatStore((s) => s.activeConversationId))
+  // A11 / C60: a change LU makes to itself waits here for Accept, and stays
+  // with Undo: one setting, several on one card, or an action.
+  const isSetSetting = isSelfControlToolName(toolCall.toolName) && toolCall.toolName !== 'get_settings' && toolCall.toolName !== 'lu_open_settings' && toolCall.toolName !== 'watcher_list'
+  const settingAsk = useSettingsConfirmStore((s) => (isSetSetting && isRunning ? pendingForCall(s.queue, toolCall.id) : null))
+  const settingChanges = isSetSetting && toolCall.status === 'completed' ? parseSettingChanges(toolCall.result) : []
+  const selfAction = isSetSetting && toolCall.status === 'completed' ? parseSelfControlAction(toolCall.result) : null
+  // P-L: a web address the model made up waits here for Open; the sources of
+  // a web tool stay visible under it, from the tool result and not the model.
+  const isWebTool = WEB_URL_TOOLS.has(toolCall.toolName)
+  const urlAsk = useWebUrlConfirmStore((s) => (isWebTool && isRunning ? pendingUrlForCall(s.queue, toolCall.id) : null))
+  const sourceCards = isWebTool && toolCall.status === 'completed' ? parseSourceCards(toolCall.result) : []
+  // C60-S5: a workflow install or assignment waits here with its traffic
+  // light check, and stays with Undo for the assignment.
+  const isWorkflowWrite = toolCall.toolName === 'workflow_install' || toolCall.toolName === 'workflow_assign'
+  const workflowAsk = useWorkflowCardStore((s) => (isWorkflowWrite && isRunning ? workflowCardForCall(s.queue, toolCall.id) : null))
+  const workflowMark = isWorkflowWrite && toolCall.status === 'completed' ? parseWorkflowMark(toolCall.result) : null
+  // Real cancel (2026-06-16): only image/video generation supports a true
   // abort (ComfyUI /interrupt + loop abort). Local "cancelling" state flips the
   // mini button to a "stopping…" indicator the moment it's clicked.
   const isGenTool = toolCall.toolName === 'image_generate' || toolCall.toolName === 'video_generate'
+  // 3.0.8 (A2): went on in the background, the turn is over. Its Stop ends
+  // this one job, never the chat's other generations or a running turn.
+  const inBackground = isRunning && toolCall.background?.state === 'running'
   const [cancelling, setCancelling] = useState(false)
+  const genPrompt = isGenTool && typeof toolCall.args?.prompt === 'string' ? toolCall.args.prompt.trim() : ''
 
   // Inline media preview URL (image_generate / video_generate / screenshot).
   // Computed once; rendered ALWAYS-visible below the header (even while the
   // tool block is collapsed) so an auto-approved generation shows its picture
-  // without the user having to expand the block — konata's "and no image".
+  // without the user having to expand the block — a user's "and no image".
   // Two possible sources: a ComfyUI /view URL (Windows/Linux), or a local
   // blob:/data: URL from the Mac MLX path (executeImageGenerateMlx /
   // executeVideoGenerateMlx in api/mcp/builtin-tools.ts — no ComfyUI /view
@@ -271,7 +355,7 @@ function ToolCallBlockImpl({ toolCall, onApprove, onReject }: Props) {
   const genKind = pickKindForToolCall(toolCall)
   const showPicker = !!genKind && !!pendingPick && pendingPick.kind === genKind && isRunning
 
-  // Proxy-independent loading (konata 2026-06-08). In browser/dev the tool
+  // Proxy-independent loading (a user 2026-06-08). In browser/dev the tool
   // result carries the RELATIVE `/comfyui/view?…` Vite-proxy path, which loads
   // fine under `npm run dev` (verified E2E). But a built frontend served
   // WITHOUT that dev proxy (e.g. `vite preview` or a static host) would 404 the
@@ -280,8 +364,12 @@ function ToolCallBlockImpl({ toolCall, onApprove, onReject }: Props) {
   // so it loads with no server-side proxy. Tauri results are already absolute
   // (they never start with '/') and are unaffected.
   const [imgFailed, setImgFailed] = useState(false)
+  // Desktop: a blocked direct load of an absolute /view URL is fetched through
+  // the app's localhost proxy instead (comfyViewRescue.ts, Discord 15.10.2026).
+  const { url: rescuedUrl, waiting: rescueWaiting } = useComfyViewRescueState(comfyPreviewUrl, imgFailed)
   const effectivePreviewUrl = (() => {
     if (!previewUrl) return null
+    if (rescuedUrl) return rescuedUrl
     // blob:/data: URLs (Mac MLX) are self-contained in this session — the
     // ComfyUI-host retry below only ever applies to a relative /view path.
     if (imgFailed && previewUrl.startsWith('/')) {
@@ -295,21 +383,43 @@ function ToolCallBlockImpl({ toolCall, onApprove, onReject }: Props) {
   // executor never produces an image result and vice versa.
   // Keyed off the RAW result line, not the resolved one: a file:// URL takes a
   // moment to read off disk, and the kind of element to render must not depend
-  // on whether that read has landed yet.
+  // on whether that read has landed yet. The same goes for a ComfyUI /view
+  // URL: once the desktop rescue swaps in a blob: URL, that URL has no
+  // filename left to read, and keying off it turned every rescued clip into a
+  // broken <img> "Generated image" (3.0.8 A1, minimax-h3 on Windows, .molot).
   const isVideoResult = rawLocalUrl
     ? toolCall.toolName === 'video_generate'
-    : !!effectivePreviewUrl && isInlineVideoUrl(effectivePreviewUrl)
+    : !!comfyPreviewUrl && isInlineVideoUrl(comfyPreviewUrl)
 
   return (
-    <div className="mb-0.5">
+    <div className="mb-0.5" data-tool={toolCall.toolName} data-status={toolCall.status}>
       {/* Header line — monochrome, only status icon has subtle color */}
       <div className="flex items-center gap-1">
         <button
           onClick={() => setOpen(!open)}
-          className="flex items-center gap-1.5 py-0.5 text-left hover:opacity-80 transition-opacity flex-1 min-w-0"
+          className="flex items-center gap-2 py-1 text-left hover:opacity-80 transition-opacity flex-1 min-w-0"
+          title={toolCall.toolName}
         >
-          <ToolIcon size={10} className="text-gray-500 dark:text-gray-500 shrink-0" />
-          <span className={`t-micro ${isRunning ? 'lu-tool-shimmer' : 'text-gray-600 dark:text-gray-400'}`}>{toolCall.toolName}</span>
+          <ToolIcon size={13} className="text-gray-400 dark:text-gray-500 shrink-0" />
+          {/* CA U1: what the call did, in words; the internal name is the tooltip. */}
+          <span data-testid="tool-title" className={`t-control truncate min-w-0 ${isRunning && !waitsOnCard ? 'lu-tool-shimmer' : 'text-gray-600 dark:text-gray-400'}`}>
+            {title.verb}
+            {title.target && (
+              <>
+                {' '}
+                <span className={title.mono ? 'font-mono text-gray-800 dark:text-gray-200' : 'text-gray-800 dark:text-gray-200'}>{title.target}</span>
+              </>
+            )}
+          </span>
+          {stat && (
+            <span className="t-mono shrink-0" data-testid="tool-diffstat">
+              <span className="text-emerald-600 dark:text-emerald-400">+{stat.added}</span>{' '}
+              <span className="text-red-500 dark:text-red-400">−{stat.removed}</span>
+            </span>
+          )}
+          {exitCode !== null && (
+            <span className="t-micro shrink-0 text-red-500 dark:text-red-400" data-testid="tool-exit">exit {exitCode}</span>
+          )}
           {isRunning && (
             <span className="flex items-center gap-[3px] shrink-0" aria-hidden>
               {[0, 1, 2].map((i) => (
@@ -327,19 +437,22 @@ function ToolCallBlockImpl({ toolCall, onApprove, onReject }: Props) {
               offener Werkzeugaufruf ein halber Absturz. Gesehen wird er ueber
               die Uhr, ueber Approve/Reject darunter und ueber die Rueckfrage
               am Eingabefeld, nicht ueber die Farbe. */}
-          <StatusIcon size={9} className={`shrink-0 ${
+          <StatusIcon size={11} className={`shrink-0 ${
             toolCall.status === 'completed' ? 'text-gray-400 dark:text-gray-500' :
             isFailed ? 'text-red-400/60' :
             isPending ? HINWEIS_TEXT.ruhig :
             'text-gray-500'
           } ${isRunning ? 'animate-spin' : ''}`} />
+          {isRunning && !waitsOnCard && toolCall.duration == null && (
+            <RunningFor since={toolCall.startedAt ?? toolCall.timestamp} />
+          )}
           {toolCall.duration != null && (
-            <span className="text-[0.5rem] text-gray-500 dark:text-gray-600">
+            <span className="t-micro text-gray-500 dark:text-gray-500">
               {toolCall.duration < 1000 ? `${toolCall.duration}ms` : `${(toolCall.duration / 1000).toFixed(1)}s`}
             </span>
           )}
         </button>
-        {/* Real abort (David 2026-06-16): stop a running image/video generation.
+        {/* Real abort (2026-06-16): stop a running image/video generation.
             Fires ComfyUI /interrupt AND aborts the agent loop so it won't
             auto-start a replacement. VRAM is restored by runHandoff's finally. */}
         {isRunning && isGenTool && (
@@ -352,9 +465,23 @@ function ToolCallBlockImpl({ toolCall, onApprove, onReject }: Props) {
               onClick={(e) => {
                 e.stopPropagation()
                 setCancelling(true)
-                requestGenerationCancel()
-                const { generating, aborters } = useGenerationStore.getState()
-                Object.keys(generating).forEach((cid) => aborters[cid]?.())
+                if (inBackground && toolCall.background) {
+                  // Nothing to stop here any more (the app restarted): the
+                  // block is left as it is and says so after a reload.
+                  if (!cancelBackgroundJob(toolCall.background.jobId)) setCancelling(false)
+                  return
+                }
+                // A13: this block's own conversation only. The old app-wide
+                // Stop also ended the replies and renders of every other chat.
+                const cid = conversationOfToolCall(toolCall.id)
+                if (cid) {
+                  requestGenerationCancel(cid)
+                  useGenerationStore.getState().aborters[cid]?.()
+                } else {
+                  requestGenerationCancel()
+                  const { generating, aborters } = useGenerationStore.getState()
+                  Object.keys(generating).forEach((id) => aborters[id]?.())
+                }
               }}
               title="Stop generation"
               className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[0.55rem] font-medium text-red-700 dark:text-red-300 bg-red-500/10 hover:bg-red-500/15 border border-red-500/20 dark:border-red-500/25 transition-colors shrink-0"
@@ -365,6 +492,33 @@ function ToolCallBlockImpl({ toolCall, onApprove, onReject }: Props) {
         )}
       </div>
 
+      {inBackground && (
+        <div className="pl-5 pt-0.5" data-testid="tool-background-note">
+          <span className="t-micro text-gray-500 dark:text-gray-400">
+            Rendering in the background. You can keep chatting, the {toolCall.toolName === 'video_generate' ? 'video' : 'picture'} appears here when it is done.
+          </span>
+        </div>
+      )}
+      {toolCall.background?.state === 'interrupted' && (
+        <div className="pl-5 pt-0.5">
+          <span className="t-micro text-gray-500 dark:text-gray-400">{toolCall.error}</span>
+        </div>
+      )}
+      {chatAsk && <div className="ml-3.5 pl-2"><ComputerChatPermission ask={chatAsk} /></div>}
+      {settingAsk && <div className="ml-3.5 pl-2"><SettingChangeAsk req={settingAsk} /></div>}
+      {settingChanges.map((c) => <div key={c.key} className="ml-3.5 pl-2"><SettingChangeDone change={c} /></div>)}
+      {selfAction && <div className="ml-3.5 pl-2"><SelfControlDone action={selfAction} /></div>}
+      {urlAsk && <div className="ml-3.5 pl-2"><WebUrlAsk req={urlAsk} /></div>}
+      {sourceCards.length > 0 && <div className="ml-3.5 pl-2"><WebSourceCards cards={sourceCards} /></div>}
+      {toolCall.toolName === 'browser_screenshot' && <div className="ml-3.5 pl-2"><BrowserShot toolCallId={toolCall.id} /></div>}
+      {toolCall.toolName.startsWith('browser_') && <div className="ml-3.5 pl-2"><BrowserControls live={isRunning} /></div>}
+      {workflowAsk && <div className="ml-3.5 pl-2"><WorkflowCardAsk req={workflowAsk} /></div>}
+      {workflowMark && <div className="ml-3.5 pl-2"><WorkflowCardDone mark={workflowMark} /></div>}
+      {isRunning && toolCall.toolName === 'computer_task' && <ScreenTaskSteps />}
+      {(toolCall.toolName === 'computer_task' || toolCall.toolName === 'computer_use') && (
+        <ScreenShotStrip callId={toolCall.id} className="ml-3.5 mb-1 pl-2" />
+      )}
+
       {/* Model-Picker (v2.5.3) — LU's own pre-VRAM-swap model choice, shown
           while the executor gate awaits the pick. Falls back to the mini
           "Change model" line once a preference is saved. */}
@@ -373,7 +527,7 @@ function ToolCallBlockImpl({ toolCall, onApprove, onReject }: Props) {
 
       {/* Inline media preview — ALWAYS visible for a completed image/video
           generation, even while the tool block stays collapsed. Before the
-          konata 2026-06-07 fix this lived inside the collapsed details, so a
+A user 2026-06-07 fix this lived inside the collapsed details, so a
           user with auto-approve (block closed) saw "Image generated: …" text
           and no picture. A .mp4/.webm output renders in a <video>; everything
           else — including animated .webp — in an <img>. URL is bounded to OUR
@@ -390,11 +544,24 @@ function ToolCallBlockImpl({ toolCall, onApprove, onReject }: Props) {
       )}
       {previewUrl && effectivePreviewUrl && (
         <div className="pl-5 pt-0.5 space-y-1">
-          {isVideoResult ? (
+          {/* The direct load failed and ComfyUI is not answering yet, as right
+              after the app starts or while ComfyUI restarts. The rescue keeps
+              asking (comfyViewRescue.ts); a calm line instead of a broken frame
+              until the bytes arrive. */}
+          {rescueWaiting ? (
+            <div className="flex items-center gap-1.5 t-micro text-gray-500 dark:text-gray-500" data-testid="tool-media-waiting">
+              <Loader2 size={10} className="animate-spin" />
+              {isVideoResult ? 'Loading the video' : 'Loading the picture'}, waiting for ComfyUI…
+            </div>
+          ) : isVideoResult ? (
             <video
               src={effectivePreviewUrl}
               controls
               loop
+              playsInline
+              preload="metadata"
+              aria-label="Generated video"
+              data-testid="tool-media-video"
               onError={() => { if (!imgFailed) setImgFailed(true) }}
               className="block max-w-full max-h-[320px] rounded border border-gray-200 dark:border-white/[0.06]"
             />
@@ -409,13 +576,22 @@ function ToolCallBlockImpl({ toolCall, onApprove, onReject }: Props) {
               />
             </a>
           )}
-          {/* Download (David 2026-06-12): generated media shows in the chat with
+          {/* The prompt the picture or the clip was made from, readable without
+              opening the tool block, with a button that copies it. Taken from
+              the call's own arguments, so a call without one shows no line. */}
+          {genPrompt && (
+            <div className="flex max-w-xl items-start gap-3 text-gray-500 dark:text-gray-400" data-testid="tool-media-prompt">
+              <span className="t-micro min-w-0 flex-1 max-h-20 overflow-y-auto scrollbar-thin select-text whitespace-pre-wrap break-words">{genPrompt}</span>
+              <CopyText text={genPrompt} label="Copy prompt" />
+            </div>
+          )}
+          {/* Download (2026-06-12): generated media shows in the chat with
               a Download button, ChatGPT-style — downloadComfyFile pulls the real
               bytes and saves via the native dialog. Mac MLX results have no
               ComfyUI /view route to re-fetch from, so a plain anchor download
               off the blob:/data: URL already in hand does the same job. */}
           {(() => {
-            const p = comfyViewParams(effectivePreviewUrl)
+            const p = comfyViewParams(comfyPreviewUrl ?? effectivePreviewUrl)
             if (p) {
               return (
                 <button
@@ -454,10 +630,13 @@ function ToolCallBlockImpl({ toolCall, onApprove, onReject }: Props) {
             className="overflow-hidden"
           >
             <div className="pl-5 pb-1.5 space-y-1">
-              {/* Arguments */}
-              <pre className="text-[0.55rem] leading-relaxed text-gray-500 dark:text-gray-500 bg-gray-50 dark:bg-white/[0.02] rounded px-2 py-1 overflow-x-auto scrollbar-thin">
-                {JSON.stringify(toolCall.args, null, 2)}
-              </pre>
+              {/* Arguments: only where the title does not already say them, and
+                  for a shell call as the terminal block below. */}
+              {!knownTool && (
+                <pre className="t-mono leading-relaxed text-gray-500 dark:text-gray-500 bg-gray-50 dark:bg-white/[0.02] rounded px-2 py-1 overflow-x-auto scrollbar-thin">
+                  {JSON.stringify(toolCall.args, null, 2)}
+                </pre>
+              )}
 
               {/* Diff for the write tools (audit D5): a change view where a
                   change happened, not raw result text. */}
@@ -468,16 +647,24 @@ function ToolCallBlockImpl({ toolCall, onApprove, onReject }: Props) {
               )}
 
               {/* Result (raw text). The inline media preview now renders
-                  always-visible above the collapsible (konata 2026-06-07). */}
-              {toolCall.result && !toolCall.diff && (
-                <pre className="text-[0.55rem] leading-relaxed text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-white/[0.02] rounded px-2 py-1 overflow-auto scrollbar-thin max-h-[300px]">
-                  {toolCall.result}
+                  always-visible above the collapsible (a user 2026-06-07). */}
+              {isShell && (
+                <pre data-testid="tool-terminal" className="lu-on-dark t-mono leading-relaxed rounded-md bg-gray-950 dark:bg-black/50 text-gray-100 px-3 py-2 overflow-auto scrollbar-thin max-h-[300px] whitespace-pre-wrap break-words">
+                  <span className="select-none text-gray-500">$ </span>{typeof toolCall.args?.command === 'string' ? toolCall.args.command : ''}
+                  {toolCall.result ? `\n${stripAnsi(toolCall.result)}` : ''}
+                </pre>
+              )}
+              {toolCall.result && !toolCall.diff && !isShell && (
+                <pre className="t-mono leading-relaxed text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-white/[0.02] rounded px-2 py-1 overflow-auto scrollbar-thin max-h-[300px] whitespace-pre-wrap break-words">
+                  {isWebTool ? stripSourcesMarker(toolCall.result) : toolCall.result}
                 </pre>
               )}
 
-              {/* Error */}
-              {toolCall.error && (
-                <pre className="text-[0.55rem] leading-relaxed text-gray-500 dark:text-gray-500 bg-gray-50 dark:bg-white/[0.02] rounded px-2 py-1">
+              {/* Error. Not when the result above already says it: a refused
+                  path showed "Path escapes the allowed workspace" twice
+                  (3.0.4 box run). */}
+              {toolCall.error && !(toolCall.result ?? '').includes(toolCall.error.trim()) && (
+                <pre className="t-mono leading-relaxed text-gray-500 dark:text-gray-500 bg-gray-50 dark:bg-white/[0.02] rounded px-2 py-1 whitespace-pre-wrap break-words">
                   {toolCall.error}
                 </pre>
               )}
@@ -496,13 +683,27 @@ function ToolCallBlockImpl({ toolCall, onApprove, onReject }: Props) {
                   >
                     <Check size={10} /> Approve
                   </button>
+                  {alwaysRule && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        useCommandRulesStore.getState().allow(toolCall.ruleScope!, alwaysRule)
+                        onApprove()
+                      }}
+                      data-testid="approve-always-here"
+                      title="Approves this command, and from now on commands that start like this run without asking in this folder. You can remove the rule in Settings → Agent."
+                      className="flex items-center gap-1 px-2.5 py-1 rounded t-micro text-gray-700 dark:text-gray-200 border border-gray-300 dark:border-white/15 hover:bg-gray-100 dark:hover:bg-white/[0.06] transition-colors"
+                    >
+                      Always allow <code className="font-mono">{alwaysRule}</code> here
+                    </button>
+                  )}
                   <button
                     onClick={(e) => { e.stopPropagation(); onReject() }}
                     className="flex items-center gap-1 px-2.5 py-1 rounded t-micro font-medium text-red-700 dark:text-red-300 bg-red-500/10 dark:bg-red-500/10 hover:bg-red-500/15 dark:hover:bg-red-500/15 border border-red-500/20 dark:border-red-500/25 transition-colors"
                   >
                     <X size={10} /> Reject
                   </button>
-                  <span className="ml-1 text-[0.5rem] text-gray-400 dark:text-gray-600 font-mono">⏎ / Esc</span>
+                  <span className="ml-1 t-micro text-gray-400 dark:text-gray-600 font-mono">⏎ / Esc</span>
                 </div>
               )}
             </div>
@@ -510,5 +711,24 @@ function ToolCallBlockImpl({ toolCall, onApprove, onReject }: Props) {
         )}
       </AnimatePresence>
     </div>
+  )
+}
+
+/**
+ * CA U1: seconds on a call that is still going, so a long `npm install` reads
+ * as working, not stuck. Quiet for the first 3 s: most reads end before that.
+ */
+function RunningFor({ since }: { since: number }) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [])
+  const s = Math.floor((now - since) / 1000)
+  if (!Number.isFinite(s) || s < 3) return null
+  return (
+    <span className="t-micro tabular-nums text-gray-500 dark:text-gray-500" data-testid="tool-running-for">
+      {s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`}
+    </span>
   )
 }

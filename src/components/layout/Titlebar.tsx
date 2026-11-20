@@ -81,7 +81,7 @@ export function Titlebar() {
   // macOS uses the OS-native traffic lights (close/minimize/zoom) rendered on
   // the LEFT by titleBarStyle:"Overlay" (tauri.macos.conf.json). So on mac we
   // draw NO custom window buttons — we just reserve space on the left for the
-  // native lights (David 2026-07-11). The whole strip stays a drag region.
+  // native lights (2026-07-11). The whole strip stays a drag region.
   //
   // D-W3-7, erste Haelfte: „Titlebar-Monogramm streichen." Hier ist es
   // gestrichen, auf dem Windows/Linux-Zweig unten NICHT — und der Unterschied

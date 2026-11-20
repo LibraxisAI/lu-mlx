@@ -53,8 +53,10 @@ describe('resetProvidersToDefaults hands the slot back to the Built-in Engine', 
 
 describe('wiring and the second G20 leftover', () => {
   it('the backends tab reset actually calls the store reset', () => {
+    // The two reset buttons live in lib/run-settings-reset.ts since B2.
     const page = read('../../components/settings/SettingsPage.tsx')
-    expect(page).toContain("if (tab === 'backends') useProviderStore.getState().resetProvidersToDefaults()")
+    expect(page).toContain('runSettingsReset(which, tab)')
+    expect(read('../run-settings-reset.ts')).toContain("if (tab === 'backends') useProviderStore.getState().resetProvidersToDefaults()")
   })
 
   it('the Add Provider path to the Built-in Engine exists as a preset', () => {
@@ -64,9 +66,14 @@ describe('wiring and the second G20 leftover', () => {
   })
 
   it('the picker says WHY local models are hidden in Cloud mode', () => {
-    const sel = read('../../components/models/ModelSelector.tsx')
-    expect(sel).toContain('Cloud mode shows hosted models only.')
-    expect(sel).toContain("appMode === 'cloud' && (")
+    // Since the picker of 3.0.5 the sentence stands behind the count in the
+    // footer of the Cloud picker ("47 cloud models"), no longer as a standing
+    // band over the list. The count names the mode, the hover says the rest.
+    const picker = read('../../components/models/CloudModelPicker.tsx')
+    expect(picker).toContain('Cloud mode shows hosted models only. Switch the app to Local mode')
+    expect(picker).toContain('title={CLOUD_MODE_LIST_NOTE}')
+    expect(picker).toMatch(/\$\{rows\.length\} cloud \$\{rows\.length === 1 \? 'model' : 'models'\}/)
+    expect(read('../../components/models/ModelSelector.tsx')).toContain("const cloudPicker = appMode === 'cloud'")
   })
 
   it('NEGATIVE CONTROL: the cloud-mode filter itself is untouched, only named', () => {

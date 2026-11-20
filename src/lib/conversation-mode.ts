@@ -32,3 +32,47 @@ export function conversationMode(
 ): NonNullable<Conversation['mode']> {
   return conv?.mode ?? 'lu'
 }
+
+/**
+ * The conversation that may stay active when the app starts.
+ *
+ * The app always starts in the Chat tab (codexStore resets chatMode to 'lu'
+ * on every rehydrate, a product decision), while the active conversation id
+ * is persisted. When the last conversation was a Code one, the Chat tab
+ * rendered it as a plain chat with Agent off, and a "continue" typed there
+ * went out without any tools (Gegenprobe on the real build, 30.09.2026). A
+ * conversation that belongs to another tab therefore does not survive the
+ * start; the app opens on the chat worked on last instead, so a returning
+ * user is where they left the Chat tab (Gegenprobe 01.10.2026: it opened
+ * empty). Nothing active stays nothing active, and so does a newcomer.
+ */
+export function activeConversationAtStart(
+  conversations: ReadonlyArray<{ id: string; updatedAt?: number } & ConversationModeSource>,
+  activeId: string | null | undefined,
+): string | null {
+  if (!activeId) return null
+  const conv = conversations.find((c) => c.id === activeId)
+  if (conv && conversationMode(conv) === 'lu') return activeId
+  return latestConversationOfMode(conversations, 'lu')
+}
+
+/**
+ * The conversation the Code button (mode 'codex') and the Chat button (mode
+ * 'lu') return to: the one worked on last. For Chat since 01.10.2026: Chat,
+ * Code, Chat landed on an empty page while the chat was one click away.
+ * "New Chat" is the way to an empty one.
+ * The button used to clear the active conversation, so going to Chat and
+ * back to Code while a run was in flight landed on the empty start page and
+ * the running conversation had to be found in the list.
+ */
+export function latestConversationOfMode(
+  conversations: ReadonlyArray<{ id: string; updatedAt?: number } & ConversationModeSource>,
+  mode: NonNullable<Conversation['mode']>,
+): string | null {
+  let best: { id: string; updatedAt?: number } | null = null
+  for (const c of conversations) {
+    if (conversationMode(c) !== mode) continue
+    if (!best || (c.updatedAt ?? 0) > (best.updatedAt ?? 0)) best = c
+  }
+  return best?.id ?? null
+}

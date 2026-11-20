@@ -86,9 +86,14 @@ describe('das Aufklappmenue bleibt im Fenster', () => {
 
   it('es misst, wie viel Platz ueber dem Ausloeser wirklich ist', () => {
     // Ein festes max-h in vh weiss nichts davon, wo der Ausloeser sitzt.
-    expect(src).toContain('const frei = openUpward ? r.top : window.innerHeight - r.bottom')
-    expect(src).toContain('setMenuePlatz(')
-    expect(src).toContain('style={menuePlatz === null ? undefined : { maxHeight: menuePlatz }}')
+    // Seit GitHub #149 misst das der gemeinsame Haken, gegen die Flaeche, die
+    // wirklich abschneidet, und ohne Mindesthoehe.
+    // Seit 3.0.5 mit zwei Optionssaetzen: die Cloud-Liste deckelt ihre Hoehe
+    // und rollt innen, die lokale Liste misst wie zuvor.
+    expect(src).toContain('const menue = usePopoverPlatz(menueRef, open, cloudPicker')
+    expect(src).toContain("? { bevorzugt: openUpward ? 'oben' : 'unten', abstand: 6, luft: 12, deckel: CLOUD_PICKER_MAX_HEIGHT")
+    expect(src).toContain(": { bevorzugt: openUpward ? 'oben' : 'unten', abstand: 6, luft: 12 })")
+    expect(src).toContain('style={cloudPicker ? { width: CLOUD_PICKER_WIDTH, ...menue.style } : menue.style}')
   })
 
   it('und was nicht mehr hineinpasst, laesst sich scrollen', () => {

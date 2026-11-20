@@ -10,7 +10,7 @@
  *   • der Live-Anstrich (Pruefung D1: ein wartendes Bild malte alten Inhalt
  *     ueber den fertigen Text);
  *   • die Bergung von Werkzeugaufrufen aus dem Fliesstext (qwen2.5-coder:3b);
- *   • das Urteil "steckengeblieben oder fertig" (David 2026-06-02: der Agent
+ *   • das Urteil "steckengeblieben oder fertig" (2026-06-02: der Agent
  *     "antwortet in loops" auf eine simple Frage);
  *   • der Denk-Abstieg, der in DREI Transporten in drei Schreibweisen stand.
  *
@@ -168,7 +168,7 @@ describe('Ein Zug ohne Werkzeugaufruf', () => {
     expect(nudge('Which file should I look at?')).toBe(true)
   })
 
-  it('stupst NICHT bei einer echten Antwort — das war die Schleife von David', () => {
+  it('stupst NICHT bei einer echten Antwort — das war die Schleife vom Inhaber', () => {
     expect(nudge('2+2 is 4.')).toBe(false)
     expect(nudge('Task completed. The answer is 4.')).toBe(false)
     expect(nudge('The bug was a missing await in loadUser(); I added it and the suite passes.')).toBe(false)
@@ -182,7 +182,7 @@ describe('Ein Zug ohne Werkzeugaufruf', () => {
   it('ein leerer Zug stupst nur, wenn noch NICHTS geliefert wurde', () => {
     expect(nudge('', '')).toBe(true)
     // Leer NACH einer echten Antwort heisst fertig, sonst bleiben die
-    // Schreibpunkte stehen (David 2026-06-12).
+    // Schreibpunkte stehen (2026-06-12).
     expect(nudge('', 'Die Antwort steht oben.')).toBe(false)
     expect(nudge('   \n  ', 'Die Antwort steht oben.')).toBe(false)
   })

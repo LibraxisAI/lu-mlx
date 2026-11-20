@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 /// Mirrors commands/filesystem.rs::resolve_path so shell output lands in the
 /// SAME folder the file tools write to. Used as the fallback cwd when the
 /// caller doesn't pass one — without it the child process inherits the LU
-/// app's ambient cwd and dumps build output into ~/Documents (David 2026-06-04).
+/// app's ambient cwd and dumps build output into ~/Documents (2026-06-04).
 ///
 /// The slug comes from `agent::sanitize_chat_slug`, the one copy that drops
 /// `.`: this file used to carry its own that kept it, so a chat id of ".."
@@ -28,14 +28,52 @@ fn workspace_cwd(chat_id: Option<&str>) -> PathBuf {
         .join(crate::commands::agent::sanitize_chat_slug(chat_id.unwrap_or("default")))
 }
 
+/// The folder a command runs in. The tool tells the model that `cwd` is
+/// "relative to the workspace", so a relative one is joined onto the
+/// workspace; it used to be checked against the app's own process folder,
+/// failed there, and the command ran in the workspace root instead of the
+/// subfolder the model asked for (C59 bench, 2026-11-09). An absolute cwd
+/// that exists is used as is; anything that is not a folder falls back to
+/// the workspace.
+pub(crate) fn cwd_in_workspace(cwd: Option<&str>, base: &Path) -> PathBuf {
+    match cwd.map(str::trim).filter(|s| !s.is_empty()).map(Path::new) {
+        Some(p) => {
+            let p = if p.is_absolute() { p.to_path_buf() } else { base.join(p) };
+            if p.is_dir() { p } else { base.to_path_buf() }
+        }
+        None => base.to_path_buf(),
+    }
+}
+
 /// How much of a command's output travels back to the model. Anything past this
 /// is still read off the pipe — it has to be, or the child blocks — but dropped.
 const MAX_CAPTURE: usize = 256 * 1024;
+
+/// So viel vom ENDE einer Ausgabe bleibt immer erhalten (C81). `kept` haelt
+/// den Anfang und hoert nach MAX_CAPTURE auf; ein llama-server, der nach
+/// Stunden stirbt, hat seine letzten Worte aber weit dahinter geschrieben.
+const TAIL_CAPTURE: usize = 16 * 1024;
 
 #[derive(Default)]
 pub(crate) struct Captured {
     kept: Vec<u8>,
     total: usize,
+    /// Die letzten TAIL_CAPTURE Bytes, laufend nachgeschoben.
+    tail: std::collections::VecDeque<u8>,
+}
+
+impl Captured {
+    fn push(&mut self, bytes: &[u8]) {
+        self.total += bytes.len();
+        let room = MAX_CAPTURE.saturating_sub(self.kept.len());
+        if room > 0 {
+            self.kept.extend_from_slice(&bytes[..bytes.len().min(room)]);
+        }
+        let bytes = &bytes[bytes.len().saturating_sub(TAIL_CAPTURE)..];
+        let overflow = (self.tail.len() + bytes.len()).saturating_sub(TAIL_CAPTURE);
+        self.tail.drain(..overflow);
+        self.tail.extend(bytes.iter().copied());
+    }
 }
 
 /// Drain a child pipe on its own thread. The pipe MUST be read while the process
@@ -55,11 +93,7 @@ pub(crate) fn drain(mut pipe: impl Read + Send + 'static) -> (Arc<Mutex<Captured
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     if let Ok(mut c) = sink.lock() {
-                        c.total += n;
-                        let room = MAX_CAPTURE.saturating_sub(c.kept.len());
-                        if room > 0 {
-                            c.kept.extend_from_slice(&chunk[..n.min(room)]);
-                        }
+                        c.push(&chunk[..n]);
                     }
                 }
             }
@@ -148,6 +182,75 @@ pub(crate) fn captured_text(buf: &Arc<Mutex<Captured>>) -> String {
     }
     text
 }
+
+/// Everything a capture still holds, in stream order: the head `kept`, a
+/// marker for the bytes that fell between head and tail, and the tail ring.
+///
+/// `captured_text` stops at the head, which is right for a probe but wrong
+/// for the agent's terminal: a build that printed 300 KiB ended at the 256 KiB
+/// mark, and the last lines the model saw were not the last lines the build
+/// wrote, which is where the error stands. The agent tool cuts this to its own
+/// head and tail in TypeScript (`cutShellOutput` in builtin-tools.ts); the
+/// whole text stays readable as a task in `bg_tasks`.
+pub(crate) fn captured_full(buf: &Arc<Mutex<Captured>>) -> String {
+    let c = match buf.lock() {
+        Ok(c) => c,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let head = strip_ansi(&String::from_utf8_lossy(&c.kept));
+    if c.total <= c.kept.len() {
+        return head;
+    }
+    let tail: Vec<u8> = c.tail.iter().copied().collect();
+    // Where the ring starts in the stream, and how much of it the head
+    // already covers.
+    let tail_start = c.total - tail.len();
+    let overlap = c.kept.len().saturating_sub(tail_start).min(tail.len());
+    let lost = tail_start.saturating_sub(c.kept.len());
+    let mut text = head;
+    if lost > 0 {
+        text.push_str(&format!("\n[output truncated: {} bytes in the middle not kept]\n", lost));
+    }
+    text.push_str(&strip_ansi(&String::from_utf8_lossy(&tail[overlap..])));
+    text
+}
+
+/// How many bytes went through a capture in all, kept or not.
+pub(crate) fn captured_total(buf: &Arc<Mutex<Captured>>) -> usize {
+    match buf.lock() {
+        Ok(c) => c.total,
+        Err(poisoned) => poisoned.into_inner().total,
+    }
+}
+
+/// From this many captured bytes on, a finished foreground run is also kept
+/// in the task registry, so the model can read what the tool result cut.
+/// The TypeScript side cuts from 8000 characters on (2000 head + 6000 tail,
+/// `SHELL_HEAD_CHARS` + `SHELL_TAIL_CHARS`), and a character is never less
+/// than one byte here, so every result that gets cut has a task behind it.
+pub(crate) const KEEP_OUTPUT_FROM_BYTES: usize = 8_000;
+
+/// Die letzten `max_lines` nicht leeren Zeilen einer Ausgabe, aus dem
+/// Ringpuffer statt aus dem Anfang (C81). Die erste Zeile im Puffer kann
+/// abgeschnitten sein und faellt deshalb weg, sobald der Puffer voll war.
+pub(crate) fn captured_tail(buf: &Arc<Mutex<Captured>>, max_lines: usize) -> String {
+    let c = match buf.lock() {
+        Ok(c) => c,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let bytes: Vec<u8> = c.tail.iter().copied().collect();
+    let wrapped = c.total > c.tail.len();
+    drop(c);
+    let text = strip_ansi(&String::from_utf8_lossy(&bytes));
+    let mut lines: Vec<&str> = text.lines().collect();
+    if wrapped && !lines.is_empty() {
+        lines.remove(0);
+    }
+    let lines: Vec<&str> = lines.into_iter().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect();
+    let start = lines.len().saturating_sub(max_lines);
+    lines[start..].join("\n")
+}
+
 
 /// Every process descending from `root`, deepest last.
 pub(crate) fn descendants(root: u32, sys: &sysinfo::System) -> Vec<u32> {
@@ -272,7 +375,17 @@ pub(crate) fn kill_tree_with(root: u32, root_start: Option<u64>) {
     // is already dead, which is why each leftover is felled as a root of its
     // own. The loop ends as soon as nothing is left, and otherwise after
     // TREE_KILL_SETTLE, for as long as taskkill itself returns.
-    taskkill_tree(root);
+    //
+    // `/T` follows parent links and nothing else. When a process older than
+    // `root` is recorded under it, the number `root` has was once held by that
+    // stranger's creator, and `/T` would take the stranger and everything
+    // below it along. Then only `root` itself is ended here, and the sweep
+    // below fells what is provably its own.
+    if carries_a_stranger(root, root_start) {
+        taskkill_one(root);
+    } else {
+        taskkill_tree(root);
+    }
     let deadline = Instant::now() + TREE_KILL_SETTLE;
     loop {
         let leftovers = late_descendants(root, root_start);
@@ -293,13 +406,45 @@ pub(crate) fn kill_tree_with(root: u32, root_start: Option<u64>) {
 /// that to have happened.
 #[cfg(windows)]
 fn taskkill_tree(root: u32) {
+    taskkill(root, true);
+}
+
+/// End `root` alone and wait for that to have happened.
+#[cfg(windows)]
+fn taskkill_one(root: u32) {
+    taskkill(root, false);
+}
+
+#[cfg(windows)]
+fn taskkill(root: u32, with_tree: bool) {
+    let pid = root.to_string();
+    let args: &[&str] = if with_tree { &["/PID", &pid, "/T", "/F"] } else { &["/PID", &pid, "/F"] };
     let mut command = Command::new("taskkill.exe");
-    command.args(["/PID", &root.to_string(), "/T", "/F"])
+    command.args(args)
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     crate::process_util::suppress_window(&mut command);
     if let Ok(mut killer) = command.spawn() {
         finish_tree_kill(&mut killer);
     }
+}
+
+/// Whether a process that is older than `root` is recorded as its child.
+/// See [`late_descendants`] for why the age is the token. Without a start
+/// time for `root` there is nothing to compare against, and the answer is no.
+#[cfg(windows)]
+fn carries_a_stranger(root: u32, root_start: Option<u64>) -> bool {
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let Some(root_start) = root_start else { return false };
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+    is_a_stranger_under(root, root_start, sys.processes().values().map(|p| (p.parent().map(Pid::as_u32), p.start_time())))
+}
+
+/// The rule of [`carries_a_stranger`] on plain numbers, so it can be tested
+/// without a recycled pid, which no test can order from Windows.
+#[cfg(any(windows, test))]
+fn is_a_stranger_under(root: u32, root_start: u64, mut table: impl Iterator<Item = (Option<u32>, u64)>) -> bool {
+    table.any(|(parent, start)| parent == Some(root) && start < root_start)
 }
 
 /// When `root` was created, read while it is still alive. `None` once it is
@@ -831,10 +976,18 @@ pub(crate) fn default_shell(windows: bool) -> &'static str {
     }
 }
 
-/// The eight arguments are the IPC contract: `#[tauri::command]` derives the
+/// The arguments are the IPC contract: `#[tauri::command]` derives the
 /// invoke payload from this signature, so folding them into a struct would
 /// change the JSON the frontend sends. `clippy::too_many_arguments` is allowed
 /// here for that reason and not as a matter of taste.
+///
+/// `backgroundOnTimeout` (T1, CA rebuild): with `true`, a command that is
+/// still running when its timeout hits is NOT killed. It moves into the
+/// background-task registry (`bg_tasks::adopt_foreground`, the same ids as
+/// `shell_task_*`) and the reply carries `taskId`. Without it, or with
+/// `false`, the timeout kills the tree as it always has: every caller other
+/// than the agent's terminal tool (the retired git helpers, the phone's remote
+/// path) has nobody who would ever read or stop such a task.
 #[tauri::command]
 #[allow(non_snake_case, clippy::too_many_arguments)]
 pub async fn shell_execute(
@@ -847,9 +1000,21 @@ pub async fn shell_execute(
     chatId: Option<String>,
     workingDirectory: Option<String>,
     callId: Option<String>,
+    backgroundOnTimeout: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     tokio::task::spawn_blocking(move || {
-        shell_execute_sync(command, args, cwd, timeout, shell, stdin, chatId, workingDirectory, callId)
+        shell_execute_sync(
+            command,
+            args,
+            cwd,
+            timeout,
+            shell,
+            stdin,
+            chatId,
+            workingDirectory,
+            callId,
+            backgroundOnTimeout.unwrap_or(false),
+        )
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
@@ -859,7 +1024,7 @@ pub async fn shell_execute(
 /// blocking half of the same command, and a different shape here would be a
 /// second place to keep in step with the frontend contract.
 #[allow(clippy::too_many_arguments)]
-fn shell_execute_sync(
+pub(crate) fn shell_execute_sync(
     command: String,
     args: Option<Vec<String>>,
     cwd: Option<String>,
@@ -869,6 +1034,7 @@ fn shell_execute_sync(
     chat_id: Option<String>,
     working_directory: Option<String>,
     call_id: Option<String>,
+    background_on_timeout: bool,
 ) -> Result<serde_json::Value, String> {
     // VOR dem Bauen des Befehls angemeldet, damit ein Abbruch, der den Start
     // ueberholt, einen Platz hat, an dem er stehen bleiben kann.
@@ -891,6 +1057,15 @@ fn shell_execute_sync(
     let mut cmd = crate::process_util::foreign_system_command(&shell_bin);
     cmd.args(&shell_args);
 
+    // Fehlerkontrolle Mac 2, Fund 7: an app opened from the Finder has the
+    // launchd PATH, and so had this shell. `brew`, `node`, `uv`, `ffmpeg` and
+    // everything else under /opt/homebrew answered "command not found" for the
+    // agent although the same line works in the user's terminal. The child
+    // gets the PATH of the user's login shell instead (read once, bounded,
+    // never an interactive shell; see `finder_path`).
+    #[cfg(target_os = "macos")]
+    cmd.env("PATH", crate::finder_path::child_path());
+
     // Append extra args
     if let Some(extra_args) = args {
         for a in extra_args {
@@ -901,20 +1076,18 @@ fn shell_execute_sync(
     // Working directory. Use the explicit cwd when it exists; otherwise fall
     // back to the per-chat agent workspace (created if missing) so a relative
     // command never runs in the app's ambient cwd and scatters files into
-    // ~/Documents (David 2026-06-04). Mirrors the file tools' path resolution.
-    let workdir: PathBuf = match cwd.as_ref().map(Path::new) {
-        Some(p) if p.is_dir() => p.to_path_buf(),
-        _ => match working_directory.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            // Folder workspace (the user's repo, from chatCtx.workingDirectory)
-            // wins over the per-chat sandbox for relative commands (#62).
-            Some(wd) => PathBuf::from(wd),
-            None => {
-                let w = workspace_cwd(chat_id.as_deref());
-                let _ = std::fs::create_dir_all(&w);
-                w
-            }
-        },
+    // ~/Documents (2026-06-04). Mirrors the file tools' path resolution.
+    let base: PathBuf = match working_directory.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        // Folder workspace (the user's repo, from chatCtx.workingDirectory)
+        // wins over the per-chat sandbox for relative commands (#62).
+        Some(wd) => PathBuf::from(wd),
+        None => {
+            let w = workspace_cwd(chat_id.as_deref());
+            let _ = std::fs::create_dir_all(&w);
+            w
+        }
     };
+    let workdir = cwd_in_workspace(cwd.as_deref(), &base);
     if workdir.is_dir() {
         cmd.current_dir(&workdir);
     }
@@ -934,6 +1107,17 @@ fn shell_execute_sync(
     cmd.creation_flags(CREATE_NO_WINDOW);
 
     let mut child = cmd.spawn().map_err(|e| format!("Spawn shell: {}", os_error::english(&e)))?;
+
+    // A run that may outlive this call joins the kill-on-close Job Object at
+    // once, exactly like a task started by `shell_task_start`: on Windows the
+    // job is what takes background tasks down when LU quits (the atexit sweep
+    // in bg_tasks is not armed there). At spawn and not at the handover,
+    // because a job only catches the children created after the assignment,
+    // and by the timeout the shell has long started its worker.
+    #[cfg(target_os = "windows")]
+    if background_on_timeout {
+        crate::commands::process::assign_pid_to_kill_on_close_job(child.id());
+    }
 
     // Der Abbruch kann zwischen Anmelden und Start eingetroffen sein. Dann gab
     // es keine Prozesskennung zu toeten, und dieser Prozess hier ist genau der,
@@ -991,14 +1175,56 @@ fn shell_execute_sync(
         match child.try_wait() {
             Ok(Some(status)) => {
                 settle(&out_done, &err_done, std::time::Duration::from_millis(500));
-                return Ok(serde_json::json!({
-                    "stdout": captured_text(&out_buf),
-                    "stderr": captured_text(&err_buf),
-                    "exitCode": status.code().unwrap_or(-1),
+                let exit_code = status.code().unwrap_or(-1);
+                let mut reply = serde_json::json!({
+                    "stdout": captured_full(&out_buf),
+                    "stderr": captured_full(&err_buf),
+                    "exitCode": exit_code,
                     "timedOut": false,
-                }));
+                });
+                // A long result gets cut in the tool reply; what was cut stays
+                // readable under this id (`shell_task_status`). Only the agent
+                // tool asks for it, the same switch as the handover below.
+                if background_on_timeout
+                    && captured_total(&out_buf) + captured_total(&err_buf) >= KEEP_OUTPUT_FROM_BYTES
+                {
+                    let id = crate::commands::bg_tasks::keep_finished_output(
+                        &command,
+                        workdir_text(&workdir),
+                        status.code(),
+                        out_buf,
+                        err_buf,
+                    );
+                    reply["outputId"] = serde_json::Value::String(id);
+                }
+                return Ok(reply);
             }
             Ok(None) => {
+                if start.elapsed() > timeout_dur && background_on_timeout {
+                    // HANDOVER instead of a kill (T1). The child, its pipe
+                    // readers and their buffers move into the task registry as
+                    // they are: nothing is restarted, nothing is read twice,
+                    // and the process never notices. From here on the
+                    // registry's reaper owns it, `shell_task_kill` and the
+                    // exit sweep reach it like any other task, and this call
+                    // returns what was printed so far.
+                    let stdout_so_far = captured_full(&out_buf);
+                    let stderr_so_far = captured_full(&err_buf);
+                    let id = crate::commands::bg_tasks::adopt_foreground(
+                        child,
+                        &command,
+                        workdir_text(&workdir),
+                        crate::commands::bg_tasks::AdoptedPipes { out_buf, err_buf, out_done, err_done },
+                    );
+                    return Ok(serde_json::json!({
+                        "stdout": stdout_so_far,
+                        "stderr": stderr_so_far,
+                        "exitCode": -1,
+                        "timedOut": true,
+                        "taskId": id,
+                        "timeoutMs": timeout_ms,
+                    }));
+                }
                 if start.elapsed() > timeout_dur {
                     kill_tree(child.id());
                     let _ = child.kill();
@@ -1023,6 +1249,11 @@ fn shell_execute_sync(
             Err(e) => return Err(format!("Wait error: {}", e)),
         }
     }
+}
+
+/// The folder a run happened in, as the task registry shows it.
+fn workdir_text(workdir: &Path) -> Option<String> {
+    workdir.is_dir().then(|| workdir.to_string_lossy().to_string())
 }
 
 /// Der Abbruch eines schon gestarteten Befehls.
@@ -1147,10 +1378,16 @@ mod shell_cancel_tests {
     fn shell_register_fegt_alte_pid_lose_eintraege_weg() {
         // Negativkontrolle steht im naechsten Test: eine junge Karte ohne pid
         // bleibt stehen, nur das Alter entscheidet.
+        //
+        // Die Karte wird geprueft, solange sie jung ist. Die Karte ist eine
+        // fuer alle Tests, und jedes `shell_register` eines Nachbartests fegt:
+        // nach dem Zurueckdatieren darf die Karte also schon fort sein, bevor
+        // der eigene Ausloeser laeuft. Linux, 08.10.2026: ein voller Lauf rot
+        // an der Pruefung, die hier frueher nach dem Zurueckdatieren stand.
         let alt = kennung("alt-ohne-pid");
         shell_register(&alt);
-        shell_test_set_created_at(&alt, STALE_SHELL_ENTRY_AGE + Duration::from_secs(1));
         assert!(shell_test_contains(&alt), "die Karte muss vor dem Fegen existieren");
+        shell_test_set_created_at(&alt, STALE_SHELL_ENTRY_AGE + Duration::from_secs(1));
 
         let ausloeser = kennung("ausloeser");
         shell_register(&ausloeser); // das naechste shell_register fegt
@@ -1406,6 +1643,42 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    /// Fehlerkontrolle Mac 2, Fund 7. The agent's shell runs with the PATH of
+    /// the user's login shell and not with whatever this process inherited.
+    /// From the Finder that inherited PATH is `/usr/bin:/bin:/usr/sbin:/sbin`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_agents_shell_gets_the_login_path_on_a_mac() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = shell_execute_sync(
+            "printf %s \"$PATH\"".to_string(),
+            None,
+            Some(dir.path().to_string_lossy().to_string()),
+            Some(20_000),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .expect("the shell ran");
+        let seen = out["stdout"].as_str().unwrap_or_default().to_string();
+        assert_eq!(seen, crate::finder_path::child_path().to_string_lossy());
+        // The property itself, not only the wiring: what a login shell adds
+        // on every Mac (`/etc/paths` names /usr/local/bin) is there.
+        assert!(seen.split(':').any(|p| p == "/usr/local/bin"), "{seen}");
+    }
+
+    /// The same rule holds for a task the agent starts in the background.
+    #[test]
+    fn both_shell_paths_hand_the_login_path_to_the_child() {
+        let needle = ["finder_path", "::child_path()"].concat();
+        for (name, src) in [("shell.rs", include_str!("shell.rs")), ("bg_tasks.rs", include_str!("bg_tasks.rs"))] {
+            assert!(src.contains(&needle), "{name} starts a shell without the login PATH on a Mac");
+        }
+    }
+
     fn capture(bytes: Vec<u8>) -> String {
         let (buf, done) = drain(Cursor::new(bytes));
         settle(&done, &done, std::time::Duration::from_secs(2));
@@ -1443,6 +1716,40 @@ mod tests {
     fn small_output_comes_back_whole_and_unannotated() {
         let text = capture(b"hello\n".to_vec());
         assert_eq!(text, "hello\n");
+    }
+
+    fn capture_full(bytes: Vec<u8>) -> String {
+        let (buf, done) = drain(Cursor::new(bytes));
+        settle(&done, &done, std::time::Duration::from_secs(2));
+        captured_full(&buf)
+    }
+
+    /// T1: the agent's terminal reads the END of a long output too. Past the
+    /// head, `captured_text` only said "truncated"; the last lines, where a
+    /// build prints its error, were gone.
+    #[test]
+    fn the_full_capture_keeps_head_and_the_real_end() {
+        let mut bytes = vec![b'a'; MAX_CAPTURE + 100_000];
+        bytes.extend_from_slice(b"THE-LAST-LINE\n");
+        let text = capture_full(bytes.clone());
+        assert!(text.starts_with("aaaa"));
+        assert!(text.ends_with("THE-LAST-LINE\n"), "the tail is missing");
+        let lost = bytes.len() - MAX_CAPTURE - TAIL_CAPTURE;
+        assert!(text.contains(&format!("[output truncated: {lost} bytes in the middle not kept]")), "no marker");
+    }
+
+    /// Head and tail overlap when the stream is only a little longer than the
+    /// head: then nothing is lost and nothing may appear twice.
+    #[test]
+    fn an_overlapping_tail_is_not_repeated() {
+        let bytes: Vec<u8> = (0..MAX_CAPTURE + 4_000).map(|i| b'a' + (i % 26) as u8).collect();
+        let text = capture_full(bytes.clone());
+        assert_eq!(text.as_bytes(), &bytes[..], "the stream did not come back exactly once");
+    }
+
+    #[test]
+    fn a_short_full_capture_is_the_output_itself() {
+        assert_eq!(capture_full(b"hello\n".to_vec()), "hello\n");
     }
 
     /// The shell tool creates its fallback cwd with `create_dir_all`. With the
@@ -1600,5 +1907,86 @@ mod farbcode_tests {
     fn cursorbewegungen_gehen_mit_und_nicht_nur_farben() {
         // ComfyUI setzt den Cursor zurueck, um seinen Balken zu ueberschreiben.
         assert_eq!(strip_ansi("\u{1b}[2K\u{1b}[1Gnode 3/7"), "node 3/7");
+    }
+}
+
+#[cfg(test)]
+mod stranger_tests {
+    use super::is_a_stranger_under;
+
+    #[test]
+    fn a_child_older_than_its_recorded_parent_is_a_stranger() {
+        // (parent, start): one own child, one process of another tree, and one
+        // listed under 40 although it started 500 seconds before 40 did.
+        let table = [(Some(40), 1000), (Some(7), 10), (Some(40), 500)];
+        assert!(is_a_stranger_under(40, 1000, table.into_iter()));
+    }
+
+    #[test]
+    fn children_of_the_same_second_or_later_are_its_own() {
+        let table = [(Some(40), 1000), (Some(40), 1003), (None, 1), (Some(41), 2)];
+        assert!(!is_a_stranger_under(40, 1000, table.into_iter()));
+    }
+}
+
+#[cfg(test)]
+mod cwd_in_workspace_tests {
+    use super::cwd_in_workspace;
+
+    #[test]
+    fn a_relative_cwd_lands_inside_the_workspace() {
+        let ws = std::env::temp_dir().join(format!("lu-cwd-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(ws.join("fotos")).unwrap();
+        assert_eq!(cwd_in_workspace(Some("fotos"), &ws), ws.join("fotos"));
+        assert_eq!(cwd_in_workspace(Some(" fotos "), &ws), ws.join("fotos"));
+        // Not a folder there: the workspace, never the app's own folder.
+        assert_eq!(cwd_in_workspace(Some("fehlt"), &ws), ws);
+        assert_eq!(cwd_in_workspace(None, &ws), ws);
+        assert_eq!(cwd_in_workspace(Some(""), &ws), ws);
+        // An absolute folder is used as it is.
+        let abs = ws.join("fotos");
+        assert_eq!(cwd_in_workspace(abs.to_str(), &ws), abs);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+}
+
+#[cfg(test)]
+mod captured_tail_tests {
+    use super::*;
+
+    #[test]
+    fn the_tail_keeps_the_last_words_long_after_the_head_stopped() {
+        let buf = Arc::new(Mutex::new(Captured::default()));
+        {
+            let mut c = buf.lock().unwrap();
+            // Mehr als MAX_CAPTURE an Geplapper, dann der Absturz.
+            let line = b"slot update_slots: id  0 | task 7 | prompt processing progress\n";
+            let mut written = 0;
+            while written < MAX_CAPTURE + 64 * 1024 {
+                c.push(line);
+                written += line.len();
+            }
+            c.push(b"ggml_cuda_compute_forward: ROCm error: out of memory\n");
+            c.push(b"\x1b[31mGGML_ABORT\x1b[0m failed\n");
+        }
+        let tail = captured_tail(&buf, 2);
+        assert_eq!(tail, "ggml_cuda_compute_forward: ROCm error: out of memory\nGGML_ABORT failed");
+        // Der Kopf bleibt, wie er war: abgeschnitten nach MAX_CAPTURE.
+        assert!(captured_text(&buf).contains("[output truncated"));
+    }
+
+    #[test]
+    fn a_short_output_is_all_tail_and_a_wrapped_first_line_is_dropped() {
+        let buf = Arc::new(Mutex::new(Captured::default()));
+        buf.lock().unwrap().push(b"one\n\ntwo\nthree\n");
+        assert_eq!(captured_tail(&buf, 5), "one\ntwo\nthree");
+        assert_eq!(captured_tail(&buf, 1), "three");
+        let big = Arc::new(Mutex::new(Captured::default()));
+        let mut chunk = vec![b'x'; TAIL_CAPTURE];
+        chunk.extend_from_slice(b"\nlast\n");
+        big.lock().unwrap().push(&chunk);
+        // Die angeschnittene x-Zeile ist kein ganzer Satz und faellt weg.
+        assert_eq!(captured_tail(&big, 5), "last");
+        assert_eq!(captured_tail(&Arc::new(Mutex::new(Captured::default())), 5), "");
     }
 }

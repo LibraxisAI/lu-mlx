@@ -241,8 +241,12 @@ describe('die Leiter ist angewandt, wo dieses Paket hinreicht — und nur da', (
   it('die Leerzustaende dieser Verzeichnisse tragen EINE Groesse', () => {
     // Das ist der eigentliche Fix hinter der Zahl. Er darf sich nicht
     // still aufloesen, indem jemand eine der vier Stellen zurueckdreht.
+    // Die Leerzustaende des Model Managers zeichnet seit dem 08.10.2026 die
+    // jeweilige Fassung der Seite (klassisch auf Windows und Linux, neu auf
+    // dem Mac). Beide tragen die 28.
     for (const f of [
-      'components/models/ModelManager.tsx',
+      'components/models/skin/classic.tsx',
+      'components/models/skin/mac.tsx',
       'components/chat/CodexView.tsx',
       'components/chat/RAGPanel.tsx',
     ]) {

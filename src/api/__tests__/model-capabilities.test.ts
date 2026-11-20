@@ -180,7 +180,7 @@ describe('videoFrameReject — only reject the genuinely-impossible (C1 regressi
   })
 
   // FramePack must honor the original ask (long clips). 7s @ 40fps = 280 frames ≤ 600.
-  it('FramePack seconds=7 fps=40 → NULL (the original David ask is deliverable)', () => {
+  it('FramePack seconds=7 fps=40 → NULL (the original ask is deliverable)', () => {
     expect(videoFrameReject('framepack', { seconds: 7, fps: 40 }, framepack)).toBeNull()
   })
   it('FramePack seconds=100 → NULL (within the real 120s total_second_length limit)', () => {

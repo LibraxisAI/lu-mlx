@@ -5,6 +5,7 @@ import { proxyUrls } from './support/recorded'
 // test bundle. It gives the page-side module handle below the REAL signatures
 // of src/api/rag.ts instead of a hand-copied guess that would drift.
 import type * as RagModule from '../src/api/rag'
+import { appModules, type AppWindow } from './support/ui'
 
 /**
  * P5 acceptance test — Document-Chat / RAG embeddings without Ollama.
@@ -54,6 +55,7 @@ test('document chat embeds via the bundled server, never Ollama', async ({ page 
   await page.getByRole('button', { name: /Get Started/i }).click()
 
   // ── Drive the real RAG pipeline in-page against the mocked bundled embed ──
+  await appModules(page, ['/src/api/rag.ts'])
   const result = await page.evaluate(async () => {
     // The pipeline has to run INSIDE the page — it talks to the mocked Tauri
     // bridge — so rag.ts is reachable only through the URL Vite serves it
@@ -62,8 +64,7 @@ test('document chat embeds via the bundled server, never Ollama', async ({ page 
     // above), and the check below proves at RUNTIME that the two entry points
     // are actually there. A renamed export then fails with a sentence instead
     // of "rag.indexDocument is not a function".
-    const RAG_MODULE_URL = '/src/api/rag.ts'
-    const rag: typeof RagModule = await import(/* @vite-ignore */ RAG_MODULE_URL)
+    const rag: typeof RagModule = (window as unknown as AppWindow).__APP__['/src/api/rag.ts']
     if (typeof rag.indexDocument !== 'function' || typeof rag.retrieveContext !== 'function') {
       throw new Error('src/api/rag.ts no longer exports indexDocument/retrieveContext')
     }

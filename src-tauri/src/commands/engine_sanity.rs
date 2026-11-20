@@ -4,9 +4,9 @@
 // opened its port. It says nothing about whether the numbers coming out of the
 // graphics card are numbers. Three reporters have now described the difference:
 //
-//   * GitHub 128 (Caldeiradas, 2026-09-09): endless question marks.
-//   * Discord half_676767 (2026-09-09): the same runaway stream.
-//   * Discord buzz0070615 (2026-08-17): character salad.
+//   * GitHub 128 (2026-09-09): endless question marks.
+//   * Discord (2026-09-09): the same runaway stream.
+//   * Discord (2026-08-17): character salad.
 //
 // The only one who named his hardware had a 2 GB card and a 3B model. On the
 // 12 GB RTX 3060 here the same upstream Vulkan build answers coherent English
@@ -91,6 +91,38 @@ pub(crate) const GARBLED_ON_CPU_NOTE: &str = "The engine produced unreadable out
 /// well" here would claim a measurement that never happened, and on the flash
 /// attention rung the processor was not even the destination.
 pub(crate) const RESTART_DID_NOT_COME_BACK_NOTE: &str = "The engine could not be restarted with different settings, so the first engine is running again. Please send the log file from Settings > Troubleshoot.";
+
+/// llama-server's own sentence when no GPU backend came up with a device
+/// (common/arg.cpp at the pinned 049326a, printed for `-ngl` with a number,
+/// `auto` or `all` alike). It is the only line that says "no card at all":
+/// `ggml_vulkan: No devices found.` alone is not, because a build with a
+/// second backend can serve on that one.
+const NO_USABLE_GPU_LINE: &str = "no usable GPU found, --gpu-layers option will be ignored";
+
+/// What a Linux user is told when the engine started without any card.
+///
+/// fanezeu (Linux server, RX 7900 XTX, 23.10.2026). The Linux LU Engine is the
+/// Vulkan build, and the loader alone (libvulkan1, which the deb pulls in) is
+/// not a driver: a server or minimal install often has no Vulkan driver for
+/// the card, so the engine comes up, serves on the processor and says it in
+/// one line of its log that nobody reads. The package names are the ones that
+/// carry RADV and ANV on each family; NVIDIA brings its own with the driver.
+pub(crate) const NO_GPU_DEVICE_LINUX_NOTE: &str = "Running on the CPU: the LU Engine found no graphics card it can use. On Linux it runs on Vulkan, so install the Vulkan driver for your card (AMD and Intel: mesa-vulkan-drivers on Debian, Ubuntu and Fedora, vulkan-radeon or vulkan-intel on Arch; NVIDIA: the proprietary driver), check that your user is in the render and video groups, then restart LU.";
+
+/// The same fact on Windows, where the driver is the one thing to update.
+pub(crate) const NO_GPU_DEVICE_NOTE: &str = "Running on the CPU: the LU Engine found no graphics card it can use. Update your graphics driver, then restart LU.";
+
+/// The note for an engine that asked for the card and found none, or `None`.
+///
+/// `layers` is the `-ngl` the process carries: a typed 0 asked for the
+/// processor, and then the same warning is no news. The Mac runs Metal and is
+/// not asked.
+pub(crate) fn no_gpu_device_note(startup: &str, layers: Option<u32>, os: &str) -> Option<&'static str> {
+    if os == "macos" || layers == Some(0) || !startup.contains(NO_USABLE_GPU_LINE) {
+        return None;
+    }
+    Some(if os == "linux" { NO_GPU_DEVICE_LINUX_NOTE } else { NO_GPU_DEVICE_NOTE })
+}
 
 // ── The classifier ──────────────────────────────────────────────────────────
 //
@@ -415,8 +447,9 @@ pub(crate) struct EngineFacts {
     /// supports the scalar kernel, which is every device in the class below,
     /// the binary's own default turns it on.
     pub flash_attention_on: bool,
-    /// True only when llama-server itself printed a device line and EVERY
-    /// device on it said `matrix cores: none`.
+    /// True when llama-server printed a device line and EVERY device on it
+    /// said `matrix cores: none`, and on the Vulkan build also when it printed
+    /// no device line at all (`may_lack_matrix_cores`).
     pub every_device_without_matrix_cores: bool,
 }
 
@@ -488,6 +521,37 @@ pub(crate) fn device_without_matrix_cores(startup: &str) -> Option<bool> {
     seen.then_some(all_none)
 }
 
+/// Whether the flash attention rung may be tried on this engine.
+///
+/// GH #156. The pinned llama-server (049326a) does not print the device line
+/// above: there it is a debug line (`GGML_LOG_DEBUG` in ggml-vulkan.cpp) and
+/// llama-server runs at verbosity 3. Measured on the shipped Windows sidecar
+/// with an RTX 3060, 15.10.2026: no `matrix cores:` line at the default
+/// verbosity, nor at `-lv 4`, `-lv 5` or `-v` (so raising the verbosity is
+/// no way to get it back either), while the same run offloads every layer to
+/// Vulkan0. So on the
+/// Vulkan build `device_without_matrix_cores` always answered `None`, the rung
+/// for cards without matrix cores (Pascal, GCN, RDNA 1 and 2 on RADV) could
+/// never be taken, and a garbled card went straight to the processor.
+///
+/// Where the Vulkan build says nothing, the rung is tried: it costs one
+/// restart and keeps the card when it helps, and when it does not, the
+/// processor rung follows as before. A line that IS printed (an older or a
+/// newer engine) is still believed. The Metal build is not Vulkan, the reports
+/// behind the rung are all Vulkan, so there an unknown stays unknown.
+pub(crate) fn may_lack_matrix_cores(startup: &str, vulkan_build: bool) -> bool {
+    device_without_matrix_cores(startup).unwrap_or(vulkan_build)
+}
+
+/// The log word for what the startup lines said about matrix cores.
+pub(crate) fn matrix_cores_label(startup: &str) -> &'static str {
+    match device_without_matrix_cores(startup) {
+        Some(true) => "none",
+        Some(false) => "present",
+        None => "not reported",
+    }
+}
+
 // ── The one place that speaks HTTP ──────────────────────────────────────────
 
 /// Where the probe sends its question. Loopback and a port, built here and
@@ -534,11 +598,15 @@ pub(crate) fn probe_engine(port: u16, timeout: Duration) -> Option<ProbeOutcome>
         "max_tokens": PROBE_TOKENS,
         "stream": false,
     });
-    let response = reqwest::blocking::Client::builder()
-        .timeout(timeout)
-        .build()
-        .ok()?
-        .post(probe_url(port))
+    let client = reqwest::blocking::Client::builder().timeout(timeout).build().ok()?;
+    // The probe asks an engine this app just started: on the desktop with the
+    // engine's key (engine_key.rs), on a phone with the token of its
+    // in-process engine (engine_token.rs).
+    #[cfg(desktop)]
+    let request = client.post(probe_url(port)).header(reqwest::header::AUTHORIZATION, super::engine_key::bearer());
+    #[cfg(mobile)]
+    let request = super::engine_token::attach_blocking(client.post(probe_url(port)), port);
+    let response = request
         .json(&body)
         .send()
         .ok()
@@ -594,6 +662,35 @@ pub(crate) fn verdict_label(verdict: Sanity, still_thinking: bool) -> &'static s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── An engine without any card (fanezeu, 23.10.2026) ───────────────────
+
+    /// The three lines common/arg.cpp prints at the pinned commit, as they
+    /// stand in the engine's stderr.
+    const NO_GPU_STDERR: &str = "load_backend: loaded CPU backend from /usr/lib/lu/libggml-cpu-haswell.so\nload_backend: loaded Vulkan backend from /usr/lib/lu/libggml-vulkan.so\nggml_vulkan: No devices found.\nwarning: no usable GPU found, --gpu-layers option will be ignored\nwarning: one possible reason is that llama.cpp was compiled without GPU support\nwarning: consult docs/build.md for compilation instructions\n";
+
+    #[test]
+    fn an_engine_that_found_no_card_says_which_driver_is_missing() {
+        let linux = no_gpu_device_note(NO_GPU_STDERR, Some(998), "linux").expect("note on linux");
+        assert!(linux.contains("mesa-vulkan-drivers"), "{linux}");
+        assert!(linux.contains("render and video groups"), "{linux}");
+        assert_eq!(no_gpu_device_note(NO_GPU_STDERR, None, "windows"), Some(NO_GPU_DEVICE_NOTE));
+        assert!(!NO_GPU_DEVICE_NOTE.contains("mesa"), "no Linux package names on Windows");
+    }
+
+    #[test]
+    fn a_card_that_came_up_or_a_typed_zero_gets_no_note() {
+        // A healthy Vulkan start on the reported card: no warning, no note.
+        let healthy = "ggml_vulkan: Found 1 Vulkan devices:\nggml_vulkan: 0 = AMD Radeon RX 7900 XTX (RADV NAVI31) (radv) | uma: 0 | fp16: 1\nload_tensors: offloaded 49/49 layers to GPU\n";
+        assert_eq!(no_gpu_device_note(healthy, Some(998), "linux"), None);
+        // Vulkan without devices next to a backend that has one is not "no card".
+        let cuda_too = "ggml_vulkan: No devices found.\nggml_cuda_init: found 1 CUDA devices:\n";
+        assert_eq!(no_gpu_device_note(cuda_too, Some(999), "windows"), None);
+        // GPU Layers 0 asked for the processor, so the warning is no news.
+        assert_eq!(no_gpu_device_note(NO_GPU_STDERR, Some(0), "linux"), None);
+        // The Mac runs Metal.
+        assert_eq!(no_gpu_device_note(NO_GPU_STDERR, Some(999), "macos"), None);
+    }
 
     // ── The reporters' samples ──────────────────────────────────────────────
 
@@ -928,10 +1025,64 @@ mod tests {
         assert_eq!(device_without_matrix_cores(""), None);
         // Verbatim from the shipped sidecar on this machine, 2026-09-11. The
         // Metal build names no device at all, so the rung is never taken here,
-        // which is the counter-check to the two tests above: the flag is only
-        // ever set where llama-server itself said the card has no matrix cores.
+        // which is the counter-check to the two tests above: on Metal the flag
+        // is only ever set where llama-server itself said the card has no
+        // matrix cores (the Vulkan build, which says nothing, see GH #156 below).
         let mac = "0.00.075.755 I srv    load_model: loading model '/Users/x/models/Qwen2.5-0.5B-Instruct-Q8_0.gguf'\n0.00.715.606 I srv    load_model: initializing, n_slots = 4, n_ctx_slot = 8192, kv_unified = 'true'\n0.00.719.437 I srv  llama_server: model loaded\n";
         assert_eq!(device_without_matrix_cores(mac), None);
+    }
+
+    // GH #156: what the pinned Vulkan build really prints. Verbatim from the
+    // shipped Windows sidecar (049326a, RTX 3060, -lv 4), 15.10.2026: the
+    // device is named, the matrix cores are not.
+    const PINNED_VULKAN_STARTUP: &str = "0.00.140.028 I cmn  common_param:   - Vulkan0 : NVIDIA GeForce RTX 3060 (12329 MiB, 11559 MiB free)\n0.00.696.228 I llama_prepare_model_devices: using device Vulkan0 (NVIDIA GeForce RTX 3060) (0000:01:00.0) - 11557 MiB free\n0.00.921.576 I load_tensors: offloaded 25/25 layers to GPU\n";
+
+    /// The device line of a Navi 10 card on Mesa RADV, built from the format
+    /// string in ggml-vulkan.cpp (ggml_vk_print_gpu_info) with the values
+    /// RADV reports for RDNA 1: fp16 yes, wave64 subgroups, no cooperative
+    /// matrix extension (RADV exposes it from RDNA 3 on).
+    const RDNA1_RADV_LINE: &str = "ggml_vulkan: 0 = AMD Radeon RX 5700 XT (RADV NAVI10) (radv) | uma: 0 | fp16: 1 | bf16: 0 | warp size: 64 | shared memory: 65536 | int dot: 1 | matrix cores: none\n";
+
+    #[test]
+    fn gh156_the_pinned_vulkan_build_names_no_matrix_cores() {
+        assert_eq!(device_without_matrix_cores(PINNED_VULKAN_STARTUP), None);
+        assert_eq!(matrix_cores_label(PINNED_VULKAN_STARTUP), "not reported");
+    }
+
+    #[test]
+    fn gh156_a_silent_vulkan_build_may_take_the_flash_attention_rung() {
+        assert!(may_lack_matrix_cores(PINNED_VULKAN_STARTUP, true));
+        let facts = EngineFacts {
+            gpu_layers: Some(998),
+            flash_attention_on: true,
+            every_device_without_matrix_cores: may_lack_matrix_cores(PINNED_VULKAN_STARTUP, true),
+        };
+        assert_eq!(decide(Sanity::Garbled(Garble::QuestionMarks), &facts), AfterProbe::RestartWithoutFlashAttention);
+        // Still garbled without flash attention: the processor, as before.
+        let without = EngineFacts { flash_attention_on: false, ..facts };
+        assert_eq!(decide(Sanity::Garbled(Garble::QuestionMarks), &without), AfterProbe::RestartOnCpu);
+        // NEGATIVE CONTROL: the rule before this change read the silence as
+        // "has matrix cores" and skipped the rung.
+        let before = EngineFacts {
+            every_device_without_matrix_cores: device_without_matrix_cores(PINNED_VULKAN_STARTUP).unwrap_or(false),
+            ..facts
+        };
+        assert_eq!(decide(Sanity::Garbled(Garble::QuestionMarks), &before), AfterProbe::RestartOnCpu);
+    }
+
+    #[test]
+    fn gh156_a_printed_line_is_still_believed() {
+        assert!(may_lack_matrix_cores(RDNA1_RADV_LINE, true));
+        assert_eq!(matrix_cores_label(RDNA1_RADV_LINE), "none");
+        let rdna3 = "ggml_vulkan: 0 = AMD Radeon RX 7900 XTX (RADV NAVI31) (radv) | uma: 0 | fp16: 1 | bf16: 0 | warp size: 64 | shared memory: 65536 | int dot: 1 | matrix cores: KHR_coopmat\n";
+        assert!(!may_lack_matrix_cores(rdna3, true), "a card that says it has them skips the rung");
+        assert_eq!(matrix_cores_label(rdna3), "present");
+    }
+
+    #[test]
+    fn gh156_the_metal_build_keeps_an_unknown_as_unknown() {
+        assert!(!may_lack_matrix_cores("", false));
+        assert!(!may_lack_matrix_cores(PINNED_VULKAN_STARTUP, false));
     }
 
     // ── The transport ───────────────────────────────────────────────────────
@@ -1103,11 +1254,9 @@ mod tests {
 
     #[test]
     fn nothing_listening_is_no_verdict_at_all() {
-        // A port that was bound and released: nothing answers, and the probe
+        // A port that refuses the connection: nothing answers, and the probe
         // must come back empty rather than call that garbled.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        let (port, _held) = crate::test_support::refusing_port();
         assert!(probe_engine(port, Duration::from_secs(2)).is_none());
     }
 

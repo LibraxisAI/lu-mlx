@@ -44,7 +44,7 @@ export function EmptyState({ icon: Icon, logoSrc, logoClassName = '', title, des
         {logoSrc ? (
           <img src={logoSrc} alt="" className={`mx-auto h-14 w-14 object-contain opacity-90 select-none ${logoClassName}`} draggable={false} />
         ) : (
-          // David 2026-07-13: no gray bubble behind the icon — the SVG stands on
+          // 2026-07-13: no gray bubble behind the icon — the SVG stands on
           // its own, lifted only by a soft purple accent glow (a gentle, slow
           // breathe so it reads as intentional, not a hard animation).
           <div className="relative mx-auto w-16 h-16 flex items-center justify-center">

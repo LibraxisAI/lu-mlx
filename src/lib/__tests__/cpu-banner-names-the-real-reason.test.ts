@@ -99,7 +99,7 @@ describe('THE FIX: the CPU banner names the reason that is actually true', () =>
 
 describe('NEGATIVE CONTROL: what the banner did right stays untouched', () => {
   it('a plain fallback to the processor keeps the exact sentence it always had', () => {
-    // Nothing about this case was wrong. shd_scorpion's RX 7900 XTX is still
+    // Nothing about this case was wrong. a user's RX 7900 XTX is still
     // the reason the bar exists at all.
     expect(comfyCpuBannerText(NVIDIA_WINDOWS)).toBe(
       'ComfyUI is running on the CPU (no usable GPU detected). Generation will be extremely slow and may time out.',

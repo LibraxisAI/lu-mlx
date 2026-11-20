@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>opencode Alternative günstiger: Wir haben die Kosten pro Aufgabe gemessen</title>
+<title>opencode Alternative günstiger: Kosten pro Aufgabe gemessen</title>
 <meta name="description" content="Gleicher Bugfix, gleiches Modell, gleiche Preise, bitgleicher Prompt. opencode brauchte im Mittel 2157 Credits, Locally Uncensored 2.6.6 nur 1298. Alle Zahlen und der Grund dahinter.">
 <meta name="keywords" content="opencode alternative, opencode günstiger, opencode kosten, opencode alternative deutsch, coding agent kosten vergleich, ki coding agent günstig, opencode token verbrauch, coding agent benchmark">
 <meta property="og:title" content="opencode Alternative günstiger: Wir haben die Kosten pro Aufgabe gemessen">
@@ -33,12 +33,15 @@
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"FAQPage","inLanguage":"de","mainEntity":[{"@type":"Question","name":"Gibt es eine günstigere Alternative zu opencode?","acceptedAnswer":{"@type":"Answer","text":"Auf der gemessenen Aufgabe ja. Der Coding-Agent von Locally Uncensored 2.6.6 hat denselben Bugfix für 1298 Credits erledigt, opencode brauchte im Mittel von drei Läufen 2157. Das sind rund 40 Prozent weniger, und selbst der günstigste opencode-Lauf lag noch 29 Prozent über unserem Wert. Das ist ein Szenario auf einem winzigen Repo, also ein Messpunkt und kein Naturgesetz."}},{"@type":"Question","name":"Ist Locally Uncensored 78 Prozent günstiger als opencode?","acceptedAnswer":{"@type":"Answer","text":"Nein, und die beiden Zahlen werden leicht verwechselt. Die 78,6 Prozent vergleichen unsere eigenen Versionen: Locally Uncensored 2.6.6 gegen Locally Uncensored 2.6.5, gemessen über unsere eigene Reihe werkzeuggetriebener Läufe. Das ist nicht der Abstand zu opencode. Der Abstand zu opencode liegt in dieser Messung bei rund 40 Prozent, 1298 Credits gegen einen opencode-Schnitt von 2157 Credits aus drei Läufen."}},{"@type":"Question","name":"Was kostet opencode pro Aufgabe?","acceptedAnswer":{"@type":"Answer","text":"opencode selbst ist freie Software und kostet nichts. Bezahlt wird das Modell. Bei unserem Einzeiler-Bugfix mit DeepSeek V3.2 lagen die drei Läufe bei 1679, 2433 und 2358 Credits, also 98789 bis 146387 Prompt-Token. Zwischen dem günstigsten und dem teuersten Lauf liegen 45 Prozent, ein einzelner Lauf sagt also wenig darüber aus, was eine Aufgabe kosten wird."}},{"@type":"Question","name":"Warum verbraucht opencode so viele Token?","acceptedAnswer":{"@type":"Answer","text":"Nicht wegen zusätzlicher Schritte. opencode kam sogar mit weniger Runden aus als wir, 8 bis 11 Requests gegen unsere 16. Die Kosten stecken in dem, was jeder einzelne Request mitschleppt: 12349 bis 13308 Prompt-Token pro Request gegen 4664 bei Locally Uncensored 2.6.6. Allein der Werkzeugkatalog ist bei opencode 21188 Byte groß gegen 7703 Byte bei uns, und dieser Block geht bei jedem Aufruf erneut mit."}},{"@type":"Question","name":"Rechnen beide Agenten zum gleichen Tarif ab?","acceptedAnswer":{"@type":"Answer","text":"Ja, und genau darum ging es beim Aufbau. Beide Agenten sprachen denselben Endpunkt mit demselben Modell und derselben Kontostufe an. Credits je Prompt-Token lagen bei 0,01739 für Locally Uncensored und bei 0,01700, 0,01666 und 0,01611 für die drei opencode-Läufe. Diese Sätze sind praktisch identisch, der Kostenunterschied ist also reine Mengenfrage."}},{"@type":"Question","name":"Arbeitet ein günstigerer Coding-Agent schlechter?","acceptedAnswer":{"@type":"Answer","text":"Hier nicht. Alle vier Läufe haben dieselbe Erfolgshürde genommen: npm test grün, genau ein Commit mit der geforderten Nachricht, nur add.js geändert, Arbeitsbaum sauber. Bewegt haben sich allein die Kosten. Bei einer schwereren Aufgabe kann das anders aussehen, das haben wir nicht gemessen."}},{"@type":"Question","name":"Kann ich die Messung selbst nachstellen?","acceptedAnswer":{"@type":"Answer","text":"Ja. Das Repo ist ein npm-Projekt aus drei Dateien mit einem roten Test, der Prompt ist mit sha256 29cec6c3576c46421ed1923d90e5f72ba311c57eb09964dcd39a91b47cf62687 festgenagelt, das Modell ist deepseek-ai/DeepSeek-V3.2, opencode lief in Version 1.18.21 mit Standardeinstellungen über opencode run. Requests und Token wurden über einen Proxy vor der API gezählt, die Credits vor und nach jedem Lauf am Konto abgelesen."}}]}
 </script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://locallyuncensored.com/"},{"@type":"ListItem","position":2,"name":"Blog","item":"https://locallyuncensored.com/blog/"},{"@type":"ListItem","position":3,"name":"opencode Alternative günstiger: Wir haben die Kosten pro Aufgabe gemessen","item":"https://locallyuncensored.com/blog/opencode-alternative-guenstiger.html"}]}
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/assets/lu.css">
 <script defer src="/assets/lu.js"></script>
-  <script data-goatcounter="https://lu-uncensored.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+  <script data-goatcounter="https://purple47.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
 </head>
 <body>
 
@@ -49,15 +52,17 @@
   </a>
   <div class="lu-nav-links" id="lu-nav-links">
     <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/pricing/">Pricing</a>
     <a class="lu-nav-link" href="/blog/">Blog</a>
     <a class="lu-nav-link" href="/guide/">Guide</a>
     <a class="lu-nav-link" href="/remote-access/">Remote</a>
   </div>
   <div class="lu-nav-right">
-    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">1600+&#8202;⭐</span></a>
-    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">800+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">4200+&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">1700+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
     <span class="lu-nav-sep"></span>
     <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="he-cta" href="/pricing/" aria-label="LU Cloud plans and what they include"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>Cloud</a>
     <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
     <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
   </div>
@@ -211,6 +216,7 @@ cd locally-uncensored
       <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
       Get Started on GitHub
     </a>
+    <p style="margin-top:14px;margin-bottom:0">Keine GPU? LU Cloud l&auml;uft im Browser, bezahlt aus Credit-Paketen ab 15 EUR, ohne Abo. <a href="/pricing/">Was es kostet</a>.</p>
   </div>
 </div>
 
@@ -219,6 +225,15 @@ cd locally-uncensored
   <div class="footer-row footer-links">
     <a href="https://locallyuncensored.com/blog/">Blog</a>
     <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/pricing/">Pricing</a>
+    <a href="https://locallyuncensored.com/cloud/">LU Cloud</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-chat-online/">Uncensored AI chat online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-image-generator-online/">Image generator online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-video-generator-online/">Video generator online</a>
+    <a href="https://locallyuncensored.com/unrestricted-ai/">Unrestricted AI</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-coding-agent/">AI coding agent</a>
+    <a href="https://locallyuncensored.com/alternatives/">Alternatives</a>
+    <a href="https://locallyuncensored.com/is-locally-uncensored-safe/">Is it safe?</a>
     <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
     <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
     <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
@@ -226,6 +241,9 @@ cd locally-uncensored
     <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
     <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
     <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+    <a href="https://locallyuncensored.com/privacy/">Privacy</a>
+    <a href="https://locallyuncensored.com/terms/">Terms</a>
+    <a href="https://locallyuncensored.com/impressum/">Impressum</a>
   </div>
 </footer>
 </body>

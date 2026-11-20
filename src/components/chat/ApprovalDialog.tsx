@@ -3,11 +3,19 @@ import { useState } from 'react'
 import { ChevronDown } from 'lucide-react'
 import type { AgentToolCall } from '../../types/agent-mode'
 import { MOTION_S } from '../ui/motion'
+import { askingWord } from '../status/run-status'
+import { toolRegistry } from '../../api/mcp/tool-registry'
 
 interface Props {
   toolCall: AgentToolCall
   onApprove: () => void
   onReject: () => void
+  /**
+   * A surface that is not the chat says who asks, as a whole sentence in
+   * place of "Approve" and the words after it (Voice: "Voice wants to change
+   * a file. Nothing happens until you answer.").
+   */
+  question?: string
 }
 
 /**
@@ -26,9 +34,18 @@ interface Props {
  * answer TWO queued approvals on one keypress, silently approving a tool the
  * user never saw. Args expand inline via the chevron button if the user wants
  * to inspect what the agent is about to run.
+ *
+ * What is about to happen stands in words ("change a file"), from the same
+ * table as the run status. The tool's own name read like a debug line here
+ * ("APPROVE file_write"); it is the tooltip of the words, and the tool block
+ * in the transcript still carries it.
  */
-export function ApprovalDialog({ toolCall, onApprove, onReject }: Props) {
+export function ApprovalDialog({ toolCall, onApprove, onReject, question }: Props) {
   const [argsOpen, setArgsOpen] = useState(false)
+  // A tool of an external MCP server says whose it is: "use Notes: search"
+  // instead of the generic "use a tool" (M1).
+  const shownName = toolRegistry.displayName(toolCall.toolName)
+  const asking = shownName === toolCall.toolName ? askingWord(toolCall.toolName) : `use ${shownName}`
 
   return (
     <AnimatePresence mode="wait">
@@ -41,12 +58,20 @@ export function ApprovalDialog({ toolCall, onApprove, onReject }: Props) {
         className="mb-1.5 rounded-md border border-gray-200 dark:border-white/[0.08] bg-gray-50 dark:bg-white/[0.025] overflow-hidden"
       >
         <div className="flex items-center gap-2 px-2.5 py-1.5">
-          <span className="text-[0.55rem] uppercase tracking-wider text-gray-500 dark:text-gray-500 font-medium">
-            Approve
-          </span>
-          <code className="t-micro text-gray-700 dark:text-gray-300 font-medium truncate flex-1 min-w-0">
-            {toolCall.toolName}
-          </code>
+          {question ? (
+            <span data-testid="approval-what" title={shownName} className="t-micro leading-snug text-gray-700 dark:text-gray-300 flex-1 min-w-0 break-words">
+              {question}
+            </span>
+          ) : (
+            <>
+              <span className="text-[0.55rem] uppercase tracking-wider text-gray-500 dark:text-gray-500 font-medium">
+                Approve
+              </span>
+              <span data-testid="approval-what" title={shownName} className="t-micro text-gray-700 dark:text-gray-300 font-medium truncate flex-1 min-w-0">
+                {asking}
+              </span>
+            </>
+          )}
           <button
             onClick={() => setArgsOpen((v) => !v)}
             title={argsOpen ? 'Hide arguments' : 'Show arguments'}
@@ -86,7 +111,7 @@ export function ApprovalDialog({ toolCall, onApprove, onReject }: Props) {
               className="overflow-hidden border-t border-gray-200 dark:border-white/[0.06]"
             >
               <pre className="text-[0.55rem] leading-relaxed text-gray-600 dark:text-gray-400 px-2.5 py-1.5 max-h-[180px] overflow-auto scrollbar-thin whitespace-pre-wrap break-words">
-                {JSON.stringify(toolCall.args, null, 2)}
+                {`${shownName}\n${JSON.stringify(toolCall.args, null, 2)}`}
               </pre>
             </motion.div>
           )}

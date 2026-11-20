@@ -5,11 +5,13 @@ interface Props {
   enabled: boolean
   onChange: (enabled: boolean) => void
   label?: string
+  /** A name for screen readers when the visible label already stands next to the switch. */
+  ariaLabel?: string
   disabled?: boolean
   size?: 'sm' | 'md'
 }
 
-export function ToggleSwitch({ enabled, onChange, label, disabled = false, size = 'sm' }: Props) {
+export function ToggleSwitch({ enabled, onChange, label, ariaLabel, disabled = false, size = 'sm' }: Props) {
   const trackSize = size === 'sm' ? 'w-8 h-4' : 'w-10 h-5'
   const dotSize = size === 'sm' ? 'w-3 h-3' : 'w-4 h-4'
   const dotTravel = size === 'sm' ? 16 : 20
@@ -20,7 +22,8 @@ export function ToggleSwitch({ enabled, onChange, label, disabled = false, size 
       onClick={() => !disabled && onChange(!enabled)}
       disabled={disabled}
       className={`flex items-center gap-2 ${disabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
-      aria-label={label || 'Toggle'}
+      aria-label={ariaLabel || label || 'Toggle'}
+      aria-pressed={enabled}
     >
       {label && (
         <span className="text-[0.7rem] text-gray-500 dark:text-gray-400 select-none">{label}</span>

@@ -40,7 +40,7 @@ function makeRun(over: Partial<AgentRunContext> = {}): AgentRunContext {
 beforeEach(() => {
   registerBuiltinTools(toolRegistry)
   resetApprovals()
-  useCodexConfirmStore.setState({ pending: null, resolve: null })
+  useCodexConfirmStore.setState({ pending: null, resolve: null, queue: [] })
 })
 
 afterEach(() => {

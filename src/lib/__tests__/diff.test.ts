@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { computeUnifiedDiff, parseUnifiedDiff } from '../diff'
+import { computeUnifiedDiff, parseUnifiedDiff, displayPath } from '../diff'
 
 describe('computeUnifiedDiff', () => {
   it('returns empty string when texts are identical', () => {
@@ -141,5 +141,25 @@ describe('hunks are split, and large files do not build a giant LCS table', () =
     const parsed = parseUnifiedDiff(computeUnifiedDiff('x.ts', a, b))
     expect(parsed.removed).toBe(3000)
     expect(parsed.added).toBe(3000)
+  })
+})
+
+describe('what the staged card shows (UX pass 30.09.2026)', () => {
+  it('a new three-line file is three added lines, not four', () => {
+    const parsed = parseUnifiedDiff(computeUnifiedDiff('src/Hero.tsx', '', 'a\nb\nc\n'))
+    expect(parsed.added).toBe(3)
+    expect(parsed.lines.filter((l) => l.kind === 'add').map((l) => l.text)).toEqual(['a', 'b', 'c'])
+  })
+
+  it('an edit near the end does not report a phantom last line', () => {
+    const parsed = parseUnifiedDiff(computeUnifiedDiff('a.ts', 'x\ny\n', 'x\nz\n'))
+    expect(parsed.added).toBe(1)
+    expect(parsed.removed).toBe(1)
+  })
+
+  it('shows the path the way people write it', () => {
+    expect(displayPath('./src/components/Hero.tsx')).toBe('src/components/Hero.tsx')
+    expect(displayPath('src/a.ts')).toBe('src/a.ts')
+    expect(displayPath('../up.ts')).toBe('../up.ts')
   })
 })

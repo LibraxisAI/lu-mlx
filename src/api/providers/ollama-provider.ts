@@ -1,3 +1,7 @@
+import { chatBackendsBack } from '../../lib/chat-backends-gate'
+import { ollamaSamplerOptions } from './sampler-fields'
+import { ollamaCustomOptions } from '../../lib/custom-params'
+import { resolveMessageAttachments } from '../../lib/chat-attachments'
 /**
  * Ollama Provider, wraps existing ollama.ts into the ProviderClient interface.
  *
@@ -11,12 +15,19 @@ import type {
 } from './types'
 import { ProviderError } from './types'
 import { localFetch, localFetchStream, ollamaUrl } from '../backend'
+import { ollamaWindowOption } from '../ollama'
+import { parseOllamaShowContext } from './context-probe'
+import { oneEntryPerName } from '../../lib/one-entry-per-name'
 import { isLocalTransportFailure, localBackendUnreachableMessage } from '../../lib/local-backend-transport'
 import { parseNDJSONStream } from '../stream'
+import { chatFirstReplyMs } from '../../lib/chat-reply-timeout'
+import { useSettingsStore } from '../../stores/settingsStore'
+import { ollamaKeepAlive } from '../../lib/idle-unload'
 import { idleAbortGuard, isStreamIdleTimeout, STREAM_IDLE_TIMEOUT_MS } from '../stream-idle'
 import { repairToolCallArgs, extractToolCallsFromContent } from '../../lib/tool-call-repair'
 import { applyTemplateContract } from './normalize-system'
 import { parseOllamaChatChunk, isRecord, prop, asString, asNumber, asRecordArray } from './wire'
+import { FIRST_REPLY_TIMEOUT } from '../../lib/chat-reply-timeout'
 
 // ── Ollama-specific types ──────────────────────────────────────
 
@@ -31,6 +42,13 @@ export interface OllamaRequestOptions {
   top_k?: number
   num_predict?: number
   num_ctx?: number
+  /** GH #175, see sampler-fields.ts. */
+  min_p?: number
+  repeat_penalty?: number
+  presence_penalty?: number
+  frequency_penalty?: number
+  /** GH #198: custom rows (dry_base, xtc_threshold ...), see lib/custom-params.ts. */
+  [custom: string]: unknown
 }
 
 export interface OllamaRequestMessage {
@@ -50,6 +68,8 @@ export interface OllamaChatRequest {
   options?: OllamaRequestOptions
   /** Tri-state; deleted again on the 400-retry, hence optional. */
   think?: boolean
+  /** Constrained output: a JSON schema the answer must match. */
+  format?: Record<string, unknown>
 }
 
 // Was auf dieser Route ZURUECKKOMMT, liegt als `OllamaChatChunk` in ./wire,
@@ -118,9 +138,13 @@ export class OllamaProvider implements ProviderClient {
     // row either. Ollama renders the model's own template exactly the way
     // llama.cpp does, and a strict one raises instead of improvising. See
     // providers/normalize-system.ts for the whole contract.
+    messages = await resolveMessageAttachments(messages)
+    // A Create render may have moved the chat model out (vram-handoff).
+    await chatBackendsBack()
     const ollamaMessages = applyTemplateContract(messages, {
       toolRole: 'text',
       alternate: true,
+      model,
     }).map(m => {
       const msg: OllamaRequestMessage = { role: m.role, content: m.content }
       if (m.images?.length) msg.images = m.images.map(img => img.data)
@@ -133,12 +157,12 @@ export class OllamaProvider implements ProviderClient {
       stream: true,
       // Audit A6: match the agent transport so a long turn never pays a
       // cold multi-GB reload after Ollama's 5-minute default idle unload.
-      keep_alive: '30m',
+      keep_alive: ollamaKeepAlive('30m'),
     }
 
     // v2.4.6 Bug L: dropped hardcoded `num_gpu: 99`. Old code forced ALL
     // layers onto the GPU on every chat request, which on 8 GB laptop cards
-    // pushed the KV cache out into system RAM (nightmare13740 Discord
+    // pushed the KV cache out into system RAM (Discord
     // 2026-05-18: 30 tok/s in ollama CLI vs 6.9 tok/s in LU on RTX 4070
     // Laptop + gemma3:4b). Letting Ollama do its own VRAM-aware layer
     // placement restores CLI parity on tight cards and is a no-op on
@@ -148,19 +172,13 @@ export class OllamaProvider implements ProviderClient {
     if (options?.topP !== undefined) ollamaOptions.top_p = options.topP
     if (options?.topK !== undefined) ollamaOptions.top_k = options.topK
     if (options?.maxTokens && options.maxTokens > 0) ollamaOptions.num_predict = options.maxTokens
-    // Bug AA v2.5.0, forward user's context-window override. Without this
-    // Ollama silently uses num_ctx=2048 (its default), which RAG payloads
-    // and long-turn chats blow through immediately. Kj103x Discord
-    // 2026-05-27: "LU caps VRAM ~5 GB regardless of context window UI
-    // setting", the UI setting was never wired here. Setting num_ctx
-    // higher than the loaded model's max is harmless (Ollama clamps).
-    // num_ctx comes from the caller (hook): the user override OR the model's
-    // real context length (capped for VRAM safety). 0/undefined → Ollama keeps
-    // its own default; the hook always passes a real value so a chat never
-    // silently sits at Ollama's 2048 default.
-    if (options?.contextWindow && options.contextWindow > 0) {
-      ollamaOptions.num_ctx = options.contextWindow
-    }
+    if (options) Object.assign(ollamaOptions, ollamaSamplerOptions(options))
+    // GH #198: the custom rows, inside options, where Ollama reads samplers.
+    Object.assign(ollamaOptions, ollamaCustomOptions(options?.customParams))
+    // The window: resolved in ONE place for every request to Ollama, so the
+    // model is never loaded again by a call that sends another one. Without
+    // any, Ollama runs at its own small default and cuts real chats short.
+    Object.assign(ollamaOptions, await ollamaWindowOption(model, options?.window))
     body.options = ollamaOptions
     // Tri-state: true → explicit think on, false → explicit think off
     // (saves tokens on QwQ / DeepSeek-R1 / Gemma 4 etc.), undefined →
@@ -213,6 +231,9 @@ export class OllamaProvider implements ProviderClient {
       try {
         for await (const raw of parseNDJSONStream<unknown>(res, {
           idleMs: STREAM_IDLE_TIMEOUT_MS,
+          // Issue 177: Ollama answers the headers at once and then reads the
+          // prompt in silence; that wait follows the setting (0 = Off).
+          firstChunkMs: chatFirstReplyMs(useSettingsStore.getState().settings),
           onIdle: guard.abort,
         })) {
           if (options?.signal?.aborted) break
@@ -220,7 +241,7 @@ export class OllamaProvider implements ProviderClient {
 
           // Mid-stream `{"error":"..."}` line (runner crash, OOM) inside an
           // HTTP-200 stream, surface it instead of yielding a silent empty
-          // chat turn (rikki Discord 2026-06-10, Win11 proxy path). `error`
+          // chat turn (Discord 2026-06-10, Win11 proxy path). `error`
           // kommt als `string | undefined` aus dem Parser, der `typeof`-Test
           // von frueher sass auf einem `unknown` aus einer Typzusicherung.
           if (chunk.error) {
@@ -289,9 +310,13 @@ export class OllamaProvider implements ProviderClient {
     // `tools` payload keeps the native tool channel. The strategy resolution
     // only sends one after Ollama itself reported the `tools` capability for
     // this model (/api/show, see lib/tool-support.ts).
+    messages = await resolveMessageAttachments(messages)
+    // A Create render may have moved the chat model out (vram-handoff).
+    await chatBackendsBack()
     const ollamaMessages = applyTemplateContract(messages, {
       toolRole: tools.length > 0 ? 'native' : 'text',
       alternate: tools.length === 0,
+      model,
     }).map(m => {
       const msg: OllamaRequestMessage = { role: m.role, content: m.content }
       if (m.tool_calls) msg.tool_calls = m.tool_calls
@@ -305,7 +330,7 @@ export class OllamaProvider implements ProviderClient {
       tools,
       stream: false,
       // Audit A6: see chatStream above.
-      keep_alive: '30m',
+      keep_alive: ollamaKeepAlive('30m'),
     }
 
     // v2.4.6 Bug L: see chatStream() above, same num_gpu:99 removal.
@@ -314,18 +339,16 @@ export class OllamaProvider implements ProviderClient {
     if (options?.topP !== undefined) ollamaOptions.top_p = options.topP
     if (options?.topK !== undefined) ollamaOptions.top_k = options.topK
     if (options?.maxTokens && options.maxTokens > 0) ollamaOptions.num_predict = options.maxTokens
-    // Bug AA v2.5.0, see chatStream() for the why.
-    // num_ctx comes from the caller (hook): the user override OR the model's
-    // real context length (capped for VRAM safety). 0/undefined → Ollama keeps
-    // its own default; the hook always passes a real value so a chat never
-    // silently sits at Ollama's 2048 default.
-    if (options?.contextWindow && options.contextWindow > 0) {
-      ollamaOptions.num_ctx = options.contextWindow
-    }
+    if (options) Object.assign(ollamaOptions, ollamaSamplerOptions(options))
+    // GH #198: the custom rows, inside options, where Ollama reads samplers.
+    Object.assign(ollamaOptions, ollamaCustomOptions(options?.customParams))
+    // The window, see chatStream().
+    Object.assign(ollamaOptions, await ollamaWindowOption(model, options?.window))
     body.options = ollamaOptions
     // Tri-state think flag, see chatStream() for details.
     if (options?.thinking === true) body.think = true
     else if (options?.thinking === false) body.think = false
+    if (options?.jsonSchema) body.format = options.jsonSchema
 
     type LocalFetchInit = NonNullable<Parameters<typeof localFetch>[1]>
     const fetchOptions = (bodyObj: OllamaChatRequest): LocalFetchInit => {
@@ -391,7 +414,7 @@ export class OllamaProvider implements ProviderClient {
     }
 
     const data = await res.json()
-    return (data.models || []).map((m: OllamaModelEntry) => ({
+    return oneEntryPerName<OllamaModelEntry>(data.models || []).map((m) => ({
       id: m.name,
       name: m.name,
       provider: 'ollama' as const,
@@ -413,7 +436,7 @@ export class OllamaProvider implements ProviderClient {
       // works exactly this way.
       supportsTools: Array.isArray(m.capabilities) ? m.capabilities.includes('tools') : undefined,
       // K12 (3.0.1): no `unfiltered` here, on purpose but with a real gap
-      // behind it. The "No refusals" mark (ModelRowMarks.tsx) only fires for
+      // behind it. The "No Filter" mark (ModelRowMarks.tsx) only fires for
       // 'full', and only the cloud catalog path (openai-provider.ts
       // listModels) ever sets that field, because it is the only one backed
       // by a real measurement. Ollama's own /api/tags carries nothing like
@@ -453,28 +476,10 @@ export class OllamaProvider implements ProviderClient {
       if (!res.ok) return 4096
       const info = await res.json()
 
-      // 1. model_info: prefer `general.context_length`, then architecture-specific
-      //    `.context_length` keys (gemma2.context_length, qwen2.context_length, etc.)
-      const modelInfo = info?.model_info || {}
-      const contextFromInfo =
-        modelInfo['general.context_length'] ||
-        Object.entries(modelInfo).find(([k]) => k.endsWith('.context_length'))?.[1]
-      if (contextFromInfo && Number(contextFromInfo) > 0) {
-        return Number(contextFromInfo)
-      }
-
-      // 2. parameters: can be an object with `num_ctx`, or a Modelfile-style string
-      //    like "num_ctx 8192\nstop ..."
-      const params = info?.parameters
-      if (params) {
-        if (typeof params === 'object' && params.num_ctx) {
-          return Number(params.num_ctx)
-        }
-        if (typeof params === 'string') {
-          const match = params.match(/num_ctx\s+(\d+)/)
-          if (match) return Number(match[1])
-        }
-      }
+      // The same reading as api/ollama.ts (`parseOllamaShowContext`), so the
+      // two paths cannot drift apart again.
+      const fromShow = parseOllamaShowContext(info)
+      if (fromShow) return fromShow
 
       return 4096
     } catch {
@@ -526,6 +531,9 @@ export class OllamaProvider implements ProviderClient {
       let code = 'network'
       if (parsed.kind === 'missing-blob') code = 'ollama_missing_blob'
       else if (parsed.kind === 'stale-manifest') code = 'ollama_stale_manifest'
+      // Issue 177: Chat Reply Timeout ran out (api/backend.ts). Terminal for
+      // the agent's retry ladder, which would only wait the window again.
+      else if (/sent nothing for \d+ s/.test(parsed.raw ?? message)) code = FIRST_REPLY_TIMEOUT
       // Prefer the parsed model name (e.g. from a stale-manifest string that
       // carries it) and fall back to the request's model arg.
       return new ProviderError(message, 'ollama', code, status, parsed.model || model)

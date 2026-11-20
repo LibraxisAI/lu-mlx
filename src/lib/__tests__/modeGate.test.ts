@@ -1,5 +1,5 @@
 /**
- * E4 (Discord bug-reports 2026-08-09, helpslowlydying): flipping the Cloud
+ * E4 (Discord bug-reports 2026-08-09): flipping the Cloud
  * switch to Local with no local model installed left the lu-cloud model
  * silently active, and every chat kept billing cloud credits. The send path
  * now refuses any model from the wrong mode via modelOutOfMode, and the

@@ -336,7 +336,7 @@ describe('wiring in the poll loop', () => {
  * failure messages and not one of them said so: renderBudgetNotice told the
  * customer to use fewer steps, swapWarmupNotice told him to free VRAM on a
  * machine that was not using any, and renderTimeoutNotice said nothing at all.
- * shd_scorpion sent us the screenshot of one of them, and the cause was not in
+ * A user sent us the screenshot of one of them, and the cause was not in
  * it, so the support answer had to guess.
  */
 describe('a render without a GPU says so (Runde 12)', () => {
@@ -427,6 +427,8 @@ describe('the CPU cause is wired into all five failure exits (Runde 12)', () => 
     // They fire from a timer and cannot await, so the answer is fetched when
     // the render starts and read from the cache here.
     expect(create).toContain('void cpuRenderFacts()')
-    expect(create.match(/cpuCauseSuffix\(lastCpuRenderFacts\(\)\)/g)?.length).toBe(2)
+    // One stall verdict (Q3, late result) that both watchdogs give.
+    expect(create.match(/cpuCauseSuffix\(lastCpuRenderFacts\(\)\)/g)?.length).toBe(1)
+    expect(create.match(/reject\(stalled\(\)\)/g)?.length).toBe(2)
   })
 })

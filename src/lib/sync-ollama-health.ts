@@ -13,7 +13,7 @@
  * "Refresh All" + Header chip — are identical for both failure modes).
  * Both `ollama_stale_manifest` AND `ollama_missing_blob` share the exact
  * same recovery (`ollama pull <model>`), so both route into `staleModels`
- * here. (uselu's web build keeps a separate `missingBlobModels` array +
+ * here. (the web app's web build keeps a separate `missingBlobModels` array +
  * `markMissingBlob` action; desktop has no such slot, so we fold both
  * codes into the one list the store actually exposes.)
  *

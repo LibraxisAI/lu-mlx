@@ -31,7 +31,7 @@
  * Zaehler unten liest darum jede .ts/.tsx unter src/.
  *
  * Und er misst dabei die 422-Entscheidung mit: useChat.ts trug als einzige
- * Kopie zusaetzlich `status === 422`. Das ist DeepInfras Status hinter dem
+ * Kopie zusaetzlich `status === 422`. Das ist des Upstreams Status hinter dem
  * LU-Cloud-Proxy und erreicht `provider.chatStream` — denselben Aufruf, den
  * auch `streamProviderTurn` fuer die Agenten- und Codex-Zweige macht. Also
  * keine Eigenheit dieses Transports, sondern eine Luecke in den anderen: der
@@ -98,7 +98,7 @@ describe('der 422 ist mitgewandert, nicht verlorengegangen', () => {
   // die ihn still einebnet, waere schlimmer als die Kopien: derselbe Anbieter
   // haette auf dem Agentenpfad weiter den ganzen Lauf beendet, wo der Chat nur
   // eine Wiederholung zahlt.
-  it('DeepInfras 422 loest denselben Abstieg aus wie ein 400', () => {
+  it('der 422 des Upstreams loest denselben Abstieg aus wie ein 400', () => {
     expect(isThinkingUnsupportedError(vierzweizwei())).toBe(true)
     expect(shouldDowngradeThinking(true, vierzweizwei())).toBe(true)
   })
@@ -122,7 +122,7 @@ describe('der 422 ist mitgewandert, nicht verlorengegangen', () => {
 
   it('das WARUM steht am Modul, sonst faellt der 422 beim naechsten Aufraeumen', () => {
     expect(modul).toContain('422')
-    expect(modul).toContain('DeepInfra')
+    expect(modul).toContain('Upstream')
     expect(modul).toContain('provider.chatStream')
     expect(modul).toContain('openai-provider.ts')
   })

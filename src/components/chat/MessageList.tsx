@@ -1,13 +1,28 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { PlanBar, PlanHistoryRow, usePlanHistory } from './PlanBar'
 import type { CSSProperties } from 'react'
 import { useChatStore } from '../../stores/chatStore'
+import { useSettingsStore } from '../../stores/settingsStore'
+import { availableGroupMembers, groupSpeakers, groupTurnAuthor } from '../../lib/group-chat'
+import { useModelStore } from '../../stores/modelStore'
 import { useAutoScroll } from '../../hooks/useAutoScroll'
 import { MessageBubble } from './MessageBubble'
 import { WorkingAnchor } from './WorkingAnchor'
+import { useComputerStore } from '../../stores/computerStore'
 import { CompactBlock } from './CompactBlock'
-import { compactionAnchors } from '../../lib/compact-summary'
+import { CompactLayerBanner, CompactLayerRail, useCompactLayers } from './CompactLayerRail'
 import { Hinweis } from '../ui/Hinweis'
 import { TRANSCRIPT_MAX_PX } from './composer-width'
+import { ChatLookScope } from './ChatLookScope'
+import { useAgentModeStore } from '../../stores/agentModeStore'
+import { latestRefusalId, refusalNoticeApplies } from '../../lib/refusal-detect'
+import { GreetingSwitcher } from './GreetingSwitcher'
+import { forkMarks } from '../../lib/chat-forks'
+import { hasLaterRounds, isSpeakerTurn, laterAnswersInRound } from '../../lib/group-rounds'
+import { historyTrimNote } from '../../lib/history-trim-note'
+import { displayModelName } from '../../api/providers'
+import { Modal } from '../ui/Modal'
+import { ModalActions, ModalButton } from '../ui/ModalActions'
 
 /**
  * Above this many visible messages the transcript stops paying full layout +
@@ -53,24 +68,62 @@ interface Props {
   isGenerating: boolean
   /** Per-conversation generating flag — drives the 3-dot typing indicator so it
    *  shows ONLY in the chat that is actually generating, not in every chat the
-   *  user switches to (David 2026-06-12). Falls back to isGenerating. */
+   *  user switches to (2026-06-12). Falls back to isGenerating. */
   isThisChatGenerating?: boolean
   isLoadingModel?: boolean
   onRegenerate?: (conversationId: string, assistantMessageId: string) => void
-  onEdit?: (conversationId: string, messageId: string, newContent: string) => void
+  /** GH #199: one speaker of a group round answers again ('only'), or it and
+   *  every later speaker of the round ('from-here'). */
+  onRegenerateSpeaker?: (conversationId: string, assistantMessageId: string, mode: 'only' | 'from-here') => Promise<boolean>
+  /** Save & resend. False when nothing could be sent. */
+  onEdit?: (conversationId: string, messageId: string, newContent: string) => boolean | void
   /** Tool-call id awaiting user approval — when set, the matching tool
    *  block renders Approve/Reject inline (replaces the old popup). */
   pendingApprovalId?: string | null
   onApprove?: () => void
   onReject?: () => void
+  /** Sends a message in this chat: the pinned plan's "Continue". */
+  onContinuePlan?: (text: string) => void
 }
 
-export function MessageList({ isGenerating, isThisChatGenerating, isLoadingModel, onRegenerate, onEdit, pendingApprovalId, onApprove, onReject }: Props) {
+export function MessageList({ isGenerating, isThisChatGenerating, isLoadingModel, onRegenerate, onRegenerateSpeaker, onEdit, pendingApprovalId, onApprove, onReject, onContinuePlan }: Props) {
   const showTyping = isThisChatGenerating ?? isGenerating
+  // The question of the first use of computer control is open in this conversation.
+  const chatAsked = useComputerStore((s) => !!s.chatAsk && !s.chatAsk.voice && (s.chatAsk.conversationId === null || s.chatAsk.conversationId === useChatStore.getState().activeConversationId))
   const conversation = useChatStore((s) => {
     if (!s.activeConversationId) return undefined
     return s.conversations.find((c) => c.id === s.activeConversationId)
   })
+
+  // Group chat: who speaks as which persona (3.0.5). Resolved once for the
+  // list, so each bubble gets a plain string and stays memoised.
+  const personas = useSettingsStore((s) => s.personas)
+  const groupModels = conversation?.groupModels
+  const groupPersonas = conversation?.groupPersonas
+  const listedModels = useModelStore((s) => s.models)
+  const inventoryLoaded = useModelStore((s) => s.inventoryLoaded)
+  // The same line-up a round uses: a member whose model left the list sits
+  // out (GH #165), and the persona decides who wrote a turn (GH #169), so the
+  // label on a bubble and the tag the other models read always agree.
+  const speakers = useMemo(
+    () => groupSpeakers(availableGroupMembers(groupModels ?? [], listedModels, inventoryLoaded), groupPersonas, personas),
+    [groupModels, groupPersonas, personas, listedModels, inventoryLoaded],
+  )
+  const authors = useMemo(() => ({ groupPersonas, personas }), [groupPersonas, personas])
+  // Who can be asked again: a speaker's own Regenerate asks only that member,
+  // so it is not offered on the turn of one who left the group or whose model
+  // is not listed now. It used to stand there and do nothing (T1 2026-10-29,
+  // A9). "Regenerate whole round" stays: it runs the members who are here.
+  const atTable = useMemo(
+    () => new Set(availableGroupMembers(groupModels ?? [], listedModels, inventoryLoaded)),
+    [groupModels, listedModels, inventoryLoaded],
+  )
+
+  // Agent mode of THIS chat: a short "I can't ..." there is usually about a
+  // file or a command, so the refusal notice stays out (lib/refusal-detect).
+  const agentModeActive = useAgentModeStore((s) =>
+    conversation ? s.agentModeActive[conversation.id] ?? false : false,
+  )
 
   const lastMessage = conversation?.messages[conversation.messages.length - 1]
   // The approval id is part of the scroll trigger (G31): a run waiting for a
@@ -80,9 +133,15 @@ export function MessageList({ isGenerating, isThisChatGenerating, isLoadingModel
   // covered by the hook's ResizeObserver (G33). The resumeKey is the last
   // USER message: sending jumps all the way down even after scrolling away.
   const lastUserMessage = conversation?.messages.filter((m) => m.role === 'user').at(-1)
+  // Compact layers (3.0.9): the view starts at the newest compaction, and the
+  // rail on the left opens the stretch before each one, read only.
+  const layers = useCompactLayers(conversation, lastUserMessage?.id)
+  const readOnly = layers.layer !== null
+  // Switching layers is a jump like sending: to the bottom of what is shown,
+  // the moment right before that compaction.
   const { ref: scrollRef, contentRef } = useAutoScroll(
     `${lastMessage?.content ?? ''}|${pendingApprovalId ?? ''}`,
-    lastUserMessage?.id,
+    `${lastUserMessage?.id ?? ''}|${layers.layer ?? 'now'}`,
   )
 
   // MessageBubble is memoised, so its handlers have to keep the same identity
@@ -94,18 +153,63 @@ export function MessageList({ isGenerating, isThisChatGenerating, isLoadingModel
   // (React 19 `refs`). Both readers below are user-event handlers, which never
   // run before the effects of the render they belong to, so they still only
   // ever see the current conversation and callbacks.
-  const bind = useRef({ conversation, onRegenerate, onEdit })
-  useEffect(() => { bind.current = { conversation, onRegenerate, onEdit } })
+  const bind = useRef({ conversation, onRegenerate, onRegenerateSpeaker, onEdit })
+  useEffect(() => { bind.current = { conversation, onRegenerate, onRegenerateSpeaker, onEdit } })
+
+  // GH #199: in a group, Regenerate on a speaker asks that speaker again. With
+  // later speakers already answered, the person picks first; the question
+  // stays open here until they do.
+  const [askRegen, setAskRegen] = useState<{ convId: string; messageId: string; later: number; laterRounds: boolean } | null>(null)
 
   const handleRegenerate = useCallback((messageId: string) => {
+    const { conversation: c, onRegenerate: cb, onRegenerateSpeaker: one } = bind.current
+    if (!c) return
+    if (one && (c.groupModels?.length ?? 0) >= 2 && isSpeakerTurn(c.messages, messageId)) {
+      const later = laterAnswersInRound(c.messages, messageId).length
+      if (later === 0) void one(c.id, messageId, 'only')
+      else setAskRegen({ convId: c.id, messageId, later, laterRounds: hasLaterRounds(c.messages, messageId) })
+      return
+    }
+    if (cb) cb(c.id, messageId)
+  }, [])
+
+  // "Regenerate whole round": the round's question again, every speaker.
+  const handleRegenerateRound = useCallback((messageId: string) => {
     const { conversation: c, onRegenerate: cb } = bind.current
     if (c && cb) cb(c.id, messageId)
   }, [])
 
-  const handleEdit = useCallback((messageId: string, content: string) => {
+  const answerRegen = (mode: 'only' | 'from-here') => {
+    const ask = askRegen
+    setAskRegen(null)
+    const one = bind.current.onRegenerateSpeaker
+    if (ask && one) void one(ask.convId, ask.messageId, mode)
+  }
+
+  const handleEdit = useCallback((messageId: string, content: string): boolean => {
     const { conversation: c, onEdit: cb } = bind.current
-    if (c && cb) cb(c.id, messageId, content)
+    return !!c && !!cb && cb(c.id, messageId, content) !== false
   }, [])
+
+  // GH #172, #174: "< 1/2 >" and "Branch from here" act on the open chat.
+  const handleSwitchFork = useCallback((key: string, index: number) => {
+    const c = bind.current.conversation
+    if (c) useChatStore.getState().switchFork(c.id, key, index)
+  }, [])
+
+  const handleBranch = useCallback((messageId: string) => {
+    const c = bind.current.conversation
+    if (c) useChatStore.getState().duplicateConversation(c.id, { endAt: messageId })
+  }, [])
+
+  // Which message carries the switch of which kept version. Recomputed only
+  // when the thread or its versions change, not on every streaming frame of
+  // another chat.
+  const messages = conversation?.messages
+  const forks = conversation?.forks
+  const marks = useMemo(() => forkMarks({ messages: messages ?? [], forks }), [messages, forks])
+  // Plans the user has moved on from, as folded rows under their answers.
+  const planRows = usePlanHistory(conversation?.id, messages)
 
   // Decided once per visited conversation, see CONTENT_VISIBILITY_THRESHOLD.
   // React's documented "adjust state when a prop changes" shape: the branch
@@ -120,10 +224,19 @@ export function MessageList({ isGenerating, isThisChatGenerating, isLoadingModel
   // in den Verlauf. Bis 2.6.8 filterte diese Zeile jede Systemnachricht weg,
   // und der Code-Verlauf zeigte sie schon; damit war `/compact` im Chat
   // stumm, sobald die beiden Zeilen ehrlich als Hinweise abgelegt wurden.
-  const visibleMessages = conversation.messages.filter(
-    (m) => (m.role !== 'system' || !!m.notice) && !m.hidden,
-  )
+  const isVisible = (m: (typeof conversation.messages)[number]) => (m.role !== 'system' || !!m.notice) && !m.hidden
+  // What this view shows: the current layer, or the one picked on the rail.
+  // Each compaction is ONE line at the top of the view after it.
+  const items = layers.items.filter((it) => it.kind === 'line' || isVisible(it.message))
+  const visibleMessages = items.flatMap((it) => (it.kind === 'message' ? [it.message] : []))
   const lastVisibleId = visibleMessages[visibleMessages.length - 1]?.id
+  // The one answer that carries the refusal notice, if any. The answer that
+  // is still being written is never judged: every long answer is a short one
+  // for a moment.
+  const streamingId = showTyping && lastMessage?.role === 'assistant' ? lastMessage.id : null
+  const declinedId = refusalNoticeApplies(conversation, agentModeActive)
+    ? latestRefusalId(visibleMessages, streamingId)
+    : null
 
   if (skipGate.id !== conversation.id) {
     setSkipGate({
@@ -132,23 +245,19 @@ export function MessageList({ isGenerating, isThisChatGenerating, isLoadingModel
     })
   }
   const skipOffscreen = skipGate.id === conversation.id && skipGate.on
-  const tailStart = visibleMessages.length - ALWAYS_RENDERED_TAIL
-
-  // Die Verdichtungslinien. Berechnet aus der VOLLEN Nachrichtenliste, weil
-  // der Schnittpunkt auf eine gefilterte Nachricht zeigen kann, aber
-  // angezeigt an sichtbaren Zeilen — siehe compactionAnchors.
-  const compactAt = compactionAnchors(
-    conversation.messages,
-    visibleMessages.map((m) => m.id),
-    conversation.compactions,
-  )
+  const tailStart = items.length - ALWAYS_RENDERED_TAIL
+  const groupOn = (groupModels?.length ?? 0) >= 2
 
   return (
+    <>
+    <ChatLookScope variant="chat" className="relative flex-1 min-h-0 flex flex-col">
+    <CompactLayerBanner view={layers} />
     <div
       ref={scrollRef}
-      className="flex-1 overflow-y-auto scrollbar-thin py-4"
+      className={`flex-1 overflow-y-auto scrollbar-thin py-4 ${layers.cuts.length ? 'pl-6' : ''}`}
+      data-compact-layer={layers.layer ?? 'current'}
       style={{
-        // Soft top fade — chat content "blurs out" under the header (David).
+        // Soft top fade — chat content "blurs out" under the header.
         WebkitMaskImage: 'linear-gradient(to bottom, transparent 0, #000 28px)',
         maskImage: 'linear-gradient(to bottom, transparent 0, #000 28px)',
       }}
@@ -157,7 +266,7 @@ export function MessageList({ isGenerating, isThisChatGenerating, isLoadingModel
           anchor included (G33).
 
           Die Breite kommt aus `composer-width.ts` und nicht mehr aus
-          `--lu-measure`. David, 05.09.2026: das Transkript stand exakt auf
+          `--lu-measure`. 05.09.2026: das Transkript stand exakt auf
           der Spaltenbreite und war damit sogar schmaler als die Promptbox
           darunter (759 gegen 792,3 gerenderte px am Windows-Bau). Es soll
           links und rechts um je rund 20 Prozent ueber die Box hinausragen,
@@ -165,9 +274,12 @@ export function MessageList({ isGenerating, isThisChatGenerating, isLoadingModel
           der Promptbox aus, damit hier keine zweite Zahl neben der einen
           steht; als `style`, weil Tailwind Klassennamen scannt und eine
           gerechnete Breite deshalb keine Regel bekaeme. */}
-      <div ref={contentRef} className="mx-auto w-full" style={{ maxWidth: TRANSCRIPT_MAX_PX }}>
-        {visibleMessages
-          .map((message, index) => (
+      <div ref={contentRef} className="lu-chat-zoom mx-auto w-full" style={{ maxWidth: `calc(${TRANSCRIPT_MAX_PX}px * var(--lu-chat-width, 1))` }}>
+        {items
+          .map((item, index) => {
+            if (item.kind === 'line') return <CompactBlock key={item.cut.key} cut={item.cut} />
+            const message = item.message
+            return (
             // The wrapper carries the skip hint so MessageBubble keeps owning
             // its own root class. It is a plain block inside a plain block, so
             // it adds no layout of its own.
@@ -175,6 +287,18 @@ export function MessageList({ isGenerating, isThisChatGenerating, isLoadingModel
               key={message.id}
               style={skipOffscreen && index < tailStart ? SKIPPABLE : undefined}
             >
+              {message.role === 'assistant' && message.historyTrim && (
+                <div className="px-3 pt-1" data-testid="history-trim-note">
+                  <Hinweis>
+                    <span className="break-words">
+                      {historyTrimNote(
+                        message.historyTrim,
+                        groupOn && message.modelId ? (speakerNameOf(message, speakers, authors) ?? displayModelName(message.modelId)) : undefined,
+                      )}
+                    </span>
+                  </Hinweis>
+                </div>
+              )}
               {message.role === 'system' && message.notice ? (
                 // Schlichte Zeile, keine Blase: eine Blase wuerde behaupten,
                 // das Modell habe es gesagt. Und kein Kasten mehr darum: der
@@ -194,31 +318,93 @@ export function MessageList({ isGenerating, isThisChatGenerating, isLoadingModel
                 isLast={message.id === lastVisibleId}
                 // The live generating flag, not `message.usage`: a backend that
                 // never reports usage would lose the action bar for good.
-                isStreaming={showTyping && message.id === lastVisibleId && message.role === 'assistant'}
-                onRegenerate={message.role === 'assistant' && onRegenerate && !isGenerating
+                isStreaming={!readOnly && showTyping && message.id === lastVisibleId && message.role === 'assistant'}
+                // An earlier layer is read only: no regenerate, no edit, no
+                // approval, no switching or branching of versions.
+                onRegenerate={!readOnly && message.role === 'assistant' && onRegenerate && !isGenerating && !message.greetings
+                  && !(groupOn && message.modelId && !atTable.has(message.modelId))
                   ? handleRegenerate
                   : undefined}
-                onEdit={message.role === 'user' && onEdit && !isGenerating
+                onRegenerateRound={!readOnly && groupOn && message.role === 'assistant' && onRegenerate && !isGenerating && message.modelId
+                  ? handleRegenerateRound
+                  : undefined}
+                onEdit={!readOnly && message.role === 'user' && onEdit && !isGenerating
                   ? handleEdit
                   : undefined}
-                pendingApprovalId={pendingApprovalId}
-                onApprove={onApprove}
-                onReject={onReject}
+                pendingApprovalId={readOnly ? null : pendingApprovalId}
+                onApprove={readOnly ? undefined : onApprove}
+                onReject={readOnly ? undefined : onReject}
+                forkKey={marks.get(message.id)?.key}
+                forkIndex={marks.get(message.id)?.index}
+                forkTotal={marks.get(message.id)?.total}
+                // Switching while a turn streams would move the bubble the
+                // stream writes into out of the thread.
+                onSwitchFork={isGenerating || readOnly ? undefined : handleSwitchFork}
+                onBranch={readOnly ? undefined : handleBranch}
+                readOnly={readOnly}
+                declined={message.id === declinedId}
+                speakerName={speakerNameOf(message, speakers, authors)}
               />
               )}
-              {compactAt.get(message.id)?.map((record) => (
-                <CompactBlock key={record.id} record={record} />
+              {!readOnly && message.greetings && message.greetings.length > 1 && message.id === lastVisibleId && !isGenerating && (
+                <GreetingSwitcher conversationId={conversation.id} message={message} />
+              )}
+              {message.role === 'assistant' && planRows.get(message.id)?.map((todos, k) => (
+                // On the answer text's left edge, like the pinned plan.
+                <PlanHistoryRow key={k} todos={todos} className="pl-12 pr-3 pt-1" />
               ))}
             </div>
-          ))}
+            )
+          })}
+        {/* A summary is being written: one line, where the next step will be. */}
+        {!readOnly && layers.compacting && <CompactBlock />}
         {/* The run anchor stays visible the entire time the agent is still
             working, including between tool calls and while the final answer
             streams. G14-6: one shimmering "Working" with the clock beside it,
             instead of three dots here and a floating counter elsewhere. */}
-        {showTyping && lastMessage?.role === 'assistant' && (
-          <WorkingAnchor isRunning label={isLoadingModel ? 'Loading model' : undefined} />
+        {!readOnly && showTyping && lastMessage?.role === 'assistant' && (
+          <WorkingAnchor
+            isRunning
+            conversationId={conversation?.id}
+            // A run waiting on the user is not working: same words as the Code
+            // tab (G15b), Gegenprobe 01.10.2026 read "Working 49s" here.
+            // The first use of computer control in this chat waits for the user too.
+            awaitingApproval={!!pendingApprovalId || chatAsked}
+            loadingModel={isLoadingModel}
+            message={lastMessage}
+          />
         )}
+        {/* The run's plan, pinned under the newest message (PlanBar.tsx). */}
+        {!readOnly && <PlanBar conversationId={conversation.id} onContinue={onContinuePlan} />}
       </div>
     </div>
+    <CompactLayerRail view={layers} />
+    </ChatLookScope>
+    {/* GH #199: later speakers of this round already answered. Ask before
+        anything moves. Outside the scrolling list, whose mask would clip it. */}
+    <Modal open={!!askRegen} onClose={() => setAskRegen(null)} title="Regenerate this answer" maxWidth="max-w-md">
+      <p className="t-small text-gray-600 dark:text-gray-300" data-testid="regen-speaker-question">
+        {askRegen?.later === 1 ? 'One later speaker' : `${askRegen?.later ?? 0} later speakers`} of this round already answered.
+        Keep {askRegen?.later === 1 ? 'that answer' : 'their answers'}, or let {askRegen?.later === 1 ? 'it' : 'them'} answer again after the new one?
+        {askRegen?.laterRounds ? ' Later rounds move into the earlier version either way; the arrows bring them back.' : ''}
+      </p>
+      <ModalActions>
+        <ModalButton variant="quiet" onClick={() => setAskRegen(null)}>Cancel</ModalButton>
+        <ModalButton data-testid="regen-from-here" onClick={() => answerRegen('from-here')}>Regenerate from here</ModalButton>
+        <ModalButton data-testid="regen-keep-later" variant="primary" onClick={() => answerRegen('only')}>Keep later answers</ModalButton>
+      </ModalActions>
+    </Modal>
+    </>
   )
+}
+
+/** The persona a group turn was written as, for the bubble's label. Nothing
+ *  when the turn's author is its model, which the label names anyway. */
+function speakerNameOf(
+  message: Parameters<typeof groupTurnAuthor>[0],
+  speakers: Parameters<typeof groupTurnAuthor>[1],
+  authors: Parameters<typeof groupTurnAuthor>[2],
+): string | undefined {
+  const author = message.modelId ? groupTurnAuthor(message, speakers, authors) : null
+  return author && author.name !== message.modelId ? author.name : undefined
 }

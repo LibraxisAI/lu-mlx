@@ -1,97 +1,111 @@
 import { useEffect, useState } from 'react'
-import { formatElapsed } from '../../lib/format-elapsed'
+import { useGenerationStore } from '../../stores/generationStore'
+import { useRunActivityStore } from '../../stores/runActivityStore'
+import { StatusChip } from '../status/StatusChip'
+import { deriveRunStatus, type RunSignals } from '../status/run-status'
+import { WorkingBeacon } from './WorkingBeacon'
 
 interface Props {
   isRunning: boolean
-  /** What the run is actually doing right now. Defaults to "Working"; pass
-   * something specific ("Waiting for your approval", "Generating image")
-   * whenever the surface knows better, because a wait that looks like work
-   * is how a nine minute approval stall got mistaken for progress (G15b). */
-  label?: string
+  /** The conversation whose run this is. Its booked start (generationStore
+   *  `runs[id].bookedAt`) drives the clock, so leaving the tab and coming
+   *  back does not start the count again at 0. */
+  conversationId?: string | null
+  /** A call waits for the user. A wait that looks like work is how a nine
+   *  minute approval stall got mistaken for progress (G15b). */
+  awaitingApproval?: boolean
+  /** A local model is loading and has not answered yet. */
+  loadingModel?: boolean
+  /** The assistant message the run is filling: its text, reasoning and tool calls say what the run is doing. */
+  message?: RunSignals['message']
 }
 
 /**
- * THE bottom-of-run status line (G14-6, David 2026-08-07): the word "Working"
- * carrying the same shimmer as a live tool name, with the elapsed clock
- * beside it. It replaces the three bouncing dots AND the floating
- * bottom-right counter on every surface (Chat, Agent, Code), so a run has
- * exactly one anchor that says the app is alive, what it is doing, and for
- * how long. Reference is the Claude desktop app.
+ * When a conversation's approval wait began, so the clock next to "Waiting
+ * for your approval" says how long the card has been waiting, not how long the
+ * run has been going. Module scope, like the run's booked start, so a tab
+ * switch does not start the wait at 0 again.
  */
-export function WorkingAnchor({ isRunning, label }: Props) {
-  const [elapsed, setElapsed] = useState(0)
+const waitSince = new Map<string, number>()
 
-  // The clock resets in the render where `isRunning` flips, not in an effect
-  // afterwards. Two things were wrong with the effect version: `useRef(Date.now())`
-  // read the clock on every render (React 19 `purity`), and `setElapsed(0)`
-  // inside the effect body is a cascading render (`set-state-in-effect`) that
-  // lands AFTER paint — so the first quarter second of a new run showed the
-  // previous run's time. React's documented "adjust state while rendering"
-  // shape re-runs only this component, before anything paints.
+/**
+ * THE bottom-of-run status line: the LU mark showing what the run is doing,
+ * the word for it, and the elapsed clock. One anchor per run on every surface
+ * (Chat, Agent, Code), so a run always says that the app is alive, what it is
+ * doing, and for how long.
+ */
+export function WorkingAnchor({ isRunning, conversationId, awaitingApproval, loadingModel, message }: Props) {
+  const [elapsed, setElapsed] = useState(0)
+  // The mounted status line, as state: the mark above the composer watches it.
+  const [line, setLine] = useState<HTMLDivElement | null>(null)
+  const bookedAt = useGenerationStore((s) => (conversationId ? s.runs[conversationId]?.bookedAt : undefined))
+  const activity = useRunActivityStore((s) => (conversationId ? s.activity[conversationId] : undefined))
+  const waiting = !!awaitingApproval
+
+  // The clock resets in the render where the run or the wait flips, not in an
+  // effect afterwards, so the old count never paints under the new word.
   const [wasRunning, setWasRunning] = useState(isRunning)
-  if (wasRunning !== isRunning) {
+  const [wasWaiting, setWasWaiting] = useState(waiting)
+  if (wasRunning !== isRunning || wasWaiting !== waiting) {
     setWasRunning(isRunning)
+    setWasWaiting(waiting)
     setElapsed(0)
   }
 
   useEffect(() => {
+    // A wait that is over gives its start up, so the next approval of this
+    // conversation counts from its own start.
+    if (conversationId && (!isRunning || !waiting)) waitSince.delete(conversationId)
     if (!isRunning) return
-    // The start belongs to this run, so it lives in the run's own closure —
-    // no ref, and nothing left over from the previous run to read back.
-    const start = Date.now()
-    const interval = setInterval(() => {
-      setElapsed(Math.floor((Date.now() - start) / 1000))
-    }, 250)
-    return () => clearInterval(interval)
-  }, [isRunning])
+    let start: number
+    if (waiting && conversationId) {
+      if (!waitSince.has(conversationId)) waitSince.set(conversationId, Date.now())
+      start = waitSince.get(conversationId)!
+    } else if (waiting) {
+      start = Date.now()
+    } else {
+      start = bookedAt ?? Date.now()
+    }
+    // One update per second, timed to the moment the shown second changes.
+    let timer: ReturnType<typeof setTimeout>
+    const tick = () => {
+      const ms = Math.max(0, Date.now() - start)
+      setElapsed(Math.floor(ms / 1000))
+      timer = setTimeout(tick, 1000 - (ms % 1000))
+    }
+    tick()
+    return () => clearTimeout(timer)
+  }, [isRunning, bookedAt, waiting, conversationId])
 
   if (!isRunning) return null
 
+  const status = deriveRunStatus({ awaitingApproval: waiting, loadingModel, activity, message })
+
   return (
-    // D-S11: „ein einzelnes Wort in 12,88px mit Shimmer — im Standbild nicht
-    // von Fliesstext unterscheidbar."
-    //
-    // Der Shimmer allein traegt die Aussage nur, solange etwas laeuft UND man
-    // hinsieht. Im Standbild — Screenshot, Bildschirmfoto in einem Bugreport,
-    // `prefers-reduced-motion`, wo die Kaskade in index.css die Animation nach
-    // einem Durchlauf anhaelt — bleibt ein graues Wort in Textgroesse ueber
-    // dem Transkript stehen. Es sah aus wie eine angefangene Antwort.
-    //
-    // Drei Dinge machen daraus einen Status, und alle drei wirken OHNE
-    // Bewegung:
-    //   1. Ein Behaelter mit Kante und Radius — die Form eines Chips, nicht
-    //      die eines Absatzes. `inline-flex` + `w-fit`, damit er genau so
-    //      breit ist wie sein Inhalt und nicht als Zeile durchlaeuft.
-    //   2. Ein Punkt davor. `lu-band-dot` pulst, wenn Bewegung erlaubt ist,
-    //      und ist sonst einfach ein Punkt in der Akzentfarbe — dieselbe
-    //      Klasse, die die Werkzeugleiste schon benutzt, kein zweites Rezept.
-    //   3. `role="status"` + `aria-live="polite"`. Das Wort war fuer
-    //      Screenreader vorher gar nichts; jetzt wird der Beginn eines Laufs
-    //      angesagt. Der Sekundenzaehler steht bewusst in `aria-hidden`,
-    //      sonst spricht die Ansage im Viertelsekundentakt.
-    <div
-      className="flex items-center pl-11 pr-3 py-1.5"
-      data-testid="working-anchor"
-      role="status"
-      aria-live="polite"
-    >
-      <span className="inline-flex w-fit items-center gap-2 rounded-full border border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-white/[0.03] pl-2 pr-2.5 py-1">
-        {/* Akzent hell / dunkel getrennt, gerechnet gegen den Behaelter:
-            #a094f8 auf gray-50 (#f9fafb) = 2,49:1 — zu wenig; die im Haus
-            schon definierte Hellmodus-Kante #8b7cf0 kommt auf 3,22:1.
-            Im Dunkeln steht #a094f8 auf white/[0.03] ueber #1e1e1e (= #252525)
-            bei 5,90:1. */}
-        <span
-          aria-hidden="true"
-          className="lu-band-dot w-1.5 h-1.5 rounded-full bg-lu-accent-edge dark:bg-lu-accent shrink-0"
-        />
-        <span className="lu-tool-shimmer t-control">{label ?? 'Working'}</span>
-        {elapsed >= 1 && (
-          <span aria-hidden="true" className="lu-hud-num t-micro text-gray-500 dark:text-gray-500">
-            {formatElapsed(elapsed)}
-          </span>
-        )}
-      </span>
-    </div>
+    <>
+      {/* The word is the announcement; the mark and the clock are hidden from
+          assistive technology, otherwise a screen reader would speak every second. */}
+      <div
+        ref={setLine}
+        className="flex items-center pl-11 pr-3 py-1.5"
+        data-testid="working-anchor"
+        data-status={status.kind}
+        role="status"
+        aria-live="polite"
+      >
+        <StatusChip kind={status.kind} word={status.word} detail={status.detail} seconds={elapsed} />
+      </div>
+      {/* B26: why the first wait lasts, while it is still the line shown, or
+          while the chat's own "Loading model" stands in for it (a local model
+          keeps that word until its first token, loaded or not). Outside the
+          live region: the word is announced, the sentence is read. */}
+      {activity?.hint && (status.word === activity.label || status.kind === 'loading') && (
+        <p className="pl-11 pr-3 pb-1.5 text-xs text-gray-500 dark:text-gray-400" data-testid="working-anchor-hint">
+          {activity.hint}
+        </p>
+      )}
+      {/* Scrolled away from the line above, the run still shows: the mark alone, above the composer. */}
+      <WorkingBeacon anchor={line} kind={status.kind} />
+    </>
   )
 }

@@ -29,20 +29,20 @@ use crate::state::AppState;
 use crate::os_error;
 use super::comfy_job::{finished_notice, requirements_fallback_log};
 use super::env_check::verify_and_heal_environment;
-use super::pip::{pip_install_streaming_with_retry_raw, requirements_failure_reason_for, should_retry_in_user_site};
+use super::pip::{pip_install_streaming_with_retry_raw, requirements_failure_reason_for};
 
 use super::children::TrackedInstallerChild;
 use super::comfy_job::{ComfyJob, COMFY_JOB};
 use super::comfy_job::comfy_job_busy_message;
 use super::pip::pip_install_streaming_with_retry_cancellable;
 use super::torch::plan_pytorch_install;
-use super::venv::{create_comfyui_venv, is_pep668_protected, restore_orphaned_venv_if_needed};
+use super::venv::{create_comfyui_venv, restore_orphaned_venv_if_needed};
 #[cfg(target_os = "windows")]
 use super::git::{windows_git_install_hint, windows_git_probe, WindowsGitState};
 #[cfg(target_os = "windows")]
 use super::CREATE_NO_WINDOW;
 
-// ── Disk-pressure pre-flight (Bug #1 — techx69 100%-busy-drive hang) ────────
+// ── Disk-pressure pre-flight (Bug #1 — 100%-busy-drive hang) ────────
 //
 // FREE SPACE IS THE ONLY THING MEASURED HERE, and that is deliberate. The doc
 // comment below used to promise a second check as well — "or its pending I/O
@@ -227,7 +227,7 @@ pub fn install_comfyui(
         .map(PathBuf::from)
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("ComfyUI"));
 
-    // Bug #1 (techx69): pre-flight disk pressure check. On a drive sitting
+    // Bug #1: pre-flight disk pressure check. On a drive sitting
     // at 100% utilisation the install hangs for 45+ minutes and the app
     // OOMs. Surface the risk BEFORE we start — the user can free space
     // or pick a different drive instead of staring at a frozen progress
@@ -267,7 +267,7 @@ pub fn install_comfyui(
     }
     let install_status = state.install_status.clone();
     // Cloned into the worker so a custom install target can be persisted as
-    // the active ComfyUI path once the install completes (andy_38747).
+    // the active ComfyUI path once the install completes.
     let comfy_path_slot = state.comfy_path.clone();
 
     std::thread::spawn(move || {
@@ -306,7 +306,7 @@ pub fn install_comfyui(
         // else looks at the folder.
         restore_orphaned_venv_if_needed(&target_dir);
 
-        // Bug N (juliandiggins-stack issue #40, 2026-05-18) — probe Windows
+        // Bug N (issue #40, 2026-05-18) — probe Windows
         // git BEFORE clone so a WSL/non-native git on PATH surfaces a clear
         // hint instead of failing the clone halfway with cryptic stderr.
         #[cfg(target_os = "windows")]
@@ -337,8 +337,11 @@ pub fn install_comfyui(
         println!("[Install] Cloning ComfyUI to {:?}", target_dir);
         update("downloading", "Step 1/4: Downloading ComfyUI repository...");
 
+        // 3.0.9: the release LU tested (comfy_pin.rs), not whatever master
+        // is at this minute. Full history, so a later pin is a local move.
         let mut cmd = crate::process_util::foreign_system_command("git");
-        cmd.args(["clone", "https://github.com/comfyanonymous/ComfyUI.git"])
+        cmd.args(["clone"])
+            .args(super::comfy_pin::pinned_clone_args())
             .arg(&target_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -377,7 +380,16 @@ pub fn install_comfyui(
 
         if clone_exit.success() {
             println!("[Install] Git clone successful");
-            update("installing", "Repository cloned successfully.");
+            update(
+                "installing",
+                &format!("Repository cloned successfully (ComfyUI {}).", super::comfy_pin::COMFYUI_PINNED_TAG),
+            );
+            // The marker that lets Update keep exactly this folder on the pin
+            // later on, and nothing the customer brought along. Not fatal:
+            // an unmarked install still works, it updates the old way.
+            if let Err(e) = super::comfy_pin::mark_lu_installed(&target_dir) {
+                println!("[Install] Could not mark the ComfyUI as installed by LU: {e}");
+            }
         } else {
             let mut stderr = String::new();
             if let Some(mut e) = clone_child.stderr.take() {
@@ -396,11 +408,29 @@ pub fn install_comfyui(
                     return;
                 }
                 println!("[Install] ComfyUI directory already exists, updating...");
-                update("installing", "ComfyUI already exists, pulling latest...");
                 if cancelled() {
                     update("cancelled", "Install cancelled.");
                     return;
                 }
+                // A ComfyUI LU cloned earlier sits on a tag without a branch,
+                // so a pull has nothing to update: it is set to the pin
+                // instead. Everything else keeps the pull it always got.
+                if super::comfy_pin::is_lu_installed(&target_dir) {
+                    let tag = super::comfy_pin::COMFYUI_PINNED_TAG;
+                    update("installing", &format!("ComfyUI already exists, setting it to the tested release {tag}..."));
+                    match super::comfy_pin::checkout_pinned_tag(&target_dir, tag, true) {
+                        Ok(_) => update("installing", &format!("ComfyUI is on {tag}.")),
+                        Err(e) => update(
+                            "installing",
+                            &format!(
+                                "Could not set ComfyUI to {tag}, continuing with the ComfyUI already \
+                                 on disk.\n{}",
+                                e.chars().take(400).collect::<String>()
+                            ),
+                        ),
+                    }
+                } else {
+                update("installing", "ComfyUI already exists, pulling latest...");
                 let mut pull = crate::process_util::foreign_system_command("git");
                 pull.args(["pull"]).current_dir(&target_dir)
                     .stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -441,6 +471,7 @@ pub fn install_comfyui(
                         );
                     }
                 }
+                }
             } else {
                 let err = format!("Git clone failed: {}", stderr);
                 println!("[Install] {}", err);
@@ -454,16 +485,12 @@ pub fn install_comfyui(
             return;
         }
 
-        // Bug E (rzgrozt — Arch GH #32 comment, 2026-05-08): if the system
-        // Python is PEP 668 protected (Arch, Debian 12+, Fedora 38+, Ubuntu
-        // 23.04+), a bare `python -m pip install ...` exits with
-        // `error: externally-managed-environment` and leaves the user with
-        // a half-cloned ComfyUI dir and no diagnostic. Detect the marker
-        // file via the system Python, then create a venv inside the
-        // ComfyUI folder and use the venv's Python for every subsequent
-        // pip step. The launcher in `process.rs` mirrors this check and
-        // prefers the venv when starting ComfyUI, so the user gets a
-        // consistent isolated environment without ever touching pacman.
+        // Bug E (Arch GH #32 comment, 2026-05-08) was the first
+        // reason ComfyUI got a venv of its own: a PEP 668 protected system
+        // Python refuses `pip install` outright. Since 3.0.4 every fresh
+        // install builds one (see the build below). The launcher in
+        // `process.rs` prefers the venv when starting ComfyUI, so the user
+        // gets one isolated environment without touching the system Python.
         // A venv that is already there wins over everything below. The
         // launcher starts ComfyUI out of it (process.rs) and update_comfyui
         // installs into it, so an installer that reached past it would put the
@@ -530,58 +557,58 @@ pub fn install_comfyui(
             // Runs BEFORE `create_comfyui_venv`/PEP-668 detection so a
             // healthy choice never gets discarded for one that cannot serve
             // torch (Nachbesserung 6).
-            // No existing venv yet: `create_comfyui_venv` below may build one
-            // from this exact interpreter (only skipped when PEP 668 is not
-            // in effect), so the strict probe applies.
-            let chosen_python = match super::torch::choose_torch_python(&python_bin, torch_index.as_deref(), &torch_package_refs, "press Install ComfyUI again", true) {
-                super::torch::TorchPythonDecision::Proceed => python_bin.clone(),
-                super::torch::TorchPythonDecision::UseInstead { path, .. } => {
-                    update(
-                        "installing",
-                        &format!(
-                            "The default Python ({python_bin}) does not have a PyTorch wheel for \
-                             this machine yet; using {path} instead, found on this machine already."
-                        ),
-                    );
-                    path
+            // No existing venv yet: `create_comfyui_venv` below builds one
+            // from this exact interpreter, so the strict probe applies.
+            // Nothing on the machine fits: LU's own Python 3.12 instead of a
+            // dead end (Discord 14.10.2026, a machine with only 3.15).
+            let decision = super::torch::choose_torch_python(&python_bin, torch_index.as_deref(), &torch_package_refs, "press Install ComfyUI again", true);
+            let progress = crate::private_python::StatusProgress { status: &install_status, cancel: &cancel_flag };
+            let chosen_python = match super::torch::base_for_new_venv(decision, &python_bin, &progress, &|line| update("installing", line)) {
+                Ok(path) => path,
+                Err(e) if e == "cancelled" => {
+                    update("cancelled", "Install cancelled while LU's own Python was being set up.");
+                    return;
                 }
-                super::torch::TorchPythonDecision::Blocked(msg) => {
+                Err(msg) => {
                     update("error", &msg);
                     return;
                 }
             };
-            if is_pep668_protected(&chosen_python) {
-                update(
-                    "installing",
-                    "Python is PEP 668 protected (Arch / Debian 12+ / Fedora 38+ / \
-                     Ubuntu 23.04+). Creating an isolated venv at ComfyUI/venv so \
-                     pip can install PyTorch + ComfyUI deps without touching your \
-                     system Python …",
-                );
-                match create_comfyui_venv(&target_dir, &chosen_python, Some(&cancel_flag)) {
-                    Ok(venv_py) => {
-                        let p = venv_py.to_string_lossy().to_string();
-                        update(
-                            "installing",
-                            &format!("venv ready, using {} for the install.", p),
-                        );
-                        p
-                    }
-                    // A cancel the user asked for is not a failed install. Without
-                    // this arm the new cancel path inside `create_comfyui_venv`
-                    // would arrive here as the card "Installing ComfyUI did not
-                    // finish", over a run that stopped because they said so.
-                    Err(e) if e == "cancelled" => {
-                        update("cancelled", "Install cancelled while the venv was being created.");
-                        return;
-                    }
-                    Err(e) => {
-                        update("error", &format!("venv creation failed.\n\n{}", e));
-                        return;
-                    }
+            // Always a venv of its own, on every platform. Without one,
+            // Windows and macOS put PyTorch and every ComfyUI package into the
+            // user's system Python, next to whatever other software had
+            // installed there. A user (Discord 2026-09-22, Windows 11,
+            // RX 9060 XT): the environment check died on "python.exe - Bad
+            // Image" for a ROCm DLL in Python312\Lib\site-packages that came
+            // from another install. Linux already did this whenever PEP 668
+            // locked the system Python (Bug E, GH #32). A venv also needs no
+            // administrator for a python.org install under Program Files.
+            update(
+                "installing",
+                "Creating an isolated Python environment at ComfyUI/venv, so PyTorch and \
+                 the ComfyUI packages never mix with other Python software on this machine …",
+            );
+            match create_comfyui_venv(&target_dir, &chosen_python, Some(&cancel_flag)) {
+                Ok(venv_py) => {
+                    let p = venv_py.to_string_lossy().to_string();
+                    update(
+                        "installing",
+                        &format!("venv ready, using {} for the install.", p),
+                    );
+                    p
                 }
-            } else {
-                chosen_python
+                // A cancel the user asked for is not a failed install. Without
+                // this arm the new cancel path inside `create_comfyui_venv`
+                // would arrive here as the card "Installing ComfyUI did not
+                // finish", over a run that stopped because they said so.
+                Err(e) if e == "cancelled" => {
+                    update("cancelled", "Install cancelled while the venv was being created.");
+                    return;
+                }
+                Err(e) => {
+                    update("error", &format!("venv creation failed.\n\n{}", e));
+                    return;
+                }
             }
         };
 
@@ -596,10 +623,31 @@ pub fn install_comfyui(
              lines appearing, the install is making progress, not hung.",
         );
 
+        // GH #211: an old pip cannot read the PyTorch index.
+        if let Some(line) = super::torch::lift_old_pip_before_torch(&effective_python, &install_status, Some(&cancel_flag)) {
+            update("installing", &line);
+        }
+        if cancelled() {
+            update("cancelled", "Install cancelled during PyTorch download.");
+            return;
+        }
+
         let torch_arg_refs: Vec<&str> = torch_args.iter().map(|s| s.as_str()).collect();
         match pip_install_streaming_with_retry_cancellable(&torch_arg_refs, &effective_python, 3, &install_status, Some(&cancel_flag)) {
             Ok(()) => {
                 update("installing", "PyTorch installed successfully.");
+                // 3.0.8: a GPU build that cannot see the card says so here,
+                // with the fix, instead of surfacing later as a slow render.
+                if torch_index.is_some() {
+                    let sees = crate::commands::process::probe_comfy_gpu(&effective_python);
+                    if let Some(line) = crate::commands::torch_wheels::post_install_gpu_line(
+                        torch_index.as_deref(),
+                        sees,
+                        std::env::consts::OS,
+                    ) {
+                        update("installing", &line);
+                    }
+                }
             }
             Err(diagnosis) if diagnosis == "cancelled" => {
                 update("cancelled", "Install cancelled during PyTorch download.");
@@ -658,49 +706,22 @@ pub fn install_comfyui(
                 }
                 Err(f) => {
                     let diagnosis = f.diagnosis.clone();
-                    // A python.org install under Program Files has an
-                    // admin-only site-packages, and without a venv the first
-                    // wheel that is not already there dies on it. The same
-                    // escape the custom node path has used since 2026-07-19,
-                    // and only where no venv was built: a venv rejects --user.
-                    // Decided on the RAW stderr: the diagnosis keeps only the
-                    // first 400 characters of the log, and pip prints the
-                    // permission line at the end of a long one.
-                    let retried = if should_retry_in_user_site(
-                        effective_python != python_bin,
-                        &f.stderr,
-                    ) {
-                        update(
-                            "installing",
-                            "The dependencies could not be written to the shared site-packages. \
-                             Retrying into the per user site, which needs no administrator.",
-                        );
-                        let mut user_args = req_args.clone();
-                        user_args.push("--user");
-                        pip_install_streaming_with_retry_cancellable(&user_args, &effective_python, 2, &install_status, Some(&cancel_flag)).is_ok()
-                    } else {
-                        false
-                    };
-                    if retried {
-                        update("installing", "Dependencies installed successfully.");
-                    } else {
-                        // Not fatal on its own: the import check below decides
-                        // whether the environment can actually start. What is
-                        // gone is the old "non-critical" verdict, which called
-                        // a broken environment a finished one.
-                        println!("[Install] Requirements install warning: {}", diagnosis);
-                        let reason = requirements_failure_reason_for(&f);
-                        let folder = target_dir.display().to_string();
-                        requirements_fallback = Some((folder.clone(), reason));
-                        update("installing", &requirements_fallback_log(&folder, reason));
-                        update(
-                            "installing",
-                            &format!(
-                                "Not every dependency installed. Checking what is really missing.\n\n{}",
-                                diagnosis
-                            ),
-                        );
-                    }
+                    // Not fatal on its own: the import check below decides
+                    // whether the environment can actually start. What is
+                    // gone is the old "non-critical" verdict, which called
+                    // a broken environment a finished one.
+                    println!("[Install] Requirements install warning: {}", diagnosis);
+                    let reason = requirements_failure_reason_for(&f);
+                    let folder = target_dir.display().to_string();
+                    requirements_fallback = Some((folder.clone(), reason));
+                    update("installing", &requirements_fallback_log(&folder, reason));
+                    update(
+                        "installing",
+                        &format!(
+                            "Not every dependency installed. Checking what is really missing.\n\n{}",
+                            diagnosis
+                        ),
+                    );
                 }
             }
         }
@@ -747,7 +768,7 @@ pub fn install_comfyui(
 
         println!("[Install] ComfyUI installation complete");
 
-        // andy_38747 (Discord): the install target is user-configurable now.
+        // A user (Discord): the install target is user-configurable now.
         // Persist it exactly like `set_comfyui_path` does (memory + config.json),
         // otherwise a non-default target (e.g. D:\ComfyUI) is installed fine but
         // never found again — `find_comfyui_path` only scans standard locations.
@@ -765,6 +786,9 @@ pub fn install_comfyui(
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_else(|| serde_json::json!({}));
             config["comfyui_path"] = serde_json::json!(dir_str);
+            // An install the user asked LU to make is one LU may start with
+            // itself (comfy_boot_plan). A ComfyUI LU merely found is not.
+            config["comfyui_autostart"] = serde_json::json!(true);
             let _ = std::fs::write(
                 &config_file,
                 serde_json::to_string_pretty(&config).unwrap_or_default(),

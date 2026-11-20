@@ -1,6 +1,6 @@
 // Ein Unterauftrag, der nur ankuendigt, hat nicht geantwortet.
 //
-// Persona-Lauf vom 03.09.2026 (B2, Tomas Reinholt). Drei delegierte Agenten,
+// Persona-Lauf vom 03.09.2026 (B2, a test persona). Drei delegierte Agenten,
 // 251 Sekunden Rechenzeit, und das kam zurueck:
 //
 //   Hamburg → „Ich recherchiere das Hamburger Transparenzgesetz fuer Sie.

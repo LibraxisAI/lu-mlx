@@ -11,6 +11,8 @@
  * filtering, the model has no syntactically valid path to recurse.
  */
 
+import { replayableReasoning } from '../../lib/agent-core/reasoning-replay'
+import { stripSourcesMarker } from '../../lib/web-evidence'
 import { settleThinking } from '../../lib/thinking-stripper'
 import { toolResultIsFailure } from '../../lib/tool-result-failure'
 import { isRunStopped } from '../../lib/run-stop'
@@ -31,6 +33,8 @@ import { laneOf, currentLaneFacts, type RunLane } from '../../lib/run-lane-of-mo
 // Einstiegspunkte dieser Datei hängen am `delegate_task`-Executor, den erst
 // registerBuiltinTools() verdrahtet.
 import { toolRegistry } from '../mcp/tool-registry'
+import { buildHermesToolCall, buildHermesToolPrompt, buildHermesToolResult, hasToolCallTags, parseHermesToolCalls, stripToolCallTags } from '../hermes-tool-calling'
+import { recoverTurnCalls } from '../../lib/agent-core/recover'
 import type { MCPToolDefinition, ToolArgs } from '../mcp/types'
 import type { ChatMessage } from '../providers/types'
 import type { AgentToolCall } from '../../types/agent-mode'
@@ -50,6 +54,8 @@ import { istNurAnkuendigung, ANKUENDIGUNG_STEER } from './ankuendigung'
 import { MAX_EXPLICIT_FANOUT } from '../../lib/agent-fanout'
 import { resolveApprovalLevel } from '../../lib/agent-approval-policy'
 import { allowedInReadOnlyTurn } from '../../lib/mutating-tools'
+import { isSelfControlToolName } from '../../lib/settings-tool-names'
+import { clampSubAgentLimit } from '../../lib/number-limits'
 
 // NOTE: the toolRegistry import is done LAZILY inside defaultSubAgentRunner
 // to avoid a circular dependency with src/api/mcp/builtin-tools.ts, which
@@ -141,8 +147,9 @@ export function resolveSubAgentBudget(s?: {
   subAgentMaxToolCalls?: number
   subAgentMaxIterations?: number
 }): { maxToolCalls: number; maxIterations: number } {
-  const zahl = (v: unknown, vorgabe: number) =>
-    typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : vorgabe
+  // 0 or nothing = the default; above SUB_AGENT_LIMIT_MAX is clamped (B9),
+  // a sub-agent runs unattended and must not get a practically endless budget.
+  const zahl = (v: unknown, vorgabe: number) => clampSubAgentLimit(v) || vorgabe
   return {
     maxToolCalls: zahl(s?.subAgentMaxToolCalls, SUB_AGENT_BUDGET.maxToolCalls),
     maxIterations: zahl(s?.subAgentMaxIterations, SUB_AGENT_BUDGET.maxIterations),
@@ -323,7 +330,7 @@ export interface SubAgentGates {
  * Fail closed: with no conversation to ask in, a 'confirm' tool is refused
  * rather than run.
  *
- * Auftrag 2.3 (David, 04.09.2026): WELCHE Stufe gilt, sagt jetzt
+ * Auftrag 2.3 (04.09.2026): WELCHE Stufe gilt, sagt jetzt
  * resolveApprovalLevel, und zwar fuer beide Agentenwege dieselbe Tabelle. Zwei
  * Dinge aendern sich dadurch hier. Erstens fragt der Hintergrundbetrieb selbst
  * nicht mehr nach. Zweitens folgt ein Unterauftrag aus dem Code-Tab dem Preset
@@ -363,6 +370,7 @@ export async function buildSubAgentGates(run?: AgentRunContext): Promise<SubAgen
       codexMode: run?.mode ?? null,
       execConfirm: run?.execApproval?.confirmExec === true,
       readOnlyRun: run?.readOnlyShellTurn === true,
+      external: toolRegistry.getAll().some((t) => t.name === req.toolName && t.source === 'external'),
     })
     if (level === 'blocked') {
       // Ein lesend gestellter Lauf sagt, WARUM er ablehnt. "not permitted in
@@ -406,7 +414,7 @@ export async function buildSubAgentGates(run?: AgentRunContext): Promise<SubAgen
         status: 'pending_approval',
         timestamp: Date.now(),
       }
-      const entry: ApprovalEntry = { toolCall, resolve }
+      const entry: ApprovalEntry = { toolCall, resolve, owner: abortSignal }
       approvals.enqueueApproval(convId, entry)
       // Stop has to answer a question nobody clicked, or the delegation (and
       // with it the parent turn) waits forever, same lesson as audit A4.
@@ -469,7 +477,9 @@ export async function defaultSubAgentRunner(
 ): Promise<string> {
   const { useModelStore } = await import('../../stores/modelStore')
   const { getProviderForModel } = await import('../providers')
-  const { resolveRequestedModel } = await import('../../lib/agent-fanout')
+  const { getProviderIdFromModel } = await import('../providers/model-name')
+  const { chooseSubAgentModel } = await import('../../lib/delegate-model')
+  const { singleModelSlot } = await import('../../lib/capabilities')
   const store = useModelStore.getState()
   const activeModel = store.activeModel
 
@@ -484,22 +494,42 @@ export async function defaultSubAgentRunner(
   // und nichts zu sagen ist die schlimmste der drei moeglichen Antworten: es
   // sieht aus wie Erfolg, kostet volle Rechenzeit und liefert etwas anderes,
   // als der Nutzer angeordnet hat.
-  let laufmodell = activeModel
-  if (options.model) {
-    const treffer = resolveRequestedModel(options.model, store.models)
-    if (!treffer) {
-      const da = store.models.slice(0, 6).map((m) => m.name).join(', ')
-      return `Error: the model "${options.model}" is not installed here, so this sub-agent did not run.`
-        + (da ? ` Installed: ${da}.` : '')
-    }
-    laufmodell = treffer.name
+  //
+  // Two exceptions, both in lib/delegate-model.ts: a filler word in the
+  // argument ("OMIT", "user") is no wish at all, and a phone holds one local
+  // model, so there a wish it cannot meet runs on the model of the chat
+  // (acceptance on Android with 8 GB, B6: no sub-agent ever ran).
+  const wahl = chooseSubAgentModel(options.model, activeModel, store.models, {
+    singleSlot: singleModelSlot(),
+    isCloud: (name) => getProviderIdFromModel(name) === 'lu-cloud',
+  })
+  if (wahl.missing) {
+    const da = store.models.slice(0, 6).map((m) => m.name).join(', ')
+    return `Error: the model "${wahl.missing}" is not installed here, so this sub-agent did not run.`
+      + (da ? ` Installed: ${da}.` : '')
   }
+  const laufmodell = wahl.model
   if (!laufmodell) return 'Error: No active model configured.'
-  const { provider, modelId } = getProviderForModel(laufmodell)
+  // CA K3: the same transport verdict as both tabs. A local model without
+  // native tool calling (hermes_xml) used to get a native `tools` payload
+  // here, ignored it and answered in prose: the sub-agent did nothing and
+  // reported its intentions as the result. A resolver that cannot run (a
+  // test double without the model list, an offline Ollama) keeps the old
+  // native transport rather than failing the delegation.
+  let { provider, modelId } = getProviderForModel(laufmodell)
+  let promptTransport = false
+  try {
+    const { resolveToolCallingStrategy } = await import('../../lib/agent-strategy')
+    const resolved = await resolveToolCallingStrategy(laufmodell)
+    provider = resolved.provider
+    modelId = resolved.modelToUse
+    promptTransport = resolved.strategy === 'hermes_xml'
+  } catch { /* native, as before */ }
 
   const tools: MCPToolDefinition[] = toolRegistry
     .getAll()
-    .filter((t) => t.name !== DELEGATE_TASK_TOOL_DEF.name)
+    // A sub-agent runs without the user watching: no settings changes (A11).
+    .filter((t) => t.name !== DELEGATE_TASK_TOOL_DEF.name && !isSelfControlToolName(t.name))
 
   const llmTools = tools.map((t) => ({
     type: 'function' as const,
@@ -511,7 +541,9 @@ export async function defaultSubAgentRunner(
   const messages: ChatMessage[] = [
     {
       role: 'system',
-      content: buildSubAgentSystemPrompt(),
+      content: promptTransport
+        ? `${buildSubAgentSystemPrompt()}\n\n${buildHermesToolPrompt(tools)}`
+        : buildSubAgentSystemPrompt(),
     },
     {
       role: 'user',
@@ -574,7 +606,70 @@ export async function defaultSubAgentRunner(
     // the user stopped, and that is paid compute the product promised would
     // not happen ("Stop means stop"). Threading the same signal the tool
     // gates already use into the request makes the abort reach the wire.
-    const turn = await provider.chatWithTools(modelId, messages, llmTools, { signal: gates.abortSignal })
+    // The last check before the request leaves (lib/fit-to-window.ts), as in
+    // the main loops (CA, 14.11.2026): a sub-agent's results pile up step by
+    // step, and nothing checked they still fit. Too big: the longest older
+    // results are shortened for this request. Still too big: it stops and
+    // hands back what it found, instead of a silent cut or a refused request.
+    let sendThese = messages
+    try {
+      const { resolveAgentNumCtx } = await import('../../lib/agent-num-ctx')
+      const { fitToWindow } = await import('../../lib/fit-to-window')
+      const { estimateTokens } = await import('../../lib/context-compaction')
+      const { useSettingsStore } = await import('../../stores/settingsStore')
+      const ctx = await resolveAgentNumCtx(modelId, getProviderIdFromModel(laufmodell), useSettingsStore.getState().settings.contextWindowOverride, laufmodell)
+      const fit = fitToWindow(messages, ctx, promptTransport ? 0 : estimateTokens(JSON.stringify(llmTools)))
+      if (!fit.fits) {
+        const material = finalContent || gesammeltesMaterial(messages)
+        return `Stopped: what this sub-agent gathered no longer fits the model's context window. ${material || '(no partial answer)'}`
+      }
+      sendThese = fit.messages
+    } catch { /* an unknown window checks nothing */ }
+    const raw = await provider.chatWithTools(modelId, sendThese, promptTransport ? [] : llmTools, { signal: gates.abortSignal })
+    // Its credits count toward the hour like the main loop's (CA, 14.11.2026):
+    // a sub-agent on LU Cloud spent outside both limits. Past the hour limit
+    // it stops with what it found, as the main loop pauses.
+    // Accounting never breaks the delegation: a store that cannot answer
+    // (a test double, a phone without the catalogue) counts nothing.
+    let paused: string | null = null
+    try {
+      const { stepCredits, HOUR_CREDIT_LIMIT, wireCloudSpent } = await import('../../lib/agent-cost-brake')
+      const { creditRatesOf, billingOf } = await import('../../lib/agent-core/credit-rates')
+      const { addHourCredits } = await import('../../lib/agent-core/credit-ledger')
+      const spent = stepCredits(creditRatesOf(laufmodell), raw.promptEvalCount, raw.evalCount, billingOf(raw))
+      if (spent > 0) {
+        if (import.meta.env?.MODE !== 'test') wireCloudSpent()
+        const hour = addHourCredits(spent)
+        const { useSettingsStore } = await import('../../stores/settingsStore')
+        const limit = useSettingsStore.getState().settings.agentHourCreditLimit ?? HOUR_CREDIT_LIMIT
+        if (limit > 0 && hour >= limit) {
+          const material = finalContent || gesammeltesMaterial(messages)
+          paused = `Paused to protect your credits: agent runs used the hourly limit of ${limit.toLocaleString('en-US')} credits. ${material || '(no partial answer)'}`
+        }
+      }
+    } catch { /* counted nothing */ }
+    if (paused) return paused
+    // The calls of this turn, wherever the model put them: native, <tool_call>
+    // tags on the prompt transport, JSON or prose in the answer, or the
+    // reasoning channel. One chain for every loop (lib/agent-core/recover.ts).
+    const tagged = promptTransport && hasToolCallTags(raw.content || '')
+    const recovered = recoverTurnCalls({
+      toolCalls: tagged
+        ? parseHermesToolCalls(raw.content || '').map((tc) => ({ function: { name: tc.name, arguments: tc.arguments } }))
+        : raw.toolCalls ?? [],
+      content: tagged ? stripToolCallTags(raw.content || '') : raw.content || '',
+      thinking: raw.thinking,
+      tools,
+    })
+    // Every call gets an id here, once. A call recovered from text or the
+    // reasoning channel had none, and the wire format then made up a fresh
+    // one on every request while its result went out with no id at all: the
+    // model could not tie its call to its result (CA, cloud loops).
+    const turn = {
+      ...raw,
+      content: recovered.content,
+      toolCalls: recovered.toolCalls.map((tc, k) => (tc.id ? tc : { ...tc, id: `call_sub${i}_${k}` })),
+    }
     // What a sub-agent returns becomes a TOOL RESULT in the parent's context,
     // so leaked reasoning floods the run it was supposed to shorten (2.6.7
     // Denk-Audit, Loch 11). Same settlement as every visible surface.
@@ -626,7 +721,9 @@ export async function defaultSubAgentRunner(
       {
         getTool: (name) => registry.resolveExecutable(name),
         execute: (name: string, args: ToolArgs, callRun?: AgentRunContext) =>
-          registry.execute(name, args, 1, callRun),
+          isSelfControlToolName(name)
+            ? Promise.resolve('Error: a sub-agent cannot read or change the app settings. Nothing changed.')
+            : registry.execute(name, args, 1, callRun),
         explainError: (toolName, err) => explainToolError(toolName, err),
         // The three gates the nested loop used to run without.
         awaitApproval: gates.awaitApproval,
@@ -635,13 +732,33 @@ export async function defaultSubAgentRunner(
       { abortSignal: gates.abortSignal },
     )
 
-    messages.push({ role: 'assistant', content: turn.content || '', tool_calls: turn.toolCalls })
+    if (promptTransport) {
+      // The prompt transport speaks in text both ways: a strict chat template
+      // has no branch for the native `tool` role (same rule as useCodex).
+      results.forEach((r, i) => {
+        const tc = turn.toolCalls[i]
+        messages.push({ role: 'assistant', content: buildHermesToolCall(tc.function.name, tc.function.arguments) })
+        messages.push({
+          role: 'user',
+          content: buildHermesToolResult(
+            tc.function.name,
+            clampTaskResult(
+              (r.result !== undefined ? stripSourcesMarker(r.result) : undefined) ?? gates.refusals.get(r.id) ?? r.error ?? '(no output)',
+            ),
+          ),
+        })
+      })
+      if (tasks && options.taskId) tasks.getState().update(options.taskId, { messages: [...messages] })
+      continue
+    }
+
+    messages.push({ role: 'assistant', content: turn.content || '', tool_calls: turn.toolCalls, reasoning: replayableReasoning(raw.thinking) })
     // Map each result back to its ORIGINATING call by index. executeParallel
     // preserves input order (results[i] <-> requests[i] <-> turn.toolCalls[i]),
     // so zipping by index gives every tool message the correct tool_call_id,
     // even when the turn fired the same tool twice. The previous find-by-name
     // matched the FIRST call for both duplicates, leaving the second call's id
-    // with no result; strict OpenAI-compatible providers (lu-cloud/DeepInfra,
+    // with no result; strict OpenAI-compatible providers (lu-cloud,
     // openai, anthropic) then 400/422'd on the next turn and delegate_task
     // aborted. The main loop already handles this the same way (useCodex.ts).
     results.forEach((r, i) => {
@@ -656,7 +773,7 @@ export async function defaultSubAgentRunner(
         // fuer eine Fortsetzung im Store liegen kann, waere ein 4-MB-Protokoll
         // aus einem file_read eine Zeile, die niemand mehr loswird.
         content: clampTaskResult(
-          r.result ?? gates.refusals.get(r.id) ?? r.error ?? '(no output)',
+          (r.result !== undefined ? stripSourcesMarker(r.result) : undefined) ?? gates.refusals.get(r.id) ?? r.error ?? '(no output)',
         ),
         tool_call_id: turn.toolCalls[i]?.id,
       })
@@ -680,13 +797,17 @@ export async function defaultSubAgentRunner(
  */
 async function resolveSubAgentLane(model: string | undefined): Promise<RunLane> {
   const { useModelStore } = await import('../../stores/modelStore')
-  const { resolveRequestedModel } = await import('../../lib/agent-fanout')
+  const { chooseSubAgentModel } = await import('../../lib/delegate-model')
+  const { singleModelSlot } = await import('../../lib/capabilities')
+  const { getProviderIdFromModel } = await import('../providers/model-name')
   const modelStoreState = useModelStore.getState()
-  let subAgentModel = modelStoreState.activeModel
-  if (model) {
-    const treffer = resolveRequestedModel(model, modelStoreState.models)
-    if (treffer) subAgentModel = treffer.name
-  }
+  // The same choice the runner makes (lib/delegate-model.ts). A wish that
+  // cannot be met books the lane of the chat model, as before: the runner
+  // then reports it without sending anything.
+  const subAgentModel = chooseSubAgentModel(model, modelStoreState.activeModel, modelStoreState.models, {
+    singleSlot: singleModelSlot(),
+    isCloud: (name) => getProviderIdFromModel(name) === 'lu-cloud',
+  }).model ?? modelStoreState.activeModel
   return subAgentModel ? laneOf(subAgentModel, currentLaneFacts()) : 'cloud'
 }
 

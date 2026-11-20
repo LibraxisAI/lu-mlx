@@ -23,6 +23,7 @@ import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 import { noSpeechMessage, sttErrorMessage } from '../../hooks/useVoice'
+import { CloudJobError } from '../cloud/client'
 import { LocalSttError } from '../voice'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -158,6 +159,13 @@ describe('the dead-server verdict does not depend on the systems language', () =
       new LocalSttError('stdin flush: the pipe is closing (os error 232)'),
     )
     expect(msg).toBe('stdin flush: the pipe is closing (os error 232)')
+  })
+
+  it('a request limit of cloud dictation is the sentence of the server, or ours for a bare label', () => {
+    expect(sttErrorMessage(new CloudJobError('monthly credit budget exhausted', 429, { code: 'credits_exhausted' })))
+      .toBe('monthly credit budget exhausted')
+    expect(sttErrorMessage(new CloudJobError('too many requests', 429)))
+      .toBe('The server is limiting requests right now. Please wait a moment, then try again. Nothing was charged.')
   })
 
   it('NEGATIVE CONTROL: an unrelated JS failure keeps the generic hint', () => {

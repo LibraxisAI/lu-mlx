@@ -49,7 +49,7 @@ use super::git::{windows_git_install_hint, windows_git_probe, WindowsGitState};
 #[cfg(target_os = "windows")]
 use super::CREATE_NO_WINDOW;
 
-/// GH #98 (joelnewswanger, 2026-08-14): ComfyUI installed once, then died at
+/// GH #98 (2026-08-14): ComfyUI installed once, then died at
 /// import time on every start. His torch lived in the SHARED system Python's
 /// site-packages, where anything the user ever pip-installed can break us,
 /// and clicking install again changed nothing because pip saw every package
@@ -216,19 +216,18 @@ pub fn repair_comfyui_env(state: State<'_, AppState>) -> Result<serde_json::Valu
         let torch_package_refs: Vec<&str> = torch_packages.iter().map(|s| s.as_str()).collect();
         // Repair always rebuilds the venv from this interpreter, so the
         // strict ensurepip probe applies (Runde 6, F11).
-        let chosen_python = match super::torch::choose_torch_python(&python_bin, torch_index.as_deref(), &torch_package_refs, "press \"Repair environment\" again", true) {
-            super::torch::TorchPythonDecision::Proceed => python_bin.clone(),
-            super::torch::TorchPythonDecision::UseInstead { path, .. } => {
-                update(
-                    "installing",
-                    &format!(
-                        "The default Python ({python_bin}) does not have a PyTorch wheel for \
-                         this machine yet; using {path} instead, found on this machine already."
-                    ),
-                );
-                path
+        // Nothing on the machine fits: LU's own Python 3.12 instead of a
+        // dead end (Discord 14.10.2026, a machine with only 3.15). Fetched
+        // here, before the old venv is touched, like everything above.
+        let decision = super::torch::choose_torch_python(&python_bin, torch_index.as_deref(), &torch_package_refs, "press \"Repair environment\" again", true);
+        let progress = crate::private_python::StatusProgress { status: &install_status, cancel: &cancel_flag };
+        let chosen_python = match super::torch::base_for_new_venv(decision, &python_bin, &progress, &|line| update("installing", line)) {
+            Ok(path) => path,
+            Err(e) if e == "cancelled" => {
+                update("cancelled", "Repair cancelled while LU's own Python was being set up. Nothing was changed.");
+                return;
             }
-            super::torch::TorchPythonDecision::Blocked(msg) => {
+            Err(msg) => {
                 update("error", &msg);
                 return;
             }
@@ -347,9 +346,26 @@ pub fn repair_comfyui_env(state: State<'_, AppState>) -> Result<serde_json::Valu
             "installing",
             "Downloading PyTorch into the new environment (~2 GB). Live pip output below.",
         );
+        // GH #211: an old pip cannot read the PyTorch index.
+        if let Some(line) = super::torch::lift_old_pip_before_torch(&venv_py, &install_status, Some(&cancel_flag)) {
+            update("installing", &line);
+        }
         let refs: Vec<&str> = torch_args.iter().map(|s| s.as_str()).collect();
         match pip_install_streaming_with_retry_cancellable(&refs, &venv_py, 3, &install_status, Some(&cancel_flag)) {
-            Ok(()) => update("installing", "PyTorch installed."),
+            Ok(()) => {
+                update("installing", "PyTorch installed.");
+                // 3.0.8: same check as the installer, see post_install_gpu_line.
+                if torch_index.is_some() {
+                    let sees = crate::commands::process::probe_comfy_gpu(&venv_py);
+                    if let Some(line) = crate::commands::torch_wheels::post_install_gpu_line(
+                        torch_index.as_deref(),
+                        sees,
+                        std::env::consts::OS,
+                    ) {
+                        update("installing", &line);
+                    }
+                }
+            }
             Err(d) if d == "cancelled" => {
                 abort_and_restore(
                     "cancelled",
@@ -531,7 +547,7 @@ pub fn repair_comfyui_env(state: State<'_, AppState>) -> Result<serde_json::Valu
         // like a hang with a Cancel button that does nothing.
         let mut broken_nodes: Vec<(String, String)> = Vec::new();
         if comfy_dir.join("custom_nodes").is_dir() {
-            let constraints = super::custom_nodes::write_core_package_constraints(&venv_py);
+            let constraints = super::custom_nodes::write_package_constraints(&venv_py, &super::custom_nodes::CORE_PACKAGES);
             let outcome = super::custom_nodes::reinstall_all_node_requirements(
                 &comfy_dir,
                 &venv_py,
@@ -761,9 +777,60 @@ fn wait_for_port_free(
 /// offers the Update button once `isLocal` is false, and this app manages no
 /// process there either way.
 fn ensure_comfyui_stopped_for_update(state: &State<'_, AppState>) -> Result<(), String> {
+    let port = *state.comfy_port.lock().unwrap();
+    match stop_own_idle_comfyui(state) {
+        OwnComfyStop::NotRunning | OwnComfyStop::Stopped => Ok(()),
+        OwnComfyStop::Foreign => {
+            println!("[Update] Refusing: port {port} is served by a ComfyUI this app did not start");
+            Err(foreign_comfyui_blocks_update(port))
+        }
+        OwnComfyStop::Busy => {
+            println!("[Update] Refusing: ComfyUI on port {port} is generating something");
+            Err(COMFYUI_BUSY_REFUSAL.to_string())
+        }
+        OwnComfyStop::QueueUnknown(e) => {
+            println!("[Update] Refusing: could not check ComfyUI's queue on port {port}: {e}");
+            Err(format!(
+                "Could not check whether ComfyUI is generating something right now, so the \
+                 update was refused rather than risk interrupting a render ({e}). Nothing \
+                 was changed."
+            ))
+        }
+        OwnComfyStop::StopFailed(e) => Err(e),
+        OwnComfyStop::StillRunning => Err(format!(
+            "ComfyUI on port {port} did not stop, so the update was not started. Try \
+             Stop in Settings, then run Update ComfyUI again. Nothing was changed."
+        )),
+    }
+}
+
+/// What became of the ComfyUI on the configured port when a job asked for it
+/// to be out of the way.
+pub(crate) enum OwnComfyStop {
+    /// Nothing was serving the port (or the host is another machine).
+    NotRunning,
+    /// It was this app's own, it was idle, and it is down now.
+    Stopped,
+    /// A ComfyUI this app never started. Left alone.
+    Foreign,
+    /// This app's own, but it is rendering. Left alone.
+    Busy,
+    /// This app's own, but its queue could not be read. Left alone.
+    QueueUnknown(String),
+    /// The stop itself failed, with the reason.
+    StopFailed(String),
+    /// The stop went through and the port still answers.
+    StillRunning,
+}
+
+/// Stop this app's own ComfyUI when it is idle, and say what was found. Never
+/// touches a ComfyUI this app did not start and never interrupts a render.
+/// Shared by Update ComfyUI and by a node pack whose requirements replace a
+/// file the running ComfyUI holds open (custom_nodes.rs).
+pub(crate) fn stop_own_idle_comfyui(state: &AppState) -> OwnComfyStop {
     let host = state.comfy_host.lock().unwrap().clone();
     if !crate::commands::process::is_local_host(&host) {
-        return Ok(());
+        return OwnComfyStop::NotRunning;
     }
     let port = *state.comfy_port.lock().unwrap();
     let port_occupied = crate::commands::process::is_comfyui_running_on_port(port);
@@ -799,36 +866,26 @@ fn ensure_comfyui_stopped_for_update(state: &State<'_, AppState>) -> Result<(), 
     // return that used to sit above this block, made the `NotRunning` arm
     // below dead code that only LOOKED like a check.
     match crate::commands::process::classify_comfyui_ownership(port_occupied, own_child_alive, orphan_pid) {
-        crate::commands::process::ComfyOwnership::NotRunning => Ok(()),
-        crate::commands::process::ComfyOwnership::Foreign => {
-            println!("[Update] Refusing: port {port} is served by a ComfyUI this app did not start");
-            Err(foreign_comfyui_blocks_update(port))
-        }
+        crate::commands::process::ComfyOwnership::NotRunning => OwnComfyStop::NotRunning,
+        crate::commands::process::ComfyOwnership::Foreign => OwnComfyStop::Foreign,
         crate::commands::process::ComfyOwnership::Own => {
             match comfyui_queue_busy(port) {
-                Ok(true) => {
-                    println!("[Update] Refusing: ComfyUI on port {port} is generating something");
-                    Err(COMFYUI_BUSY_REFUSAL.to_string())
-                }
-                Err(e) => {
-                    println!("[Update] Refusing: could not check ComfyUI's queue on port {port}: {e}");
-                    Err(format!(
-                        "Could not check whether ComfyUI is generating something right now, so the \
-                         update was refused rather than risk interrupting a render ({e}). Nothing \
-                         was changed."
-                    ))
-                }
+                Ok(true) => OwnComfyStop::Busy,
+                Err(e) => OwnComfyStop::QueueUnknown(e),
                 Ok(false) => {
-                    let result = crate::commands::process::stop_comfyui_blocking(state)?;
+                    let result = match crate::commands::process::stop_comfyui_blocking(state) {
+                        Ok(r) => r,
+                        Err(e) => return OwnComfyStop::StopFailed(e),
+                    };
                     let status = result.get("status").and_then(|s| s.as_str()).unwrap_or("");
                     if status == "not_ours" {
                         // A race between the classify above and the stop: the
                         // handle exited and something else grabbed the port
-                        // in between. Rare, and refused exactly like a plain
+                        // in between. Rare, and treated exactly like a plain
                         // foreign ComfyUI would be.
-                        return Err(foreign_comfyui_blocks_update(port));
+                        return OwnComfyStop::Foreign;
                     }
-                    info!(port = port, status = status, "update_comfyui stopped its own ComfyUI before updating");
+                    info!(port = port, status = status, "stopped the app's own idle ComfyUI");
                     // final review Runde 2, R2-1: a single check right here
                     // used to fire before the kill had actually landed.
                     // `stop_comfyui_blocking`'s own-child path reaps with
@@ -848,12 +905,9 @@ fn ensure_comfyui_stopped_for_update(state: &State<'_, AppState>) -> Result<(), 
                         std::time::Duration::from_secs(10),
                         || crate::commands::process::is_comfyui_running_on_port(port),
                     ) {
-                        return Err(format!(
-                            "ComfyUI on port {port} did not stop, so the update was not started. Try \
-                             Stop in Settings, then run Update ComfyUI again. Nothing was changed."
-                        ));
+                        return OwnComfyStop::StillRunning;
                     }
-                    Ok(())
+                    OwnComfyStop::Stopped
                 }
             }
         }
@@ -886,7 +940,9 @@ fn reset_install_status_for_new_run(state: &AppState) {
 }
 
 /// Update an existing ComfyUI install in place: `git pull --ff-only` plus a
-/// venv-aware `pip install -r requirements.txt`. The 2.5.8 local Create lanes
+/// venv-aware `pip install -r requirements.txt`. Since 3.0.9 a ComfyUI that
+/// LU cloned itself is set to the pinned release instead of pulled
+/// (comfy_pin.rs); a ComfyUI the customer brought keeps the pull. The 2.5.8 local Create lanes
 /// (music / talking character / extend / motion) need node classes that ship
 /// with current ComfyUI cores, and the UI gates on node PRESENCE, so when the
 /// nodes are missing this command is the one-click "Update ComfyUI" path.
@@ -1049,10 +1105,23 @@ pub fn update_comfyui(state: State<'_, AppState>, app: tauri::AppHandle) -> Resu
                 update("error", &msg);
                 return;
             }
-            crate::python::ComfyVenv::Absent => state.python_bin.lock().unwrap().clone(),
+            // Discord 14.10.2026: the Python that holds this install's torch,
+            // not whatever LU resolves as its default today.
+            crate::python::ComfyVenv::Absent => {
+                let default = state.python_bin.lock().unwrap().clone();
+                match crate::commands::process::bound_comfy_python(&comfy_dir, &default) {
+                    Some(p) => p,
+                    None => {
+                        let msg = crate::commands::process::comfy_no_torch_python_message(&comfy_dir);
+                        error!("comfyui update aborted: {}", msg);
+                        update("error", &msg);
+                        return;
+                    }
+                }
+            }
         };
         if python_bin.is_empty() || !crate::python::is_real_python(&python_bin) {
-            let msg = "No usable Python found for this ComfyUI. Install Python first, then retry the update.";
+            let msg = "No usable Python found for this ComfyUI. Press \"Repair environment\" in Settings: LU builds ComfyUI an environment of its own, then retry the update.";
             error!("comfyui update aborted: {}", msg);
             update("error", msg);
             return;
@@ -1098,6 +1167,10 @@ pub fn update_comfyui(state: State<'_, AppState>, app: tauri::AppHandle) -> Resu
             super::torch::TorchPythonDecision::Proceed => {}
             super::torch::TorchPythonDecision::UseInstead { path, current_version, chosen_version } => {
                 update("error", &super::torch::existing_venv_needs_repair_message(current_version, &path, chosen_version));
+                return;
+            }
+            super::torch::TorchPythonDecision::UseOwn { current_version, own_version } => {
+                update("error", &super::torch::existing_venv_needs_own_python_message(current_version, own_version));
                 return;
             }
             super::torch::TorchPythonDecision::Blocked(msg) => {
@@ -1161,6 +1234,31 @@ pub fn update_comfyui(state: State<'_, AppState>, app: tauri::AppHandle) -> Resu
             }
         };
 
+        // 3.0.9: a ComfyUI LU cloned itself is set to the release LU tested
+        // (comfy_pin.rs: fetch the tags, check the pinned one out), never
+        // pulled to master. A ComfyUI the customer brought along has no LU
+        // marker and keeps the fast-forward pull of its own branch below.
+        if super::comfy_pin::is_lu_installed(&comfy_dir) {
+            let tag = super::comfy_pin::COMFYUI_PINNED_TAG;
+            update("installing", &format!("Step 1/3: Setting ComfyUI to the tested release {tag}..."));
+            match super::comfy_pin::checkout_pinned_tag(&comfy_dir, tag, true) {
+                Ok(super::comfy_pin::PinOutcome::AlreadyThere) => {
+                    update("installing", &format!("ComfyUI is already on {tag}."));
+                }
+                Ok(super::comfy_pin::PinOutcome::Moved) => {
+                    update("installing", &format!("ComfyUI moved to {tag}."));
+                }
+                Err(e) => {
+                    // Nothing moved: checkout_pinned_tag only checks out a tag
+                    // it found, so the checkout is still on `old_commit`.
+                    update(
+                        "error",
+                        &format!("Could not set ComfyUI to {tag}. Nothing was changed.\n\n{e}"),
+                    );
+                    return;
+                }
+            }
+        } else {
         update("installing", "Step 1/3: Pulling the latest ComfyUI...");
         let mut pull = crate::process_util::foreign_system_command("git");
         // --ff-only: a user-modified checkout must not silently merge; surface
@@ -1196,6 +1294,7 @@ pub fn update_comfyui(state: State<'_, AppState>, app: tauri::AppHandle) -> Resu
                 update("error", &format!("Could not run git: {}", os_error::english(&e)));
                 return;
             }
+        }
         }
 
         update(
@@ -1267,21 +1366,37 @@ pub fn update_comfyui(state: State<'_, AppState>, app: tauri::AppHandle) -> Resu
         }
 
         println!("[Update] ComfyUI update complete");
+        // The box, 03.10.2026: the guard at the top stopped LU's own ComfyUI,
+        // and the run ended on "Restart ComfyUI to load the new nodes" with
+        // the status on Stopped. It comes back up here, before `complete`:
+        // the panel and a render that asked for this update both stop
+        // watching on that word, and the render goes on as soon as the port
+        // answers. A start that fails does not undo the update, it is said in
+        // the closing line with its reason.
+        update("installing", "Starting ComfyUI again...");
+        let restarted = crate::commands::process::start_comfyui_blocking(&state).map(|_| ());
+        let (done, restart_failed) = update_finished_line(&restarted);
         if let Ok(mut s) = install_status.lock() {
-            let (line, kind) = finished_notice(
-                "Update finished. Restart ComfyUI to load the new nodes.",
-                requirements_fallback.as_ref(),
-            );
+            let (line, kind) = finished_notice(&done, requirements_fallback.as_ref());
             s.notice = line;
-            s.notice_kind = kind.to_string();
+            s.notice_kind = if restart_failed { "warn" } else { kind }.to_string();
         }
-        update(
-            "complete",
-            "ComfyUI updated. Restart ComfyUI to load the new nodes.",
-        );
+        update("complete", &done);
     });
 
     Ok(serde_json::json!({"status": "installing"}))
+}
+
+/// The closing line of an update, and whether it is a warning: ComfyUI is on
+/// its way up again, or it did not start and here is why.
+fn update_finished_line(restarted: &Result<(), String>) -> (String, bool) {
+    match restarted {
+        Ok(()) => ("Update finished. ComfyUI is starting again with the new nodes.".to_string(), false),
+        Err(reason) => (
+            format!("Update finished, but ComfyUI did not start again. Press Start to try again.\n\n{reason}"),
+            true,
+        ),
+    }
 }
 
 /// LU's own throwaway siblings inside a ComfyUI checkout, none of them named
@@ -1920,7 +2035,7 @@ mod tests {
         {
             let mut install = state.install_status.lock().unwrap();
             install.status = "complete".to_string();
-            install.notice = "Update finished. Restart ComfyUI to load the new nodes.".to_string();
+            install.notice = "Update finished. ComfyUI is starting again with the new nodes.".to_string();
             install.notice_kind = "ok".to_string();
             install.logs.push("a line from the run before this one".to_string());
         }
@@ -2009,6 +2124,43 @@ mod tests {
         );
     }
 
+    /// The box, 03.10.2026: the update stops LU's own ComfyUI before it
+    /// touches the checkout and then ended on "Restart ComfyUI to load the
+    /// new nodes" with the status on Stopped. Nothing restarted it, so the
+    /// customer had to find the Start button, and a render that had asked for
+    /// the update had nothing to continue on. Whoever stops it starts it
+    /// again: after the environment check passed, before the run reports
+    /// `complete` (the panel and Create stop watching on that word).
+    #[test]
+    fn a_finished_update_starts_comfyui_again_before_it_reports_complete() {
+        let src = include_str!("comfy_repair.rs");
+        let needle = |head: &str, tail: &str| format!("{head}{tail}");
+        let body_start = src.find("pub fn update_comfyui(").expect("update_comfyui is gone");
+        let body = &src[body_start..];
+        let body = &body[..body.find("\n}\n").expect("update_comfyui has no end")];
+
+        let at_check = body.find("verify_and_heal_environment(").expect("the update no longer checks the environment");
+        let at_start = body
+            .find(&needle("process::start_comfyui_bloc", "king(&state)"))
+            .expect("the update does not start ComfyUI again");
+        let at_complete = body.rfind(&needle("\"comp", "lete\"")).expect("the update never reports complete");
+        assert!(at_check < at_start, "ComfyUI must not be started on an environment nobody checked");
+        assert!(at_start < at_complete, "ComfyUI must be on its way up before the run reports complete");
+    }
+
+    #[test]
+    fn the_closing_line_of_an_update_says_whether_comfyui_came_back() {
+        let (line, warn) = update_finished_line(&Ok(()));
+        assert_eq!(line, "Update finished. ComfyUI is starting again with the new nodes.");
+        assert!(!warn);
+
+        let (line, warn) = update_finished_line(&Err("ModuleNotFoundError: No module named 'av'".to_string()));
+        assert!(line.starts_with("Update finished, but ComfyUI did not start again. Press Start to try again."), "got: {line}");
+        assert!(line.ends_with("ModuleNotFoundError: No module named 'av'"), "the reason is missing: {line}");
+        assert!(warn, "a ComfyUI that stayed down is not good news");
+        assert!(!line.contains("Restart ComfyUI"), "the customer is no longer the one who restarts it: {line}");
+    }
+
     #[test]
     fn the_queue_is_checked_before_anything_is_stopped() {
         // box-gruen/n9 punkt 87, final review (B3): a check that runs AFTER
@@ -2017,9 +2169,9 @@ mod tests {
         let src = include_str!("comfy_repair.rs");
         let needle = |head: &str, tail: &str| format!("{head}{tail}");
 
-        let guard_fn_start = src.find("fn ensure_comfyui_stopped_for_update(").expect("the running-instance guard is gone");
+        let guard_fn_start = src.find("fn stop_own_idle_comfyui(").expect("the running-instance guard is gone");
         let queue_check = needle("comfyui_queue_bus", "y(port)");
-        let stop_call = needle("process::stop_comfyui_bloc", "king(state)?;");
+        let stop_call = needle("process::stop_comfyui_bloc", "king(state)");
 
         let at_queue_check = src[guard_fn_start..].find(&queue_check).map(|i| i + guard_fn_start)
             .expect("the guard no longer checks whether ComfyUI is busy");

@@ -1,3 +1,6 @@
+import { displayModelName } from '../api/providers/model-name'
+
+
 /**
  * Wie ein Modellname in einer schmalen Zeile aussieht, ohne dass zwei
  * verschiedene Modelle gleich aussehen.
@@ -45,6 +48,24 @@ const QUANT_TAIL = /[@._-]((?:ud-)?(?:iq\d|q\d|f16|f32|bf16)[a-z0-9_]*)$/i
 export function shortModelLabel(name: string): string {
   const letzter = name.split(/[\\/]/).pop() || name
   return letzter.replace(/\.gguf$/i, '')
+}
+
+/**
+ * The name the app shows for a model: the catalogue's display name when the
+ * model list carries one ("Kimi K2.6"), else the short form of its id. The
+ * picker and the empty chat both read it here, so the landing line no longer
+ * shows `moonshotai/Kimi-K2.6` while the picker right below says "Kimi K2.6".
+ */
+export function modelDisplayLabel(
+  models: ReadonlyArray<{ name: string; displayName?: string }>,
+  modelName: string,
+): string {
+  // A message keeps the bare id ("moonshotai/Kimi-K2.6") while the list
+  // carries the routed one ("lu-cloud::moonshotai/Kimi-K2.6"): same model.
+  const bare = displayModelName(modelName)
+  const found =
+    models.find((m) => m.name === modelName) ?? models.find((m) => displayModelName(m.name) === bare)
+  return found?.displayName || shortModelLabel(bare)
 }
 
 /**

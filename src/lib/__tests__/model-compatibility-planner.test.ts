@@ -47,7 +47,7 @@ describe('isPlainTextPlanner', () => {
       // HF refs `hf.co/<org>/<repo>:<tag>` also resolve to the family — that
       // is exactly the shape `pullModel(hf.co/<user>/<repo>:<quant>)` emits,
       // and the old non-greedy strip silently disabled the bypass for every
-      // community Gemma 4 download (Bug X, leonsk29 Discord 2026-05-24).
+      // community Gemma 4 download (Bug X, Discord 2026-05-24).
       expect(isPlainTextPlanner('library/gemma4:31b')).toBe(true)
       expect(isPlainTextPlanner('ollama/gemma3:27b')).toBe(true)
       expect(isPlainTextPlanner('hf.co/bartowski/gemma4-27B-it-GGUF:Q4_K_M')).toBe(true)

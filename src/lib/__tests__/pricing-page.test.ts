@@ -51,13 +51,13 @@ it('names the switch in the same breath as the capability behind it', () => {
   // selben Satz als hinter dem Schalter liegend benannt. Sonst liest der
   // Kaeufer eine Zusage und findet eine Ablehnung.
   expect(text()).toMatch(/once you turn your own filter off/i)
-  // Entscheid David vom 13.09.2026: der Bestaetigungsschritt faellt fuer 3.0.0
+  // Entscheid vom 13.09.2026: der Bestaetigungsschritt faellt fuer 3.0.0
   // weg und kommt in 3.0.1 wieder. Solange er nicht kommt, darf die Seite ihn
   // auch nicht ankuendigen; was hinter dem Schalter liegt, steht weiter da.
   expect(text()).not.toMatch(/18 or older|age confirmation/i)
 })
 
-// Entscheid David vom 12.09.2026 zum Zusatzfund V3: ein einmaliger Pack
+// Entscheid vom 12.09.2026 zum Zusatzfund V3: ein einmaliger Pack
 // oeffnet die Freimenge nicht auf Dauer. Die Bedingung heisst seitdem
 // "laufendes bezahltes Abo" und nicht mehr "hat je gezahlt", also darf die
 // alte Formulierung hier auch nicht mehr verlangt werden.
@@ -89,10 +89,8 @@ it('is discoverable, canonical and free of dashes', () => {
   expect(html).not.toMatch(/[–—]/u)
 })
 
-// Quelle der Wahrheit im Web-Repo, nicht hier: die Packs stehen in
-// `apps/web/lib/billing/topup.ts` (TOPUP_PACKS), die Monatsguthaben in
-// `apps/web/lib/billing/credits.ts` (TIER_CREDITS), die Preise in
-// `apps/web/lib/pricing.ts`. Wer dort eine Zahl aendert, aendert sie hier
+// Quelle der Wahrheit ist der Server, nicht diese Datei: Packs,
+// Monatsguthaben und Preise stehen dort. Wer dort eine Zahl aendert, aendert sie hier
 // mit, und scripts/check-cloud-sales.mjs beweist vor dem Release, dass beide
 // Seiten dieselbe nennen. Diese Literale sind die Reissleine dazwischen.
 const PACKS = [
@@ -148,10 +146,9 @@ it('names the three monthly plans the web repo actually sells', () => {
 })
 
 it('never says how many tokens a euro or a pack buys', () => {
-  // Davids Ansage vom 10.09.2026. Die Credit-Rate je Token darf bleiben, die
-  // IST der Einkaufspreis. Verboten ist die Umrechnung von Geld in eine
-  // Tokenmenge, weil sie in einem Schritt den Aufschlag verraet und ein
-  // Versprechen gibt, das keine Rechnung je einloest. Das Tagesbudget der
+  // Die Credit-Rate je Token darf bleiben. Verboten ist die Umrechnung von
+  // Geld in eine Tokenmenge, weil sie ein Versprechen gibt, das keine
+  // Rechnung je einloest. Das Tagesbudget der
   // Flash-Klasse ist keine solche Umrechnung: es haengt am Konto, nicht am
   // Preis, und steht deshalb ohne Geldwort im selben Satz.
   const money = /\bEUR\b|\beuro\b|\bpack\b|\bcredits?\b/i
@@ -181,32 +178,25 @@ it('scans the whole site, not an empty list', () => {
   expect(SITE.length).toBeGreaterThan(50)
 })
 
-it('never promises a Mac build of the desktop app', () => {
-  // In keinem der 19 GitHub-Releases lag je eine .dmg. Zwei alte
-  // Release-Artikel schickten den Leser trotzdem fuer eine zur
-  // Releases-Seite, und vier weitere Stellen zaehlten Mac in der
-  // Plattformliste der App mit. Richtig ist: Windows und Linux, und auf dem
-  // Mac laeuft das gehostete Studio im Browser.
-  const banned = [
-    '.dmg',
-    'Windows, Linux and macOS',
-    'Windows, Linux and Mac',
-    'Windows, Linux und Mac',
-    'Windows, Linux \u0438 Mac',
-    'Windows/macOS/Linux',
-    'macOS and Linux builds',
-  ]
+it('says which Macs the desktop build is for, wherever a page offers it', () => {
+  // Seit 3.0.6 gibt es einen Mac-Bau fuer Apple Silicon ab macOS 14, keinen
+  // fuer Intel. Eine Seite, die eine .dmg anbietet, nennt den Chip. Die zwei
+  // Stellen, an denen die Frage gestellt wird, nennen ausserdem die
+  // Mindestversion und sagen, was nicht geht.
   for (const [path, html] of SITE) {
-    for (const phrase of banned) {
-      expect(html.includes(phrase), `${path} promises a Mac build: ${phrase}`).toBe(false)
-    }
+    if (html.includes('.dmg')) expect(html.includes('Apple Silicon'), `${path} offers a .dmg without naming Apple Silicon`).toBe(true)
+    expect(/Intel Macs? (is|are) supported/i.test(html), `${path} promises an Intel build`).toBe(false)
+  }
+  for (const path of ['docs/index.html', 'docs/guide/faq-and-glossary/index.html']) {
+    const html = readFileSync(path, 'utf8')
+    expect(html, path).toContain('The Mac build is for Apple Silicon and needs macOS 14 or newer. Intel Macs are not supported.')
   }
 })
 
-it('points the two old release articles at the browser studio instead', () => {
+it('the two old release articles say since when there is a Mac build, and still name the browser studio', () => {
   for (const name of ['locally-uncensored-v1-5-release', 'locally-uncensored-v2-2-2-release']) {
     const html = readFileSync(`docs/blog/${name}.html`, 'utf8')
-    expect(html, name).toMatch(/no Mac (build|download)|never shipped a Mac build/i)
+    expect(html, name).toContain('A Mac build exists since version 3.0.6, for Apple Silicon')
     expect(html, name).toContain('lu-labs.ai')
     // Dieselben zwei Dateien sind beim Umschreiben von 90 Gedankenstrichen
     // befreit worden.
@@ -215,7 +205,7 @@ it('points the two old release articles at the browser studio instead', () => {
 })
 
 it('never says how many tokens a euro or a pack buys, on any page', () => {
-  // Davids Ansage vom 10.09.2026, hier fuer die ganze Seite. Erlaubt bleibt
+  // Ansage vom 10.09.2026, hier fuer die ganze Seite. Erlaubt bleibt
   // die Rate: "0.085 credits per output token", "285,000 credits per million
   // tokens". Verboten ist die Menge neben dem Geld: "a 15 EUR pack is 450,000
   // tokens". Das Wort "per" im Treffer trennt die beiden Faelle, und der

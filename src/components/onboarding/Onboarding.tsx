@@ -56,7 +56,7 @@ import { ICON_SM } from '../ui/icon-size'
 import { isMacOS, backendCall } from '../../api/backend'
 import { BUILTIN_BACKEND_ID } from '../../lib/onboarding-backend'
 import { LU_ENGINE_NAME } from '../../lib/engine-name'
-import { version as currentVersion } from '../../../package.json'
+import { APP_VERSION as currentVersion } from '../../lib/app-version'
 import { useReleaseNotesStore } from '../../stores/releaseNotesStore'
 import { wizardProgress, workStepsFor, type Step } from './wizard-steps'
 import { onboardingSkin } from './onboarding-skin'
@@ -75,7 +75,7 @@ import { EmbeddingsStep } from './EmbeddingsStep'
 // always". Light mode stays available in Settings → General → Appearance
 // for users who explicitly want it; we just don't push them through the
 // choice on first launch anymore.
-// Added 'embeddings' step (GH #45, leonsk29 2026-05-23): suggests pulling
+// Added 'embeddings' step (GH #45 2026-05-23): suggests pulling
 // `nomic-embed-text` (~274 MB) before completing onboarding so Document
 // Chat / RAG works out of the box. The step shows a Skip button and
 // auto-skips entirely when the user already has any embedding model on disk.
@@ -176,6 +176,10 @@ export function Onboarding() {
       // zurueck, und die Marke ist genau die Frage, die
       // `lib/onboarding-provider-gate.ts` dem Assistenten stellt.
       setProviderConfig('ollama', { enabled: true, disabledByUser: false })
+      // Die Adresse, an der der Scan ihn gefunden hat (Rusts aufgeloeste
+      // Adresse, siehe lib/ollama-host-sync.ts), nicht das Preset.
+      const detectedOllama = detectedBackends.find(b => b.id === 'ollama')
+      if (detectedOllama) setProviderConfig('ollama', { baseUrl: detectedOllama.baseUrl })
       setProviderConfig('openai', { enabled: false, managed: false })
       // Opus review, R13D follow-up: a deliberate pick here, not an eviction
       // bug, so the missing-engine notice must not read this as LU Engine
@@ -231,10 +235,14 @@ export function Onboarding() {
           zeichnet das System die Ampeln links (Overlay-Balken), also keine
           eigenen Knoepfe; auf Windows/Linux ersetzt die App den Systembalken
           — Minimieren und Schliessen, KEIN Maximieren, das Fenster ist nicht
-          groessenveraenderbar. Im Hauptfenster bleibt der alte Satz. */}
+          groessenveraenderbar. Im Hauptfenster bleibt auf Windows/Linux der
+          alte Satz. Auf dem Mac hat auch das Hauptfenster die Ampeln des
+          Systems (`tauri.macos.conf.json`: decorations, Overlay), also dort
+          ebenfalls keine eigenen Knoepfe: der Notweg ohne eigenes Fenster
+          zeigte sonst Ampeln links UND Windows-Knoepfe rechts. */}
       {isTauri && (
         <div data-tauri-drag-region className="fixed top-0 left-0 right-0 h-8 z-50 flex items-center justify-end select-none">
-          {!(ownWindow && isMacOS()) && (<>
+          {!isMacOS() && (<>
             <button onClick={handleMinimize} className={winBtn} aria-label="Minimize"><Minus size={ICON_SM} /></button>
             {!ownWindow && (
               <button onClick={handleMaximize} className={winBtn} aria-label="Maximize"><Square size={ICON_SM} /></button>
@@ -287,7 +295,7 @@ export function Onboarding() {
               LU <span className="text-[12px] font-normal opacity-60 align-middle">by LU Labs</span>
             </h1>
             <p className={`text-[12px] leading-relaxed ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-              Private, local AI chat that works right away. No extra software to install. No servers, no tracking, everything stays on your machine.
+              Private, local AI chat that works right away. No extra software to install. Your chats stay on your machine.
             </p>
             <button
               onClick={() => {

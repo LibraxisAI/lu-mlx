@@ -1,13 +1,19 @@
+import { transparentPrompt } from '../lib/transparent-image'
 import {
-  classifyModel, findMatchingVAE, findMatchingCLIP, findFluxCLIPPair,
-  findMatchingAudioEncoder, findMatchingClipVision, findFramePackCLIPPair,
+  classifyModel, ref2vFamily, ref2vRefusal, findMatchingVAE, findMatchingCLIP, findFluxCLIPPair, findMiniMaxAudioVAE, findLtx25AudioVAE, isFastH3, wan22LowNoisePartner,
+  findMatchingAudioEncoder, findMatchingClipVision, findFramePackCLIPPair, getSystemVRAM,
   isLtx2Model, getComfyDeviceType,
 } from './comfyui'
 import { isMlxImageModel } from './mlx-image'
+import { isMacOS } from './backend'
+import { QWEN21_TURBO_NODES, QWEN21_TURBO_SAMPLING, QWEN21_TURBO_SIGMAS, isQwenImage21Turbo } from '../lib/render/qwen21-turbo'
+import { comfyEditFullImages, qwenEditPlusOverCard } from '../lib/comfy-edit-memory'
 import type { ModelType, GenerateParams, VideoParams } from './comfyui'
 import { log } from '../lib/logger'
 import { resolveRunSeed } from '../lib/run-seed'
-import { readComboOptions } from './comfyui-enum'
+import { nodeComboOptions, readComboOptions } from './comfyui-enum'
+import { COMPONENT_REGISTRY, type ComponentSpec } from './component-registry'
+import { MissingComponentsError, resolveFamilyParts, type SniffedFamily } from './family-components'
 import {
   getAllNodeInfo,
   categorizeNodes,
@@ -56,7 +62,14 @@ function specDefault(spec: ComfyInputValue | undefined): ComfyInputValue | undef
 // promptFilenamePrefix und videoDecodeNode wohnen in comfyui-graph.ts (siehe
 // dort). Re-Export, damit bestehende Importpfade unverändert bleiben.
 export { promptFilenamePrefix, videoDecodeNode } from './comfyui-graph'
-import { promptFilenamePrefix, videoDecodeNode } from './comfyui-graph'
+import { promptFilenamePrefix, videoDecodeNode, addVideoSave } from './comfyui-graph'
+import { extraReferenceSlots, isQwenImageEditModel, referenceSide } from '../lib/edit-references'
+import { canonicalImageRefs } from '../lib/image-ref-names'
+import { KREA2_STYLE_LORA, LOCAL_END_FRAME_MODELS, createReferenceSupport, localAnimateReferenceSlots, localEndFrame, CREATE_REFERENCE_MODELS } from '../lib/frame-refs'
+import { nativeUpscaleScale, upscaleTarget, type UpscaleFactor } from '../lib/local-upscale'
+import { TRELLIS2_FILES } from './model-bundles'
+import { WAN_FAST, findWanSpeedLora, isFastSampling, isWanSpeedLoraName, wanSamplingFor, wanSpeedKind, wanSpeedLoraNames } from '../lib/wan-speed'
+import { addAudioStitch, addContextWindows, addContinueSource, addStitch, CONTINUE_NEEDS_UPDATE, type ContinueSource } from './video-continue'
 
 // ─── Strategy Detection ───
 
@@ -65,16 +78,26 @@ export type WorkflowStrategy =
   | 'unet_flux2'      // FLUX 2: UNETLoader + CLIPLoader + VAELoader + EmptyFlux2LatentImage
   | 'unet_krea2'      // Krea 2: UNETLoader + CLIPLoader(type="krea2") + VAELoader + EmptyLatentImage (GH #136)
   | 'unet_zimage'     // Z-Image: UNETLoader + CLIPLoader(qwen_image) + VAELoader + EmptySD3LatentImage
-  | 'unet_qwen_image_edit' // Qwen-Image-Edit: UNETLoader + CLIPLoader(qwen_image) + TextEncodeQwenImageEditPlus + AuraFlow
   | 'unet_ernie_image' // ERNIE-Image: UNETLoader + CLIPLoader(flux2) + VAELoader + EmptyFlux2LatentImage + ConditioningZeroOut
   | 'unet_qwenimage'  // Qwen-Image 2.1: UNETLoader + CLIPLoader(qwen_image) + VAELoader + TextEncodeQwenImage21 (generate and edit)
+  // The families below came in with the header sniff (Discord 2026-09-28).
+  // Graphs follow the official Comfy-Org templates, see family-components.ts.
+  | 'unet_qwenimage1' // Qwen-Image 1 / Edit: CLIPLoader(qwen_image, Qwen2.5-VL) + qwen_image_vae + AuraFlow shift 3.1 (edit: TextEncodeQwenImageEditPlus)
+  | 'unet_chroma'     // Chroma: CLIPLoader(chroma, T5) + ae + AuraFlow shift 1
+  | 'unet_hidream'    // HiDream I1: QuadrupleCLIPLoader + ae + ModelSamplingSD3
+  | 'unet_sd3'        // SD 3.5: TripleCLIPLoader (or the checkpoint's own) + SD3 latent
+  | 'unet_lumina2'    // Lumina 2: CLIPLoader(lumina2, Gemma 2 2B) + ae + AuraFlow shift 6 + system prompt
+  | 'unet_sdxl'       // SDXL transformer in diffusion_models: DualCLIPLoader(sdxl) + sdxl_vae
+  | 'unet_sd15'       // SD 1.5 unet in diffusion_models: CLIPLoader(stable_diffusion) + ft-mse VAE
   | 'unet_video'      // Wan/Hunyuan: UNETLoader + CLIPLoader + VAELoader + EmptyHunyuanLatentVideo
   | 'wan22'           // Wan 2.2 TI2V-5B: UNET + CLIP + Wan 2.2 VAE + Wan22ImageToVideoLatent (unified T2V/I2V)
   | 'unet_ltx'        // LTX Video: UNETLoader + CLIPLoader + EmptyLTXVLatentVideo
+  | 'ltx25'           // LTX 2.5: two pass picture-and-sound graph (distilled), needs ComfyUI 0.32.0
   | 'unet_mochi'      // Mochi: UNETLoader + CLIPLoader + VAELoader + EmptyMochiLatentVideo
   | 'unet_cosmos'     // Cosmos: UNETLoader + CLIPLoader(oldt5) + VAELoader + EmptyCosmosLatentVideo
   | 'svd'             // SVD: ImageOnlyCheckpointLoader + SVD_img2vid_Conditioning
   | 'framepack'       // FramePack: Kijai wrapper + image input
+  | 'minimaxh3'       // MiniMax H3: UNET + CLIPLoader(minimax) + video VAE + audio VAE, picture and sound in one pass
   // cogvideo / pyramidflow / allegro are gone on purpose (2026-07-24). Their
   // builders emitted node names no wrapper registers, so those model types now
   // resolve to 'unavailable' with an honest reason instead of a ComfyUI 400.
@@ -89,12 +112,33 @@ interface StrategyResult {
    * When `strategy === 'unavailable'` and the missing piece is an
    * installable custom-node pack, this hint tells the UI which one to
    * suggest. Surfaces in Create view as a clickable "open install guide"
-   * link so users like vvvxxxvvv_80435 (CogVideoX 1.5 5B → UNETLoader
+   * link so users like a user (CogVideoX 1.5 5B → UNETLoader
    * mismatch on v2.4.3) get a clear next step instead of just a
    * blocking error. (Bug #6)
    */
   installHint?: { pack: string; url: string }
 }
+
+/** The sentence an older ComfyUI gets, per model (not global): the version is
+ *  the release that brought the node the lane cannot run without. Read from the
+ *  ComfyUI tags on 2026-10-02: LTX 2.5 in 0.32.0, FastH3's sparse attention in
+ *  0.35.0, YuE2 in 0.36.0. "Update ComfyUI" in the text is what Create keys the
+ *  one click update on (needsComfyUpdate). */
+export const LTX25_NEEDS_UPDATE = 'LTX 2.5 needs ComfyUI 0.32.0 or newer. Update ComfyUI in Settings.'
+
+/** C78: what Create says for MiniMax H3 Image, a still model on the H3
+ *  layout that LU has no graph of its own for. */
+export const MINIMAX_H3_IMAGE_NO_BUILDER =
+  'LU has no built-in workflow for MiniMax H3 Image. Save the ComfyUI template "MiniMax-H3-Image: Text to Image", '
+  + 'import it under Workflows and assign it to this model. Create then runs it with your prompt, size and LoRAs.'
+/** GH #192: what Create says for MOSS Image until LU has a graph of its own. */
+export const MOSS_IMAGE_NO_BUILDER =
+  'LU has no built in workflow for MOSS Image. Import a ComfyUI workflow that runs MOSS Image under Workflows and assign it to this model. '
+  + 'Create then runs it with your prompt, size and LoRAs.'
+/** A step distillation LoRA names its step count (minimax_h3_fl2v_turbo_8step_...). */
+const H3_STEP_LORA = /turbo\D*?(\d+)\s*_?steps?/i
+export const FASTH3_NEEDS_UPDATE = 'FastH3 needs ComfyUI 0.35.0 or newer. Update ComfyUI in Settings.'
+export const YUE2_NEEDS_UPDATE = 'YuE2 needs ComfyUI 0.36.0 or newer. Update ComfyUI in Settings.'
 
 export function determineStrategy(
   modelType: ModelType,
@@ -102,6 +146,16 @@ export function determineStrategy(
   nodes: CategorizedNodes,
   models: AvailableModels,
 ): StrategyResult {
+  // C78: MiniMax H3 Image has no graph of LU's own. Its workflow is the
+  // official template; imported under Workflows and assigned to the model,
+  // Create runs it with the prompt, size and LoRAs (workflows.ts).
+  if (modelType === 'minimaxh3image') {
+    return { strategy: 'unavailable', reason: MINIMAX_H3_IMAGE_NO_BUILDER }
+  }
+  if (modelType === 'mossimage') {
+    return { strategy: 'unavailable', reason: MOSS_IMAGE_NO_BUILDER }
+  }
+
   const hasUNET = nodes.loaders.includes('UNETLoader')
   const hasCheckpoint = nodes.loaders.includes('CheckpointLoaderSimple')
   const hasCLIPLoader = nodes.loaders.includes('CLIPLoader')
@@ -114,23 +168,6 @@ export function determineStrategy(
       return { strategy: 'unet_ernie_image', reason: 'ERNIE-Image model → UNETLoader + CLIPLoader(flux2) + ConditioningZeroOut' }
     }
     return { strategy: 'unavailable', reason: 'ERNIE-Image requires UNETLoader + CLIPLoader + VAELoader nodes' }
-  }
-
-  // Qwen-Image-Edit → UNET + CLIPLoader(qwen_image) + VAE + TextEncodeQwenImageEditPlus.
-  // Confirmed on the live ComfyUI 0.33 instance (port 8080): the 2511 file is
-  // in UNETLoader.unet_name, not CheckpointLoaderSimple.ckpt_name.
-  if (modelType === 'qwen_image_edit') {
-    const hasEncode = nodes.textEncoders.includes('TextEncodeQwenImageEditPlus')
-      || nodes.textEncoders.includes('TextEncodeQwenImageEdit')
-    const hasShift = nodes.samplers.includes('ModelSamplingAuraFlow')
-    const hasSd3 = nodes.latentInit.includes('EmptySD3LatentImage')
-    if (hasUNET && hasCLIPLoader && hasVAELoader && hasEncode && hasShift && hasSd3) {
-      return { strategy: 'unet_qwen_image_edit', reason: 'Qwen Image Edit → UNETLoader + TextEncodeQwenImageEditPlus' }
-    }
-    return {
-      strategy: 'unavailable',
-      reason: 'Qwen Image Edit needs UNETLoader, CLIPLoader, VAELoader, TextEncodeQwenImageEditPlus, ModelSamplingAuraFlow and EmptySD3LatentImage. Update ComfyUI (0.3.43 or newer).',
-    }
   }
 
   // Qwen-Image 2.1 → UNET + CLIPLoader(qwen_image) + VAE + TextEncodeQwenImage21.
@@ -161,6 +198,19 @@ export function determineStrategy(
     return { strategy: 'unavailable', reason: 'Z-Image requires UNETLoader + CLIPLoader + VAELoader nodes' }
   }
 
+  // Header-sniffed families (Discord 2026-09-28). Their graphs are built in
+  // one place further down; the loaders are checked there, per graph.
+  const sniffed: Partial<Record<ModelType, WorkflowStrategy>> = {
+    chroma: 'unet_chroma', hidream: 'unet_hidream', sd3: 'unet_sd3', lumina2: 'unet_lumina2', qwenimage1: 'unet_qwenimage1',
+  }
+  const sniffedStrategy = sniffed[modelType]
+  if (sniffedStrategy) {
+    if ((hasUNET || hasCheckpoint) && hasVAELoader) {
+      return { strategy: sniffedStrategy, reason: `${modelType} → its own loader set (official Comfy-Org template)` }
+    }
+    return { strategy: 'unavailable', reason: `${modelType} needs UNETLoader and VAELoader. Update ComfyUI in Settings.` }
+  }
+
   // FLUX 2 → UNET + Flux2LatentImage
   if (modelType === 'flux2') {
     if (hasUNET && hasCLIPLoader && hasVAELoader) {
@@ -185,12 +235,39 @@ export function determineStrategy(
     return { strategy: 'unavailable', reason: 'Krea 2 requires UNETLoader + CLIPLoader + VAELoader nodes' }
   }
 
+  // LTX 2.5 → UNET + CLIPLoader(ltxv, Gemma 4) + both VAEs + the two pass graph
+  // of the official templates. The model patch arrived in ComfyUI 0.32.0
+  // together with LTXVDualCFGGuider (comfy_extras/nodes_lt.py, PR 15499), and
+  // that node is the one this lane cannot run without, so its absence is the
+  // version check: an older install gets the update sentence instead of a 400.
+  if (modelType === 'ltx25') {
+    const hasDual = nodes.samplers.includes('LTXVDualCFGGuider')
+    if (hasUNET && hasCLIPLoader && hasVAELoader && hasDual) {
+      return { strategy: 'ltx25', reason: 'LTX 2.5 → UNETLoader + CLIPLoader(ltxv) + LTXVDualCFGGuider (two pass, sound)' }
+    }
+    if (hasUNET && hasCLIPLoader && hasVAELoader) {
+      return { strategy: 'unavailable', reason: LTX25_NEEDS_UPDATE }
+    }
+    return { strategy: 'unavailable', reason: 'LTX 2.5 requires UNETLoader + CLIPLoader + VAELoader nodes' }
+  }
+
   // LTX Video → UNET + LTXVLatentVideo (no separate VAE needed)
   if (modelType === 'ltx') {
     if (hasUNET && hasCLIPLoader) {
       return { strategy: 'unet_ltx', reason: 'LTX Video → UNETLoader + EmptyLTXVLatentVideo' }
     }
     return { strategy: 'unavailable', reason: 'LTX Video requires UNETLoader + CLIPLoader nodes' }
+  }
+
+  // MiniMax H3 → its own encode node, which also builds the joint
+  // picture-and-sound latent. The nodes arrived with ComfyUI PR #15224, so an
+  // older install gets the update sentence (fixable in place) instead of a 400.
+  if (modelType === 'minimaxh3') {
+    const hasH3 = nodes.latentInit.includes('MiniMaxH3ImageToVideo')
+    if (hasUNET && hasCLIPLoader && hasVAELoader && hasH3) {
+      return { strategy: 'minimaxh3', reason: 'MiniMax H3 → UNETLoader + CLIPLoader(minimax) + MiniMaxH3ImageToVideo' }
+    }
+    return { strategy: 'unavailable', reason: 'MiniMax H3 needs a newer ComfyUI. Update ComfyUI in Settings.' }
   }
 
   // Wan 2.2 TI2V-5B → UNET + CLIP + Wan 2.2 VAE + Wan22ImageToVideoLatent (T2V & I2V)
@@ -240,7 +317,7 @@ export function determineStrategy(
 
   // CogVideoX → Kijai wrapper nodes.
   //
-  // 2026-07-24 (bob80817-dev, D#88 "it says I'm missing custom nodes, but they
+  // 2026-07-24 (D#88 "it says I'm missing custom nodes, but they
   // are there"): he was right. The gate looked for `CogVideoXSampler`, which has
   // never existed in kijai/ComfyUI-CogVideoXWrapper — the real class is
   // `CogVideoSampler` (verified against a real checkout; `git log -S` upstream
@@ -350,18 +427,53 @@ export function determineStrategy(
 export class WorkflowUnavailableError extends Error {
   readonly strategy: WorkflowStrategy
   readonly installHint?: { pack: string; url: string }
-  constructor(message: string, strategy: WorkflowStrategy, installHint?: { pack: string; url: string }) {
+  /** Companion files LU can download itself; Create offers them in place. */
+  readonly missing?: ComponentSpec[]
+  /** The local ComfyUI is too old for this graph; Create offers the update. */
+  readonly needsComfyUpdate?: boolean
+  constructor(
+    message: string,
+    strategy: WorkflowStrategy,
+    installHint?: { pack: string; url: string },
+    extra?: { missing?: ComponentSpec[]; needsComfyUpdate?: boolean },
+  ) {
     super(message)
     this.name = 'WorkflowUnavailableError'
     this.strategy = strategy
     this.installHint = installHint
+    this.missing = extra?.missing
+    this.needsComfyUpdate = extra?.needsComfyUpdate
   }
+}
+
+/** The families built from family-components.ts, by strategy. */
+const SNIFFED_FAMILY: Partial<Record<WorkflowStrategy, SniffedFamily>> = {
+  unet_chroma: 'chroma', unet_hidream: 'hidream', unet_sd3: 'sd3', unet_lumina2: 'lumina2',
+  unet_qwenimage1: 'qwenimage1', unet_sdxl: 'sdxl_unet', unet_sd15: 'sd15_unet',
+}
+
+/** Latent spaces that start from EmptySD3LatentImage (16 channels). */
+const SD3_LATENT_STRATEGIES = new Set<WorkflowStrategy>(['unet_chroma', 'unet_hidream', 'unet_sd3', 'unet_lumina2', 'unet_qwenimage1'])
+
+/** Verbatim from comfy_extras/nodes_lumina2.py (SYSTEM_PROMPT["superior"]) and
+ *  the negative of the NetaYume Lumina template. */
+const LUMINA2_POSITIVE_SYSTEM = 'You are an assistant designed to generate superior images with the superior degree of image-text alignment based on textual prompts or user prompts.'
+const LUMINA2_NEGATIVE_SYSTEM = 'You are an assistant designed to generate low-quality images based on textual prompts'
+
+/** A resolver's "download X" message, turned into the registry spec that can
+ *  fetch X, so Create can offer it instead of pointing at the Model Manager. */
+function registrySpecsNamedIn(type: ModelType, message: string): ComponentSpec[] {
+  const req = COMPONENT_REGISTRY[type]
+  if (!req) return []
+  return [req.vae, req.clip, req.clipSecondary, req.audioVae, req.upscaler].filter(
+    (s): s is ComponentSpec => !!s?.downloadUrl && message.includes(s.downloadFilename),
+  )
 }
 
 /**
  * Probe ComfyUI for the video output node we need. When neither VHS nor
  * SaveAnimatedWEBP is present, the workflow will fall back to SaveImage
- * (single frames on disk) — Turbulent_Tomato7559's "videos generate as
+ * (single frames on disk) — a user's "videos generate as
  * .webp" was caused by VHS missing while SaveAnimatedWEBP still produced
  * an animated still. UI calls this BEFORE Generate so users see a banner
  * rather than discovering after the fact.
@@ -369,18 +481,22 @@ export class WorkflowUnavailableError extends Error {
 export async function checkVideoOutputCapability(): Promise<{ mp4Capable: boolean; webpOnly: boolean; missingNodes: string[] }> {
   const allNodes = await getAllNodeInfo()
   const cats = categorizeNodes(allNodes)
+  // The core's CreateVideo + SaveVideo write mp4 on their own (A19), so VHS is
+  // only missing when the core can't do it either.
+  const hasCoreMp4 = cats.videoSavers.includes('CreateVideo') && cats.videoSavers.includes('SaveVideo')
   const hasVHS = cats.videoSavers.includes('VHS_VideoCombine')
   const hasWebp = cats.videoSavers.includes('SaveAnimatedWEBP')
+  const mp4Capable = hasCoreMp4 || hasVHS
   const missing: string[] = []
-  if (!hasVHS) missing.push('VHS_VideoCombine (ComfyUI-VideoHelperSuite)')
+  if (!mp4Capable) missing.push('VHS_VideoCombine (ComfyUI-VideoHelperSuite)')
   return {
-    mp4Capable: hasVHS,
-    webpOnly: !hasVHS && hasWebp,
+    mp4Capable,
+    webpOnly: !mp4Capable && hasWebp,
     missingNodes: missing,
   }
 }
 
-/** Multi-LoRA (konata 2026-06-09) — normalize the `lora` param into an
+/** Multi-LoRA (a user 2026-06-09) — normalize the `lora` param into an
  *  ordered list. Accepts a single filename, an array, or a comma/semicolon-
  *  joined string (the most common LLM shape for "use lora A and lora B" —
  *  exactly the failing case where the joined string used to reach ComfyUI
@@ -490,7 +606,7 @@ function resolveLoaderName(req: string, installed: string[]): string | null {
  * (0 to 4096, step 32), with 32 as the floor so a tiny canvas cannot produce
  * a zero that would silently switch the node back to original size.
  */
-function qwenEditResolution(width: number, height: number): number {
+export function qwenEditResolution(width: number, height: number): number {
   const px = (v: number) => (Number.isFinite(v) && v > 0 ? v : 1024)
   const side = Math.sqrt(px(width) * px(height))
   return Math.min(4096, Math.max(32, Math.round(side / 32) * 32))
@@ -539,19 +655,65 @@ export async function buildDynamicWorkflow(
     )
   }
 
-  const { strategy, reason, installHint } = determineStrategy(type, isVideo, nodes, models)
+  // ─── Reference to video (Animate with a Ref2V model, D24) ───
+  // Before the strategy table: VACE has no entry there (it is a Motion lane
+  // family), and Phantom/MAGREF classify as plain Wan, whose i2v override
+  // would feed the picture to WanImageToVideo as a first frame. Without a
+  // picture Phantom and MAGREF stay the text to video runs they always were;
+  // VACE has no such run in LU.
+  const refFamily = isVideo ? ref2vFamily(params.model) : null
+  // B38: never drop an end image or further references without a word. A
+  // model that cannot take them refuses, and Create shows why.
+  if (isVideo && videoParams.endImage && !localEndFrame(params.model)) {
+    throw new WorkflowUnavailableError(`${params.model} starts from one image and cannot also take an end image. ${LOCAL_END_FRAME_MODELS}`, 'unavailable')
+  }
+  if (isVideo && (gp.referenceImages?.length ?? 0) > 0 && localAnimateReferenceSlots(params.model) === 0) {
+    throw new WorkflowUnavailableError(`${params.model} reads one picture. Several references work with MiniMax H3 Reference (ref2va).`, 'unavailable')
+  }
+  if (refFamily && (videoParams.inputImage || refFamily === 'vace')) {
+    const refusal = ref2vRefusal(params.model)
+    if (refusal) throw new WorkflowUnavailableError(refusal, 'unavailable')
+    if (!videoParams.inputImage) {
+      throw new WorkflowUnavailableError('This reference model needs a picture to work from. Use it on the Animate tab and add the image there.', 'unavailable')
+    }
+    try {
+      return await buildVaceReferenceWorkflow(videoParams, resolveRunSeed(params.seed), nodes, allNodes)
+    } catch (err) {
+      if (!(err instanceof Error) || err instanceof WorkflowUnavailableError) throw err
+      throw new WorkflowUnavailableError(err.message, 'unet_video', undefined, { missing: registrySpecsNamedIn('wan', err.message) })
+    }
+  }
+
+  const determined = determineStrategy(type, isVideo, nodes, models)
+  const { reason, installHint } = determined
+  let strategy = determined.strategy
   log.info(`[dynamic-workflow] Strategy: ${strategy} (${reason})`)
 
   if (strategy === 'unavailable') {
-    throw new WorkflowUnavailableError(reason, strategy, installHint)
+    // "Update ComfyUI" reasons are fixable in place (lib/render-fixups.ts).
+    throw new WorkflowUnavailableError(reason, strategy, installHint, { needsComfyUpdate: /update comfyui/i.test(reason) })
   }
 
-  if (strategy === 'unet_qwen_image_edit' && models.unets.length > 0 && !models.unets.includes(params.model)) {
-    throw new WorkflowUnavailableError(
-      `"${params.model}" is not in UNETLoader's list. Put the file in ComfyUI's diffusion_models folder.`,
-      'unavailable',
-    )
+  // The loader follows the FOLDER the file sits in, not what its family
+  // usually ships as (Discord 2026-09-28). CheckpointLoaderSimple only lists
+  // models/checkpoints, UNETLoader only diffusion_models/unet, and a name in
+  // the wrong one is ComfyUI's "Value not in list".
+  const listedCheckpoints = nodeComboOptions(allNodes, 'CheckpointLoaderSimple', 'ckpt_name')
+  const listedUnets = [
+    ...nodeComboOptions(allNodes, 'UNETLoader', 'unet_name'),
+    ...nodeComboOptions(allNodes, 'UnetLoaderGGUF', 'unet_name'),
+  ]
+  const inCheckpoints = listedCheckpoints.includes(params.model)
+  const inUnets = listedUnets.includes(params.model)
+  if (strategy === 'checkpoint' && !inCheckpoints && inUnets && (type === 'sdxl' || type === 'sd15')) {
+    // A bare SDXL / SD 1.5 unet: its text encoders and VAE come separately.
+    strategy = type === 'sdxl' ? 'unet_sdxl' : 'unet_sd15'
   }
+  // An all-in-one file of a UNET family in models/checkpoints (the FLUX fp8
+  // and SD 3.5 checkpoints, NetaYume Lumina, CivitAI merges): MODEL comes from
+  // CheckpointLoaderSimple, and its own CLIP/VAE when it carries them.
+  const fromCheckpoint = strategy !== 'checkpoint' && strategy !== 'animatediff'
+    && listedCheckpoints.length > 0 && inCheckpoints && !inUnets
 
   // Local Edit (mask inpaint) runs on the SDXL/SD1.5 checkpoint pipeline only.
   // Reject other strategies explicitly instead of silently dropping the mask —
@@ -565,7 +727,8 @@ export async function buildDynamicWorkflow(
   // check exists to prevent. The model's own route for a local change is a
   // marking drawn into the picture plus a prompt that names it, which is a
   // different surface from the mask editor and is not built in this cut.
-  if (!isVideo && gp.inputImage && gp.maskImage && strategy !== 'checkpoint') {
+  const sdCheckpointFamily = strategy === 'checkpoint' || strategy === 'unet_sdxl' || strategy === 'unet_sd15'
+  if (!isVideo && gp.inputImage && gp.maskImage && !sdCheckpointFamily) {
     throw new WorkflowUnavailableError(
       'Local image editing needs an SD 1.5 / SDXL checkpoint. Pick a checkpoint model for Edit. FLUX and video models are not wired for local inpaint.',
       strategy,
@@ -576,14 +739,32 @@ export async function buildDynamicWorkflow(
 
   // ─── Wrapper Strategies (custom node pipelines — completely different node chains) ───
 
+  // A wrapper builder looks up its own encoder and VAEs. A file it cannot
+  // find has to reach Create as that sentence plus its download, never as a
+  // reason to try the old checkpoint graph (Discord 2026-09-29 and 10-01:
+  // "CheckpointLoaderSimple: Value not in list" for MiniMax H3).
+  const wrapper = async (build: () => Promise<ComfyApiGraph> | ComfyApiGraph) => {
+    try {
+      return await build()
+    } catch (err) {
+      if (!(err instanceof Error) || err instanceof WorkflowUnavailableError) throw err
+      throw new WorkflowUnavailableError(err.message, strategy, undefined, { missing: registrySpecsNamedIn(type, err.message) })
+    }
+  }
   if (strategy === 'svd') {
-    return buildSVDWorkflow(params as VideoParams, seed, nodes)
+    return wrapper(() => buildSVDWorkflow(params as VideoParams, seed, nodes))
   }
   if (strategy === 'wan22') {
-    return await buildWan22Workflow(params as VideoParams, seed, nodes, allNodes)
+    return wrapper(() => buildWan22Workflow(params as VideoParams, seed, nodes, allNodes))
   }
   if (strategy === 'framepack') {
-    return await buildFramePackWorkflow(params as VideoParams, seed, nodes)
+    return wrapper(() => buildFramePackWorkflow(params as VideoParams, seed, nodes))
+  }
+  if (strategy === 'minimaxh3') {
+    return wrapper(() => buildMiniMaxH3Workflow(params as VideoParams, seed, allNodes))
+  }
+  if (strategy === 'ltx25') {
+    return wrapper(() => buildLtx25Workflow(params as VideoParams, seed, allNodes))
   }
   if (strategy === 'unet_ltx' && isVideo && isLtx2Model(params.model)) {
     return await buildLtx2Workflow(params as VideoParams, seed, nodes, allNodes, models)
@@ -604,27 +785,11 @@ export async function buildDynamicWorkflow(
   let samplerModelId: string
 
   if (strategy === 'checkpoint') {
-    // A populated checkpoint enum is the truth. An empty one means this
-    // call has no list (offline fixture) and the historical graph still
-    // builds. A name that is not in a real list must not be sent as
-    // ckpt_name — ComfyUI answers "Value not in list" and we do not
-    // substitute another file.
-    // The node info above is cached for 5 minutes, while the model picker
-    // reads ComfyUI live. A checkpoint downloaded inside that window is in
-    // the picker but not in the cached list, so a miss asks ComfyUI once
-    // more before it becomes a refusal.
-    const freshModels = models.checkpoints.length > 0 && !models.checkpoints.includes(params.model)
-      ? detectAvailableModels(await getAllNodeInfo(true))
-      : models
-    if (freshModels.checkpoints.length > 0 && !freshModels.checkpoints.includes(params.model)) {
-      const inUnet = freshModels.unets.includes(params.model)
-      throw new WorkflowUnavailableError(
-        inUnet
-          ? `"${params.model}" is a diffusion model (UNETLoader), not a ComfyUI checkpoint. It lives in diffusion_models, and this build has no graph for that family.`
-          : `"${params.model}" is not in ComfyUI's checkpoint list. CheckpointLoaderSimple only loads files from the checkpoints folder.`,
-        'unavailable',
-      )
-    }
+    const cachedCheckpoints = nodeComboOptions(allNodes, 'CheckpointLoaderSimple', 'ckpt_name')
+    const checkpointNodes = cachedCheckpoints.length > 0 && !cachedCheckpoints.includes(params.model)
+      ? await getAllNodeInfo(true)
+      : allNodes
+    assertCheckpointListed(params.model, checkpointNodes)
     // Single loader: outputs MODEL (0), CLIP (1), VAE (2)
     modelNodeId = String(n++)
     workflow[modelNodeId] = {
@@ -637,13 +802,83 @@ export async function buildDynamicWorkflow(
     vaeOutputSlot = 2
     samplerModelId = modelNodeId
 
-  } else if (strategy === 'unet_flux' || strategy === 'unet_flux2' || strategy === 'unet_krea2' || strategy === 'unet_zimage' || strategy === 'unet_qwen_image_edit' || strategy === 'unet_ernie_image' || strategy === 'unet_qwenimage' || strategy === 'unet_video' || strategy === 'unet_ltx'
+  } else if (SNIFFED_FAMILY[strategy]) {
+    // ─── Header-sniffed families (Discord 2026-09-28) ───
+    const family = SNIFFED_FAMILY[strategy]!
+    const modelId = String(n++)
+    const clipId = String(n++)
+    if (fromCheckpoint) {
+      workflow[modelId] = { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: params.model } }
+    } else {
+      addUnetLoader(workflow, modelId, params.model, allNodes)
+    }
+    // An all-in-one checkpoint brings its own encoder / VAE. Known from the
+    // header; when the header was not readable, the separate files are tried
+    // first and the checkpoint's own outputs are the fallback.
+    const parts = gp.modelParts
+    const ownClip = fromCheckpoint && !!parts?.textEncoder
+    const ownVae = fromCheckpoint && !!parts?.vae
+    let resolved: { encoders: string[]; vae?: string }
+    try {
+      resolved = resolveFamilyParts(family, models.clips, models.vaes, { encoders: !ownClip, vae: !ownVae })
+    } catch (err) {
+      if (!(err instanceof MissingComponentsError)) throw err
+      if (fromCheckpoint && !parts) {
+        resolved = { encoders: [], vae: undefined }
+      } else {
+        throw new WorkflowUnavailableError(err.message, strategy, undefined, { missing: err.missing })
+      }
+    }
+    const useOwnClip = ownClip || (fromCheckpoint && resolved.encoders.length === 0)
+    const useOwnVae = ownVae || (fromCheckpoint && !resolved.vae)
+
+    if (!useOwnClip) {
+      const [e1, e2, e3, e4] = resolved.encoders
+      const clipNode: { class_type: string; inputs: ComfyNodeInputs } =
+        family === 'hidream' ? { class_type: 'QuadrupleCLIPLoader', inputs: { clip_name1: e1, clip_name2: e2, clip_name3: e3, clip_name4: e4 } }
+        : family === 'sd3' ? { class_type: 'TripleCLIPLoader', inputs: { clip_name1: e1, clip_name2: e2, clip_name3: e3 } }
+        : family === 'sdxl_unet' ? { class_type: 'DualCLIPLoader', inputs: { clip_name1: e1, clip_name2: e2, type: 'sdxl' } }
+        : {
+            class_type: 'CLIPLoader',
+            inputs: {
+              clip_name: e1,
+              type: family === 'chroma' ? 'chroma' : family === 'lumina2' ? 'lumina2' : family === 'qwenimage1' ? 'qwen_image' : 'stable_diffusion',
+              device: 'default',
+            },
+          }
+      if (!allNodes[clipNode.class_type]) {
+        throw new WorkflowUnavailableError(
+          `Your ComfyUI is too old for this model (it has no ${clipNode.class_type} node). Update ComfyUI, then try again.`,
+          strategy, undefined, { needsComfyUpdate: true },
+        )
+      }
+      if (clipNode.class_type === 'CLIPLoader') assertClipTypeKnown(String(clipNode.inputs.type), type, strategy, allNodes)
+      workflow[clipId] = clipNode
+      clipSourceId = clipId
+      clipOutputSlot = 0
+    } else {
+      clipSourceId = modelId
+      clipOutputSlot = 1
+    }
+    if (!useOwnVae) {
+      const vaeId = String(n++)
+      workflow[vaeId] = { class_type: 'VAELoader', inputs: { vae_name: resolved.vae! } }
+      vaeSourceId = vaeId
+      vaeOutputSlot = 0
+    } else {
+      vaeSourceId = modelId
+      vaeOutputSlot = 2
+    }
+    modelNodeId = modelId
+    samplerModelId = modelId
+
+  } else if (strategy === 'unet_flux' || strategy === 'unet_flux2' || strategy === 'unet_krea2' || strategy === 'unet_zimage' || strategy === 'unet_ernie_image' || strategy === 'unet_qwenimage' || strategy === 'unet_video' || strategy === 'unet_ltx'
     || strategy === 'unet_mochi' || strategy === 'unet_cosmos') {
     // Separate loaders
     const unetId = String(n++)
     const clipId = String(n++)
 
-    const clipType = type === 'zimage' || type === 'qwen_image_edit' || type === 'qwenimage' ? 'qwen_image'
+    const clipType = type === 'zimage' || type === 'qwenimage' ? 'qwen_image'
       : type === 'ernie_image' ? 'flux2'
       : type === 'flux2' ? 'flux2'
       : type === 'krea2' ? 'krea2'
@@ -655,7 +890,7 @@ export async function buildDynamicWorkflow(
       : 'flux'
 
     // Resolve the text encoder from the LIVE ComfyUI node enum. CRITICAL
-    // (Bug C / aldrich "CLIPLoader: Value not in list"): do NOT silently fall
+    // (Bug C / a user "CLIPLoader: Value not in list"): do NOT silently fall
     // back to models.clips[0] / '' on a miss — an empty or wrong clip_name makes
     // ComfyUI reject the prompt with that exact cryptic error. The resolvers
     // throw actionable "download <encoder>" messages; propagate them as a
@@ -663,7 +898,7 @@ export async function buildDynamicWorkflow(
     // raw rejection. Pass the active UNet filename so the resolver prefers the
     // matching quant tier (fp4 model → fp4 encoder; fp8/bf16 → full precision).
     //
-    // C2 (aldrich follow-up, v2.5.3 fix #5): modern ComfyUI (v0.12.0 confirmed)
+    // C2 (a user follow-up, v2.5.3 fix #5): modern ComfyUI (v0.12.0 confirmed)
     // removed 'flux' from the single CLIPLoader's type enum — FLUX v1 text
     // encoding lives in DualCLIPLoader (clip_name1 = T5-XXL, clip_name2 =
     // CLIP-L, type 'flux'), which has shipped with every FLUX-era ComfyUI.
@@ -673,47 +908,65 @@ export async function buildDynamicWorkflow(
     // below.
     const useDualFluxClip = type === 'flux' && nodes.loaders.includes('DualCLIPLoader')
 
+    // An all-in-one file in models/checkpoints (see fromCheckpoint): its own
+    // encoder / VAE are used when the header says it carries them, and are the
+    // fallback when the header could not be read.
+    const parts = gp.modelParts
+    const carriesClip = fromCheckpoint && (parts ? parts.textEncoder : true)
+    const carriesVae = fromCheckpoint && (parts ? parts.vae : true)
+    const skipClipLookup = fromCheckpoint && !!parts?.textEncoder
+
     let clip = ''
     let fluxPair: { t5: string; clipL: string } | null = null
-    if (useDualFluxClip) {
+    if (skipClipLookup) {
+      // nothing to look up
+    } else if (useDualFluxClip) {
       try {
         fluxPair = await findFluxCLIPPair()
       } catch (clipErr) {
-        throw new WorkflowUnavailableError(
-          clipErr instanceof Error ? clipErr.message : 'Required text encoder not found in ComfyUI.',
-          strategy,
-        )
+        if (!carriesClip) {
+          const message = clipErr instanceof Error ? clipErr.message : 'Required text encoder not found in ComfyUI.'
+          throw new WorkflowUnavailableError(message, strategy, undefined, { missing: registrySpecsNamedIn(type, message) })
+        }
+        clip = ''
       }
     } else {
       try {
-        clip = await findMatchingCLIP(type, params.model)
+        clip = await findMatchingCLIP(type, params.model, params.qwenTextEncoder)
       } catch (clipErr) {
-        throw new WorkflowUnavailableError(
-          clipErr instanceof Error ? clipErr.message : 'Required text encoder not found in ComfyUI.',
-          strategy,
-        )
+        if (!carriesClip) {
+          const message = clipErr instanceof Error ? clipErr.message : 'Required text encoder not found in ComfyUI.'
+          throw new WorkflowUnavailableError(message, strategy, undefined, { missing: registrySpecsNamedIn(type, message) })
+        }
+        clip = ''
       }
     }
 
-    // Every strategy here decodes (and LTX's I2V node encodes) through a VAE,
-    // so every one loads it. LTX used to be exempt on the theory that it
-    // "bakes the VAE into the pipeline"; it does not, and the fallback below
-    // then wired the UNET loader's MODEL into the vae inputs: ComfyUI refused
-    // the prompt with "LTXVImgToVideo / VAEDecodeTiled: Return type mismatch,
-    // received_type(MODEL) mismatch input_type(VAE)". LTX-2 has its own
-    // builder (buildLtx2Workflow); this path is left for LTX-Video 0.9.
-    let vae: string
-    try {
-      vae = await findMatchingVAE(type)
-    } catch (vaeErr) {
-      throw new WorkflowUnavailableError(
-        vaeErr instanceof Error ? vaeErr.message : 'Required VAE not found in ComfyUI.',
-        strategy,
-      )
+    // VAE is only loaded for strategies with a separate VAELoader — LTX bakes it
+    // into the pipeline, so a missing VAE there is fine. Validate (same
+    // no-silent-fallback rule) only when it will actually be used.
+    const needsVAELoader = strategy !== 'unet_ltx'
+    let vae = ''
+    if (needsVAELoader && !(fromCheckpoint && parts?.vae)) {
+      try {
+        vae = await findMatchingVAE(type)
+      } catch (vaeErr) {
+        if (!carriesVae) {
+          const message = vaeErr instanceof Error ? vaeErr.message : 'Required VAE not found in ComfyUI.'
+          throw new WorkflowUnavailableError(message, strategy, undefined, { missing: registrySpecsNamedIn(type, message) })
+        }
+      }
     }
+    const clipFromFile = !clip && !fluxPair
+    const vaeFromFile = needsVAELoader && !vae
 
-    addUnetLoader(workflow, unetId, params.model, allNodes)
-    workflow[clipId] = useDualFluxClip && fluxPair
+    if (!useDualFluxClip && !clipFromFile) assertClipTypeKnown(clipType, type, strategy, allNodes)
+    if (fromCheckpoint) {
+      workflow[unetId] = { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: params.model } }
+    } else {
+      addUnetLoader(workflow, unetId, params.model, allNodes)
+    }
+    if (!clipFromFile) workflow[clipId] = useDualFluxClip && fluxPair
       ? {
           class_type: 'DualCLIPLoader',
           inputs: { clip_name1: fluxPair.t5, clip_name2: fluxPair.clipL, type: 'flux' },
@@ -723,17 +976,22 @@ export async function buildDynamicWorkflow(
           inputs: { clip_name: clip, type: clipType, device: 'default' },
         }
 
-    const vaeId = String(n++)
-    workflow[vaeId] = {
-      class_type: 'VAELoader',
-      inputs: { vae_name: vae },
+    let vaeId: string
+    if (needsVAELoader && !vaeFromFile) {
+      vaeId = String(n++)
+      workflow[vaeId] = {
+        class_type: 'VAELoader',
+        inputs: { vae_name: vae },
+      }
+    } else {
+      vaeId = unetId // checkpoint's own VAE output (slot 2 when vaeFromFile / parts?.vae)
     }
 
     modelNodeId = unetId
-    clipSourceId = clipId
-    clipOutputSlot = 0
+    clipSourceId = clipFromFile ? unetId : clipId
+    clipOutputSlot = clipFromFile ? 1 : 0
     vaeSourceId = vaeId
-    vaeOutputSlot = 0
+    vaeOutputSlot = vaeFromFile ? 2 : 0
     samplerModelId = unetId
 
   } else {
@@ -774,7 +1032,7 @@ export async function buildDynamicWorkflow(
 
   // ─── Phase 1b: Optional LoRA chain + VAE + Skip-CLIP injection (F2 + F3) ───
   //
-  // LoRA chain (cinemazverev GH#4; multi-LoRA konata 2026-06-09): each
+  // LoRA chain (GH#4; multi-LoRA 2026-06-09): each
   // LoraLoader takes (model, clip) and outputs new (model, clip) — chaining
   // N loaders applies the LoRAs in order, exactly like stacking them in the
   // ComfyUI graph editor. We rewire both refs after every link so the rest
@@ -783,22 +1041,32 @@ export async function buildDynamicWorkflow(
   // and a miss throws an actionable error instead of ComfyUI's opaque
   // "Value not in list".
   //
-  // VAE override (vanja-san GH#4): VAELoader replaces vaeSourceId. The
+  // VAE override (GH#4): VAELoader replaces vaeSourceId. The
   // checkpoint's bundled VAE stays unused.
   //
-  // Skip CLIP (vanja-san GH#4): CLIPSetLastLayer takes a negative
+  // Skip CLIP (GH#4): CLIPSetLastLayer takes a negative
   // `stop_at_clip_layer` index — passing -clipSkip mirrors A1111 /
   // ComfyUI conventions.
   //
   // All three are skipped (no extra nodes) when the corresponding
   // param is unset, so workflows without F2/F3 enabled stay byte-
   // identical to the previous behaviour.
-  const loraNames = normalizeLoraList(params.lora)
+  // FEHLER-Q1 #1 (3.0.9): a fast Wan 14B run gets its lightx2v LoRAs from
+  // Fast mode below, once per half at the model card's 1.0. The same LoRA
+  // picked in the stack would go in a second time (0.8 + 1.0 on the high
+  // half), so in a fast run the stack's speed LoRAs are left out; every
+  // other stack LoRA stays, and a quality run keeps the stack as it is.
+  const fastWan = isVideo && type === 'wan' && strategy === 'unet_video' && !fromCheckpoint
+    && !!wanSpeedKind(params.model) && isFastSampling(params.steps, params.cfgScale)
+  const stackNames = normalizeLoraList(params.lora)
+  const stackStrengths = normalizeLoraStrengths(params.loraStrength, stackNames.length)
+  const keepInStack = stackNames.map((l) => !(fastWan && isWanSpeedLoraName(l)))
+  const loraNames = stackNames.filter((_, i) => keepInStack[i])
   if (loraNames.length > 0) {
     const installed: string[] =
       readComboOptions(allNodes?.LoraLoader?.input?.required?.lora_name) ?? []
     const resolved = resolveLoraNames(loraNames, installed)
-    const strengths = normalizeLoraStrengths(params.loraStrength, resolved.length)
+    const strengths = stackStrengths.filter((_, i) => keepInStack[i])
     resolved.forEach((loraName, i) => {
       const loraId = String(n++)
       workflow[loraId] = {
@@ -858,17 +1126,6 @@ export async function buildDynamicWorkflow(
     vaeOutputSlot = 0
   }
 
-  if (strategy === 'unet_qwen_image_edit') {
-    // Official Qwen-Image-Edit graph shifts the flow-matching schedule.
-    // ComfyUI 0.33 ships ModelSamplingAuraFlow; shift 3.1 is the template value.
-    const shiftId = String(n++)
-    workflow[shiftId] = {
-      class_type: 'ModelSamplingAuraFlow',
-      inputs: { model: [samplerModelId, 0], shift: 3.1 },
-    }
-    samplerModelId = shiftId
-  }
-
   if (params.clipSkip && params.clipSkip > 0) {
     const skipId = String(n++)
     workflow[skipId] = {
@@ -890,42 +1147,97 @@ export async function buildDynamicWorkflow(
   // isI2I test in Phase 3, which would otherwise claim the image and turn an
   // edit instruction into ordinary latent img2img.
   const isQwenEdit = !isVideo && strategy === 'unet_qwenimage' && !!gp.inputImage
+  // Qwen-Image-Edit 2509/2511 (official template image_qwen_image_edit_2509):
+  // the source goes through TextEncodeQwenImageEditPlus on both sides and is
+  // the latent itself, sampled at denoise 1.0 like the template.
+  const isQwen1Edit = !isVideo && strategy === 'unet_qwenimage1' && !!gp.inputImage && isQwenImageEditModel(params.model)
+  // Extra reference images, only for a family that takes them and only as
+  // many as it has slots for (lib/edit-references); anything else ignores them.
+  const references = (isQwenEdit || isQwen1Edit)
+    ? (gp.referenceImages ?? []).slice(0, extraReferenceSlots(type, params.model))
+    : []
+  // B45 (Discord 30.10.2026): reference images for text to image, read the
+  // way each family's official template reads them (lib/frame-refs). A model
+  // without such a path refuses instead of drawing from the prompt alone.
+  const createRefsAsked = !isVideo && !gp.inputImage ? (gp.referenceImages ?? []) : []
+  const createRefSupport = createReferenceSupport(type, params.model)
+  const createRefStrategy = strategy === 'unet_krea2' || strategy === 'unet_qwenimage' || strategy === 'unet_flux2'
+  if (createRefsAsked.length > 0 && (createRefSupport.slots === 0 || !createRefStrategy)) {
+    throw new WorkflowUnavailableError(`${params.model} cannot take reference images. ${CREATE_REFERENCE_MODELS}`, strategy)
+  }
+  const createRefs = createRefsAsked.slice(0, createRefSupport.slots)
+  const krea2StyleRef = strategy === 'unet_krea2' && createRefs.length > 0
+  if (krea2StyleRef) {
+    requireRelease(allNodes, ['TextEncodeQwenImageEditPlus', 'FluxKontextMultiReferenceLatentMethod', 'ModelSamplingFlux', 'LoraLoaderModelOnly'],
+      'Reference images with Krea 2 need a newer ComfyUI. Update ComfyUI, then try again.', strategy)
+  }
+  if (strategy === 'unet_flux2' && createRefs.length > 0) {
+    requireRelease(allNodes, ['ReferenceLatent', 'VAEEncode', 'ImageScaleToTotalPixels'],
+      'Reference images with FLUX.2 need a newer ComfyUI. Update ComfyUI, then try again.', strategy)
+  }
+  // The style reference LoRA of the Krea 2 template. Without it the images
+  // would reach the model but not steer the style, so Create offers the file.
+  let krea2StyleLora: string | null = null
+  if (krea2StyleRef) {
+    krea2StyleLora = nodeComboOptions(allNodes, 'LoraLoaderModelOnly', 'lora_name')
+      .find((l) => (l.split(/[\\/]/).pop() ?? '').toLowerCase() === KREA2_STYLE_LORA.filename) ?? null
+    if (!krea2StyleLora) {
+      throw new WorkflowUnavailableError(
+        `Reference images with Krea 2 need the Krea 2 style reference LoRA (${KREA2_STYLE_LORA.filename}, 436 MB) in ComfyUI/models/loras.`,
+        strategy, undefined,
+        { missing: [{ matchPatterns: [KREA2_STYLE_LORA.filename], downloadFilename: KREA2_STYLE_LORA.filename, downloadUrl: KREA2_STYLE_LORA.url, subfolder: 'loras', sizeGB: 0.43, sha256: KREA2_STYLE_LORA.sha256 }] },
+      )
+    }
+  }
+  // The graphics card, read only for an edit with further images: past what
+  // it carries, ComfyUI 0.37 ends the run in "aimdo memory compile error"
+  // (lib/comfy-edit-memory). Not on a Mac, where ComfyUI has no such compiler
+  // and the figure is the shared memory.
+  const cardGb = (references.length > 0 || (strategy === 'unet_qwenimage' && createRefs.length > 1)) && !isMacOS()
+    ? await getSystemVRAM().catch(() => null)
+    : null
+  const fullImages = comfyEditFullImages(cardGb)
+  // B46 / D8 (Discord 06.11.2026, 3.0.10): the Edit strength of a Qwen edit,
+  // as guidance between the edit and no edit. Both encoders also give a
+  // conditioning of the same images without an instruction ("identity",
+  // the source as it is); every step the sampler follows
+  //   identity + strength x (edit - identity)
+  // the way InstructPix2Pix scales its text guidance. 1 is the template's
+  // edit exactly; lower is the same edit taken less far, on one path from
+  // noise, so nothing is laid over anything. At CFG 1 (Qwen-Image 2.1, its
+  // Turbo) that is the sampler's own CFG = strength with identity as the
+  // negative; at a higher CFG (Qwen-Image-Edit 2509/2511 at 4) DualCFGGuider
+  // in its nested form, so the user's negative still counts:
+  //   negative + cfg x (identity + strength x (edit - identity) - negative)
+  // 3.0.9 started the sampler from the source at denoise = strength instead:
+  // these edit models copy their reference unless they start from pure
+  // noise, so every value below 1 came back as the source (box run 01.11.).
+  const qwenEditStrength = (isQwenEdit || isQwen1Edit) && Number.isFinite(gp.editStrength) && gp.editStrength! < 1
+    ? Math.max(0.05, gp.editStrength!)
+    : 1
+  const qwenStrengthCfg1 = qwenEditStrength < 1 && Math.abs(params.cfgScale - 1) < 1e-6
+  const qwenStrengthDual = qwenEditStrength < 1 && !qwenStrengthCfg1
+  // The conditioning without an instruction, set where the encoder is built.
+  let qwenIdentityRef: [string, number] | null = null
+  if (qwenStrengthDual) {
+    requireRelease(allNodes, ['DualCFGGuider', 'SamplerCustomAdvanced', 'RandomNoise', 'KSamplerSelect', 'BasicScheduler'],
+      'An Edit strength below 1 needs a newer ComfyUI. Update ComfyUI, or set the Edit strength to 1.', strategy)
+  }
+  if (isQwen1Edit) {
+    const over = qwenEditPlusOverCard(1 + references.length, cardGb)
+    if (over) throw new WorkflowUnavailableError(over, strategy)
+  }
+  if (isQwen1Edit && !allNodes['TextEncodeQwenImageEditPlus']) {
+    throw new WorkflowUnavailableError(
+      'Qwen-Image-Edit needs a newer ComfyUI (TextEncodeQwenImageEditPlus). Update ComfyUI, then try again.',
+      strategy, undefined, { needsComfyUpdate: true },
+    )
+  }
+  let qwen1EditImageRef: [string, number] | null = null
 
   let posId: string
   let negId: string
 
-  if (strategy === 'unet_qwen_image_edit') {
-    const encodeClass = nodes.textEncoders.includes('TextEncodeQwenImageEditPlus')
-      ? 'TextEncodeQwenImageEditPlus'
-      : 'TextEncodeQwenImageEdit'
-    let imageNodeId: string | undefined
-    if (!isVideo && gp.inputImage) {
-      imageNodeId = String(n++)
-      workflow[imageNodeId] = {
-        class_type: 'LoadImage',
-        inputs: { image: gp.inputImage },
-      }
-    }
-    posId = String(n++)
-    negId = String(n++)
-    const posInputs: ComfyNodeInputs = {
-      prompt: params.prompt,
-      clip: [clipSourceId, clipOutputSlot],
-      vae: [vaeSourceId, vaeOutputSlot],
-    }
-    if (imageNodeId) {
-      posInputs[encodeClass === 'TextEncodeQwenImageEditPlus' ? 'image1' : 'image'] = [imageNodeId, 0]
-    }
-    workflow[posId] = { class_type: encodeClass, inputs: posInputs }
-    workflow[negId] = {
-      class_type: encodeClass,
-      inputs: {
-        prompt: params.negativePrompt || '',
-        clip: [clipSourceId, clipOutputSlot],
-        vae: [vaeSourceId, vaeOutputSlot],
-      },
-    }
-  } else {
   posId = String(n++)
   negId = String(n++)
 
@@ -951,24 +1263,151 @@ export async function buildDynamicWorkflow(
     // t2i template, which also carries the widget and never uses it.
     const qwenInputs: ComfyNodeInputs = {
       clip: [clipSourceId, clipOutputSlot],
-      prompt: params.prompt,
-      negative_prompt: params.negativePrompt || '',
-      resolution: qwenEditResolution(params.width, params.height),
+      // Transparent background: the model writes an alpha channel when the
+      // prompt is wrapped the way the official template says, and SaveImage
+      // below keeps it (lib/transparent-image.ts). An edit takes its picture
+      // from the reference, so the wrapper stays out of it.
+      // An edit names its images the way the encoder labels them, <image2>,
+      // however the user spelled them (lib/image-ref-names).
+      prompt: isQwenEdit
+        ? canonicalImageRefs(params.prompt, 1 + references.length, 'qwen21')
+        : createRefs.length > 0 ? canonicalImageRefs(params.prompt, createRefs.length, 'qwen21')
+        : gp.transparent ? transparentPrompt(params.prompt) : params.prompt,
+      negative_prompt: isQwenEdit
+        ? canonicalImageRefs(params.negativePrompt || '', 1 + references.length, 'qwen21')
+        : createRefs.length > 0 ? canonicalImageRefs(params.negativePrompt || '', createRefs.length, 'qwen21')
+        : params.negativePrompt || '',
+      // With more images in an edit than the card carries at full size
+      // (four, fewer on a card under 24 GB) they share a pixel budget
+      // (referenceSide in lib/edit-references, lib/comfy-edit-memory).
+      // The node takes ONE side for all of them and the result follows the
+      // first, so such an edit comes out smaller than the canvas.
+      resolution: isQwenEdit
+        ? referenceSide(qwenEditResolution(params.width, params.height), 1 + references.length, fullImages)
+        : createRefs.length > 0 ? referenceSide(qwenEditResolution(params.width, params.height), createRefs.length, fullImages)
+        : qwenEditResolution(params.width, params.height),
     }
     if (isQwenEdit) {
-      const qwenImageId = String(n++)
-      workflow[qwenImageId] = {
-        class_type: 'LoadImage',
-        inputs: { image: gp.inputImage },
+      // The source is image_1 and sets the output shape; the references the
+      // user added follow as image_2 and up, the names the prompt uses.
+      const images = [gp.inputImage!, ...references]
+      for (const [i, image] of images.entries()) {
+        const loadId = String(n++)
+        workflow[loadId] = { class_type: 'LoadImage', inputs: { image } }
+        let imageRef: [string, number] = [loadId, 0]
+        if (i === 0 && gp.editShape === 'canvas') {
+          // C75 (Discord feature-requests 11.11.2026): an edit in a shape of
+          // its own. The node's latent follows the first image and has to
+          // (any other latent size shifts the edit), so the source itself is
+          // brought to the shape first: scaled to cover width x height and
+          // cropped from its centre. The pixel budget below stays the size.
+          const scaleId = String(n++)
+          workflow[scaleId] = {
+            class_type: 'ImageScale',
+            inputs: {
+              image: [loadId, 0],
+              upscale_method: resizeMethod(allNodes, 'ImageScale', false),
+              width: params.width,
+              height: params.height,
+              crop: 'center',
+            },
+            _meta: { title: 'Edit shape' },
+          }
+          imageRef = [scaleId, 0]
+        }
+        qwenInputs[`images.image_${i + 1}`] = imageRef
       }
-      qwenInputs['images.image_1'] = [qwenImageId, 0]
+      qwenInputs.vae = [vaeSourceId, vaeOutputSlot]
+    } else if (createRefs.length > 0) {
+      // B45: references without a source. They are image_1 and up; the
+      // picture still comes from the empty latent at the canvas size below.
+      for (const [i, image] of createRefs.entries()) {
+        const loadId = String(n++)
+        workflow[loadId] = { class_type: 'LoadImage', inputs: { image } }
+        qwenInputs[`images.image_${i + 1}`] = [loadId, 0]
+      }
       qwenInputs.vae = [vaeSourceId, vaeOutputSlot]
     }
     workflow[posId] = { class_type: 'TextEncodeQwenImage21', inputs: qwenInputs }
+    if (isQwenEdit && qwenEditStrength < 1) {
+      // The node's negative is the images with the negative prompt, so with
+      // none it is the identity already; with one, a second encode.
+      if ((params.negativePrompt || '').trim() === '') {
+        qwenIdentityRef = [posId, 1]
+      } else {
+        const idId = String(n++)
+        workflow[idId] = { class_type: 'TextEncodeQwenImage21', inputs: { ...qwenInputs, prompt: '', negative_prompt: '' }, _meta: { title: 'Edit strength: the source as it is' } }
+        qwenIdentityRef = [idId, 0]
+      }
+    }
+  } else if (isQwen1Edit) {
+    const loadId = String(n++)
+    workflow[loadId] = { class_type: 'LoadImage', inputs: { image: gp.inputImage } }
+    qwen1EditImageRef = [loadId, 0]
+    if (allNodes['FluxKontextImageScale']) {
+      // The template scales the source to a size the model was trained on.
+      const scaleId = String(n++)
+      workflow[scaleId] = { class_type: 'FluxKontextImageScale', inputs: { image: [loadId, 0] } }
+      qwen1EditImageRef = [scaleId, 0]
+    }
+    // References go in unscaled as image2 and image3: the node resizes every
+    // extra image itself, only image1 sets the canvas.
+    const refInputs: ComfyNodeInputs = {}
+    for (const [i, image] of references.entries()) {
+      const refId = String(n++)
+      workflow[refId] = { class_type: 'LoadImage', inputs: { image } }
+      refInputs[`image${i + 2}`] = [refId, 0]
+    }
+    const editInputs = (prompt: string): ComfyNodeInputs => ({
+      clip: [clipSourceId, clipOutputSlot], prompt, vae: [vaeSourceId, vaeOutputSlot], image1: qwen1EditImageRef!, ...refInputs,
+    })
+    // The node labels its images "Picture 1: ", "Picture 2: ", so the prompt
+    // names them that way too (lib/image-ref-names).
+    const pictures = (text: string) => canonicalImageRefs(text, 1 + references.length, 'qwenEditPlus')
+    workflow[posId] = { class_type: 'TextEncodeQwenImageEditPlus', inputs: editInputs(pictures(params.prompt)) }
+    workflow[negId] = { class_type: 'TextEncodeQwenImageEditPlus', inputs: editInputs(pictures(params.negativePrompt || '')) }
+    if (qwenEditStrength < 1) {
+      // The same images without an instruction: the negative when it is
+      // empty, else an encode of its own.
+      if ((params.negativePrompt || '').trim() === '') {
+        qwenIdentityRef = [negId, 0]
+      } else {
+        const idId = String(n++)
+        workflow[idId] = { class_type: 'TextEncodeQwenImageEditPlus', inputs: editInputs(''), _meta: { title: 'Edit strength: the source as it is' } }
+        qwenIdentityRef = [idId, 0]
+      }
+    }
+  } else if (krea2StyleRef) {
+    // B45: the official Krea 2 style reference template. The images go
+    // through TextEncodeQwenImageEditPlus (image1 to image3), the reference
+    // latents are placed with index_timestep_zero, and the negative is the
+    // zeroed positive at CFG 1, as the template runs it.
+    const encId = String(n++)
+    const encInputs: ComfyNodeInputs = {
+      clip: [clipSourceId, clipOutputSlot],
+      prompt: canonicalImageRefs(params.prompt, createRefs.length, 'qwenEditPlus'),
+      vae: [vaeSourceId, vaeOutputSlot],
+    }
+    for (const [i, image] of createRefs.entries()) {
+      const loadId = String(n++)
+      workflow[loadId] = { class_type: 'LoadImage', inputs: { image } }
+      encInputs[`image${i + 1}`] = [loadId, 0]
+    }
+    workflow[encId] = { class_type: 'TextEncodeQwenImageEditPlus', inputs: encInputs }
+    workflow[posId] = {
+      class_type: 'FluxKontextMultiReferenceLatentMethod',
+      inputs: { conditioning: [encId, 0], reference_latents_method: 'index_timestep_zero' },
+    }
+    workflow[negId] = { class_type: 'ConditioningZeroOut', inputs: { conditioning: [posId, 0] } }
   } else {
     workflow[posId] = {
       class_type: 'CLIPTextEncode',
-      inputs: { text: params.prompt, clip: [clipSourceId, clipOutputSlot] },
+      inputs: {
+        // Lumina 2 is trained on a system prompt ahead of the user's; without
+        // it the output drifts badly (CLIPTextEncodeLumina2 does the same join).
+        text: strategy === 'unet_lumina2' ? `${LUMINA2_POSITIVE_SYSTEM} <Prompt Start> ${params.prompt}` : params.prompt,
+        clip: [clipSourceId, clipOutputSlot],
+      },
     }
 
     if (strategy === 'unet_ernie_image' || (strategy === 'unet_krea2' && params.cfgScale === 1)) {
@@ -983,12 +1422,13 @@ export async function buildDynamicWorkflow(
       workflow[negId] = {
         class_type: 'CLIPTextEncode',
         inputs: {
-          text: params.negativePrompt || '',
+          text: strategy === 'unet_lumina2'
+            ? `${LUMINA2_NEGATIVE_SYSTEM} <Prompt Start> ${params.negativePrompt || ''}`
+            : params.negativePrompt || '',
           clip: [clipSourceId, clipOutputSlot],
         },
       }
     }
-  }
   }
 
   // ─── Phase 3: Latent Initialization ───
@@ -996,11 +1436,12 @@ export async function buildDynamicWorkflow(
   // Takes precedence over plain I2I — a mask means "repaint THIS area", never
   // "repaint everything". Ported 1:1 from the web app's tested builder
   // (create-workflows.ts): same node classes, same defaults.
-  const isInpaint = !isVideo && !!gp.inputImage && !!gp.maskImage && strategy === 'checkpoint'
-  // I2I mode: LoadImage → VAEEncode instead of empty latent.
-  // Qwen Image Edit 2511 feeds the still into TextEncodeQwenImageEditPlus.
-  // A Qwen-Image 2.1 edit is already wired into TextEncodeQwenImage21.
-  const isI2I = strategy !== 'unet_qwen_image_edit' && !isVideo && !isInpaint && !isQwenEdit && params.inputImage && (params.denoise ?? 1.0) < 1.0
+  const isInpaint = !isVideo && !!gp.inputImage && !!gp.maskImage && sdCheckpointFamily
+  // I2I mode: LoadImage → VAEEncode instead of empty latent. A Qwen-Image 2.1
+  // edit is excluded: its reference image is already wired into the text
+  // encoder above, and its sampler runs at denoise 1.0 like the official
+  // template (instruction editing, not a partial re-noise of the source).
+  const isI2I = !isVideo && !isInpaint && !isQwenEdit && !isQwen1Edit && params.inputImage && (params.denoise ?? 1.0) < 1.0
 
   const latentId = String(n++)
 
@@ -1068,7 +1509,14 @@ export async function buildDynamicWorkflow(
       class_type: 'EmptyLatentImage',
       inputs: { width: params.width, height: params.height, batch_size: params.batchSize },
     }
-  } else if (strategy === 'unet_zimage' || strategy === 'unet_qwen_image_edit') {
+  } else if (SD3_LATENT_STRATEGIES.has(strategy)) {
+    // Chroma, HiDream, SD 3.5, Lumina 2 and Qwen-Image 1: EmptySD3LatentImage,
+    // as in every one of their official templates.
+    workflow[latentId] = {
+      class_type: nodes.latentInit.includes('EmptySD3LatentImage') ? 'EmptySD3LatentImage' : 'EmptyLatentImage',
+      inputs: { width: params.width, height: params.height, batch_size: params.batchSize },
+    }
+  } else if (strategy === 'unet_zimage') {
     // Z-Image uses SD3 latent (same architecture family)
     const latentNode = nodes.latentInit.includes('EmptySD3LatentImage')
       ? 'EmptySD3LatentImage'
@@ -1109,6 +1557,13 @@ export async function buildDynamicWorkflow(
       latentRef = [posId, 2]
       delete workflow[latentId]
     }
+  }
+
+  if (isQwen1Edit && qwen1EditImageRef) {
+    const encId = String(n++)
+    workflow[encId] = { class_type: 'VAEEncode', inputs: { pixels: qwen1EditImageRef, vae: [vaeSourceId, vaeOutputSlot] } }
+    latentRef = [encId, 0]
+    delete workflow[latentId]
   }
 
   // I2I override: replace empty latent with LoadImage → VAEEncode
@@ -1172,7 +1627,7 @@ export async function buildDynamicWorkflow(
     delete workflow[latentId]
   }
 
-  // ─── I2V override (Animate — local lane restored, David 2026-07-17) ───
+  // ─── I2V override (Animate — local lane restored, 2026-07-17) ───
   // A video request carrying an inputImage swaps the empty latent for the
   // family's image-to-video conditioning node. Covers every family core
   // ComfyUI can animate on this main path (WAN i2v, Hunyuan i2v, LTX,
@@ -1180,7 +1635,11 @@ export async function buildDynamicWorkflow(
   // builders above. Wiring is schema-driven — we only feed inputs the live
   // node declares and map outputs by their declared types — so version drift
   // in these nodes degrades to a ComfyUI validation error, not a bad graph.
-  const isI2V = isVideo && !!(params as GenerateParams).inputImage
+  // A later section of a long clip (B18) is an I2V run too: it starts on the
+  // last frames of the clip so far instead of on one picture.
+  const continueFrom = isVideo ? videoParams.continueFrom : undefined
+  let continued: ContinueSource | null = null
+  const isI2V = isVideo && (!!(params as GenerateParams).inputImage || !!continueFrom)
   if (isI2V && ['unet_video', 'unet_ltx', 'unet_cosmos', 'unet_mochi'].includes(strategy)) {
     if (strategy === 'unet_mochi') {
       throw new WorkflowUnavailableError(
@@ -1188,20 +1647,38 @@ export async function buildDynamicWorkflow(
         strategy,
       )
     }
+    // B38: an end image turns the Wan run into first and last frame
+    // (WanFirstLastFrameToVideo, the node of the official FLF2V templates).
+    const endImage = continueFrom ? undefined : videoParams.endImage
     const i2vNode =
       strategy === 'unet_ltx' ? 'LTXVImgToVideo'
       : strategy === 'unet_cosmos' ? 'CosmosImageToVideoLatent'
       : type === 'hunyuan' ? 'HunyuanImageToVideo'
+      : endImage ? 'WanFirstLastFrameToVideo'
       : 'WanImageToVideo'
     const meta = allNodes[i2vNode]
     if (!meta) {
       throw new WorkflowUnavailableError(
         `Animating with this model family needs the ${i2vNode} node, which your ComfyUI doesn't have. Update ComfyUI, then try again.`,
         strategy,
+        undefined,
+        { needsComfyUpdate: true },
       )
     }
-    const loadId = String(n++)
-    workflow[loadId] = { class_type: 'LoadImage', inputs: { image: (params as GenerateParams).inputImage } }
+    if (continueFrom && i2vNode !== 'WanImageToVideo') {
+      throw new WorkflowUnavailableError('Continuing a clip in sections works with Wan, Wan 2.2 and LTX 2.5. Pick one of those models, or make this clip in one run.', strategy)
+    }
+    let startRef: [string, number]
+    if (continueFrom) {
+      requireContinueNodes(allNodes, strategy)
+      continued = addContinueSource(workflow, n, continueFrom, allNodes)
+      n = continued.n
+      startRef = continued.tail
+    } else {
+      const loadId = String(n++)
+      workflow[loadId] = { class_type: 'LoadImage', inputs: { image: (params as GenerateParams).inputImage } }
+      startRef = [loadId, 0]
+    }
     const required = meta.input?.required ?? {}
     const optional = meta.input?.optional ?? {}
     const decl = { ...required, ...optional }
@@ -1213,9 +1690,18 @@ export async function buildDynamicWorkflow(
     if (decl.height) inputs.height = params.height
     if (decl.length) inputs.length = videoParams.frames
     if (decl.batch_size) inputs.batch_size = 1
-    if (decl.start_image) inputs.start_image = [loadId, 0]
-    else if (decl.image) inputs.image = [loadId, 0]
-    else if (decl.init_image) inputs.init_image = [loadId, 0]
+    if (decl.start_image) inputs.start_image = startRef
+    else if (decl.image) inputs.image = startRef
+    else if (decl.init_image) inputs.init_image = startRef
+    if (endImage && decl.end_image) {
+      const endId = String(n++)
+      workflow[endId] = { class_type: 'LoadImage', inputs: { image: endImage } }
+      inputs.end_image = [endId, 0]
+    }
+    // SVI-style anti-drift padding (core WanImageToVideo, 2026): the empty
+    // frames of a continued section are filled with the clip's first picture
+    // instead of grey, so faces and colours stay where the clip started.
+    if (continued && decl.ref_pad_image) inputs.ref_pad_image = continued.first
     // Remaining REQUIRED widgets we don't model: take the schema default,
     // for a combo the first option. Same live-schema pattern as the RMBG
     // builder, and the combo read goes through the one shared reader so the
@@ -1258,22 +1744,258 @@ export async function buildDynamicWorkflow(
   // apart (filename convention, a CivitAI metadata field, ...), gate this
   // node on that signal rather than reintroducing it unconditionally.
 
+  // Sampling patches of the header-sniffed families, straight from their
+  // official templates: AuraFlow shift 1 (Chroma), 6 (Lumina 2), 3.1 / 3
+  // (Qwen-Image / -Edit); ModelSamplingSD3 shift 3 (HiDream fast/full) or 6
+  // (dev). Qwen-Image-Edit also runs CFGNorm at strength 1.
+  // B45: FLUX.2 reads references as ReferenceLatent on the conditioning,
+  // each image scaled to about a megapixel and encoded, chained one after
+  // the other on both sides (image_flux2, the Klein edit templates).
+  if (strategy === 'unet_flux2' && createRefs.length > 0) {
+    for (const image of createRefs) {
+      const loadId = String(n++)
+      const scaleId = String(n++)
+      const encId = String(n++)
+      workflow[loadId] = { class_type: 'LoadImage', inputs: { image } }
+      workflow[scaleId] = { class_type: 'ImageScaleToTotalPixels', inputs: { image: [loadId, 0], upscale_method: 'lanczos', megapixels: 1, resolution_steps: 1 } }
+      workflow[encId] = { class_type: 'VAEEncode', inputs: { pixels: [scaleId, 0], vae: [vaeSourceId, vaeOutputSlot] } }
+      const posRefId = String(n++)
+      const negRefId = String(n++)
+      workflow[posRefId] = { class_type: 'ReferenceLatent', inputs: { conditioning: positiveRef, latent: [encId, 0] } }
+      workflow[negRefId] = { class_type: 'ReferenceLatent', inputs: { conditioning: negativeRef, latent: [encId, 0] } }
+      positiveRef = [posRefId, 0]
+      negativeRef = [negRefId, 0]
+    }
+  }
+  // B45: the Krea 2 style reference LoRA and the template's flux sampling
+  // patch (max shift 1.15, base shift 0.5 at the canvas size), after the
+  // user's own LoRA stack.
+  if (krea2StyleRef && krea2StyleLora) {
+    const loraId = String(n++)
+    const shiftId = String(n++)
+    workflow[loraId] = { class_type: 'LoraLoaderModelOnly', inputs: { model: [samplerModelId, 0], lora_name: krea2StyleLora, strength_model: 1 }, _meta: { title: 'Krea 2 style reference' } }
+    workflow[shiftId] = { class_type: 'ModelSamplingFlux', inputs: { model: [loraId, 0], max_shift: 1.15, base_shift: 0.5, width: params.width, height: params.height } }
+    samplerModelId = shiftId
+  }
+
+  const auraShift = strategy === 'unet_chroma' ? 1
+    : strategy === 'unet_lumina2' ? 6
+    : strategy === 'unet_qwenimage1' ? (isQwenImageEditModel(params.model) ? 3 : 3.1)
+    : null
+  if (auraShift !== null && allNodes['ModelSamplingAuraFlow']) {
+    const id = String(n++)
+    workflow[id] = { class_type: 'ModelSamplingAuraFlow', inputs: { model: [samplerModelId, 0], shift: auraShift } }
+    samplerModelId = id
+  }
+  if (strategy === 'unet_hidream' && allNodes['ModelSamplingSD3']) {
+    const id = String(n++)
+    workflow[id] = { class_type: 'ModelSamplingSD3', inputs: { model: [samplerModelId, 0], shift: /dev/i.test(params.model) ? 6 : 3 } }
+    samplerModelId = id
+  }
+  if (isQwen1Edit && allNodes['CFGNorm']) {
+    const id = String(n++)
+    workflow[id] = { class_type: 'CFGNorm', inputs: { model: [samplerModelId, 0], strength: 1 } }
+    samplerModelId = id
+  }
+  // Qwen-Image 2.1, full model and Turbo: both official templates put
+  // QwenImage21Cache ("auto", "default") between the model and the sampler.
+  // It only sets where the key/value cache of the prompt prefix lives
+  // (comfy_extras/nodes_qwen.py), so it goes after the LoRA chain: UNET →
+  // LoRAs → cache → sampler. A ComfyUI without the node runs without it.
+  if (strategy === 'unet_qwenimage' && allNodes['QwenImage21Cache']) {
+    const id = String(n++)
+    workflow[id] = { class_type: 'QwenImage21Cache', inputs: { model: [samplerModelId, 0], device: 'auto', dtype: 'default' } }
+    samplerModelId = id
+  }
+  // Qwen-Image 2.1 Turbo (lib/render/qwen21-turbo): its own eight step
+  // schedule through SamplerCustomAdvanced, as the official Turbo templates
+  // run it, for Generate and Edit alike. Steps, sampler and scheduler of the
+  // sliders do not reach it. CFG does: the Turbo edit template offers cfg as
+  // a setting of its own (1, "raise it only if you use a negative prompt"),
+  // and Create presets 1 for a Turbo file and says so when it is higher.
+  // Without one of the custom sampler nodes the run falls back to a KSampler
+  // at eight steps, euler, simple.
+  const qwenTurbo = strategy === 'unet_qwenimage' && isQwenImage21Turbo(params.model)
+  const qwenTurboChain = qwenTurbo && QWEN21_TURBO_NODES.every((c) => !!allNodes[c])
+  if (qwenTurbo) {
+    log.info(`[dynamic-workflow] Qwen-Image 2.1 Turbo: ${qwenTurboChain ? 'SamplerCustomAdvanced on the template sigmas' : 'KSampler fallback, 8 steps'}`)
+  }
+
   // ─── Phase 4: Sampling ───
+
+  // Wan 2.2 A14B (GH #193): the high noise half lays out the clip, the low
+  // noise half finishes it, the split ComfyUI's own template runs (two
+  // KSamplerAdvanced, the first returns its leftover noise). Only when the
+  // picked file is the high half and its partner sits in the same loader
+  // list; otherwise the one file runs alone as before. LoRAs stay on the
+  // picked half.
+  const lowNoisePartner = isVideo && type === 'wan' && !fromCheckpoint && !!allNodes['KSamplerAdvanced']
+    ? wan22LowNoisePartner(params.model, listedUnets)
+    : null
+  let highNoiseStage: { id: string; lowId: string; split: number } | null = null
+  let lowModelRef: [string, number] | null = null
+  if (lowNoisePartner) {
+    const lowLoaderId = String(n++)
+    addUnetLoader(workflow, lowLoaderId, lowNoisePartner, allNodes)
+    lowModelRef = [lowLoaderId, 0]
+  }
+
+  // Wan (B18, 3.0.9): the sampling shift of the official templates, which the
+  // main path never set, and the lightx2v speed LoRAs for a fast run (4 steps
+  // at cfg 1, lib/wan-speed). The LoRAs go on each half its own: the high
+  // noise LoRA on the high noise model, the low noise one on the low. A fast
+  // run without its LoRA would come out as mush, so it stops with the file
+  // names instead.
+  if (isVideo && type === 'wan' && strategy === 'unet_video' && !fromCheckpoint) {
+    const kind = wanSpeedKind(params.model)
+    const fast = !!kind && isFastSampling(params.steps, params.cfgScale)
+    if (fast && kind) {
+      const listedLoras = [
+        ...nodeComboOptions(allNodes, 'LoraLoaderModelOnly', 'lora_name'),
+        ...nodeComboOptions(allNodes, 'LoraLoader', 'lora_name'),
+      ]
+      const halves: Array<'high' | 'low' | 'single'> = kind.startsWith('a14b') ? ['high', 'low'] : ['single']
+      const picks = halves.map((h) => findWanSpeedLora(kind, h, listedLoras))
+      if (picks.some((p) => !p) || (kind.startsWith('a14b') && !lowModelRef)) {
+        const need = wanSpeedLoraNames(kind)
+        throw new WorkflowUnavailableError(
+          kind.startsWith('a14b') && !lowModelRef && picks.every(Boolean)
+            ? `Fast mode runs both halves of ${params.model}: the matching low noise file is not installed. Install the whole Wan 2.2 A14B bundle, or switch Speed to Quality.`
+            : `Fast mode (4 steps) needs the lightx2v speed LoRA${need.length > 1 ? 's' : ''} ${need.join(' and ')} in ComfyUI/models/loras. Download "Wan speed LoRAs" in the Model Manager, or switch Speed to Quality.`,
+          strategy,
+        )
+      }
+      const loraNode = allNodes['LoraLoaderModelOnly'] ? 'LoraLoaderModelOnly' : null
+      const patch = (model: [string, number], lora: string): [string, number] => {
+        const id = String(n++)
+        workflow[id] = loraNode
+          ? { class_type: loraNode, inputs: { lora_name: lora, strength_model: 1.0, model }, _meta: { title: 'Speed LoRA' } }
+          : { class_type: 'LoraLoader', inputs: { lora_name: lora, strength_model: 1.0, strength_clip: 0, model, clip: [clipSourceId, clipOutputSlot] }, _meta: { title: 'Speed LoRA' } }
+        return [id, 0]
+      }
+      samplerModelId = patch([samplerModelId, 0], picks[0]!)[0]
+      if (lowModelRef && picks[1]) lowModelRef = patch(lowModelRef, picks[1])
+    }
+    if (allNodes['ModelSamplingSD3']) {
+      const shift = fast ? WAN_FAST.shift : (wanSamplingFor(params.model, 'quality')?.shift ?? 8)
+      const shiftOf = (model: [string, number]): [string, number] => {
+        const id = String(n++)
+        workflow[id] = { class_type: 'ModelSamplingSD3', inputs: { model, shift } }
+        return [id, 0]
+      }
+      samplerModelId = shiftOf([samplerModelId, 0])[0]
+      if (lowModelRef) lowModelRef = shiftOf(lowModelRef)
+    }
+  }
+
+  // One pass past the native length (B18): sliding context windows on the
+  // model(s), when asked for and the core has the node.
+  if (isVideo && videoParams.contextWindows && !continueFrom) {
+    const win = addContextWindows(workflow, n, [samplerModelId, 0], type, videoParams.frames, allNodes)
+    n = win.n
+    samplerModelId = win.model[0]
+    if (lowModelRef) {
+      const low = addContextWindows(workflow, n, lowModelRef, type, videoParams.frames, allNodes)
+      n = low.n
+      lowModelRef = low.model
+    }
+  }
+
+  if (lowNoisePartner && lowModelRef) {
+    highNoiseStage = { lowId: lowModelRef[0], id: String(n++), split: Math.max(1, Math.floor(params.steps / 2)) }
+    const { id, split } = highNoiseStage
+    workflow[id] = {
+      class_type: 'KSamplerAdvanced',
+      inputs: {
+        model: [samplerModelId, 0], add_noise: 'enable', noise_seed: seed,
+        steps: params.steps, cfg: params.cfgScale, sampler_name: params.sampler, scheduler: params.scheduler,
+        positive: positiveRef, negative: negativeRef, latent_image: latentRef,
+        start_at_step: 0, end_at_step: split, return_with_leftover_noise: 'enable',
+      },
+      _meta: { title: 'Wan 2.2 high noise' },
+    }
+    log.info(`[dynamic-workflow] Wan 2.2 A14B pair: ${params.model} → ${lowNoisePartner}, split at step ${split}`)
+  }
+
+  // B46 / D8: the Edit strength at CFG 1 is the sampler's CFG, with the
+  // identity as its negative (see qwenEditStrength above).
+  const samplerNegative: [string, number] = qwenStrengthCfg1 && qwenIdentityRef ? qwenIdentityRef : negativeRef
+  const samplerCfg = qwenStrengthCfg1 && qwenIdentityRef ? qwenEditStrength : params.cfgScale
+  const part = (node: { class_type: string; inputs: ComfyNodeInputs; _meta?: { title: string } }): [string, number] => {
+    const id = String(n++)
+    workflow[id] = node
+    return [id, 0]
+  }
+  // ...and at a higher CFG the nested DualCFGGuider.
+  const dualGuider = (): [string, number] => part({
+    class_type: 'DualCFGGuider',
+    inputs: {
+      model: [samplerModelId, 0], cond1: positiveRef, cond2: qwenIdentityRef!, negative: negativeRef,
+      cfg_conds: qwenEditStrength, cfg_cond2_negative: params.cfgScale, style: 'nested',
+    },
+    _meta: { title: `Edit strength ${qwenEditStrength.toFixed(2)}` },
+  })
+  const useDual = qwenStrengthDual && !!qwenIdentityRef
+
+  // The four inputs of the Turbo chain besides the latent, one node each.
+  let qwenTurboCustom: ComfyNodeInputs | null = null
+  if (qwenTurboChain) {
+    qwenTurboCustom = {
+      noise: part({ class_type: 'RandomNoise', inputs: { noise_seed: seed } }),
+      guider: useDual ? dualGuider() : part({
+        class_type: 'CFGGuider',
+        inputs: { model: [samplerModelId, 0], positive: positiveRef, negative: samplerNegative, cfg: samplerCfg },
+      }),
+      sampler: part({ class_type: 'KSamplerSelect', inputs: { sampler_name: QWEN21_TURBO_SAMPLING.sampler } }),
+      sigmas: part({ class_type: 'ManualSigmas', inputs: { sigmas: QWEN21_TURBO_SIGMAS } }),
+    }
+  } else if (useDual) {
+    // A guider needs the custom sampler; its steps are the KSampler's.
+    qwenTurboCustom = {
+      noise: part({ class_type: 'RandomNoise', inputs: { noise_seed: seed } }),
+      guider: dualGuider(),
+      sampler: part({ class_type: 'KSamplerSelect', inputs: { sampler_name: qwenTurbo ? QWEN21_TURBO_SAMPLING.sampler : params.sampler } }),
+      sigmas: part({
+        class_type: 'BasicScheduler',
+        inputs: {
+          model: [samplerModelId, 0], scheduler: qwenTurbo ? QWEN21_TURBO_SAMPLING.scheduler : params.scheduler,
+          steps: qwenTurbo ? QWEN21_TURBO_SAMPLING.steps : params.steps, denoise: 1.0,
+        },
+      }),
+    }
+  }
 
   const samplerId = String(n++)
 
-  workflow[samplerId] = {
+  workflow[samplerId] = highNoiseStage ? {
+    class_type: 'KSamplerAdvanced',
+    inputs: {
+      model: [highNoiseStage.lowId, 0], add_noise: 'disable', noise_seed: seed,
+      steps: params.steps, cfg: params.cfgScale, sampler_name: params.sampler, scheduler: params.scheduler,
+      positive: positiveRef, negative: negativeRef, latent_image: [highNoiseStage.id, 0],
+      start_at_step: highNoiseStage.split, end_at_step: 10000, return_with_leftover_noise: 'disable',
+    },
+    _meta: { title: 'Wan 2.2 low noise' },
+  } : qwenTurboCustom ? {
+    class_type: 'SamplerCustomAdvanced',
+    inputs: {
+      ...qwenTurboCustom,
+      latent_image: latentRef,
+    },
+    _meta: { title: qwenTurboChain ? 'Qwen-Image 2.1 Turbo' : 'Qwen edit' },
+  } : {
     class_type: 'KSampler',
     inputs: {
       model: [samplerModelId, 0],
       positive: positiveRef,
-      negative: negativeRef,
+      negative: samplerNegative,
       latent_image: latentRef,
       seed,
-      steps: params.steps,
-      cfg: params.cfgScale,
-      sampler_name: params.sampler,
-      scheduler: params.scheduler,
+      steps: qwenTurbo ? QWEN21_TURBO_SAMPLING.steps : params.steps,
+      cfg: samplerCfg,
+      sampler_name: qwenTurbo ? QWEN21_TURBO_SAMPLING.sampler : params.sampler,
+      scheduler: qwenTurbo ? QWEN21_TURBO_SAMPLING.scheduler : params.scheduler,
+      // Qwen edits: 1.0 like their templates, whatever the Edit strength.
       denoise: isInpaint ? (params.denoise ?? 0.85) : isI2I ? (params.denoise ?? 0.7) : 1.0,
     },
   }
@@ -1294,47 +2016,19 @@ export async function buildDynamicWorkflow(
 
   // ─── Phase 6: Output ───
 
-  const saveId = String(n++)
-
   if (isVideo) {
-    // Video output: prefer VHS > SaveAnimatedWEBP > SaveImage
-    const vidPrefix = promptFilenamePrefix(params.prompt, true)
-    if (nodes.videoSavers.includes('VHS_VideoCombine')) {
-      workflow[saveId] = {
-        class_type: 'VHS_VideoCombine',
-        inputs: {
-          images: [decodeId, 0],
-          frame_rate: videoParams.fps,
-          loop_count: 0,
-          filename_prefix: vidPrefix,
-          format: 'video/h264-mp4',
-          pingpong: false,
-          save_output: true,
-        },
-      }
-    } else if (nodes.videoSavers.includes('SaveAnimatedWEBP')) {
-      workflow[saveId] = {
-        class_type: 'SaveAnimatedWEBP',
-        inputs: {
-          images: [decodeId, 0],
-          filename_prefix: vidPrefix,
-          fps: videoParams.fps,
-          lossless: false,
-          quality: 90,
-          method: 'default',
-        },
-      }
-    } else {
-      workflow[saveId] = {
-        class_type: 'SaveImage',
-        inputs: {
-          images: [decodeId, 0],
-          filename_prefix: vidPrefix,
-        },
-      }
+    // A continued section goes behind the clip so far, without the frames it
+    // repeats, and the whole clip is saved (B18).
+    let frames: [string, number] = [decodeId, 0]
+    if (continued && continueFrom) {
+      const joined = addStitch(workflow, n, continued.frames, frames, continueFrom.overlap, allNodes)
+      n = joined.n
+      frames = joined.images
     }
+    // Video output: core SaveVideo (mp4) > VHS > SaveAnimatedWEBP > SaveImage (A19)
+    addVideoSave(workflow, n, frames, videoParams.fps, promptFilenamePrefix(params.prompt, true), (c) => nodes.videoSavers.includes(c))
   } else {
-    workflow[saveId] = {
+    workflow[String(n)] = {
       class_type: 'SaveImage',
       inputs: {
         images: [decodeId, 0],
@@ -1385,6 +2079,311 @@ function buildRemoveBgWorkflow(params: GenerateParams, rmbgMeta: NodeMetadata): 
   return workflow
 }
 
+// ─── Enhance Image on local ComfyUI (3.0.7) ───
+//
+// Core nodes only: LoadImage → UpscaleModelLoader + ImageUpscaleWithModel →
+// (a resize when the model's own scale is not the factor asked for) →
+// SaveImage. ImageUpscaleWithModel tiles on its own and halves the tile when
+// the card runs out of memory, so no tile settings are needed here.
+
+export interface UpscaleParams {
+  /** The source, as ComfyUI's /upload/image named it. */
+  image: string
+  /** A file ComfyUI lists for UpscaleModelLoader (models/upscale_models). */
+  model: string
+  factor: UpscaleFactor
+  /** The source's size, for the exact resize when the model's scale is unknown. */
+  sourceWidth: number
+  sourceHeight: number
+}
+
+const UPSCALE_NODES = ['LoadImage', 'UpscaleModelLoader', 'ImageUpscaleWithModel', 'SaveImage']
+
+/** The resize method: area to go down (a 4x model asked for 2x), lanczos to go
+ *  up. Taken from the node's live list when it can be read, so a ComfyUI that
+ *  renamed one never sees a value it would reject. */
+function resizeMethod(allNodes: NodePresence, node: 'ImageScaleBy' | 'ImageScale', down: boolean): string {
+  const wanted = down ? 'area' : 'lanczos'
+  const listed = nodeComboOptions(allNodes, node, 'upscale_method')
+  if (listed.length === 0 || listed.includes(wanted)) return wanted
+  return listed.includes('bicubic') ? 'bicubic' : listed[0]
+}
+
+export function buildUpscaleWorkflow(params: UpscaleParams, allNodes: NodePresence): ComfyApiGraph {
+  requireNodes(allNodes, UPSCALE_NODES, 'Enhance Image')
+  const listed = nodeComboOptions(allNodes, 'UpscaleModelLoader', 'model_name')
+  if (listed.length > 0 && !listed.includes(params.model)) {
+    throw new WorkflowUnavailableError(
+      `${params.model} is no longer in ComfyUI's upscale model list. It may have been moved or deleted. Restart ComfyUI after adding files, then try again.`,
+      'unavailable',
+    )
+  }
+  const workflow: ComfyApiGraph = {}
+  workflow['1'] = { class_type: 'LoadImage', inputs: { image: params.image } }
+  workflow['2'] = { class_type: 'UpscaleModelLoader', inputs: { model_name: params.model } }
+  workflow['3'] = { class_type: 'ImageUpscaleWithModel', inputs: { upscale_model: ['2', 0], image: ['1', 0] } }
+  let out: [string, number] = ['3', 0]
+  const native = nativeUpscaleScale(params.model)
+  if (native !== null && native !== params.factor) {
+    // A 4x model asked for 2x: the model's result, scaled by 0.5.
+    requireNodes(allNodes, ['ImageScaleBy'], 'Enhance Image')
+    const scale = params.factor / native
+    workflow['4'] = {
+      class_type: 'ImageScaleBy',
+      inputs: { image: out, upscale_method: resizeMethod(allNodes, 'ImageScaleBy', scale < 1), scale_by: scale },
+    }
+    out = ['4', 0]
+  } else if (native === null) {
+    // The name does not say the model's scale: resize to the exact target.
+    requireNodes(allNodes, ['ImageScale'], 'Enhance Image')
+    const t = upscaleTarget(params.sourceWidth, params.sourceHeight, params.factor)
+    workflow['4'] = {
+      class_type: 'ImageScale',
+      inputs: { image: out, upscale_method: resizeMethod(allNodes, 'ImageScale', false), width: t.width, height: t.height, crop: 'disabled' },
+    }
+    out = ['4', 0]
+  }
+  workflow['5'] = {
+    class_type: 'SaveImage',
+    inputs: { images: out, filename_prefix: `${promptFilenamePrefix('', false)}_enhanced` },
+  }
+  return workflow
+}
+
+/** The graph against the running ComfyUI's node list. */
+export async function buildLocalUpscaleWorkflow(params: UpscaleParams): Promise<ComfyApiGraph> {
+  return buildUpscaleWorkflow(params, await getAllNodeInfo())
+}
+
+// ─── 3D from one picture (TRELLIS.2, Windows and Linux, 3.1.0) ───
+//
+// The graph is the TRELLIS.2 branch of ComfyUI's own template
+// `3d_pixal3d_trellis2_image_to_model.json`, read as data out of the PyPI
+// wheel comfyui_workflow_templates_json 0.1.120 (sha256
+// f4f8e94d2c8a94ea894a9d9a18235ea6306268112f9dc267611a04b20d2740be). That is
+// the version ComfyUI v0.42.4 pins through comfyui-workflow-templates==0.11.94
+// in its requirements.txt. Class names, input names, types and ranges were
+// checked against the node code at the tag v0.42.4: comfy_extras/
+// nodes_trellis2.py, nodes_bg_removal.py, nodes_images.py (ImageCropToMask),
+// nodes_custom_sampler.py (CFGOverride), nodes_model_advanced.py (RescaleCFG,
+// ModelSamplingSD3), nodes_mesh_postprocess.py and nodes_save_3d.py.
+//
+// The node ids are the template's, so a diff against it stays readable. What
+// differs from the template, on purpose:
+//   * The Pixal3D branch is gone (its model, MoGe, the FOV node and the three
+//     ComfySwitchNode that choose between the two). The template's switch
+//     "Switch to Trellis2" set to true is exactly this graph.
+//   * The preview nodes are gone (PreviewImage, MaskPreview, Preview3DAdvanced,
+//     VoxelToMesh, PaintMesh, RenderUVAtlas, GetMeshInfo, the MeshToFile3D in
+//     front of each preview). In v0.42.4 PreviewImage and MaskPreview pass
+//     their input through, so the links run straight from the node before.
+//   * SaveGLB (mesh in, writes output/3d/*.glb, reports under the key "3d")
+//     stands in for MeshToFile3D plus Save3DAdvanced, which needs the
+//     viewport state of the canvas.
+//   * cutout false skips RemoveBackground and feeds the picture's own mask
+//     (LoadImage output 1) into ImageCropToMask, the template's "Switch:
+//     Remove background" set to false. An opaque picture then has an empty
+//     mask, and ImageCropToMask takes the whole picture (_crop_image_with_mask).
+//   * pad_factor 1.0 instead of the template's 1.1: the Trellis2Conditioning
+//     input says "pad_factor=1.0 for TRELLIS.2"; the template shares the crop
+//     with Pixal3D. Unconfirmed until a run on the box.
+//   * `detail` sets the cascade resolution, the remesh grid, the face count
+//     and the texture sizes. 'fine' is the template's values.
+
+export type ThreeDDetail = 'draft' | 'standard' | 'fine'
+
+export interface ThreeDDetailSettings {
+  /** Trellis2UpsampleStage target_resolution (1024 to 2048, step 128). */
+  shapeResolution: number
+  /** RemeshMesh resolution (32 to 2048). */
+  remeshResolution: number
+  /** DecimateMesh target_face_count. */
+  faces: number
+  /** UnwrapMesh resolution and BakeTextureFromVoxel texture_size (step 256). */
+  texture: number
+  /** BakeNormalMapFromMesh resolution (step 64). */
+  normalMap: number
+  /** BakeAmbientOcclusion resolution (step 64) and its ray count (step 4). */
+  occlusion: number
+  occlusionSamples: number
+}
+
+export const THREE_D_DETAIL: Record<ThreeDDetail, ThreeDDetailSettings> = {
+  draft: { shapeResolution: 1024, remeshResolution: 384, faces: 100_000, texture: 1024, normalMap: 1024, occlusion: 512, occlusionSamples: 32 },
+  standard: { shapeResolution: 1024, remeshResolution: 512, faces: 300_000, texture: 2048, normalMap: 2048, occlusion: 1024, occlusionSamples: 64 },
+  fine: { shapeResolution: 1536, remeshResolution: 768, faces: 700_000, texture: 4096, normalMap: 2048, occlusion: 1024, occlusionSamples: 64 },
+}
+
+export interface ThreeDParams {
+  /** The picture, as ComfyUI's /upload/image named it. */
+  image: string
+  detail: ThreeDDetail
+  /** Cut the object out of its background first (BiRefNet). */
+  cutout: boolean
+  seed: number
+  /** Other file names than the catalogue's, for a ComfyUI that lists them so. */
+  files?: Partial<Record<keyof typeof TRELLIS2_FILES, string>>
+}
+
+export const THREE_D_NEEDS_UPDATE = 'Local 3D needs ComfyUI 0.42.4 or newer. Update ComfyUI in Settings.'
+
+/** The core nodes the graph is built from. The TRELLIS.2 ones are the release
+ *  marker: without them the install is older than the lane. */
+export const THREE_D_TRELLIS_NODES = [
+  'EmptyTrellis2LatentStructure', 'Trellis2Conditioning', 'Trellis2ShapeStage', 'Trellis2UpsampleStage',
+  'Trellis2TextureStage', 'VaeDecodeStructureTrellis2', 'VaeDecodeShapeTrellis', 'VaeDecodeTextureTrellis',
+]
+export const THREE_D_NODES = [
+  ...THREE_D_TRELLIS_NODES,
+  'LoadImage', 'ImageCropToMask', 'CLIPVisionLoader', 'UNETLoader', 'VAELoader',
+  'CFGOverride', 'RescaleCFG', 'ModelSamplingSD3', 'KSampler',
+  'RemeshMesh', 'DecimateMesh', 'MeshSmoothNormals', 'UnwrapMesh',
+  'BakeTextureFromVoxel', 'BakeNormalMapFromMesh', 'BakeAmbientOcclusion', 'ApplyTextureToMesh', 'SaveGLB',
+]
+export const THREE_D_CUTOUT_NODES = ['LoadBackgroundRemovalModel', 'RemoveBackground']
+
+/** The id of the save node, whose history entry carries the model. */
+export const THREE_D_SAVE_NODE = '900'
+
+/** The choices of a DynamicCombo input in one node's /object_info entry,
+ *  which ComfyUI serves as ["COMFY_DYNAMICCOMBO_V3", { options: [{ key, inputs }] }]
+ *  (comfy_api/latest/_io.py, DynamicCombo.Input.as_dict). A plain combo
+ *  ([[...choices]]) reads too. Null when the entry says nothing readable,
+ *  so a caller can tell "unknown" from "not offered". */
+export function dynamicComboKeys(nodeInfo: unknown, field: string): string[] | null {
+  if (!nodeInfo || typeof nodeInfo !== 'object') return null
+  const input = (nodeInfo as { input?: { required?: Record<string, unknown>; optional?: Record<string, unknown> } }).input
+  const spec = input?.required?.[field] ?? input?.optional?.[field]
+  if (!Array.isArray(spec)) return null
+  if (Array.isArray(spec[0])) return spec[0].filter((k): k is string => typeof k === 'string')
+  const options = (spec[1] as { options?: unknown } | undefined)?.options
+  if (!Array.isArray(options)) return null
+  return options.map((o) => (o as { key?: unknown })?.key).filter((k): k is string => typeof k === 'string')
+}
+
+/** RemeshMesh's sign_mode choice. 'solid' came with ComfyUI 0.42.0; 0.36 to
+ *  0.41 have the TRELLIS.2 nodes and RemeshMesh but offer only udf and sdf.
+ *  Sent there, 'solid' matches no option, ComfyUI drops the input without a
+ *  word and the node fails with "execute() missing 1 required positional
+ *  argument: 'sign_mode'" (3.1.0, reported 17.11.2026). */
+export const THREE_D_SIGN_MODE = 'solid'
+
+function sampler(
+  model: [string, number], cond: string, latent: [string, number], seed: number,
+  steps: number, cfg: number, scheduler: string,
+): ComfyNodeInputs {
+  return {
+    model, positive: [cond, 0], negative: [cond, 1], latent_image: latent,
+    seed, steps, cfg, sampler_name: 'euler', scheduler, denoise: 1,
+  }
+}
+
+export function buildThreeDWorkflow(params: ThreeDParams, allNodes: NodePresence): ComfyApiGraph {
+  requireRelease(allNodes, THREE_D_TRELLIS_NODES, THREE_D_NEEDS_UPDATE, 'unavailable')
+  requireRelease(allNodes, ['SaveGLB', 'RemeshMesh', 'BakeTextureFromVoxel'], THREE_D_NEEDS_UPDATE, 'unavailable')
+  requireNodes(allNodes, THREE_D_NODES, 'Local 3D')
+  // The node is there, but is its remesh choice? Asked of /object_info before
+  // the run, so an older ComfyUI gets the update offer, not a failed run.
+  const signModes = dynamicComboKeys(allNodes.RemeshMesh, 'sign_mode')
+  if (signModes && !signModes.includes(THREE_D_SIGN_MODE)) {
+    throw new WorkflowUnavailableError(THREE_D_NEEDS_UPDATE, 'unavailable', undefined, { needsComfyUpdate: true })
+  }
+  if (params.cutout) requireNodes(allNodes, THREE_D_CUTOUT_NODES, 'Local 3D')
+  const files = { ...TRELLIS2_FILES, ...params.files }
+  const d = THREE_D_DETAIL[params.detail] ?? THREE_D_DETAIL.standard
+  // KSampler takes 0 to 2^64-1; the texture pass gets its own seed as in the
+  // template (42 for the shape passes, 43 for the texture).
+  const seed = Math.max(0, Math.floor(params.seed))
+  const textureSeed = seed + 1 > Number.MAX_SAFE_INTEGER ? 0 : seed + 1
+  const w: ComfyApiGraph = {}
+
+  // The picture, cut out and cropped to 1024 square.
+  w['122'] = { class_type: 'LoadImage', inputs: { image: params.image } }
+  let mask: [string, number] = ['122', 1]
+  if (params.cutout) {
+    w['193'] = { class_type: 'LoadBackgroundRemovalModel', inputs: { bg_removal_name: files.cutout } }
+    w['192'] = { class_type: 'RemoveBackground', inputs: { bg_removal_model: ['193', 0], image: ['122', 0] } }
+    mask = ['192', 0]
+  }
+  w['312'] = {
+    class_type: 'ImageCropToMask',
+    inputs: { images: ['122', 0], masks: mask, width: 1024, height: 1024, pad_factor: 1.0, grow_mask: 0, background: '#000000' },
+  }
+
+  // Loaders and the two guided model chains of the template.
+  w['15'] = { class_type: 'CLIPVisionLoader', inputs: { clip_name: files.imageEncoder } }
+  w['40'] = { class_type: 'UNETLoader', inputs: { unet_name: files.model, weight_dtype: 'default' } }
+  w['117'] = { class_type: 'VAELoader', inputs: { vae_name: files.shapeVae } }
+  w['118'] = { class_type: 'VAELoader', inputs: { vae_name: files.textureVae } }
+  w['199'] = { class_type: 'CFGOverride', inputs: { model: ['40', 0], cfg: 1, start_percent: 0.667, end_percent: 1 } }
+  w['125'] = { class_type: 'RescaleCFG', inputs: { model: ['199', 0], multiplier: 0.7 } }
+  w['108'] = { class_type: 'ModelSamplingSD3', inputs: { model: ['125', 0], shift: 5 } }
+  w['279'] = { class_type: 'CFGOverride', inputs: { model: ['40', 0], cfg: 1, start_percent: 0.769, end_percent: 1 } }
+  w['126'] = { class_type: 'RescaleCFG', inputs: { model: ['279', 0], multiplier: 0.5 } }
+  w['299'] = { class_type: 'Trellis2Conditioning', inputs: { clip_vision_model: ['15', 0], image: ['312', 0] } }
+
+  // Structure, then shape at 512, then the cascade up to the detail's resolution.
+  w['87'] = { class_type: 'EmptyTrellis2LatentStructure', inputs: { batch_size: 1 } }
+  w['3'] = { class_type: 'KSampler', inputs: sampler(['108', 0], '299', ['87', 0], seed, 12, 7.5, 'normal') }
+  w['119'] = { class_type: 'VaeDecodeStructureTrellis2', inputs: { samples: ['3', 0], vae: ['117', 0], resolution: '32' } }
+  w['91'] = { class_type: 'Trellis2ShapeStage', inputs: { positive: ['299', 0], negative: ['299', 1], voxel: ['119', 0] } }
+  w['18'] = { class_type: 'KSampler', inputs: sampler(['126', 0], '91', ['91', 2], seed, 20, 7.5, 'normal') }
+  w['94'] = {
+    class_type: 'Trellis2UpsampleStage',
+    inputs: { positive: ['91', 0], negative: ['91', 1], shape_latent: ['18', 0], vae: ['117', 0], target_resolution: d.shapeResolution },
+  }
+  w['23'] = { class_type: 'KSampler', inputs: sampler(['126', 0], '94', ['94', 2], seed, 12, 7.5, 'simple') }
+  w['92'] = { class_type: 'VaeDecodeShapeTrellis', inputs: { samples: ['23', 0], vae: ['117', 0] } }
+
+  // The surface, as voxel colours.
+  w['98'] = { class_type: 'Trellis2TextureStage', inputs: { positive: ['94', 0], negative: ['94', 1], shape_latent: ['23', 0] } }
+  w['12'] = { class_type: 'KSampler', inputs: sampler(['40', 0], '98', ['98', 2], textureSeed, 12, 1, 'normal') }
+  w['93'] = { class_type: 'VaeDecodeTextureTrellis', inputs: { samples: ['12', 0], vae: ['118', 0], shape_subdivides: ['92', 1] } }
+
+  // A clean mesh, unwrapped, with the colours baked into textures.
+  w['241'] = {
+    class_type: 'RemeshMesh',
+    inputs: {
+      mesh: ['92', 0], resolution: d.remeshResolution,
+      // A DynamicCombo: the choice under its own name, its options as
+      // "sign_mode.<name>" (comfy_api/latest/_io.py, finalize_prefix).
+      sign_mode: THREE_D_SIGN_MODE, 'sign_mode.fill': 20, 'sign_mode.qef': false,
+      band: 1, project_back: 0, fix_poles: false, smooth_iters: 20,
+      drop_small_components: 0.01, precluster_max_verts: 20_000_000,
+    },
+  }
+  w['186'] = { class_type: 'DecimateMesh', inputs: { mesh: ['241', 0], target_face_count: d.faces, placement_mode: 'midpoint' } }
+  w['238'] = { class_type: 'MeshSmoothNormals', inputs: { mesh: ['186', 0], crease_angle: 180 } }
+  w['196'] = { class_type: 'UnwrapMesh', inputs: { mesh: ['238', 0], segmenter: 'pec', resolution: d.texture, padding: 1, weld_distance: 0.0002 } }
+  w['147'] = {
+    class_type: 'BakeTextureFromVoxel',
+    inputs: { mesh: ['196', 0], voxel_colors: ['93', 0], texture_size: d.texture, reference_mesh: ['92', 0] },
+  }
+  w['224'] = {
+    class_type: 'BakeNormalMapFromMesh',
+    inputs: { low_poly: ['196', 0], high_poly: ['241', 0], resolution: d.normalMap, cage_distance: 0.05, ignore_backfaces: true },
+  }
+  w['233'] = {
+    class_type: 'BakeAmbientOcclusion',
+    inputs: { low_poly: ['196', 0], high_poly: ['241', 0], resolution: d.occlusion, samples: d.occlusionSamples, max_distance: 0.71, strength: 1, bias: 0.01 },
+  }
+  w['210'] = {
+    class_type: 'ApplyTextureToMesh',
+    inputs: { mesh: ['196', 0], base_color: ['147', 0], metallic: ['147', 1], roughness: ['147', 2], occlusion: ['233', 0], normal_map: ['224', 0] },
+  }
+  w['260'] = { class_type: 'MeshSmoothNormals', inputs: { mesh: ['210', 0], crease_angle: 180 } }
+  w[THREE_D_SAVE_NODE] = {
+    class_type: 'SaveGLB',
+    inputs: { mesh: ['260', 0], filename_prefix: `3d/${promptFilenamePrefix('', false)}_3d` },
+  }
+  return w
+}
+
+/** The graph against the running ComfyUI's node list. */
+export async function buildLocalThreeDWorkflow(params: ThreeDParams): Promise<ComfyApiGraph> {
+  return buildThreeDWorkflow(params, await getAllNodeInfo())
+}
+
 // Resolve a default value for one RMBG widget input from its object_info spec.
 // Combo → prefer a transparent option for the background widget, else the
 // declared default / first entry. Primitives → their declared default. A
@@ -1417,25 +2416,7 @@ function rmbgWidgetDefault(
 
 
 function addVideoOutput(workflow: ComfyApiGraph, n: number, decodeId: string, fps: number, nodes: CategorizedNodes, prompt?: string): number {
-  const saveId = String(n++)
-  const prefix = promptFilenamePrefix(prompt, true)
-  if (nodes.videoSavers.includes('VHS_VideoCombine')) {
-    workflow[saveId] = {
-      class_type: 'VHS_VideoCombine',
-      inputs: { images: [decodeId, 0], frame_rate: fps, loop_count: 0, filename_prefix: prefix, format: 'video/h264-mp4', pingpong: false, save_output: true },
-    }
-  } else if (nodes.videoSavers.includes('SaveAnimatedWEBP')) {
-    workflow[saveId] = {
-      class_type: 'SaveAnimatedWEBP',
-      inputs: { images: [decodeId, 0], filename_prefix: prefix, fps, lossless: false, quality: 90, method: 'default' },
-    }
-  } else {
-    workflow[saveId] = {
-      class_type: 'SaveImage',
-      inputs: { images: [decodeId, 0], filename_prefix: prefix },
-    }
-  }
-  return n
+  return addVideoSave(workflow, n, [decodeId, 0], fps, promptFilenamePrefix(prompt, true), (c) => nodes.videoSavers.includes(c))
 }
 
 // buildCogVideoWorkflow deleted 2026-07-24 (D#88). It emitted CogVideoXCLIPLoader,
@@ -1459,7 +2440,7 @@ function buildSVDWorkflow(params: VideoParams, seed: number, nodes: CategorizedN
 
   workflow[loaderId] = { class_type: 'ImageOnlyCheckpointLoader', inputs: { ckpt_name: params.model } }
   workflow[imageId] = { class_type: 'LoadImage', inputs: { image: params.inputImage || 'input_image.png' } }
-  // Aspect-fill the source into the SVD generation resolution (David 2026-06-11:
+  // Aspect-fill the source into the SVD generation resolution (2026-06-11:
   // a portrait/square still fed straight in came back squished and no longer
   // matched the input). crop:'center' scales to cover width×height then
   // centre-crops — so the conditioning sees the source at the right aspect with
@@ -1510,7 +2491,7 @@ export function snapWanLength(frames: number): number {
  * latent shape) and the shared UMT5-XXL text encoder. `ModelSamplingSD3`
  * applies Wan's sampling shift.
  *
- * I2V faithfulness (David 2026-06-11): an `ImageScale(crop:center)` aspect-fills
+ * I2V faithfulness (2026-06-11): an `ImageScale(crop:center)` aspect-fills
  * the source into the generation size, so the first frame matches the still
  * instead of being squished, the same fix proven on the SVD path.
  *
@@ -1553,7 +2534,7 @@ async function buildWan22Workflow(params: VideoParams, seed: number, nodes: Cate
   workflow[posId] = { class_type: 'CLIPTextEncode', inputs: { text: params.prompt, clip: [clipId, 0] } }
   workflow[negId] = { class_type: 'CLIPTextEncode', inputs: { text: params.negativePrompt || '', clip: [clipId, 0] } }
 
-  // Optional LoRA chain (D#80, game-master0): video LoRAs are model-only, so
+  // Optional LoRA chain (D#80): video LoRAs are model-only, so
   // patch the UNET with LoraLoaderModelOnly (no clip side) before the sampling
   // shift. Guarded on params.lora, a plain Wan 2.2 gen stays byte-identical.
   let wanModelSrc = unetId
@@ -1574,10 +2555,27 @@ async function buildWan22Workflow(params: VideoParams, seed: number, nodes: Cate
   // SD3), so the sampler reads from it to match the official 5B workflow's motion.
   const shiftId = String(n++)
   workflow[shiftId] = { class_type: 'ModelSamplingSD3', inputs: { model: [wanModelSrc, 0], shift: 8.0 } }
+  let samplerModel: [string, number] = [shiftId, 0]
+  if (params.contextWindows && !params.continueFrom) {
+    const win = addContextWindows(workflow, n, samplerModel, 'wan22', length, allNodes)
+    n = win.n
+    samplerModel = win.model
+  }
 
-  // Unified latent: a start_image is attached ONLY for an I2V request.
+  // Unified latent: a start_image is attached ONLY for an I2V request. A
+  // continued section (B18) attaches the last frames of the clip so far; the
+  // node masks every latent frame they cover, so the section picks the
+  // motion up where it stopped.
   const latentInputs: ComfyNodeInputs = { vae: [vaeId, 0], width, height, length, batch_size: 1 }
-  if (params.inputImage) {
+  let continued: ContinueSource | null = null
+  if (params.continueFrom) {
+    requireContinueNodes(allNodes, 'unet_video')
+    continued = addContinueSource(workflow, n, params.continueFrom, allNodes)
+    n = continued.n
+    const scaleId = String(n++)
+    workflow[scaleId] = { class_type: 'ImageScale', inputs: { image: continued.tail, upscale_method: 'lanczos', width, height, crop: 'center' } }
+    latentInputs.start_image = [scaleId, 0]
+  } else if (params.inputImage) {
     const imageId = String(n++)
     const scaleId = String(n++)
     workflow[imageId] = { class_type: 'LoadImage', inputs: { image: params.inputImage } }
@@ -1591,13 +2589,18 @@ async function buildWan22Workflow(params: VideoParams, seed: number, nodes: Cate
   workflow[samplerId] = {
     class_type: 'KSampler',
     inputs: {
-      model: [shiftId, 0], positive: [posId, 0], negative: [negId, 0], latent_image: [latentId, 0],
+      model: samplerModel, positive: [posId, 0], negative: [negId, 0], latent_image: [latentId, 0],
       seed, steps: params.steps, cfg: params.cfgScale, sampler_name: params.sampler, scheduler: params.scheduler, denoise: 1.0,
     },
   }
   const decodeId = String(n++)
   workflow[decodeId] = videoDecodeNode([samplerId, 0], [vaeId, 0], nodes.decoders.includes('VAEDecodeTiled'))
 
+  if (continued && params.continueFrom) {
+    const joined = addStitch(workflow, n, continued.frames, [decodeId, 0], params.continueFrom.overlap, allNodes)
+    addVideoSave(workflow, joined.n, joined.images, params.fps, promptFilenamePrefix(params.prompt, true), (c) => nodes.videoSavers.includes(c))
+    return workflow
+  }
   addVideoOutput(workflow, n, decodeId, params.fps, nodes, params.prompt)
   return workflow
 }
@@ -1843,6 +2846,340 @@ async function buildLtx2Workflow(
   return workflow
 }
 
+/** MiniMax H3 counts frames in blocks of 17 plus 5 (124 is about five
+ *  seconds at 24 fps). Rounds UP, as the official template does, so a request
+ *  never comes back shorter than asked. */
+export function snapMiniMaxH3Length(frames: number): number {
+  const f = Math.max(5, Number.isFinite(frames) ? Math.round(frames) : 124)
+  return f + ((5 - (f % 17)) + 17) % 17
+}
+
+/**
+ * MiniMax H3 (Discord, throwaway 2026-09-26: "shows up as an image model").
+ * One model writes picture and sound together, wired as the official
+ * Comfy-Org t2v/i2v and r2v templates do: the encode node builds the joint
+ * latent, BasicGuider and SamplerCustomAdvanced sample it, and VAEDecode and
+ * VAEDecodeAudio each pull their half back out before CreateVideo muxes them.
+ *
+ * Two sets of weights share the family. fl2va takes the source image as the
+ * first frame; ref2va takes it as a reference the prompt can call
+ * <Picture 1>.
+ */
+async function buildMiniMaxH3Workflow(params: VideoParams, seed: number, allNodes: NodePresence): Promise<ComfyApiGraph> {
+  const fast = isFastH3(params.model)
+  const isRef2va = !fast && /ref2va/i.test(params.model)
+  const encodeNode = isRef2va ? 'MiniMaxH3ReferenceToVideo' : 'MiniMaxH3ImageToVideo'
+  requireNodes(allNodes, [encodeNode, 'BasicGuider', 'SamplerCustomAdvanced', 'VAEDecodeAudio'], 'MiniMax H3')
+  if (fast) {
+    // FastH3 runs on FastVideo's sparse attention, which ComfyUI has had since
+    // 0.35.0 (BlockSparseAttention), and it only distilled text to video.
+    requireRelease(allNodes, ['BlockSparseAttention', 'MiniMaxH3SigmaShift'], FASTH3_NEEDS_UPDATE, 'minimaxh3')
+    // Read in comfy_extras/nodes_sparse_attention.py (ComfyUI master, 2026-10-02):
+    // BlockSparseAttention does NOT use Triton. It calls the compiled sol_attn
+    // kernels of comfy_kitchen (CUDA sm_80+ on Linux and Windows x64 wheels, or
+    // HIP). Where they are not available (older GPU, CPU) h3_eligible() returns
+    // False and the block runs the model's normal dense attention, so the graph
+    // is valid on every machine and only loses the speed gain. No platform gate.
+    if (params.inputImage) {
+      throw new WorkflowUnavailableError('FastH3 makes video from a prompt only. Pick MiniMax H3 to start from an image.', 'minimaxh3')
+    }
+  }
+
+  const workflow: ComfyApiGraph = {}
+  let n = 1
+  const snap32 = (v: number | undefined, def: number) => Math.max(32, Math.round(((v && v > 0) ? v : def) / 32) * 32)
+  const width = snap32(params.width, 1344)
+  const height = snap32(params.height, 768)
+  const length = snapMiniMaxH3Length(params.frames || 124)
+
+  const [clipName, vaeName, audioVaeName] = await Promise.all([
+    findMatchingCLIP('minimaxh3', params.model),
+    findMatchingVAE('minimaxh3'),
+    findMiniMaxAudioVAE(),
+  ])
+
+  const unetId = String(n++)
+  const clipId = String(n++)
+  const vaeId = String(n++)
+  const audioVaeId = String(n++)
+  addUnetLoader(workflow, unetId, params.model, allNodes)
+  workflow[clipId] = { class_type: 'CLIPLoader', inputs: { clip_name: clipName, type: 'minimax', device: 'default' } }
+  workflow[vaeId] = { class_type: 'VAELoader', inputs: { vae_name: vaeName } }
+  workflow[audioVaeId] = { class_type: 'VAELoader', inputs: { vae_name: audioVaeName } }
+
+  // Video LoRAs (the turbo ones included) patch the model only.
+  let modelSrc = unetId
+  const stack = normalizeLoraList(params.lora)
+  const stackStrengths = normalizeLoraStrengths(params.loraStrength, stack.length)
+  // FastH3 is already the 8 step distillation. A step LoRA (the H3 turbo one)
+  // on top of it distils twice, so on FastH3 it is left out; every other LoRA
+  // in the stack still patches the model.
+  const keep = stack.map((l) => !(fast && H3_STEP_LORA.test(l)))
+  const loras = stack.filter((_, i) => keep[i])
+  const strengths = stackStrengths.filter((_, i) => keep[i])
+  loras.forEach((loraName, i) => {
+    const loraId = String(n++)
+    workflow[loraId] = {
+      class_type: 'LoraLoaderModelOnly',
+      inputs: { lora_name: loraName, strength_model: strengths[i], model: [modelSrc, 0] },
+    }
+    modelSrc = loraId
+  })
+
+  if (fast) {
+    // The official template (video_fastvideo_fasth3_t2v) patches the model with
+    // the distilled schedule's shifts (video 10, audio 3, not the base model's
+    // 12) and then the VSA sparse attention the checkpoint was trained with
+    // (keep 10 percent of the video cubes). The template also picks the comfy
+    // kitchen attention for the dense layers; that choice is left to ComfyUI's
+    // default because the option is missing on cards that cannot run it.
+    const shiftId = String(n++)
+    const sparseId = String(n++)
+    workflow[shiftId] = { class_type: 'MiniMaxH3SigmaShift', inputs: { model: [modelSrc, 0], shift_video: 10, shift_audio: 3 } }
+    workflow[sparseId] = {
+      class_type: 'BlockSparseAttention',
+      inputs: {
+        model: [shiftId, 0], selection: 'vsa', 'selection.keep_percent': 10,
+        start_percent: 0.2, end_percent: 1, dense_blocks: '', min_tokens: 12288, extra_tokens: 256,
+        sink_conditioning: 'exact_kv_and_rows', verbose: false,
+      },
+    }
+    modelSrc = sparseId
+  }
+
+  const encodeInputs: ComfyNodeInputs = { clip: [clipId, 0], vae: [vaeId, 0], prompt: params.prompt, width, height, length }
+  if (params.inputImage) {
+    // The node stretches a first frame to the canvas; a center crop keeps
+    // the picture's proportions instead.
+    const imageId = String(n++)
+    const scaleId = String(n++)
+    workflow[imageId] = { class_type: 'LoadImage', inputs: { image: params.inputImage } }
+    workflow[scaleId] = { class_type: 'ImageScale', inputs: { image: [imageId, 0], upscale_method: 'lanczos', width, height, crop: 'center' } }
+    if (isRef2va) encodeInputs['ref_images.ref_image_0'] = [scaleId, 0]
+    else encodeInputs.first_frame = [scaleId, 0]
+  }
+  // B38: fl2va ends on a second picture (last_frame, center crop like the
+  // node itself), ref2va takes up to nine references (ref_image_0 to _8).
+  // The node scales references on its own ("match"), so they go in as they are.
+  if (params.endImage && !isRef2va) {
+    const endId = String(n++)
+    const endScaleId = String(n++)
+    workflow[endId] = { class_type: 'LoadImage', inputs: { image: params.endImage } }
+    workflow[endScaleId] = { class_type: 'ImageScale', inputs: { image: [endId, 0], upscale_method: 'lanczos', width, height, crop: 'center' } }
+    encodeInputs.last_frame = [endScaleId, 0]
+  }
+  if (isRef2va) {
+    const more = params.inputImage ? (params.referenceImages ?? []).slice(0, localAnimateReferenceSlots(params.model)) : []
+    for (const [i, image] of more.entries()) {
+      const refId = String(n++)
+      workflow[refId] = { class_type: 'LoadImage', inputs: { image } }
+      encodeInputs[`ref_images.ref_image_${i + 1}`] = [refId, 0]
+    }
+    // The node numbers its pictures <Picture 1> and up; "image 2" in the
+    // prompt means the second of them (lib/image-ref-names).
+    if (more.length > 0) encodeInputs.prompt = canonicalImageRefs(params.prompt, 1 + more.length, 'minimaxH3')
+  }
+  if (isRef2va) {
+    encodeInputs.audio_vae = [audioVaeId, 0]
+    encodeInputs.ref_image_size = 'match'
+  }
+  const encodeId = String(n++)
+  workflow[encodeId] = { class_type: encodeNode, inputs: encodeInputs }
+
+  const guiderId = String(n++)
+  const schedulerId = String(n++)
+  const samplerSelectId = String(n++)
+  const noiseId = String(n++)
+  const sampleId = String(n++)
+  workflow[guiderId] = { class_type: 'BasicGuider', inputs: { model: [modelSrc, 0], conditioning: [encodeId, 0] } }
+  // The H3 turbo LoRA says its step count in its name (minimax_h3_fl2v_turbo_
+  // 8step_...), and the official template runs it at exactly that (Discord
+  // 2026-10-02, a user's ComfyUI screenshot: turbo_steps 8). The
+  // slider's 20 or more would only cost time on a 24 GB model.
+  const turbo = loras.map((l) => H3_STEP_LORA.exec(l)).find((m) => m)
+  // FastH3 is the 8 step checkpoint: the template runs exactly 8.
+  const steps = fast ? 8 : turbo ? Number(turbo[1]) : params.steps
+  workflow[schedulerId] = { class_type: 'BasicScheduler', inputs: { model: [modelSrc, 0], scheduler: params.scheduler || 'simple', steps, denoise: 1 } }
+  workflow[samplerSelectId] = { class_type: 'KSamplerSelect', inputs: { sampler_name: params.sampler || 'res_multistep' } }
+  workflow[noiseId] = { class_type: 'RandomNoise', inputs: { noise_seed: seed } }
+  workflow[sampleId] = {
+    class_type: 'SamplerCustomAdvanced',
+    inputs: { noise: [noiseId, 0], guider: [guiderId, 0], sampler: [samplerSelectId, 0], sigmas: [schedulerId, 0], latent_image: [encodeId, 1] },
+  }
+
+  const decodeId = String(n++)
+  const decodeAudioId = String(n++)
+  workflow[decodeId] = { class_type: 'VAEDecode', inputs: { samples: [sampleId, 0], vae: [vaeId, 0] } }
+  workflow[decodeAudioId] = { class_type: 'VAEDecodeAudio', inputs: { samples: [sampleId, 0], vae: [audioVaeId, 0] } }
+
+  addVideoWithAudioOutput(workflow, n, decodeId, params.fps || 24, [decodeAudioId, 0], allNodes, params.prompt)
+  return workflow
+}
+
+/** LTX counts frames in blocks of 8 plus 1 (97 and 121 are the usual ones).
+ *  Rounds to the nearest block, never below 9. */
+export function snapLtx25Length(frames: number): number {
+  const f = Number.isFinite(frames) && frames > 0 ? Math.round(frames) : 121
+  return Math.max(9, Math.round((f - 1) / 8) * 8 + 1)
+}
+
+/** The two sigma ladders of the distilled model: 8 steps on the half size
+ *  picture, then 3 after the latent upscale. Straight from the official
+ *  video_ltx2_5_t2v / _i2v templates. */
+const LTX25_SIGMAS_FIRST = '1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0'
+const LTX25_SIGMAS_SECOND = '0.85, 0.7250, 0.4219, 0.0'
+
+/**
+ * LTX 2.5 (Lightricks, ComfyUI 0.32.0). Picture and sound come out of one
+ * model in two passes, wired as the official Comfy-Org templates
+ * video_ltx2_5_t2v and video_ltx2_5_i2v do:
+ *
+ *   pass 1  an empty picture latent at HALF size plus an empty sound latent,
+ *           joined (LTXVConcatAVLatent), sampled with the 8 step ladder
+ *   upscale the picture half is split off, doubled by the latent upscaler and
+ *           joined with the sound half again
+ *   pass 2  3 more steps at full size
+ *   output  tiled VAE decode for the frames, the audio VAE for the sound,
+ *           CreateVideo muxes them
+ *
+ * A start image (i2v) is cut to the canvas, preprocessed and written into the
+ * first frame twice: at strength 0.7 on the half size latent, at 1 after the
+ * upscale. The official template also has a prompt enhancer (a second, 5 GB
+ * Gemma) and an auto duration head; both are optional there and left out here.
+ * Multishot needs nothing in the graph: it is the model's own behaviour.
+ */
+async function buildLtx25Workflow(params: VideoParams, seed: number, allNodes: NodePresence): Promise<ComfyApiGraph> {
+  requireRelease(allNodes, ['LTXVDualCFGGuider'], LTX25_NEEDS_UPDATE, 'ltx25')
+  requireNodes(allNodes, [
+    'LTXVConditioning', 'EmptyLTXVLatentVideo', 'LTXVEmptyLatentAudio', 'LTXVConcatAVLatent', 'LTXVSeparateAVLatent',
+    'LTXVLatentUpsampler', 'LatentUpscaleModelLoader', 'LTXVAudioVAEDecode', 'ManualSigmas', 'KSamplerSelect',
+    'RandomNoise', 'SamplerCustomAdvanced', 'VAEDecodeTiled', 'CLIPTextEncode',
+  ], 'LTX 2.5')
+  if (params.inputImage || params.continueFrom) requireNodes(allNodes, ['LTXVImgToVideoInplace', 'LTXVPreprocess', 'LoadImage', 'ImageScale'], 'LTX 2.5 image to video')
+  if (params.continueFrom) requireContinueNodes(allNodes, 'ltx25')
+
+  // The graph is the distilled one. The dev weights need a different schedule
+  // and guidance, and running them on this one gives noise.
+  if (/dev/i.test(params.model) && !/distilled/i.test(params.model)) {
+    throw new WorkflowUnavailableError(
+      'LU runs the distilled LTX 2.5 model. Pick the file with "distilled" in its name.',
+      'ltx25',
+    )
+  }
+
+  // The first pass runs at half size, so the final canvas must halve onto the
+  // 32 pixel grid the video VAE works on: multiples of 64.
+  const snap64 = (v: number | undefined, def: number) => Math.max(256, Math.round(((v && v > 0) ? v : def) / 64) * 64)
+  const width = snap64(params.width, 1280)
+  const height = snap64(params.height, 704)
+  const length = snapLtx25Length(params.frames || 121)
+  const fps = params.fps || 24
+
+  const [clipName, vaeName, audioVaeName] = await Promise.all([
+    findMatchingCLIP('ltx25', params.model),
+    findMatchingVAE('ltx25'),
+    findLtx25AudioVAE(),
+  ])
+  const upscalerName = nodeComboOptions(allNodes, 'LatentUpscaleModelLoader', 'model_name')
+    .find((m) => /ltx[._\- ]?2[._\- ]?5/i.test(m) && /spatial/i.test(m))
+  if (!upscalerName) {
+    throw new Error('No LTX 2.5 latent upscaler found. Download "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors" from the Model Manager.')
+  }
+
+  const workflow: ComfyApiGraph = {}
+  let n = 1
+  const add = (class_type: string, inputs: ComfyNodeInputs): string => {
+    const id = String(n++)
+    workflow[id] = { class_type, inputs }
+    return id
+  }
+
+  // The small variant is a GGUF quant (ComfyUI-GGUF), the full one a safetensors file.
+  const unetId = String(n++)
+  addUnetLoader(workflow, unetId, params.model, allNodes)
+  const clipId = add('CLIPLoader', { clip_name: clipName, type: 'ltxv', device: 'default' })
+  const vaeId = add('VAELoader', { vae_name: vaeName })
+  const audioVaeId = add('VAELoader', { vae_name: audioVaeName })
+  const upscaleLoaderId = add('LatentUpscaleModelLoader', { model_name: upscalerName })
+
+  const posId = add('CLIPTextEncode', { text: params.prompt, clip: [clipId, 0] })
+  const negId = add('CLIPTextEncode', { text: params.negativePrompt || '', clip: [clipId, 0] })
+  const condId = add('LTXVConditioning', { positive: [posId, 0], negative: [negId, 0], frame_rate: fps })
+
+  // A continued section (B18) pins the last frames of the clip so far, an
+  // 8n+1 run (17 frames are three latent frames), instead of one picture,
+  // and pins them fully in both passes: they are frames that already exist.
+  let imageSrc: string | null = null
+  let continued: ContinueSource | null = null
+  if (params.continueFrom) {
+    continued = addContinueSource(workflow, n, params.continueFrom, allNodes)
+    n = continued.n
+    const scaleId = add('ImageScale', { image: continued.tail, upscale_method: 'lanczos', width, height, crop: 'center' })
+    imageSrc = add('LTXVPreprocess', { image: [scaleId, 0], img_compression: 18 })
+  } else if (params.inputImage) {
+    const loadId = add('LoadImage', { image: params.inputImage })
+    const scaleId = add('ImageScale', { image: [loadId, 0], upscale_method: 'lanczos', width, height, crop: 'center' })
+    imageSrc = add('LTXVPreprocess', { image: [scaleId, 0], img_compression: 18 })
+  }
+  const pin = (latent: string, strength: number): string =>
+    imageSrc
+      ? add('LTXVImgToVideoInplace', { vae: [vaeId, 0], image: [imageSrc, 0], latent: [latent, 0], strength: continued ? 1 : strength, bypass: false })
+      : latent
+
+  // One pass past one window: context windows on the model (LTXVContextWindows).
+  let model: [string, number] = [unetId, 0]
+  if (params.contextWindows && !continued) {
+    const win = addContextWindows(workflow, n, model, 'ltx25', length, allNodes)
+    n = win.n
+    model = win.model
+  }
+
+  // Pass 1: half size.
+  const emptyId = add('EmptyLTXVLatentVideo', { width: width / 2, height: height / 2, length, batch_size: 1 })
+  const videoLatent1 = pin(emptyId, 0.7)
+  const audioLatentId = add('LTXVEmptyLatentAudio', { frames_number: length, frame_rate: fps, batch_size: 1, audio_vae: [audioVaeId, 0] })
+  const joint1 = add('LTXVConcatAVLatent', { video_latent: [videoLatent1, 0], audio_latent: [audioLatentId, 0] })
+  const guider1 = add('LTXVDualCFGGuider', { model, positive: [condId, 0], negative: [condId, 1], video_cfg: 1, audio_cfg: 1 })
+  const sampler1 = add('KSamplerSelect', { sampler_name: 'euler_ancestral' })
+  const sigmas1 = add('ManualSigmas', { sigmas: LTX25_SIGMAS_FIRST })
+  const noise1 = add('RandomNoise', { noise_seed: seed })
+  const sample1 = add('SamplerCustomAdvanced', {
+    noise: [noise1, 0], guider: [guider1, 0], sampler: [sampler1, 0], sigmas: [sigmas1, 0], latent_image: [joint1, 0],
+  })
+  const split1 = add('LTXVSeparateAVLatent', { av_latent: [sample1, 0] })
+
+  // Upscale the picture half, keep the sound half.
+  const upscaled = add('LTXVLatentUpsampler', { samples: [split1, 0], upscale_model: [upscaleLoaderId, 0], vae: [vaeId, 0] })
+  const videoLatent2 = pin(upscaled, 1)
+  const joint2 = add('LTXVConcatAVLatent', { video_latent: [videoLatent2, 0], audio_latent: [split1, 1] })
+
+  // Pass 2: full size.
+  const guider2 = add('LTXVDualCFGGuider', { model, positive: [condId, 0], negative: [condId, 1], video_cfg: 1, audio_cfg: 1 })
+  const sampler2 = add('KSamplerSelect', { sampler_name: 'euler_ancestral' })
+  const sigmas2 = add('ManualSigmas', { sigmas: LTX25_SIGMAS_SECOND })
+  const noise2 = add('RandomNoise', { noise_seed: seed })
+  const sample2 = add('SamplerCustomAdvanced', {
+    noise: [noise2, 0], guider: [guider2, 0], sampler: [sampler2, 0], sigmas: [sigmas2, 0], latent_image: [joint2, 0],
+  })
+  const split2 = add('LTXVSeparateAVLatent', { av_latent: [sample2, 0] })
+
+  const decodeId = add('VAEDecodeTiled', { samples: [split2, 0], vae: [vaeId, 0], tile_size: 512, overlap: 64, temporal_size: 64, temporal_overlap: 16 })
+  const audioDecodeId = add('LTXVAudioVAEDecode', { samples: [split2, 1], audio_vae: [audioVaeId, 0] })
+
+  if (continued && params.continueFrom) {
+    const joined = addStitch(workflow, n, continued.frames, [decodeId, 0], params.continueFrom.overlap, allNodes)
+    n = joined.n
+    // The sound so far plus the new sound past the overlap. A clip so far
+    // without sound (made elsewhere) keeps only the new part's sound.
+    const sound = addAudioStitch(workflow, n, continued.audio, [audioDecodeId, 0], params.continueFrom.overlap / fps, allNodes)
+    if (sound) n = sound.n
+    addVideoWithAudioOutput(workflow, n, joined.images[0], fps, sound ? sound.audio : [audioDecodeId, 0], allNodes, params.prompt)
+    return workflow
+  }
+  addVideoWithAudioOutput(workflow, n, decodeId, fps, [audioDecodeId, 0], allNodes, params.prompt)
+  return workflow
+}
+
 // ─── 2.5.8 specialized local lanes (music / talking character / motion) ─────
 //
 // These intents run on node families that ship with CURRENT ComfyUI cores
@@ -1878,18 +3215,69 @@ export interface LocalOpParams {
 const UPDATE_COMFY_HINT =
   'Update ComfyUI (Settings, AI Backends, Update ComfyUI), restart it, then generate again.'
 
+/** The core video nodes a continued section is built from (B18). */
+function requireContinueNodes(allNodes: NodePresence, strategy: WorkflowStrategy): void {
+  requireRelease(allNodes, ['LoadVideo', 'GetVideoComponents', 'ImageFromBatch'], CONTINUE_NEEDS_UPDATE, strategy)
+}
+
 function requireNodes(allNodes: NodePresence, needed: string[], lane: string): void {
   const missing = needed.filter((n) => !allNodes[n])
   if (missing.length > 0) {
     throw new WorkflowUnavailableError(
       `${lane} needs ComfyUI nodes this install does not have yet (${missing.join(', ')}). ${UPDATE_COMFY_HINT}`,
       'unavailable',
+      undefined,
+      { needsComfyUpdate: true },
     )
   }
 }
 
+/** Like requireNodes, for a model that arrived in a known ComfyUI release: the
+ *  missing marker node means an older install, and the answer is the update
+ *  sentence for THAT model (not a list of node names), flagged so Create offers
+ *  the one click update. */
+function requireRelease(allNodes: NodePresence, marker: string[], updateSentence: string, strategy: WorkflowStrategy): void {
+  if (marker.every((m) => allNodes[m])) return
+  throw new WorkflowUnavailableError(updateSentence, strategy, undefined, { needsComfyUpdate: true })
+}
+
 /** UNET loader that understands GGUF quants: .gguf files load through the
  *  city96 GGUF pack's UnetLoaderGGUF, everything else through core UNETLoader. */
+/** Discord 2026-09-26/28: "Node 1
+ *  (CheckpointLoaderSimple): Value not in list". The strategy comes from the
+ *  file NAME, and a name LU cannot place ('unknown') falls to the checkpoint
+ *  pipeline. For a file that sits in diffusion_models that is a guaranteed
+ *  rejection, because CheckpointLoaderSimple only lists models/checkpoints.
+ *  Say what is wrong instead. An unreadable enum stays silent, as before. */
+function assertCheckpointListed(model: string, allNodes: NodePresence): void {
+  const checkpoints = nodeComboOptions(allNodes, 'CheckpointLoaderSimple', 'ckpt_name')
+  if (checkpoints.length === 0 || checkpoints.includes(model)) return
+  const unets = [
+    ...nodeComboOptions(allNodes, 'UNETLoader', 'unet_name'),
+    ...nodeComboOptions(allNodes, 'UnetLoaderGGUF', 'unet_name'),
+  ]
+  throw new WorkflowUnavailableError(
+    unets.includes(model)
+      ? `LU does not recognize which model family ${model} belongs to, so it has no pipeline for it. It sits in models/diffusion_models, where an SD 1.5 / SDXL checkpoint does not work. Pick another model, or report the file name so LU can learn it.`
+      : `${model} is no longer in ComfyUI's model list. It may have been moved or deleted. Pick another model, or restart ComfyUI after adding files.`,
+    'checkpoint',
+  )
+}
+
+/** Discord 2026-09-26: "Node 2 (CLIPLoader): Value not in list".
+ *  Newer model families need a CLIPLoader type an older ComfyUI does not have
+ *  yet (flux2, krea2, qwen_image). Only checked when the enum is readable. */
+function assertClipTypeKnown(clipType: string, type: ModelType, strategy: WorkflowStrategy, allNodes: NodePresence): void {
+  const types = nodeComboOptions(allNodes, 'CLIPLoader', 'type')
+  if (types.length === 0 || types.includes(clipType)) return
+  throw new WorkflowUnavailableError(
+    `Your ComfyUI is too old for ${type} models (its text encoder loader has no "${clipType}" type). Update ComfyUI, then try again.`,
+    strategy,
+    undefined,
+    { needsComfyUpdate: true },
+  )
+}
+
 function addUnetLoader(workflow: ComfyApiGraph, id: string, model: string, allNodes: NodePresence): void {
   if (model.toLowerCase().endsWith('.gguf')) {
     if (!allNodes['UnetLoaderGGUF']) {
@@ -1933,6 +3321,59 @@ function addVideoWithAudioOutput(
 }
 
 /**
+ * YuE2 (m-a-p, ComfyUI 0.36.0). Songs with vocals from a style and lyrics, the
+ * graph of the official template audio_yue2_text2music with ABC planning off:
+ * the checkpoint's own text model writes the music tokens
+ * (YuE2GenerateMusic, which also reports how many seconds it made), a
+ * KSampler turns them into audio latents of exactly that length
+ * (EmptyYuE2LatentAudio) and the checkpoint's VAE decodes them.
+ *
+ * The sampler is the template's (32 steps, cfg 1, dpm_2, sgm_uniform) and is
+ * pinned: the music sliders are tuned for ACE Step. The prompt is the style,
+ * the lyrics field is the lyrics. An empty ABC input makes the node switch to
+ * its own "off" mode, as the template does.
+ */
+function buildYue2Workflow(params: LocalOpParams, seed: number, allNodes: NodePresence): ComfyApiGraph {
+  requireRelease(allNodes, ['YuE2GenerateMusic', 'EmptyYuE2LatentAudio'], YUE2_NEEDS_UPDATE, 'unavailable')
+  requireNodes(allNodes, ['ConditioningZeroOut', 'KSampler', 'VAEDecodeAudio', 'SaveAudioMP3'], 'Local music')
+
+  const workflow: ComfyApiGraph = {}
+  let n = 1
+  const seconds = Math.max(5, Math.min(600, params.seconds || 120))
+
+  const ckptId = String(n++)
+  workflow[ckptId] = { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: params.model } }
+  const musicId = String(n++)
+  workflow[musicId] = {
+    class_type: 'YuE2GenerateMusic',
+    inputs: {
+      clip: [ckptId, 1], style: params.prompt, lyrics: params.lyrics || '', abc: '', seed, mode: 'full',
+      max_duration: seconds, temperature: 1, top_p: 0.95, top_k: 100, repetition_penalty: 1.2,
+    },
+  }
+  const negId = String(n++)
+  workflow[negId] = { class_type: 'ConditioningZeroOut', inputs: { conditioning: [musicId, 0] } }
+  const latentId = String(n++)
+  workflow[latentId] = { class_type: 'EmptyYuE2LatentAudio', inputs: { seconds: [musicId, 1], batch_size: 1 } }
+  const samplerId = String(n++)
+  workflow[samplerId] = {
+    class_type: 'KSampler',
+    inputs: {
+      model: [ckptId, 0], positive: [musicId, 0], negative: [negId, 0], latent_image: [latentId, 0],
+      seed, steps: 32, cfg: 1.0, sampler_name: 'dpm_2', scheduler: 'sgm_uniform', denoise: 1.0,
+    },
+  }
+  const decodeId = String(n++)
+  workflow[decodeId] = { class_type: 'VAEDecodeAudio', inputs: { samples: [samplerId, 0], vae: [ckptId, 2] } }
+  const saveId = String(n++)
+  workflow[saveId] = {
+    class_type: 'SaveAudioMP3',
+    inputs: { audio: [decodeId, 0], filename_prefix: promptFilenamePrefix(params.prompt, false), quality: 'V0' },
+  }
+  return workflow
+}
+
+/**
  * Music (ACE-Step). All-in-one checkpoint → ACE text encode (tags + lyrics) →
  * KSampler → VAEDecodeAudio → SaveAudioMP3. ACE-Step 1.5 checkpoints route
  * through the 1.5 encoder/latent pair (different node ids AND different latent
@@ -1941,6 +3382,7 @@ function addVideoWithAudioOutput(
  * encoder runs an LLM pass that would double the cost for no benefit.
  */
 export function buildMusicWorkflow(params: LocalOpParams, seed: number, allNodes: NodePresence): ComfyApiGraph {
+  if (classifyModel(params.model) === 'yue2') return buildYue2Workflow(params, seed, allNodes)
   const workflow: ComfyApiGraph = {}
   let n = 1
   const isAce15 = /1[._-]?5/.test(params.model.toLowerCase().replace(/\.safetensors$/, '').replace(/^.*ace[_-]?step/, ''))
@@ -1987,7 +3429,7 @@ export function buildMusicWorkflow(params: LocalOpParams, seed: number, allNodes
   // image-model sampler (dpmpp_2m/karras etc. leaks in through the shared knobs).
   // And the 1.5 TURBO checkpoint is distilled for ~10 steps at cfg 1.0 — the
   // shared 'ace' default (50 steps, cfg 5) overcooks it into near-silence
-  // (measured: -43 dB mean output vs -18 dB at the turbo recipe, David's "quiet
+  // (measured: -43 dB mean output vs -18 dB at the turbo recipe, the owner's "quiet
   // noise" bug). Pin the turbo recipe by name; other ACE checkpoints keep the
   // composer's step/cfg but still sample on euler/simple.
   const isTurbo = /turbo/.test(params.model.toLowerCase())
@@ -2018,7 +3460,7 @@ export function buildMusicWorkflow(params: LocalOpParams, seed: number, allNodes
  * a silent talking-head clip is useless. Uses the Wan 2.1 VAE + UMT5 encoder
  * (the S2V-14B pairing from the official release).
  *
- * K2 (mrvideogame9829/sockenmonster, Discord "HELP WITH MODELS"/help-18,
+ * K2 (a user, Discord "HELP WITH MODELS"/help-18,
  * 2026-09-15/17): the CLIP/VAE/audio-encoder filenames below used to be
  * written straight into their loader nodes as literal strings, never checked
  * against what ComfyUI actually has installed. Whichever one the box didn't
@@ -2213,6 +3655,76 @@ export async function buildMotionWorkflow(params: LocalOpParams, seed: number, a
   return workflow
 }
 
+/**
+ * Animate with Wan 2.1 VACE as a reference model (D24): the picture goes into
+ * WanVaceToVideo as reference_image, with no control video, so the clip is
+ * made from the prompt around the subject instead of starting on the picture.
+ * The same conditioner, sampling and trim as the VACE path of
+ * buildMotionWorkflow above, only without the pose video and its audio.
+ */
+export async function buildVaceReferenceWorkflow(params: VideoParams, seed: number, nodes: CategorizedNodes, allNodes: NodePresence): Promise<ComfyApiGraph> {
+  if (!params.inputImage) throw new Error('Add the reference picture first.')
+  requireNodes(allNodes, ['WanVaceToVideo', 'TrimVideoLatent', 'LoadImage', 'ImageScale'], 'Animate with VACE')
+  const workflow: ComfyApiGraph = {}
+  let n = 1
+
+  const snap16 = (v: number, def: number) => Math.max(16, Math.round(((v && v > 0) ? v : def) / 16) * 16)
+  const width = snap16(params.width, 832)
+  const height = snap16(params.height, 480)
+  const length = snapWanLength(params.frames || 81)
+
+  const [wanClip, wanVae] = await Promise.all([
+    findMatchingCLIP('wan', params.model),
+    findMatchingVAE('wan'),
+  ])
+
+  const unetId = String(n++)
+  addUnetLoader(workflow, unetId, params.model, allNodes)
+  const clipId = String(n++)
+  workflow[clipId] = { class_type: 'CLIPLoader', inputs: { clip_name: wanClip, type: 'wan', device: 'default' } }
+  const vaeId = String(n++)
+  workflow[vaeId] = { class_type: 'VAELoader', inputs: { vae_name: wanVae } }
+  const posId = String(n++)
+  workflow[posId] = { class_type: 'CLIPTextEncode', inputs: { text: params.prompt || 'the subject moving naturally, high quality', clip: [clipId, 0] } }
+  const negId = String(n++)
+  workflow[negId] = { class_type: 'CLIPTextEncode', inputs: { text: params.negativePrompt || '', clip: [clipId, 0] } }
+
+  const imageId = String(n++)
+  workflow[imageId] = { class_type: 'LoadImage', inputs: { image: params.inputImage } }
+  const scaleId = String(n++)
+  workflow[scaleId] = { class_type: 'ImageScale', inputs: { image: [imageId, 0], upscale_method: 'lanczos', width, height, crop: 'center' } }
+
+  const condId = String(n++)
+  workflow[condId] = {
+    class_type: 'WanVaceToVideo',
+    inputs: {
+      positive: [posId, 0], negative: [negId, 0], vae: [vaeId, 0],
+      width, height, length, batch_size: 1, strength: 1.0,
+      reference_image: [scaleId, 0],
+    },
+  }
+
+  const shiftId = String(n++)
+  workflow[shiftId] = { class_type: 'ModelSamplingSD3', inputs: { model: [unetId, 0], shift: 8.0 } }
+  const samplerId = String(n++)
+  workflow[samplerId] = {
+    class_type: 'KSampler',
+    inputs: {
+      model: [shiftId, 0], positive: [condId, 0], negative: [condId, 1], latent_image: [condId, 2],
+      seed, steps: params.steps, cfg: params.cfgScale, sampler_name: params.sampler, scheduler: params.scheduler, denoise: 1.0,
+    },
+  }
+  // The reference rides in front of the clip as extra latent frames; the trim
+  // takes them out again so the video does not open on a still of it.
+  const trimId = String(n++)
+  workflow[trimId] = { class_type: 'TrimVideoLatent', inputs: { samples: [samplerId, 0], trim_amount: [condId, 3] } }
+  const decodeId = String(n++)
+  workflow[decodeId] = videoDecodeNode([trimId, 0], [vaeId, 0], 'VAEDecodeTiled' in allNodes)
+
+  addVideoOutput(workflow, n, decodeId, params.fps || 16, nodes, params.prompt)
+  return workflow
+}
+
 /** Entry point for the specialized local lanes — fetches the live node
  *  catalogue once and dispatches to the lane's builder. */
 export async function buildLocalOpWorkflow(params: LocalOpParams): Promise<ComfyApiGraph> {
@@ -2238,7 +3750,7 @@ async function buildFramePackWorkflow(params: VideoParams, seed: number, nodes: 
   const samplerId = String(n++)
   const decodeId = String(n++)
 
-  // VRAM-safe load (David 2026-06-11, live OOM on his RTX 3060 12GB):
+  // VRAM-safe load (2026-06-11, live OOM on his RTX 3060 12GB):
   // `quantization:'disabled' + base_precision:'bf16' + load_device:'main_device'`
   // UPCAST the fp8 13B weights to bf16 (~26 GB) and put the whole transformer on
   // the GPU at once → torch.OutOfMemoryError in LoadFramePackModel before a single
@@ -2261,7 +3773,7 @@ async function buildFramePackWorkflow(params: VideoParams, seed: number, nodes: 
   // FramePack is a HunyuanVideo 1.0 model. Its sampler allocates the history
   // buffer with 16 latent channels, and the HunyuanVideo 1.5 VAE encodes 32, so
   // pairing the two dies at the first section with "Expected size 32 but got
-  // size 16" (bob80817, D#104). `6fb83d31` pinned this to the 1.5 file while
+  // size 16" (D#104). `6fb83d31` pinned this to the 1.5 file while
   // fixing unrelated filename typos, which broke every FramePack run since.
   //
   // Resolved against the disk rather than pinned again: the resolver refuses a
@@ -2270,7 +3782,7 @@ async function buildFramePackWorkflow(params: VideoParams, seed: number, nodes: 
   // ComfyUI "value not in list" for a filename he never chose.
   workflow[vaeId] = { class_type: 'VAELoader', inputs: { vae_name: await findMatchingVAE('framepack') } }
   workflow[imageId] = { class_type: 'LoadImage', inputs: { image: params.inputImage || 'input_image.png' } }
-  // Scale the source to the resolved generation size before encoding (David
+  // Scale the source to the resolved generation size before encoding (the owner
   // 2026-06-11). FramePack otherwise samples at the full source resolution
   // (a 1024×1024 still → very slow + heavy on a 12 GB card). resolveI2VResolution
   // already picked an aspect-preserving size capped at 768 / snapped to 16;

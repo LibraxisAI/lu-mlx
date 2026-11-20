@@ -21,16 +21,35 @@ import { resolve, join } from 'node:path'
 const src = resolve(__dirname, '..', '..')
 const rust = resolve(__dirname, '..', '..', '..', 'src-tauri', 'src')
 
-/** Die Beschriftungen der Reiterleiste, so wie ein Mensch sie liest. */
+/**
+ * Die Beschriftungen der Reiterleiste, so wie ein Mensch sie liest.
+ *
+ * Die Leiste zeichnet seit dem 08.10.2026 die jeweilige Fassung der Seite:
+ * die klassische auf Windows und Linux (ein Icon vor jedem Wort), das
+ * Redesign auf dem Mac (nur das Wort). Gelesen werden beide, und sie muessen
+ * dieselben Namen tragen, sonst gaebe ein Rat auf einer der beiden Seiten
+ * einen Reiter an, den es dort nicht gibt.
+ */
 function reiterBeschriftungen(): string[] {
-  const datei = readFileSync(join(src, 'components', 'models', 'ModelManager.tsx'), 'utf8')
-  const anfang = datei.indexOf('{/* Get new / Installed segment')
-  const ende = datei.indexOf('<div className="flex-1" />', anfang)
+  const skin = join(src, 'components', 'models', 'skin')
+
+  const klassisch = readFileSync(join(skin, 'classic.tsx'), 'utf8')
+  const anfang = klassisch.indexOf('{/* Get new / Installed segment')
+  // Die Leiste endet am Suchfeld, das den Rest der Zeile nimmt.
+  const ende = klassisch.indexOf('<div className="relative ml-auto flex-1', anfang)
   expect(anfang).toBeGreaterThan(0)
   expect(ende).toBeGreaterThan(anfang)
-  const leiste = datei.slice(anfang, ende)
-  const namen = [...leiste.matchAll(/\/>\s*([A-Za-z][A-Za-z ]*?)\s*$/gm)].map((m) => m[1].trim())
+  const namen = [...klassisch.slice(anfang, ende).matchAll(/\/>\s*([A-Za-z][A-Za-z ]*?)\s*$/gm)].map((m) => m[1].trim())
   expect(namen.length).toBeGreaterThan(1)
+
+  const mac = readFileSync(join(skin, 'mac.tsx'), 'utf8')
+  const macAnfang = mac.indexOf('{/* Get new / Installed */}')
+  const macEnde = mac.indexOf('{children}', macAnfang)
+  expect(macAnfang).toBeGreaterThan(0)
+  expect(macEnde).toBeGreaterThan(macAnfang)
+  const macNamen = [...mac.slice(macAnfang, macEnde).matchAll(/^\s*([A-Z][A-Za-z ]*?)\s*$/gm)].map((m) => m[1].trim())
+  expect(macNamen).toEqual(namen)
+
   return namen
 }
 

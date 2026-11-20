@@ -50,7 +50,7 @@
  *
  * A fifth fassung, Web's `main` branch (pre-B1-fix, still live in
  * production as of this writing), is compared too when a Web checkout is
- * reachable; see WEB_KANDIDATEN below. Web's `main` and Desktop's WEAK_SHA
+ * reachable; see LU_WEB_REPO below. Web's `main` and Desktop's WEAK_SHA
  * are the same regression by construction (R5-9 pulled Web's fassung into
  * Desktop), so this mostly reconfirms the WEAK_SHA comparison, but it is the
  * one comparison that runs against the actual code Web has live today.
@@ -61,11 +61,12 @@
  */
 import { describe, it, expect, beforeAll } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { existsSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { writeFileSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { checkPromptSafety as currentCheck } from '../safety'
+import { webCheckout } from '../../__tests__/web-checkout'
 
 const REPO_ROOT = resolve(__dirname, '../../../..')
 const PATH_IN_REPO = 'src/lib/render/safety.ts'
@@ -136,22 +137,11 @@ beforeAll(async () => {
 })
 
 /**
- * Wo der Web-Checkout liegt, fuer den Vergleich gegen Webs `main`. Ohne
- * LU_WEB_REPO und ohne Treffer unter den Nachbarpfaden wird die betroffene
- * describe-Gruppe uebersprungen, mit einer Meldung auf stderr statt still
- * gruen (Hausmuster, siehe katalog-paritaet-web.test.ts).
+ * Wo der Web-Checkout liegt, fuer den Vergleich gegen Webs `main`: das sagt
+ * nur LU_WEB_REPO (web-checkout.ts). Ohne die Variable wird die betroffene
+ * describe-Gruppe uebersprungen, mit einer Zeile auf stderr.
  */
-const WEB_KANDIDATEN = [
-  ...(process.env.LU_WEB_REPO?.trim() ? [resolve(process.env.LU_WEB_REPO.trim())] : []),
-  resolve(process.cwd(), '../lu-300-web'),
-  resolve(process.cwd(), '../lu-300-web-katalog'),
-]
-const WEB = WEB_KANDIDATEN.find((p) => existsSync(resolve(p, 'apps/web/lib/render/safety.ts')))
-const WEB_GRUND =
-  '[safety-strength-regression] Web-Vergleich uebersprungen: kein Web-Checkout gefunden. Gesucht in: ' +
-  WEB_KANDIDATEN.join(' | ') +
-  '. Setze LU_WEB_REPO, damit der Vergleich gegen Webs main-Branch laeuft.'
-if (!WEB) process.stderr.write(WEB_GRUND + '\n')
+const WEB = webCheckout('safety-strength-regression', ['apps/web/lib/render/safety.ts'])
 
 let webMainCheck: CheckFn | undefined
 beforeAll(async () => {

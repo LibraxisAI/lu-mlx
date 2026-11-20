@@ -14,7 +14,7 @@ interface ToolGroup {
 }
 
 // Creative image/video. Surface BOTH generators for any creative request so
-// the model can chain image → video in one conversation (David: "ein Video
+// the model can chain image → video in one conversation (the owner: "ein Video
 // aus dem Bild soll die LLM auch machen können"). Without video_generate
 // here the keyword path dropped it (it was in no group + not ALWAYS_INCLUDE),
 // so a "now animate it" follow-up had no tool to call.
@@ -76,6 +76,30 @@ const DELEGATE_KEYWORDS = [
 ]
 
 /**
+ * The words that bring get_settings and set_setting along (A11). Settings in
+ * general, in both languages, plus the names of the settings people ask for
+ * most. A false positive costs ~200 tokens on one turn; nothing changes
+ * without the user's yes on the card.
+ */
+export const SETTINGS_KEYWORDS = [
+  'setting', 'einstellung', 'preference', 'get_settings', 'set_setting',
+  'auto compact', 'auto-compact', 'autocompact', 'compact at', 'compact threshold',
+  'dark mode', 'light mode', 'darkmode', 'dark theme', 'light theme', 'dunkelmodus', 'dunklen modus', 'hellen modus', 'app theme',
+  'temperature', 'temperatur', 'top p', 'top_p', 'top k', 'top_k', 'max tokens',
+  'context window', 'kontextfenster', 'num_ctx', 'timeout', 'zeitlimit',
+  'reasoning effort', 'thinking budget', 'think budget', 'denkbudget', 'thinking mode',
+  'caveman', 'small model mode', 'small-model mode', 'emoji',
+  'search provider', 'suchanbieter', 'user agent', 'user-agent',
+  'gpu layers', 'flash attention', 'kv cache', 'download limit', 'repo map', 'review mode', 'architect mode',
+]
+
+/** True when a chat message is about LU's own settings. */
+export function asksAboutSettings(userMessage: string): boolean {
+  const msg = (userMessage || '').toLowerCase()
+  return SETTINGS_KEYWORDS.some((k) => msg.includes(k))
+}
+
+/**
  * The three tools that draw, film and automate. Everything else in the coding
  * catalog earns its place on every turn; these three cost 1.963 of the 6.186
  * tokens a coding step sends (measured 2026-08-12 through the real registry
@@ -89,7 +113,27 @@ export const CREATE_TOOLS = ['image_generate', 'video_generate', 'run_workflow']
  * CREATE_TOOLS stays its own exported list because the Codex asset line keys
  * off exactly those three; this map is the superset the filter walks.
  */
+// C59 A6/A8: the words that bring memory and session_search (TOOL_GROUPS
+// below) also open them on a cloud coding step (gateCreateTools).
+const MEMORY_KEYWORDS: string[] = ['merk dir', 'merke dir', 'merk es', 'merk euch', 'remember', 'vergiss', 'forget that', 'notier dir',
+  'für später', 'for later', 'from now on', 'ab jetzt', 'in zukunft', 'in future', 'my preference', 'meine vorliebe']
+const SESSION_KEYWORDS: string[] = ['früheren chat', 'frueheren chat', 'anderen chat', 'letzten chat', 'alten chat', 'in welchem chat', 'previous chat',
+  'earlier chat', 'other chat', 'earlier conversation', 'last time we', 'letztes mal', 'neulich', 'besprochen', 'we discussed',
+  'wir hatten', 'we talked', 'we decided', 'hatten wir', 'haben wir festgelegt']
+
+/** The C59 tools that ride along only on their own words (see GATE_KEYWORDS). */
+const ON_DEMAND_TOOLS = new Set(['memory', 'session_search', 'skill_view', 'skill_save'])
+
 const GATE_KEYWORDS: Record<string, readonly string[]> = {
+  // C59 A6–A8: on demand only. Every step of a cloud coding run would pay
+  // ~2.5k characters for four tools a refactor never calls. memory and
+  // session_search open on their words; the skill tools are added by
+  // withSkillTools (lib/skill-tools.ts) when there are skills or the run may
+  // propose one, never by the catalog itself.
+  memory: MEMORY_KEYWORDS,
+  session_search: SESSION_KEYWORDS,
+  skill_view: [],
+  skill_save: [],
   image_generate: MEDIA_KEYWORDS,
   video_generate: MEDIA_KEYWORDS,
   run_workflow: WORKFLOW_KEYWORDS,
@@ -110,6 +154,14 @@ const GATE_KEYWORDS: Record<string, readonly string[]> = {
   // Laufs — und dann kommen diese beiden mit, genau wenn sie gebraucht werden.
   check_tasks: DELEGATE_KEYWORDS,
   message_agent: DELEGATE_KEYWORDS,
+  // A11: in Code only on a message about settings, like everywhere else.
+  // C60: all self-control tools (settings, models, services, downloads) on
+  // the wider gate generated from the settings catalog.
+  ...Object.fromEntries(SELF_CONTROL_TOOL_NAMES.map((n) => [n, settingsGateWords()])),
+  // Watchers: only on a message about a later time or a repeat. A clock
+  // time alone ("um 18:00") is no word; Agent and chat add the tools by the
+  // full check (asksAboutWatchers), Code by withSelfControlTools.
+  ...Object.fromEntries(WATCHER_TOOL_NAMES.map((n) => [n, WATCHER_GATE_WORDS])),
 }
 
 /**
@@ -127,6 +179,16 @@ export function isGatedTool(name: string): boolean {
 
 const TOOL_GROUPS: ToolGroup[] = [
   {
+    // C59 A6: the user asks the agent to keep or drop something for later.
+    keywords: MEMORY_KEYWORDS,
+    tools: ['memory'],
+  },
+  {
+    // C59 A8: the user points at an earlier chat.
+    keywords: SESSION_KEYWORDS,
+    tools: ['session_search'],
+  },
+  {
     // Web search intents. Only EXPLICIT web cues route here. Bare 'search',
     // 'latest', 'current', 'aktuell', 'neueste', 'suche' were removed: they
     // collide head-on with coding intents ("search the codebase", "fix the
@@ -139,7 +201,12 @@ const TOOL_GROUPS: ToolGroup[] = [
       'news', 'web search', 'websearch', 'search online', 'search the web', 'browse', 'website', 'webseite',
       'url', 'http://', 'https://', 'weather', 'wetter',
       'such nach', 'such im', 'im internet', 'recherch', 'nachrichten', 'neueste'],
-    tools: ['web_search', 'web_fetch'],
+    tools: ['web_research', 'web_fetch'],
+  },
+  {
+    // P-L (3.1.0): the LU browser, only when the user asks for a browser.
+    keywords: ['browser', 'im browser', 'in the browser', 'browse to', 'open the page', 'oeffne die seite', 'zeig mir die seite', 'show me the page'],
+    tools: ['browser_open', 'browser_scroll', 'browser_click_link'],
   },
   {
     keywords: ['read', 'open', 'show', 'cat', 'content of', 'what does', 'look at', 'check file'],
@@ -203,6 +270,15 @@ const TOOL_GROUPS: ToolGroup[] = [
     keywords: WORKFLOW_KEYWORDS,
     tools: ['run_workflow'],
   },
+  {
+    // C60: the self-control tools on the gate generated from the catalog.
+    keywords: settingsGateWords(),
+    tools: [...SELF_CONTROL_TOOL_NAMES],
+  },
+  {
+    keywords: [...WATCHER_GATE_WORDS],
+    tools: [...WATCHER_TOOL_NAMES],
+  },
 ]
 
 // Tools that should always be available regardless of the prompt — they're
@@ -250,7 +326,11 @@ export const SMALL_MODEL_MAX_TOOLS = ALWAYS_INCLUDE.length + 2
 export const EMBEDDING_ROUTING_THRESHOLD = 15
 
 import type { EmbeddingFn } from '../api/agents/embedding-router'
+import { REA_SERVER_ID, reaToolsFor } from './plugins/rea-tools'
+import { SELF_CONTROL_TOOL_NAMES, settingsGateWords } from './settings-tool-names'
+import { WATCHER_TOOL_NAMES, WATCHER_GATE_WORDS } from './watcher-tool-names'
 import { selectToolsByEmbedding } from '../api/agents/embedding-router'
+import { isMobile } from './device-kind'
 
 /**
  * Select relevant tools based on user message content.
@@ -261,6 +341,9 @@ export function selectRelevantTools(
   allTools: MCPToolDefinition[],
   permissions: PermissionMap,
   maxTools?: number,
+  /** What REA's tools are routed on, when the caller knows the conversation
+   *  (rea-tools reaRoutingText). Falls back to this message alone. */
+  reaText?: string,
 ): MCPToolDefinition[] {
   const msg = userMessage.toLowerCase()
   const selectedNames = new Set<string>(ALWAYS_INCLUDE)
@@ -287,9 +370,13 @@ export function selectRelevantTools(
   // the builtin names, so on this path a connected server's tools were
   // unreachable no matter what the user typed. Connecting the server is
   // itself the signal that its tools are wanted: always offer them.
+  // REA (lib/plugins/rea-tools.ts) is the exception: its 207 tools would fill
+  // a local model's context, so a turn gets the ones its words point at.
   for (const t of allTools) {
-    if (t.source === 'external') selectedNames.add(t.name)
+    if (t.source === 'external' && t.serverId !== REA_SERVER_ID) selectedNames.add(t.name)
   }
+  const reaNames = allTools.filter((t) => t.serverId === REA_SERVER_ID).map((t) => t.name)
+  if (reaNames.length > 0) for (const n of reaToolsFor(reaText ?? userMessage, reaNames)) selectedNames.add(n)
 
   // A tool the user names verbatim is always offered, builtin or external.
   for (const t of allTools) {
@@ -326,8 +413,12 @@ export function selectRelevantTools(
     // Der Coding-Zug verlor damit sein letztes Werkzeug, um Dateien zu finden
     // — dieselbe Regression, gegen die die Sperren in tool-selection.test.ts
     // ("coding intent routing") gebaut wurden.
+    // P-L (3.1.0): web_research takes the place of web_search here. It
+    // searches AND reads in one call, so a small model under the cap gets
+    // real page text without a second round, and the pair still costs only
+    // two places.
     if (!lokaleArbeit) {
-      selectedNames.add('web_search')
+      selectedNames.add('web_research')
       selectedNames.add('web_fetch')
     }
   }
@@ -360,7 +451,14 @@ export function selectRelevantTools(
   // NUR in diese Richtung: web_fetch kommt zu web_search, nicht umgekehrt. Wer
   // eine URL hat, braucht keine Suche, und unter dem Small-Model-Deckel kostet
   // jedes ungefragte Werkzeug einen von zwei freien Plaetzen.
-  if (selectedNames.has('web_search')) selectedNames.add('web_fetch')
+  if (selectedNames.has('web_search') || selectedNames.has('web_research')) selectedNames.add('web_fetch')
+  // A catalog without web_research (a surface that does not register it)
+  // keeps the old pair. So does the phone: its ordered search ("Websuche:
+  // …") pins web_search, and web_research was not checked on a phone yet.
+  if (selectedNames.has('web_research') && (isMobile() || !allTools.some((t) => t.name === 'web_research'))) {
+    selectedNames.delete('web_research')
+    selectedNames.add('web_search')
+  }
 
   // Filter by permissions (blocked categories excluded)
   const available = allTools.filter(t => permissions[t.category] !== 'blocked')
@@ -405,14 +503,16 @@ export function gateCreateTools<T extends { name: string }>(
   userMessage: string,
   opened: boolean | Iterable<string> = false,
 ): T[] {
-  if (opened === true) return defs
   // A caller that tracks WHICH tool reopened the gate may pass the names; the
-  // boolean form stays the run-wide "everything is open again" it always was.
-  const reopened = opened === false ? null : new Set(opened)
+  // boolean form stays the run-wide "everything is open again" it always was,
+  // for the create tools. The C59 tools stay on their own words: a creative
+  // run has no more use for them than a refactor.
+  const reopened = opened === false || opened === true ? null : new Set(opened)
   const msg = userMessage.toLowerCase()
   return defs.filter((t) => {
     const words = GATE_KEYWORDS[t.name]
     if (!words) return true
+    if (opened === true && !ON_DEMAND_TOOLS.has(t.name)) return true
     if (reopened?.has(t.name)) return true
     if (msg.includes(t.name)) return true
     return words.some((k) => msg.includes(k))
@@ -536,13 +636,18 @@ export async function selectRelevantToolsAsync(
   userMessage: string,
   allTools: MCPToolDefinition[],
   permissions: PermissionMap,
-  opts?: { embed?: EmbeddingFn; embeddingThreshold?: number; topN?: number; maxTools?: number },
+  opts?: {
+    embed?: EmbeddingFn; embeddingThreshold?: number; topN?: number; maxTools?: number; reaText?: string
+    /** Keyword picks that go ahead of the semantic ranking under the cap
+     *  (agent-profile COMPACT_PREFER). Unset: the ranking alone, as before. */
+    prefer?: readonly string[]
+  },
 ): Promise<MCPToolDefinition[]> {
   const threshold = opts?.embeddingThreshold ?? EMBEDDING_ROUTING_THRESHOLD
   const available = allTools.filter((t) => permissions[t.category] !== 'blocked')
   const pinned = mentionedToolNames(userMessage, available)
   if (!opts?.embed || available.length <= threshold) {
-    return applyMaxTools(selectRelevantTools(userMessage, allTools, permissions), opts?.maxTools, undefined, pinned)
+    return applyMaxTools(selectRelevantTools(userMessage, allTools, permissions, undefined, opts?.reaText), opts?.maxTools, opts?.prefer ? [...opts.prefer] : undefined, pinned)
   }
   try {
     const semanticNames = await selectToolsByEmbedding(
@@ -551,16 +656,20 @@ export async function selectRelevantToolsAsync(
       opts.embed,
       { topN: opts.topN ?? 10, alwaysInclude: ALWAYS_INCLUDE },
     )
-    const keyword = selectRelevantTools(userMessage, allTools, permissions)
+    const keyword = selectRelevantTools(userMessage, allTools, permissions, undefined, opts?.reaText)
     const union = new Set<string>([...semanticNames, ...keyword.map((t) => t.name)])
     const selected = available.filter((t) => union.has(t.name))
+    const keywordNames = new Set(keyword.map((t) => t.name))
+    const rank = opts.prefer
+      ? [...opts.prefer.filter((n) => keywordNames.has(n)), ...semanticNames]
+      : semanticNames
     // Small-Model Mode (Knob 1): cap the union to maxTools, filling from
     // embedding-rank order so the most relevant tools survive. No-op when
     // maxTools is unset → `selected` (and its original order) is returned
     // byte-identical, so big-model behaviour is unchanged. Verbatim-named
     // tools are pinned past the cap on both paths.
-    return applyMaxTools(selected, opts.maxTools, semanticNames, pinned)
+    return applyMaxTools(selected, opts.maxTools, rank, pinned)
   } catch {
-    return applyMaxTools(selectRelevantTools(userMessage, allTools, permissions), opts?.maxTools, undefined, pinned)
+    return applyMaxTools(selectRelevantTools(userMessage, allTools, permissions, undefined, opts?.reaText), opts?.maxTools, opts?.prefer ? [...opts.prefer] : undefined, pinned)
   }
 }

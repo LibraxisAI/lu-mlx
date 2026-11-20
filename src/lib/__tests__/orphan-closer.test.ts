@@ -13,7 +13,7 @@
  *
  *   "…without stopping. Let's start with the first step. </think>"
  *
- * David has been describing exactly this: a visible think between the steps
+ * The owner has been describing exactly this: a visible think between the steps
  * that is not rendered as thinking.
  *
  * Run: npx vitest run src/lib/__tests__/orphan-closer.test.ts

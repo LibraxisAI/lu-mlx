@@ -22,7 +22,7 @@ import {
 
 describe('what the empty state is allowed to promise', () => {
   it('names the workspace that actually wins over an empty picker', () => {
-    expect(codexFallbackLabel('/home/dave/default-repo')).toBe('/home/dave/default-repo')
+    expect(codexFallbackLabel('/home/alex/default-repo')).toBe('/home/alex/default-repo')
   })
 
   it('and only says the sandbox when nothing else is pinned', () => {

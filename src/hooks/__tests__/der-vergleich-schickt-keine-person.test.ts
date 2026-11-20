@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * R2-8, zweite Haelfte. Entscheid David vom 12.09.2026: der A/B-Vergleich
+ * R2-8, zweite Haelfte. Entscheid vom 12.09.2026: der A/B-Vergleich
  * schickt keine Person mehr mit, nur die Frage.
  *
  * Gemessen wird der ANFRAGEKOERPER, nicht der Quelltext. Die Zeile, die die

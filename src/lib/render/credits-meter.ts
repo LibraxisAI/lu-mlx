@@ -6,7 +6,7 @@
 // behind it: the desktop meter knew only about credits, so a user who had spent
 // their monthly character trainings saw a healthy green bar, pressed Create and
 // got a 429 from the server. The server has sent `video`, `trainings` and
-// `topup` since migration 0029; only the client ignored them.
+// `topup` all along; only the client ignored them.
 
 import type { CloudQuota, RenderKind, RenderOp } from './cloud-jobs'
 
@@ -28,7 +28,7 @@ export type MeterState =
 /** Video renders draw the 0029 sub-budget. A character training draws the
  *  separate monthly COUNT first; once that count is spent, a wallet holding
  *  at least the full cost of the run unlocks one more (`trainingPackRun`
- *  below, server migration 0047). */
+ *  below; the server enforces the same rule). */
 export function drawsVideoBudget(kind: RenderKind, op: RenderOp): boolean {
   return kind === 'video' && op !== 'lora-train'
 }
@@ -55,7 +55,7 @@ export function meterState(
   // Absent fields mean a pre-0029 server: uncapped, never gate on data we do
   // not have. Video's monthly room is extended by the wallet because top-up
   // credits are exempt from the sub-budget. Beyond included trainings, the
-  // paid wallet must cover the complete selected run (server migration 0047).
+  // paid wallet must cover the complete selected run (the server enforces the same rule).
   const videoRoom = quota.video ? quota.video.remaining + topup : Infinity
   const trainingsLeft = quota.trainings ? quota.trainings.remaining : Infinity
   const trainingPackRun = isTraining && cost > 0 && topup >= cost

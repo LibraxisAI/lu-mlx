@@ -43,7 +43,7 @@ function knopf(): string {
 describe('der Name im Knopf', () => {
   it('ist das angeklickte Modell, solange der Wechsel laeuft', () => {
     expect(SRC).toContain('const gezeigtesModell = imWechselZu ?? activeModel')
-    expect(SRC).toContain('displayModelName(gezeigtesModell)')
+    expect(SRC).toContain('modelDisplayLabel(models, gezeigtesModell)')
   })
 
   it('der Waehler merkt sich den Klick, bevor er zu warten anfaengt', () => {

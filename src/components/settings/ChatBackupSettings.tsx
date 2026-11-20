@@ -1,10 +1,12 @@
-import { useRef, useState } from 'react'
-import { Download, Upload } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Download, Upload, History, FolderOpen, Trash2 } from 'lucide-react'
 import { useChatStore } from '../../stores/chatStore'
-import { exportAllConversations, parseImportedChats } from '../../lib/chat-export'
+import { exportAllConversations, parseImportedChats, missingImagesNote } from '../../lib/chat-export'
+import { backendCall, isTauri } from '../../api/backend'
+import { countRestorableChats, restoreChatsFromBackup, clearChatBackup, revealChatBackup } from '../../lib/chat-rescue'
 
 /**
- * Chat Backup (konata 2026-06-28) — export ALL conversations to one JSON file
+ * Chat Backup (a user 2026-06-28) — export ALL conversations to one JSON file
  * and re-import them. The web build has no store_backup.json, so a web user on
  * an SSH tunnel loses chats when the origin (host/port) changes; this is their
  * manual backup + restore path. Works on desktop too (native Save As dialog).
@@ -22,10 +24,38 @@ export function ChatBackupSettings() {
     }
     const res = await exportAllConversations(conversations)
     if (res.status === 'cancelled') return
+    if (res.status === 'error') { setMsg(res.error ?? 'Could not export chats.'); return }
     if (res.status === 'saved') {
-      setMsg(`Saved ${res.count} chat${res.count === 1 ? '' : 's'} to ${res.path}`)
+      setMsg(`Saved ${res.count} chat${res.count === 1 ? '' : 's'} to ${res.path}.${missingImagesNote(res.missing)}`)
     } else {
       setMsg(`Downloaded ${res.count} chat${res.count === 1 ? '' : 's'} as JSON.`)
+    }
+  }
+
+  const importText = (content: string) => {
+    try {
+      const convs = parseImportedChats(content)
+      const { added, skipped } = importConversations(convs, 'merge')
+      setMsg(
+        added > 0
+          ? `Imported ${added} chat${added === 1 ? '' : 's'}${skipped ? `, skipped ${skipped} already present` : ''}.`
+          : `Nothing new, all ${skipped} chat${skipped === 1 ? '' : 's'} were already here.`,
+      )
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : 'Could not import that file.')
+    }
+  }
+
+  // Desktop: the file is read natively and its images are moved into the
+  // attachment store before the WebView parses it, so a large export with
+  // every image inline is never one string in the renderer.
+  const handleImportClick = async () => {
+    if (!isTauri()) { fileRef.current?.click(); return }
+    try {
+      const content = await backendCall<string | null>('import_chats_dialog')
+      if (content) importText(content)
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -40,17 +70,7 @@ export function ChatBackupSettings() {
         setMsg('Could not read that file.')
         return
       }
-      try {
-        const convs = parseImportedChats(content)
-        const { added, skipped } = importConversations(convs, 'merge')
-        setMsg(
-          added > 0
-            ? `Imported ${added} chat${added === 1 ? '' : 's'}${skipped ? `, skipped ${skipped} already present` : ''}.`
-            : `Nothing new, all ${skipped} chat${skipped === 1 ? '' : 's'} were already here.`,
-        )
-      } catch (err) {
-        setMsg(err instanceof Error ? err.message : 'Could not import that file.')
-      }
+      importText(content)
     }
     reader.onerror = () => setMsg('Could not read that file.')
     reader.readAsText(file)
@@ -70,7 +90,7 @@ export function ChatBackupSettings() {
           <Download size={12} /> Export all chats
         </button>
         <button
-          onClick={() => fileRef.current?.click()}
+          onClick={() => void handleImportClick()}
           className="flex-1 text-[0.65rem] flex items-center justify-center gap-1.5 px-2 py-1.5 rounded border border-gray-200 dark:border-white/10 text-gray-600 dark:text-gray-300 hover:border-gray-400 dark:hover:border-white/20 transition-colors"
         >
           <Upload size={12} /> Import chats
@@ -78,6 +98,159 @@ export function ChatBackupSettings() {
         <input ref={fileRef} type="file" accept=".json,application/json" onChange={handleImport} className="hidden" />
       </div>
       {msg && <div className="text-[0.6rem] text-gray-500 dark:text-gray-400">{msg}</div>}
+      {isTauri() && <RestoreFromBackup />}
+    </div>
+  )
+}
+
+/**
+ * Restore chats from backup (3.0.10). LU keeps several copies of its stores
+ * in the app data folder; this reads all of them and puts back every chat the
+ * list here does not have. Chats that are here stay as they are.
+ */
+function RestoreFromBackup() {
+  const importConversations = useChatStore((s) => s.importConversations)
+  const liveCount = useChatStore((s) => s.conversations.length)
+  const [found, setFound] = useState<number | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [note, setNote] = useState('')
+  const [confirmClear, setConfirmClear] = useState(false)
+  // A26: counted again after a clear, not only when the list changes.
+  const [looked, setLooked] = useState(0)
+
+  useEffect(() => {
+    let gone = false
+    countRestorableChats(() => useChatStore.getState().conversations)
+      .then((n) => { if (!gone) setFound(n) })
+      .catch(() => { if (!gone) setFound(0) })
+    return () => { gone = true }
+  }, [liveCount, looked])
+
+  // A26 (3.1.0): the backup keeps every chat that left the list. This takes
+  // them out for good; the chats in the list stay, and so does the rest of
+  // the backup (settings, memories).
+  const clear = async () => {
+    setConfirmClear(false)
+    setBusy(true)
+    try {
+      const removed = await clearChatBackup(() => useChatStore.getState().conversations)
+      setNote(removed > 0
+        ? `Removed ${removed} chat${removed === 1 ? '' : 's'} from the backup. Your chat list is unchanged.`
+        : 'The backup holds no chats that are not in your chat list.')
+      setLooked((n) => n + 1)
+    } catch (err) {
+      setNote(err instanceof Error ? err.message : 'Could not clear the backup.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const openFolder = async () => {
+    try {
+      await revealChatBackup()
+    } catch (err) {
+      setNote(err instanceof Error ? err.message : 'Could not open the backup folder.')
+    }
+  }
+
+  const restore = async () => {
+    setBusy(true)
+    try {
+      const added = await restoreChatsFromBackup(() => useChatStore.getState().conversations, importConversations)
+      setNote(added > 0 ? `Restored ${added} chat${added === 1 ? '' : 's'} from the backup.` : 'Nothing to restore, every chat in the backup is already here.')
+    } catch (err) {
+      setNote(err instanceof Error ? err.message : 'Could not read the backup.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // A backup the user kept somewhere else (copied out of the app data folder,
+  // for example into a rescue folder on the desktop). Read natively, so a
+  // store_backup*.json reaches the WebView as its chat list (externalize_import).
+  const pickFile = async () => {
+    setBusy(true)
+    try {
+      const content = await backendCall<string | null>('import_chats_dialog')
+      if (!content) return
+      const { added, skipped } = importConversations(parseImportedChats(content), 'merge')
+      setNote(added > 0
+        ? `Restored ${added} chat${added === 1 ? '' : 's'} from that file${skipped ? `, ${skipped} were already here` : ''}.`
+        : 'Nothing new in that file, every chat in it is already here.')
+    } catch (err) {
+      setNote(err instanceof Error ? err.message : 'Could not read that file.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const label = found === null
+    ? 'Looking in the backup...'
+    : found === 0
+      ? 'No missing chats in the backup'
+      : `Restore chats from backup (${found} found)`
+
+  return (
+    <div className="pt-2 space-y-1">
+      <button
+        onClick={() => void restore()}
+        disabled={busy || !found}
+        data-testid="restore-chats-from-backup"
+        className="w-full t-micro flex items-center justify-center gap-1.5 px-2 py-1.5 rounded border border-gray-200 dark:border-white/10 text-gray-600 dark:text-gray-300 hover:border-gray-400 dark:hover:border-white/20 transition-colors disabled:opacity-50 disabled:cursor-default"
+      >
+        <History size={12} /> {busy ? 'Restoring...' : label}
+      </button>
+      <button
+        onClick={() => void pickFile()}
+        disabled={busy}
+        data-testid="restore-chats-from-file"
+        className="w-full t-micro flex items-center justify-center gap-1.5 px-2 py-1.5 rounded border border-gray-200 dark:border-white/10 text-gray-600 dark:text-gray-300 hover:border-gray-400 dark:hover:border-white/20 transition-colors disabled:opacity-50 disabled:cursor-default"
+      >
+        <Upload size={12} /> Choose a backup file...
+      </button>
+      <div className="flex gap-2">
+        <button
+          onClick={() => void openFolder()}
+          data-testid="chat-backup-open-folder"
+          className="flex-1 t-micro flex items-center justify-center gap-1.5 px-2 py-1.5 rounded border border-gray-200 dark:border-white/10 text-gray-600 dark:text-gray-300 hover:border-gray-400 dark:hover:border-white/20 transition-colors"
+        >
+          <FolderOpen size={12} /> Open folder
+        </button>
+        <button
+          onClick={() => { setNote(''); setConfirmClear(true) }}
+          disabled={busy || confirmClear}
+          data-testid="chat-backup-clear"
+          className="flex-1 t-micro flex items-center justify-center gap-1.5 px-2 py-1.5 rounded border border-gray-200 dark:border-white/10 text-gray-600 dark:text-gray-300 hover:border-gray-400 dark:hover:border-white/20 transition-colors disabled:opacity-50 disabled:cursor-default"
+        >
+          <Trash2 size={12} /> Clear backup...
+        </button>
+      </div>
+      {confirmClear && (
+        <div role="alertdialog" aria-label="Clear backup" data-testid="chat-backup-clear-confirm" className="rounded border border-gray-300 dark:border-white/15 px-2 py-1.5 space-y-1.5">
+          <div className="t-micro text-gray-700 dark:text-gray-200 leading-relaxed">
+            {found
+              ? `This removes the ${found} chat${found === 1 ? '' : 's'} that ${found === 1 ? 'is' : 'are'} only in the backup, for good. They cannot be restored afterwards.`
+              : 'This removes every chat from the backup that is not in your chat list, for good. They cannot be restored afterwards.'}{' '}
+            The chats in your list and your other settings stay as they are.
+          </div>
+          <div className="flex gap-2 justify-end">
+            <button onClick={() => setConfirmClear(false)} className="t-micro px-2 py-1 text-gray-600 dark:text-gray-300 hover:underline">
+              Cancel
+            </button>
+            <button
+              onClick={() => void clear()}
+              data-testid="chat-backup-clear-yes"
+              className="t-micro px-2 py-1 rounded border border-red-500/60 text-red-600 dark:text-red-400 hover:bg-red-500/10"
+            >
+              Clear backup
+            </button>
+          </div>
+        </div>
+      )}
+      <div className="t-micro text-gray-500 dark:text-gray-500 leading-relaxed">
+        LU keeps copies of your chats in its app data folder. This brings back the ones missing here and leaves the others as they are. Kept a copy of that folder somewhere else? Choose a store_backup file from it.
+      </div>
+      {note && <div className="t-micro text-gray-500 dark:text-gray-400">{note}</div>}
     </div>
   )
 }

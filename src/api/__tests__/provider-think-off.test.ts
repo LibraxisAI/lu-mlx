@@ -1,7 +1,7 @@
 /**
  * Thinking OFF has to mean off, on somebody else's server too.
  *
- * kevinmlynch, issue #112 on 2026-08-13, arrived with a trace and a working
+ * issue #112 on 2026-08-13, arrived with a trace and a working
  * local patch: he points LU at DwarfStar, turns thinking off for his tool
  * workflows, and gets reasoning anyway. We sent `reasoning_effort: 'minimal'`,
  * the least the OpenAI API itself allows, and DwarfStar reads 'minimal' as
@@ -105,7 +105,7 @@ describe('an endpoint that does not know none gets minimal, not nothing', () => 
     expect(bodyOf(spy, 1).stream_options).toEqual({ include_usage: true })
   })
 
-  it('422 walks the same ladder, that is DeepInfra bad-parameter status', async () => {
+  it('422 walks the same ladder, that is the upstream bad-parameter status', async () => {
     const spy = vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(refuse(422))
       .mockResolvedValueOnce(ok())

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { streamProviderTurn } from '../provider-stream'
 import type { ChatStreamChunk, ProviderClient } from '../../api/providers/types'
 
@@ -77,5 +77,28 @@ describe('streamProviderTurn', () => {
       },
     } as unknown as ProviderClient
     await expect(streamProviderTurn(provider, 'm', [], {})).rejects.toThrow('boom')
+  })
+})
+
+// Kundenfall ein Nutzer, 30.09.2026: ein langer file_write auf einem nativen
+// Modell. Die Argumente sammeln sich im Provider, der dabei nichts liefert,
+// waehrend die Bytes weiter fliessen. Der alte Waechter hier brach nach 300 s
+// ohne gelieferten Chunk ab, mitten im Schreiben.
+describe('a long tool call is not a stalled stream', () => {
+  afterEach(() => { vi.useRealTimers() })
+
+  it('waits for a done chunk that takes longer than five minutes', async () => {
+    vi.useFakeTimers()
+    const calls = [{ id: '1', function: { name: 'file_write', arguments: { path: 'big.ts', content: 'x' } } }]
+    const provider = {
+      id: 'openai',
+      async *chatStream() {
+        await new Promise((r) => setTimeout(r, 420_000))
+        yield { content: '', done: true, toolCalls: calls, finishReason: 'tool_calls' } as ChatStreamChunk
+      },
+    } as unknown as ProviderClient
+    const turn = streamProviderTurn(provider, 'm', [], {})
+    await vi.advanceTimersByTimeAsync(420_000)
+    await expect(turn).resolves.toMatchObject({ toolCalls: calls, finishReason: 'tool_calls' })
   })
 })

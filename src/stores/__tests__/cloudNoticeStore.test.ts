@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { useCloudNoticeStore, CLOUD_RETENTION_DAYS, shouldShowRetentionNotice } from '../cloudNoticeStore'
 
-describe('cloudNoticeStore — cloud gallery retention notice (David 2026-07-24)', () => {
+describe('cloudNoticeStore — cloud gallery retention notice (2026-07-24)', () => {
   beforeEach(() => {
     useCloudNoticeStore.setState({ retentionNoticeSeen: false })
   })

@@ -3,8 +3,8 @@ import { detailOf, withDetail } from '../lib/error-text'
 import { log } from '../lib/logger'
 import { persist } from 'zustand/middleware'
 import { safeJSONStorage } from '../lib/storage-quota'
-import { version as currentVersion } from '../../package.json'
-import { isTauri, isLinux, backendCall, openExternal } from '../api/backend'
+import { APP_VERSION as currentVersion } from '../lib/app-version'
+import { isTauri, isLinux, isMacOS, backendCall, openExternal } from '../api/backend'
 import { asBoolean, asString, prop } from '../types/json-guards'
 import { stopBundledEngine, stopBundledEmbed } from '../api/engine'
 import { flushChatPersist } from './chatStore'
@@ -28,7 +28,7 @@ const UPDATE_SETTLE_MS = 250
  *  decided is broken, a disk that is full: in every one of those the promise
  *  simply never settles, and `await` on it is forever. Without a deadline the
  *  update button turns into a spinner that never comes back, on exactly the
- *  machines whose storage is in trouble, which is to say on aldrich's. Ten
+ *  machines whose storage is in trouble, which is to say on a user's. Ten
  *  seconds is far beyond a healthy multi megabyte write and short enough that
  *  nobody thinks the app has died.
  *
@@ -51,8 +51,7 @@ type DownloadStatus = 'idle' | 'downloading' | 'downloaded' | 'installing' | 'er
 //
 // The updater plugin decides between AppImage, deb and rpm by reading a string
 // the bundler patched into the binary, not by looking at the machine
-// (tauri-utils platform.rs:349, and UPDATER-LINUX-BEFUND.md for the whole
-// trace). A repackaged install therefore lies to it. The AUR package
+// (tauri-utils platform.rs:349). A repackaged install therefore lies to it. The AUR package
 // locally-uncensored-bin unpacks our .deb into /usr, so on Arch the updater
 // downloads a Debian package and runs `pkexec dpkg -i` on a box with no dpkg:
 // polkit asks for the password, the command fails afterwards, and the user is
@@ -143,6 +142,9 @@ interface UpdateState {
    * Feld und laesst `lastChecked` in Ruhe.
    */
   lastCheckFailed: boolean
+  /** The check reached the server, and the release it found carries no build
+   *  for this platform. See `releaseHasNoBuildForThisPlatform`. */
+  noBuildForPlatform: boolean
   dismissed: string | null
   /** Fetch the update in the background as soon as it is found, so the badge
    *  offers a one-click Restart instead of a download the user has to sit
@@ -243,6 +245,20 @@ export function isNewerVersion(latest: string, current: string): boolean {
   return lPatch > cPatch
 }
 
+/**
+ * True when the updater refused because `latest.json` has no entry for this
+ * platform.
+ *
+ * The plugin's own error for it is `Error::TargetNotFound`, and what reaches
+ * the frontend is its text: "the platform `darwin-aarch64` was not found in
+ * the response `platforms` object" (tauri-plugin-updater, src/error.rs). The
+ * variant name is accepted too, in case a later plugin version sends it.
+ */
+export function releaseHasNoBuildForThisPlatform(error: unknown): boolean {
+  const text = typeof error === 'string' ? error : error instanceof Error ? error.message : String(error ?? '')
+  return /TargetNotFound/.test(text) || /platform\b.*\bwas not found in the response/i.test(text)
+}
+
 // ── Store ─────────────────────────────────────────────────────
 
 export const useUpdateStore = create<UpdateState>()(
@@ -255,6 +271,7 @@ export const useUpdateStore = create<UpdateState>()(
       isChecking: false,
       lastChecked: null,
       lastCheckFailed: false,
+      noBuildForPlatform: false,
       dismissed: null,
       autoDownload: true,
 
@@ -304,6 +321,7 @@ export const useUpdateStore = create<UpdateState>()(
                 isChecking: false,
                 lastChecked: Date.now(),
                 lastCheckFailed: false,
+                noBuildForPlatform: false,
                 ...(isNewTarget
                   ? {
                       downloadStatus: 'idle' as DownloadStatus,
@@ -338,6 +356,7 @@ export const useUpdateStore = create<UpdateState>()(
                 isChecking: false,
                 lastChecked: Date.now(),
                 lastCheckFailed: false,
+                noBuildForPlatform: false,
                 updateAvailable: false,
                 latestVersion: null,
                 releaseNotes: null,
@@ -366,8 +385,26 @@ export const useUpdateStore = create<UpdateState>()(
               lastCheckFailed: false,
             })
           }
-        } catch {
-          set({ isChecking: false, lastCheckFailed: true })
+        } catch (e) {
+          // A release without a Mac build is not a broken connection: the
+          // server answered, it just has nothing for this machine. That is
+          // the state of every Mac install until the first Mac release is
+          // out, and again after any release whose Mac job was skipped.
+          // Windows and Linux keep the old answer word for word.
+          if (releaseHasNoBuildForThisPlatform(e) && isMacOS()) {
+            _pendingUpdate = null
+            set({
+              isChecking: false,
+              lastChecked: Date.now(),
+              lastCheckFailed: false,
+              noBuildForPlatform: true,
+              updateAvailable: false,
+              latestVersion: null,
+              releaseNotes: null,
+            })
+            return
+          }
+          set({ isChecking: false, lastCheckFailed: true, noBuildForPlatform: false })
         }
       },
 
@@ -449,7 +486,7 @@ export const useUpdateStore = create<UpdateState>()(
         try {
           // Free our own sidecars BEFORE the installer runs. Windows locks a
           // running image against writes, and llama-server.exe lives in the
-          // install directory, which is why aldrich_ironhart's update stopped at
+          // install directory, which is why a user's update stopped at
           // "Error opening file for writing" (C4). The NSIS hook handles that
           // case, but it is the only installer that has one: a machine that
           // installed the .msi takes the WiX path, where nothing frees the
@@ -466,8 +503,8 @@ export const useUpdateStore = create<UpdateState>()(
           // coalesced stores can have a multi megabyte IndexedDB write in
           // flight at that moment because the window only closes 250 ms after
           // the last change. A LevelDB killed mid write is the most plausible
-          // mechanism behind aldrich_ironhart losing every chat across a 2.6.5
-          // update while sockenmonster on the same build lost none, and the
+          // mechanism behind a user losing every chat across a 2.6.5
+          // update while a user on the same build lost none, and the
           // bigger the history the wider that window.
           //
           // flush() resolves when the put has landed, so awaiting it is the
@@ -511,11 +548,27 @@ export const useUpdateStore = create<UpdateState>()(
             } finally {
               stop()
             }
+            // Exit so the new AppImage, which is waiting for exactly that,
+            // can take over.
+            await backendCall('exit_app')
           } else if (handle) {
+            // On Windows this does not come back: the plugin starts the
+            // installer and ends the process, and the installer starts the
+            // new version itself. On macOS and Linux it returns here with the
+            // new files in place, and all that used to follow was a plain
+            // exit. The button says "Restart Now", so the app closed and the
+            // user was left to find the icon again (GitHub discussion 150).
             await handle.install()
+            try {
+              await backendCall('restart_after_update')
+            } catch (e) {
+              // The update is installed either way. Closing without coming
+              // back is what used to happen, and it beats a window that stays
+              // open on the old build.
+              log.warn('[update] the restart could not be asked for, exiting only', { err: detailOf(e) })
+              await backendCall('exit_app')
+            }
           }
-          // Exit so the installer can overwrite the binary
-          await backendCall('exit_app')
         } catch (e) {
           set({
             downloadStatus: 'error',
@@ -560,6 +613,11 @@ export const useUpdateStore = create<UpdateState>()(
         updateAvailable: state.updateAvailable,
         releaseNotes: state.releaseNotes,
         autoDownload: state.autoDownload,
+        // "Dismiss" gilt fuer genau diese Version und muss den Neustart
+        // ueberstehen (T1-Nachttest 3.0.9: der Hinweis stand nach jedem Start
+        // wieder da). Eine neuere Version vergleicht sich in UpdateBadge gegen
+        // diesen Wert und erscheint wieder.
+        dismissed: state.dismissed,
       }),
       // Reset stale persisted state when the binary has been updated out-of-band
       // (e.g. user manually installed a newer .deb / .exe than what the persisted

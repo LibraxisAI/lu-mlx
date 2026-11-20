@@ -1,4 +1,4 @@
-//! One anonymous counter for the Cloud switch (David, 06.09.2026): how many
+//! One anonymous counter for the Cloud switch (06.09.2026): how many
 //! presses open the gate, arm the switch, enter Cloud or go back to Local,
 //! per day, platform and app version. Nothing else leaves the machine: no
 //! identifier, no prompt, no IP kept (the table holds daily counts). The
@@ -6,7 +6,6 @@
 //! and version are read here, not trusted from the caller. The press that
 //! reaches for the cloud is the one thing local mode reports, and that is
 //! written into Settings and the privacy page.
-use tauri::AppHandle;
 
 use crate::os_error;
 
@@ -17,12 +16,28 @@ const LUC_SUPABASE_URL: &str = "https://lrrhheztdytyfpizvuup.supabase.co";
 const LUC_SUPABASE_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxycmhoZXp0ZHl0eWZwaXp2dXVwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMxNDkwNzUsImV4cCI6MjA5ODcyNTA3NX0.1AuX4tmup82d3NHLAgQx1KdXhwlCkPcX7liB6eNSkAU";
 
 /// The four things a press on the Cloud switch can do (lib/cloud-switch-guard
-/// on the frontend). The SQL function carries the same list.
+/// on the frontend), the three clicks in the pop-up behind it (a model, a
+/// plan, a pack) and, since 3.1.0, the other buttons into LU Cloud
+/// (api/funnel.ts names each one). The SQL function carries the same list.
 pub(crate) const FUNNEL_EVENTS: &[&str] = &[
     "cloud_switch_gate",
     "cloud_switch_arm",
     "cloud_switch_enter",
     "cloud_switch_leave",
+    "cloud_gate_model_click",
+    "cloud_gate_pick_sub",
+    "cloud_gate_pick_credits",
+    // 3.1.0 (funnel Nr. 3): the main buttons, the sign in, the plan buttons,
+    // the Create sheet, the cloud offer and the onboarding hint.
+    "cloud_gate_main_sub",
+    "cloud_gate_main_pack",
+    "cloud_gate_signin",
+    "cloud_gate_plan_click",
+    "cloud_teaser_sub",
+    "cloud_teaser_pack",
+    "cloud_teaser_hide",
+    "cloud_offer_click",
+    "cloud_onboarding_hint",
 ];
 
 pub(crate) fn funnel_event_allowed(event: &str) -> bool {
@@ -34,6 +49,8 @@ pub(crate) fn platform_label(os: &str) -> &'static str {
         "windows" => "windows",
         "linux" => "linux",
         "macos" => "macos",
+        "android" => "android",
+        "ios" => "ios",
         _ => "unknown",
     }
 }
@@ -50,15 +67,15 @@ pub(crate) fn funnel_payload(event: &str, platform: &str, version: &str) -> serd
 /// Fire and forget. Never an error to the caller and never awaited by the
 /// switch: a counter that cannot be reached is a counter, not a feature.
 #[tauri::command]
-pub async fn funnel_ping(app: AppHandle, event: String) -> Result<(), String> {
+pub async fn funnel_ping(event: String) -> Result<(), String> {
     if !funnel_event_allowed(&event) {
         return Ok(());
     }
-    let version = app.package_info().version.to_string();
+    let version = crate::app_identity::APP_VERSION.to_string();
     let payload = funnel_payload(&event, platform_label(std::env::consts::OS), &version);
     tauri::async_runtime::spawn(async move {
         let client = match reqwest::Client::builder()
-            .user_agent(format!("LocallyUncensored/{version}"))
+            .user_agent(crate::app_identity::outgoing_agent_for(&version))
             .timeout(std::time::Duration::from_secs(5))
             .build()
         {
@@ -88,20 +105,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_the_four_presses_of_the_switch_count() {
+    fn only_the_listed_presses_count() {
         for e in FUNNEL_EVENTS {
             assert!(funnel_event_allowed(e), "{e}");
         }
-        for e in ["", "cloud_switch_seen", "app_start", "cloud_switch_gate'; drop table x; --", "CLOUD_SWITCH_GATE"] {
+        assert_eq!(FUNNEL_EVENTS.len(), 16);
+        for e in ["", "cloud_switch_seen", "cloud_gate_model", "cloud_gate_pick_sub ", "cloud_teaser", "cloud_gate_main", "app_start", "cloud_switch_gate'; drop table x; --", "CLOUD_SWITCH_GATE"] {
             assert!(!funnel_event_allowed(e), "{e:?} must not count");
         }
     }
 
     #[test]
-    fn the_platform_is_one_of_four_words() {
+    fn the_platform_is_one_of_six_words() {
         assert_eq!(platform_label("windows"), "windows");
         assert_eq!(platform_label("linux"), "linux");
         assert_eq!(platform_label("macos"), "macos");
+        // The phones count under their own name, not under "unknown" and
+        // not under "linux" (Android's kernel) or "macos" (iOS's family).
+        assert_eq!(platform_label("android"), "android");
+        assert_eq!(platform_label("ios"), "ios");
         assert_eq!(platform_label("freebsd"), "unknown");
         assert_eq!(platform_label(""), "unknown");
     }

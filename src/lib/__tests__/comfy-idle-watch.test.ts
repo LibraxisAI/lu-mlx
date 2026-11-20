@@ -18,13 +18,20 @@ const CARCASS_DOWN = { running: false, starting: false, isLocal: true, found: tr
 
 describe('shouldWatchComfyIdle', () => {
   it('watches while the local Create tab sits idle', () => {
-    expect(shouldWatchComfyIdle(true, false, false)).toBe(true)
+    expect(shouldWatchComfyIdle(true, false, false, false)).toBe(true)
+  })
+
+  // The box, 04.10.2026: during the Cutout setup the line "ComfyUI stopped.
+  // It will restart with your next render." stood right above "Waiting for
+  // ComfyUI to come back". LU was restarting it itself.
+  it('does not watch while LU itself restarts ComfyUI', () => {
+    expect(shouldWatchComfyIdle(true, false, false, true)).toBe(false)
   })
 
   it('does not watch on cloud, on a Mac, or during a render', () => {
-    expect(shouldWatchComfyIdle(false, false, false)).toBe(false)
-    expect(shouldWatchComfyIdle(true, true, false)).toBe(false)
-    expect(shouldWatchComfyIdle(true, false, true)).toBe(false)
+    expect(shouldWatchComfyIdle(false, false, false, false)).toBe(false)
+    expect(shouldWatchComfyIdle(true, true, false, false)).toBe(false)
+    expect(shouldWatchComfyIdle(true, false, true, false)).toBe(false)
   })
 
   it('asks rarely enough not to be a poller on port 8188', () => {
@@ -83,10 +90,16 @@ describe('the Create tab actually watches and shows it', () => {
   )
 
   it('polls comfyui_status only while idle, and renders the line', () => {
-    expect(src).toMatch(/shouldWatchComfyIdle\(backend === 'local', isMacOS\(\), isGenerating\)/)
+    expect(src).toMatch(/shouldWatchComfyIdle\(backend === 'local', isMacOS\(\), isGenerating, luIsRestartingComfy\)/)
     expect(src).toMatch(/backendCall<ComfyGuardStatus>\('comfyui_status'\)/)
     expect(src).toMatch(/setIdleNotice\(comfyIdleNotice\(st\)\)/)
     expect(src).toMatch(/\{idleNotice && \(/)
+  })
+
+  it('counts a Create setup, a ComfyUI update and the CORS fix as LU restarting it, and looks again when they end', () => {
+    expect(src).toMatch(/useSyncExternalStore\(subscribeInstallRuns, anyInstallRunning\)/)
+    expect(src).toMatch(/const luIsRestartingComfy = setupRunning \|\| comfyUpdating \|\| corsFixing/)
+    expect(src).toMatch(/\}, \[backend, isGenerating, luIsRestartingComfy\]\)/)
   })
 
   it('starts nothing on its own from the idle watch', () => {

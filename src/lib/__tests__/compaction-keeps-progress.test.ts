@@ -9,7 +9,7 @@
  *   … git_status, git_diff, git_commit, git_log,
  *     todo_write, get_current_time, system_info, process_list, file_list, …
  *
- * That second half is steps 1 to 5 again. David, watching it: "es wiederholt
+ * That second half is steps 1 to 5 again. The owner, watching it: "es wiederholt
  * sich die ganze Zeit ... das fängt so ab, ruft neu an. Und er sagt immer
  * dasselbe."
  *

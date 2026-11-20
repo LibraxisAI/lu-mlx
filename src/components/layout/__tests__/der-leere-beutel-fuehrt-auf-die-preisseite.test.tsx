@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * R5-51, Entscheid David vom 12.09.2026: der Dialog bei leerem Guthaben
+ * R5-51, Entscheid vom 12.09.2026: der Dialog bei leerem Guthaben
  * oeffnet die Preisseite und nicht die Aufladeseite.
  *
  * Der Knopf sprang bis dahin mitten in einen Kauf. Wer leer ist, hat aber die
@@ -26,7 +26,7 @@ describe('der Dialog bei leerem Guthaben', () => {
     render(<CreditsExhaustedModal />)
     act(() => { window.dispatchEvent(new Event(CREDITS_EXHAUSTED_EVENT)) })
     fireEvent.click(screen.getByText('See plans and packs'))
-    expect(geoeffnet, 'der Knopf hat nichts geoeffnet').toEqual([`${CLOUD_BASE}/pricing`])
+    expect(geoeffnet, 'der Knopf hat nichts geoeffnet').toEqual([`${CLOUD_BASE}/pricing?utm_source=desktop&utm_medium=credits-empty`])
     // Negativkontrolle in dieselbe Richtung: kein Weg dieses Dialogs zeigt
     // noch auf die Aufladeseite, weder der Knopf noch der Satz im Verlauf.
     expect(geoeffnet[0], 'der Knopf springt wieder in den Kauf').not.toContain('/credits')

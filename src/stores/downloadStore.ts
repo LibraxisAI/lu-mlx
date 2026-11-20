@@ -4,9 +4,11 @@ import {
   getDownloadProgress, pauseDownload, cancelDownload, clearDownloadEntry, resumeDownload,
   startModelDownload, startModelDownloadToPath, lookupFileMeta, modelsNotVisibleInComfy,
   isPermanentDownloadError, findOrphanDownloads, deleteOrphanDownload, orphanFilename,
-  catalogFilenames, ENUM_SUBFOLDERS, type DownloadProgress, type OrphanDownload,
+  catalogFilenames, ENUM_SUBFOLDERS, comfyModelTarget, removeImagePart, type DownloadProgress, type OrphanDownload,
 } from '../api/discover'
+import { imagePartFileName, isImagePartFile } from '../lib/image-part'
 import { isTauri } from '../api/backend'
+import { isMobileHost } from '../lib/mobile-host'
 import { coalescedJSONStorage } from '../lib/coalescedStorage'
 import { waitForModelsVisible } from '../lib/bundle-install'
 import { log } from '../lib/logger'
@@ -22,7 +24,7 @@ const awaitingVisibility = new Set<string>()
  *  The Model Manager half of C8. A finished download is not a finished
  *  install: ComfyUI serves what its own directory scan has picked up, and on
  *  the big files that scan is still running when the last byte lands. Create
- *  learned to wait for that on 2026-08-13 (Voxyl AI, Aldrich Ironhart). This
+ *  learned to wait for that on 2026-08-13 (a user AI, a user). This
  *  path never did. It fired one event, useModels ran one fetch against a
  *  stale /object_info, and the model was simply absent from the Installed tab
  *  and every picker until the user reloaded by hand. Same slow scan, same too
@@ -46,6 +48,9 @@ async function announceUntilVisible(filename: string, subfolder: string | undefi
     // One cheap probe first: with the engine down the wait would spend its
     // whole budget on requests that cannot be answered.
     if (!(await checkComfyConnection())) return
+    // A ComfyUI on another machine cannot see a file on this one until the
+    // user copies it over (GH #143); the Model Manager already said so.
+    if ((await comfyModelTarget()).remote) return
     const left = await waitForModelsVisible({
       missing: () => modelsNotVisibleInComfy([filename]),
       refresh: async () => {
@@ -68,12 +73,12 @@ async function announceUntilVisible(filename: string, subfolder: string | undefi
  * does not list it.
  *
  * The old text named one cause, a model folder LU and ComfyUI do not share
- * (pnwpdr4519). For a .gguf that is almost never the cause. UNETLoader does not
+ *. For a .gguf that is almost never the cause. UNETLoader does not
  * enumerate .gguf at all: the file is read by ComfyUI-GGUF's own loader, so a
  * pack that is missing, or that failed to import because its gguf dependency
  * landed in a different Python environment, leaves ComfyUI with no loader that
  * can see the file even though the folder is exactly right. Every Unfiltered
- * video bundle we ship is a GGUF, which is what lapbo and Blahx were looking at.
+ * video bundle we ship is a GGUF, which is what a user and Blahx were looking at.
  *
  * English on purpose, like every error text in the product.
  */
@@ -103,6 +108,47 @@ export interface DownloadMeta {
   expectedBytes?: number
   /** Content digest, when the catalog states one. */
   sha256?: string
+  /** A27: the folder came from a title; the file's header decides where it ends up. */
+  sniffFolder?: boolean
+}
+
+/** One file of a download that goes to a folder by path (every GGUF of the built-in engine). */
+export interface PathDownload {
+  url: string
+  filename: string
+  expectedBytes?: number
+  sha256?: string
+}
+
+/**
+ * How a start by path ended. The backend answers "exists", "already_running"
+ * and "error" as values, not as exceptions, and every caller used to read
+ * them for itself (or not at all).
+ */
+export type PathStartAnswer =
+  | { answer: 'started' }
+  /** The file is already there, complete. The row is marked done. */
+  | { answer: 'exists' }
+  /** A transfer of this file is already running. It keeps running. */
+  | { answer: 'running' }
+  | { answer: 'error'; error?: string }
+
+/**
+ * Files that are downloaded by path and that the desktop catalog does not
+ * list: the phone catalog. Registered by whoever owns such a list, so this
+ * store can name a partial of theirs after a restart without importing them
+ * (the desktop bundle must not pull the phone catalog in).
+ */
+const pathCatalog = new Map<string, PathDownload>()
+
+/** Make files known to the orphan scan. Calling it again with the same list changes nothing. */
+export function registerPathCatalog(files: readonly PathDownload[]): void {
+  for (const f of files) if (f.filename && f.url) pathCatalog.set(f.filename, { ...f })
+}
+
+/** For tests. */
+export function clearPathCatalog(): void {
+  pathCatalog.clear()
 }
 
 /** A `.download` file from an earlier run, plus what we could work out about it. */
@@ -114,10 +160,25 @@ export interface OrphanEntry extends OrphanDownload {
 
 interface DownloadStoreState {
   downloads: Record<string, DownloadProgress>
+  /** Rows this side wrote itself: a bundle file that was on disk already, a
+   *  file ComfyUI does not list. Rust has no entry for them, so a poll that
+   *  takes Rust's list as the whole picture wiped them a second later, and a
+   *  bundle of five showed three files (the box, 03.10.2026). They are merged
+   *  under Rust's rows and go when the user clears, cancels or restarts them. */
+  ownRows: Record<string, DownloadProgress>
   downloadMeta: Record<string, DownloadMeta>
   bundleMap: BundleMap  // filename → bundle name
   /** Partials found on disk with no transfer behind them, keyed by stem. */
   orphans: Record<string, OrphanEntry>
+  /** Files the user cancelled and has not started again. The tray keeps them
+   *  with their bundle, so a bundle with cancelled files never reads as
+   *  complete (lib/download-tray). This session only. */
+  cancelled: string[]
+  /** Finished files the user cleared from the badge. Rust keeps finished
+   *  entries in its map, so without this list the next poll brought the row
+   *  straight back. A new start of the same file takes it off the list. This
+   *  session only. */
+  dismissed: string[]
   polling: boolean
   pollInterval: ReturnType<typeof setInterval> | null
   pollCount: number
@@ -125,15 +186,22 @@ interface DownloadStoreState {
   refresh: () => Promise<void>
   startPolling: () => void
   stopPolling: () => void
-  setMeta: (filename: string, url: string, subfolder: string, destDir?: string, extra?: { expectedBytes?: number; sha256?: string }) => void
+  setMeta: (filename: string, url: string, subfolder: string, destDir?: string, extra?: { expectedBytes?: number; sha256?: string; sniffFolder?: boolean }) => void
+  /** Start one file into a folder: remember how to start it again, save that at
+   *  once, start, and say how the start ended. */
+  startToPath: (file: PathDownload, destDir: string) => Promise<PathStartAnswer>
   setBundleGroup: (bundleName: string, filenames: string[]) => void
   markComplete: (filename: string) => void
   markInvisible: (filename: string) => void
   pause: (id: string) => Promise<void>
   cancel: (id: string) => Promise<void>
-  resume: (id: string) => Promise<void>
+  /** Continue where the transfer stopped. False when nothing is known about
+   *  the file any more, or when the start by path was refused. */
+  resume: (id: string) => Promise<boolean>
   retry: (id: string) => Promise<void>
   dismiss: (id: string) => void
+  /** The user cleared the bundle's row: its cancelled files go with it. */
+  forgetCancelled: (ids: string[]) => void
   scanOrphans: () => Promise<void>
   resumeOrphan: (stem: string) => Promise<void>
   discardOrphan: (stem: string) => Promise<void>
@@ -221,11 +289,17 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
  *  trimmed rather than grown forever inside a 5 MB origin quota. */
 const META_LIMIT = 400
 
+/** Rows whose cancel is on its way, so that one click cannot cancel a file twice. */
+const cancelling = new Set<string>()
+
 export const useDownloadStore = create<DownloadStoreState>()(persist((set, get) => ({
   downloads: {},
+  ownRows: {},
   downloadMeta: {},
   bundleMap: {},
   orphans: {},
+  cancelled: [],
+  dismissed: [],
   polling: false,
   pollInterval: null,
 
@@ -233,8 +307,12 @@ export const useDownloadStore = create<DownloadStoreState>()(persist((set, get) 
 
   refresh: async () => {
     try {
-      const prog = await getDownloadProgress()
+      const raw = await getDownloadProgress()
       const prev = get().downloads
+      // A finished row the user cleared stays cleared. An entry that is no
+      // longer finished is a new run of that file and shows again.
+      const dismissed = get().dismissed.filter((id) => raw[id]?.status === 'complete')
+      const prog = Object.fromEntries(Object.entries(raw).filter(([id]) => !dismissed.includes(id)))
 
       // Detect newly completed downloads and dispatch event. The filename
       // rides along now so a listener can tell WHICH model arrived; every
@@ -253,13 +331,14 @@ export const useDownloadStore = create<DownloadStoreState>()(persist((set, get) 
       // Rust owns the live rows; an adopted orphan only fills a gap Rust has
       // nothing for. The moment a resume starts, the real entry takes over and
       // the orphan stops being one.
-      const { orphans, downloadMeta } = get()
+      const { orphans, downloadMeta, ownRows } = get()
       const stillOrphaned = Object.fromEntries(
         Object.entries(orphans).filter(([, o]) => !o.filename || !prog[o.filename]),
       )
       set({
-        downloads: { ...orphanRows(stillOrphaned, downloadMeta), ...prog },
+        downloads: { ...orphanRows(stillOrphaned, downloadMeta), ...ownRows, ...prog },
         orphans: stillOrphaned,
+        dismissed,
         pollCount: count,
       })
 
@@ -293,15 +372,45 @@ export const useDownloadStore = create<DownloadStoreState>()(persist((set, get) 
 
   setMeta: (filename, url, subfolder, destDir?, extra?) => {
     set(s => {
-      const next = { ...s.downloadMeta, [filename]: { url, subfolder, destDir, ...extra } }
+      // Defence in depth: a caller that forgot the digest or the byte count gets
+      // the catalog's, when the catalog names the SAME address. Retry and resume
+      // read only this record, so a hole here is a download that installs a
+      // swapped file unchecked.
+      const filled = fillFromCatalog({ url, subfolder, destDir, ...extra }, filename)
+      const next = { ...s.downloadMeta, [filename]: filled }
       const keys = Object.keys(next)
       if (keys.length > META_LIMIT) {
         // Oldest first — insertion order is the only age we have, and the
         // entries that matter are the ones just started.
         for (const k of keys.slice(0, keys.length - META_LIMIT)) delete next[k]
       }
-      return { downloadMeta: next }
+      // Every start goes through here first, so a file that is started
+      // again stops counting as cancelled, and what this side said about
+      // it before (already there, not listed) is no longer the news.
+      return {
+        downloadMeta: next,
+        cancelled: s.cancelled.filter((f) => f !== filename),
+        dismissed: s.dismissed.filter((f) => f !== filename),
+        ownRows: without(s.ownRows, filename),
+      }
     })
+  },
+
+  startToPath: async (file, destDir) => {
+    get().setMeta(file.filename, file.url, 'gguf', destDir, { expectedBytes: file.expectedBytes, sha256: file.sha256 })
+    // This record is what a restart resumes from. It must not wait for the
+    // next write window: an app that is closed a second after the tap would
+    // leave a partial nobody can name.
+    void flushDownloadPersist().catch(() => { /* the next window writes it */ })
+    const res = await startModelDownloadToPath(file.url, destDir, file.filename, file.expectedBytes, file.sha256)
+    if (res?.status === 'exists') {
+      get().markComplete(file.filename)
+      return { answer: 'exists' }
+    }
+    if (res?.status === 'error') return { answer: 'error', error: res.error }
+    set(s => ({ orphans: withoutFilename(s.orphans, file.filename) }))
+    get().startPolling()
+    return res?.status === 'already_running' ? { answer: 'running' } : { answer: 'started' }
   },
 
   setBundleGroup: (bundleName, filenames) => {
@@ -313,23 +422,21 @@ export const useDownloadStore = create<DownloadStoreState>()(persist((set, get) 
   },
 
   markComplete: (filename: string) => {
+    const row: DownloadProgress = { progress: 1, total: 1, speed: 0, filename, status: 'complete' }
     set(s => ({
-      downloads: {
-        ...s.downloads,
-        [filename]: { progress: 1, total: 1, speed: 0, filename, status: 'complete' },
-      },
+      downloads: { ...s.downloads, [filename]: row },
+      ownRows: { ...s.ownRows, [filename]: row },
     }))
   },
 
   markInvisible: (filename: string) => {
+    const row: DownloadProgress = {
+      progress: 0, total: 0, speed: 0, filename, status: 'error',
+      error: invisibleFileMessage(filename),
+    }
     set(s => ({
-      downloads: {
-        ...s.downloads,
-        [filename]: {
-          progress: 0, total: 0, speed: 0, filename, status: 'error',
-          error: invisibleFileMessage(filename),
-        },
-      },
+      downloads: { ...s.downloads, [filename]: row },
+      ownRows: { ...s.ownRows, [filename]: row },
     }))
   },
 
@@ -341,22 +448,92 @@ export const useDownloadStore = create<DownloadStoreState>()(persist((set, get) 
   /** The user aborting: the transfer stops AND the partial file goes. The one
    *  path that is allowed to throw bytes away. */
   cancel: async (id: string) => {
-    await cancelDownload(id)
+    // A finished file has nothing to cancel. "Cancel all" on a bundle used to
+    // drop its row too, and the next poll brought it straight back.
+    if (get().downloads[id]?.status === 'complete') return
+    // "Cancel all" calls this once per row, in one go. A model takes its image
+    // part along (below), so the part's own call would cancel it a second
+    // time. Whoever is already being cancelled is left to the call that has it.
+    if (cancelling.has(id)) return
+    // A model and its image part are one download, so cancelling the model
+    // takes the part along: a part that is still running is cancelled like
+    // the model, and one that already finished is removed from disk, because
+    // without its model it belongs to nothing and no list shows it. The other
+    // direction does not hold: cancelling only the part leaves the model.
+    const candidate = /\.gguf$/i.test(id) && !isImagePartFile(id) ? imagePartFileName(id) : null
+    const part = candidate && !cancelling.has(candidate) ? candidate : null
+    const partRow = part ? get().downloads[part] : undefined
+    const partMeta = part ? get().downloadMeta[part] : undefined
+    const mine = part && partRow ? [id, part] : [id]
+    for (const f of mine) cancelling.add(f)
+    const gone = [id]
+    try {
+      await cancelDownload(id)
+      if (part && partRow && partRow.status !== 'complete') {
+        await cancelDownload(part)
+        gone.push(part)
+      } else if (part && partRow && partMeta?.destDir) {
+        await removeImagePart(partMeta.destDir, part)
+        gone.push(part)
+      }
+    } finally {
+      for (const f of mine) cancelling.delete(f)
+    }
     set(s => {
       const updated = { ...s.downloads }
-      delete updated[id]
-      // An adopted orphan must go from BOTH places or the next poll re-adopts
-      // the row the user just cancelled.
-      return { downloads: updated, orphans: withoutFilename(s.orphans, id) }
+      let ownRows = s.ownRows
+      let orphans = s.orphans
+      for (const f of gone) {
+        delete updated[f]
+        // An adopted orphan must go from BOTH places or the next poll
+        // re-adopts the row the user just cancelled.
+        ownRows = without(ownRows, f)
+        orphans = withoutFilename(orphans, f)
+      }
+      return {
+        downloads: updated,
+        ownRows,
+        orphans,
+        cancelled: [...s.cancelled, ...gone.filter((f) => !s.cancelled.includes(f))],
+      }
     })
+    // A finished part has a row on the Rust side too, and the next poll would
+    // bring it straight back.
+    for (const f of gone.slice(1)) await clearDownloadEntry(f).catch(() => {})
   },
 
   resume: async (id: string) => {
     const meta = ensureMeta(get, id)
-    if (!meta) return
-    await resumeDownload(id, meta.url, meta.subfolder, meta.expectedBytes, meta.sha256)
+    if (!meta) return false
+    if (meta.destDir) {
+      // A file that was downloaded by path (every GGUF of the built-in engine,
+      // a chat model, its image part) has no ComfyUI subfolder, and
+      // `resume_download` resolves its folder from one: it found no half file
+      // there, began at zero and wrote the 0.9 GB of an image part into
+      // ComfyUI's models folder, where no engine looks for it (box,
+      // 09.10.2026). Starting the same download by path again IS the resume:
+      // the backend finds the `.download` next to the target and asks the
+      // source for the rest.
+      if (get().downloads[id]?.status === 'error') {
+        // A settled failure keeps its row on the backend, and the next poll
+        // would bring the red card back over the running transfer.
+        await clearDownloadEntry(id).catch(() => { /* best effort */ })
+      }
+      const res = await startModelDownloadToPath(meta.url, meta.destDir, id, meta.expectedBytes, meta.sha256)
+      if (res?.status === 'exists') {
+        // The whole file is there already (the partial was the last step away).
+        get().markComplete(id)
+        set(s => ({ orphans: withoutFilename(s.orphans, id) }))
+        return true
+      }
+      if (res?.status === 'error') return false
+    } else {
+      // A27: the header question only travels when it was asked at the start.
+      await resumeDownload(id, meta.url, meta.subfolder, meta.expectedBytes, meta.sha256, ...(meta.sniffFolder ? [true] : []))
+    }
     set(s => ({ orphans: withoutFilename(s.orphans, id) }))
     get().startPolling()
+    return true
   },
 
   /**
@@ -372,7 +549,7 @@ export const useDownloadStore = create<DownloadStoreState>()(persist((set, get) 
    *
    * The Rust row still has to be cleared, or `download_model` short-circuits on
    * the file already on disk without touching the map and the next poll
-   * resurrects the error card (the_mr_pickles). `clearDownloadEntry` is that
+   * resurrects the error card. `clearDownloadEntry` is that
    * bookkeeping without the collateral damage.
    */
   retry: async (id: string) => {
@@ -392,16 +569,16 @@ export const useDownloadStore = create<DownloadStoreState>()(persist((set, get) 
     if (current?.status === 'error') {
       await clearDownloadEntry(id).catch(() => { /* best effort — a restart clears it */ })
     }
-    set(s => {
-      const updated = { ...s.downloads }
-      delete updated[id]
-      return { downloads: updated, orphans: withoutFilename(s.orphans, id) }
-    })
+    set(s => ({
+      downloads: without(s.downloads, id),
+      ownRows: without(s.ownRows, id),
+      orphans: withoutFilename(s.orphans, id),
+    }))
     // Re-start the download — use path-based for GGUF text models, subfolder-based for ComfyUI
     if (meta.destDir) {
       await startModelDownloadToPath(meta.url, meta.destDir, id, meta.expectedBytes, meta.sha256)
     } else {
-      await startModelDownload(meta.url, meta.subfolder, id, meta.expectedBytes, meta.sha256)
+      await startModelDownload(meta.url, meta.subfolder, id, meta.expectedBytes, meta.sha256, ...(meta.sniffFolder ? [{ sniffFolder: true }] : []))
     }
     get().startPolling()
   },
@@ -409,7 +586,7 @@ export const useDownloadStore = create<DownloadStoreState>()(persist((set, get) 
   dismiss: (id: string) => {
     // Errored entries also live in the Rust download map; drop them there
     // too or the next refresh() (Models-tab remount) resurrects the error
-    // card the user just cleared (the_mr_pickles). Only for 'error' —
+    // card the user just cleared. Only for 'error' —
     // cancelling an active transfer or a completed entry is not dismiss's
     // job (the badge dismisses completed entries FE-only by design).
     //
@@ -417,14 +594,29 @@ export const useDownloadStore = create<DownloadStoreState>()(persist((set, get) 
     // to throw away the gigabytes it downloaded before it failed. The partial
     // stays and shows up as a resumable orphan on the next start; Cancel is
     // the button that deletes.
-    if (get().downloads[id]?.status === 'error') {
+    const status = get().downloads[id]?.status
+    if (status === 'error') {
       clearDownloadEntry(id).catch(() => { /* app restart clears it anyway */ })
     }
-    set(s => {
-      const updated = { ...s.downloads }
-      delete updated[id]
-      return { downloads: updated, orphans: withoutFilename(s.orphans, id) }
-    })
+    // The phone shell clears a finished row for good: its list polls again on
+    // every visit, and a row the backend still holds came back a second after
+    // it was cleared. The desktop badge keeps dismissing finished rows on this
+    // side only, as before, and remembers them so the next poll of the Rust
+    // map does not bring them back.
+    const remember = status === 'complete' && !isMobileHost()
+    if (status === 'complete' && !remember) {
+      clearDownloadEntry(id).catch(() => { /* app restart clears it anyway */ })
+    }
+    set(s => ({
+      dismissed: remember && !s.dismissed.includes(id) ? [...s.dismissed, id] : s.dismissed,
+      downloads: without(s.downloads, id),
+      ownRows: without(s.ownRows, id),
+      orphans: withoutFilename(s.orphans, id),
+    }))
+  },
+
+  forgetCancelled: (ids: string[]) => {
+    set(s => ({ cancelled: s.cancelled.filter((f) => !ids.includes(f)) }))
   },
 
   /**
@@ -447,7 +639,7 @@ export const useDownloadStore = create<DownloadStoreState>()(persist((set, get) 
     // Meta first: it is the only source that also knows the destDir. The
     // catalog is the fallback for a partial from before this store persisted
     // anything.
-    const known = [...Object.keys(meta), ...catalogFilenames()]
+    const known = [...Object.keys(meta), ...catalogFilenames(), ...pathCatalog.keys()]
     const orphans: Record<string, OrphanEntry> = {}
     for (const o of found) {
       const filename = orphanFilename(o.stem, known)
@@ -457,10 +649,18 @@ export const useDownloadStore = create<DownloadStoreState>()(persist((set, get) 
       // subfolder so Resume has somewhere to go.
       if (filename && !get().downloadMeta[filename]) {
         const cat = lookupFileMeta(filename)
+        const byPath = pathCatalog.get(filename)
         if (cat) {
           get().setMeta(filename, cat.url, cat.subfolder, undefined, {
             expectedBytes: cat.expectedBytes,
             sha256: cat.sha256,
+          })
+        } else if (byPath) {
+          // A file that is fetched by path resumes into the folder its partial
+          // lies in. That folder is the one thing the disk still knows.
+          get().setMeta(filename, byPath.url, 'gguf', o.dir, {
+            expectedBytes: byPath.expectedBytes,
+            sha256: byPath.sha256,
           })
         }
       }
@@ -519,11 +719,34 @@ export const useDownloadStore = create<DownloadStoreState>()(persist((set, get) 
   },
 }))
 
+/** Add the catalog's sha256 and byte count to a record that lacks them, but only
+ *  when the catalog entry is the same address: a Civitai file or a user's own
+ *  GGUF that happens to share a name must never inherit a foreign digest. */
+export function fillFromCatalog(meta: DownloadMeta, filename: string): DownloadMeta {
+  if (meta.sha256 && meta.expectedBytes) return meta
+  const cat = lookupFileMeta(filename)
+  if (!cat || cat.url !== meta.url) return meta
+  const sha256 = meta.sha256 ?? cat.sha256
+  const expectedBytes = meta.expectedBytes ?? cat.expectedBytes
+  if (sha256 === meta.sha256 && expectedBytes === meta.expectedBytes) return meta
+  return { ...meta, sha256, expectedBytes }
+}
+
 /** Meta for `id`, filling in from the catalog and remembering what it found.
  *  Retry and resume both need it and both used to lose the destDir. */
 function ensureMeta(get: () => DownloadStoreState, id: string): DownloadMeta | null {
   const known = get().downloadMeta[id]
-  if (known) return known
+  if (known) {
+    // A record written without the digest (older callers, a persisted one) is
+    // completed from the catalog before retry or resume reads it.
+    const filled = fillFromCatalog(known, id)
+    if (filled !== known) {
+      get().setMeta(id, filled.url, filled.subfolder, filled.destDir, {
+        expectedBytes: filled.expectedBytes, sha256: filled.sha256,
+      })
+    }
+    return filled
+  }
   const found = lookupFileMeta(id)
   if (!found) return null
   const meta: DownloadMeta = {
@@ -537,6 +760,14 @@ function ensureMeta(get: () => DownloadStoreState, id: string): DownloadMeta | n
     sha256: meta.sha256,
   })
   return meta
+}
+
+/** `rows` without `id`; the same object when `id` is not in it. */
+function without<T>(rows: Record<string, T>, id: string): Record<string, T> {
+  if (!(id in rows)) return rows
+  const next = { ...rows }
+  delete next[id]
+  return next
 }
 
 /** Drop the orphan that resolved to `filename`, whatever its stem was. */

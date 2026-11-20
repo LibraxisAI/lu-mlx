@@ -2,13 +2,18 @@
  * MCP External Client — connects to external MCP servers via stdio JSON-RPC.
  *
  * Uses @tauri-apps/plugin-shell to spawn server processes
- * and communicate via stdin/stdout JSON-RPC 2.0.
+ * and communicate via stdin/stdout JSON-RPC 2.0. Servers reached over a URL
+ * (Streamable HTTP) use `http-client.ts`; the parsing of what a server sends
+ * back (responses, tool lists, tool results) is shared from here.
  */
 
 import type { Child } from '@tauri-apps/plugin-shell'
 import type { MCPToolDefinition, MCPServerConfig, ToolArgs } from './types'
 import { log } from '../../lib/logger'
-import { isTauri } from '../backend'
+import { APP_VERSION } from '../../lib/app-version'
+// Store-free on purpose: main.tsx reaches this module before the onboarding
+// handover (api/in-tauri.ts).
+import { isTauri } from '../in-tauri'
 import { isRecord, prop, asString, asNumber, asRecordArray, errorText } from '../../types/json-guards'
 
 // ── JSON-RPC message types ──────────────────────────────────────
@@ -24,7 +29,7 @@ interface JsonRpcRequest {
   params?: unknown
 }
 
-interface JsonRpcResponse {
+export interface JsonRpcResponse {
   jsonrpc: '2.0'
   /** Absent on a notification — the server may talk without being asked. */
   id?: number
@@ -41,7 +46,7 @@ interface JsonRpcResponse {
  * than discarded — that is strictly better than the `Error: undefined` the
  * pre-typing code produced for exactly these lines.
  */
-function jsonRpcErrorMessage(raw: unknown): string {
+export function jsonRpcErrorMessage(raw: unknown): string {
   if (isRecord(raw)) {
     const msg = asString(raw.message)
     if (msg) return msg
@@ -63,7 +68,7 @@ function jsonRpcErrorMessage(raw: unknown): string {
  * Anything that is not a record, or carries no usable `id`, is a notification
  * or noise and is ignored.
  */
-function parseJsonRpcResponse(v: unknown): JsonRpcResponse | null {
+export function parseJsonRpcResponse(v: unknown): JsonRpcResponse | null {
   if (!isRecord(v)) return null
   const id = asNumber(v.id)
   const rawError = v.error
@@ -103,10 +108,102 @@ function isToolInputSchema(v: unknown): v is MCPToolDefinition['inputSchema'] {
 }
 
 /** The schema a tool gets when the server did not send a usable one. */
+/** How long one JSON-RPC request waits for its answer unless the caller says
+ *  otherwise (the handshake can, see MCPServerConfig.initializeTimeoutMs). */
+export const REQUEST_TIMEOUT_MS = 30_000
+
+/**
+ * The handshake of an external server waits as long as the server is still
+ * busy. Every server LU starts is a uvx or npx package, and its first start
+ * downloads that package and its dependencies before it answers `initialize`.
+ * On a slow line that took longer than the old fixed wait; LU then stopped
+ * uvx in the middle of the download and the next Connect started it over
+ * (box test, 31.10.2026: three failures in a row, instant once the cache was
+ * warm). uv and npm report each download on stderr, so every stderr line buys
+ * the handshake another HANDSHAKE_QUIET_MS, up to HANDSHAKE_CAP_MS in all.
+ */
+export const HANDSHAKE_QUIET_MS = 120_000
+export const HANDSHAKE_CAP_MS = 10 * 60_000
+
+/** What the panel shows while a connecting server prints to stderr, i.e.
+ *  while uvx or npx is still fetching the server. */
+export const INSTALLING_NOTE = 'Installing server dependencies … the first start can take a few minutes.'
+
+/**
+ * Whether a stderr chunk is only npm talking while npx installs the server
+ * ("npm warn deprecated prebuild-install@7.1.3 …"). That is no error of the
+ * server's, and as a WARN in the log it read like one (marky_7777,
+ * 07.11.2026). A chunk with any other line in it stays a warning.
+ */
+export function isNpmNotice(data: string): boolean {
+  const lines = data.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+  return lines.length > 0 && lines.every((l) => /^npm (warn|notice)\b/i.test(l))
+}
+
+/**
+ * How much longer the handshake waits, or null when it gives up: the server
+ * has been quiet for `quietMs`, or the whole handshake reached `capMs`.
+ */
+export function handshakeWaitLeft(
+  now: number, startedAt: number, lastOutputAt: number, quietMs: number, capMs: number,
+): number | null {
+  const capLeft = startedAt + capMs - now
+  const quietLeft = Math.max(startedAt, lastOutputAt) + quietMs - now
+  if (capLeft <= 0 || quietLeft <= 0) return null
+  return Math.min(capLeft, quietLeft)
+}
+
 const EMPTY_INPUT_SCHEMA: MCPToolDefinition['inputSchema'] = {
   type: 'object',
   properties: {},
   required: [],
+}
+
+/**
+ * The tools of one `tools/list` result, as the registry takes them. Shared by
+ * both transports, so a server reached over a URL is held to the same checks
+ * as one LU starts itself.
+ */
+export function toolsFromListResult(result: unknown, config: Pick<MCPServerConfig, 'id' | 'name'>): MCPToolDefinition[] {
+  const tools: MCPToolDefinition[] = []
+  for (const t of asRecordArray(prop(result, 'tools'))) {
+    const toolName = asString(t.name)
+    // A tool with no name cannot be looked up, called or unregistered; it
+    // used to land in the registry under the key `undefined`.
+    if (!toolName) {
+      log.warn(`[MCP:${config.name}] ignoring a tool with no name in tools/list`)
+      continue
+    }
+    tools.push({
+      name: toolName,
+      description: asString(t.description) || '',
+      inputSchema: isToolInputSchema(t.inputSchema) ? t.inputSchema : EMPTY_INPUT_SCHEMA,
+      // Their own permission row (B12): an external tool can do anything
+      // its server does, and Ask First is the default for that row.
+      category: 'mcp',
+      source: 'external',
+      serverId: config.id,
+      serverName: config.name,
+    })
+  }
+  return tools
+}
+
+/** What the model reads back from a `tools/call` result. */
+export function toolResultText(result: unknown): string {
+  // MCP returns a content array of `{ type, ... }` blocks.
+  const content = prop(result, 'content')
+  if (Array.isArray(content)) {
+    return content
+      .map((c: unknown) => {
+        const type = prop(c, 'type')
+        if (type === 'text') return asString(prop(c, 'text')) ?? ''
+        if (type === 'image') return `[Image: ${String(prop(c, 'mimeType'))}]`
+        return JSON.stringify(c)
+      })
+      .join('\n')
+  }
+  return JSON.stringify(result)
 }
 
 /**
@@ -196,11 +293,21 @@ export class MCPExternalClient {
    */
   private onExit?: (serverId: string) => void
 
+  /** Told INSTALLING_NOTE once the connecting server prints to stderr, and
+   *  null when the connect is over, whichever way. */
+  private onProgress?: (note: string | null) => void
+  /** When the server last printed to stderr; the handshake waits on it. */
+  private lastOutputAt = 0
+
   private readonly config: MCPServerConfig
 
-  constructor(config: MCPServerConfig, opts?: { onExit?: (serverId: string) => void }) {
+  constructor(config: MCPServerConfig, opts?: {
+    onExit?: (serverId: string) => void
+    onProgress?: (note: string | null) => void
+  }) {
     this.config = config
     this.onExit = opts?.onExit
+    this.onProgress = opts?.onProgress
   }
 
   async connect(): Promise<MCPToolDefinition[]> {
@@ -223,11 +330,18 @@ export class MCPExternalClient {
       if (!isStartableMcpCommand(this.config.command)) {
         throw new Error(notStartableMessage(this.config.name, this.config.command))
       }
+      const env = await spawnEnv(this.config.env)
       const candidates = commandCandidatesForPlatform(this.config.command)
-      let spawnError: unknown = null
+      // Every failed attempt is kept, not just the last one. The last one used
+      // to be the only one thrown, and on Windows that was the `.cmd`
+      // fallback: a uvx that was simply not installed (or not yet on the PATH
+      // LU was started with) reached the user as Tauri's scope refusal for
+      // `uvx.cmd` (Discord, 27.10.2026), which says nothing about uv.
+      const spawnErrors: unknown[] = []
       for (const program of candidates) {
         const command = Command.create(program, this.config.args, {
-          env: this.config.env,
+          env,
+          ...(this.config.cwd ? { cwd: this.config.cwd } : {}),
         })
 
         // Handle stdout — parse JSON-RPC responses
@@ -237,7 +351,10 @@ export class MCPExternalClient {
         })
 
         command.stderr.on('data', (data: string) => {
-          log.warn(`[MCP:${this.config.name}] stderr`, { data })
+          if (isNpmNotice(data)) log.info(`[MCP:${this.config.name}] npm`, { data })
+          else log.warn(`[MCP:${this.config.name}] stderr`, { data })
+          this.lastOutputAt = Date.now()
+          if (!this.registered) this.onProgress?.(INSTALLING_NOTE)
         })
 
         command.on('close', () => {
@@ -258,13 +375,12 @@ export class MCPExternalClient {
 
         try {
           this.child = await command.spawn()
-          spawnError = null
           break
         } catch (err) {
-          spawnError = err
+          spawnErrors.push(err)
         }
       }
-      if (!this.child) throw spawnError
+      if (!this.child) throw new Error(spawnFailureMessage(this.config.command, spawnErrors))
       this.connected = true
       // Enrolled the moment a process exists, not once the handshake is
       // through: a server that spawns and then hangs in `initialize` is
@@ -272,37 +388,28 @@ export class MCPExternalClient {
       // removes it again if the handshake fails outright.
       liveClients.add(this)
 
-      // Initialize the MCP connection
+      // Initialize the MCP connection. It waits while the server still
+      // prints (HANDSHAKE_QUIET_MS); the server's own config may give it
+      // longer still (d307-k, 19.10.2026: REA's first start on a slow line).
+      const quietMs = Math.max(this.config.initializeTimeoutMs ?? 0, HANDSHAKE_QUIET_MS)
+      const capMs = Math.max(quietMs, HANDSHAKE_CAP_MS)
+      const startedAt = Date.now()
       await this.sendRequest('initialize', {
         protocolVersion: '2024-11-05',
         capabilities: {},
-        clientInfo: { name: 'locally-uncensored', version: '2.3.0' },
-      })
+        clientInfo: { name: 'locally-uncensored', version: APP_VERSION },
+      }, quietMs, () => handshakeWaitLeft(Date.now(), startedAt, this.lastOutputAt, quietMs, capMs),
+      `no answer and no progress for ${Math.round(quietMs / 60_000)} min`)
 
       // Discover tools
       const toolsResult = await this.sendRequest('tools/list', {})
-      const tools: MCPToolDefinition[] = []
-      for (const t of asRecordArray(prop(toolsResult, 'tools'))) {
-        const toolName = asString(t.name)
-        // A tool with no name cannot be looked up, called or unregistered — it
-        // used to land in the registry under the key `undefined`.
-        if (!toolName) {
-          log.warn(`[MCP:${this.config.name}] ignoring a tool with no name in tools/list`)
-          continue
-        }
-        tools.push({
-          name: toolName,
-          description: asString(t.description) || '',
-          inputSchema: isToolInputSchema(t.inputSchema) ? t.inputSchema : EMPTY_INPUT_SCHEMA,
-          category: 'workflow', // External tools default to workflow category
-          source: 'external',
-          serverId: this.config.id,
-        })
-      }
+      const tools = toolsFromListResult(toolsResult, this.config)
 
       this.registered = true
+      this.onProgress?.(null)
       return tools
     } catch (err) {
+      this.onProgress?.(null)
       this.connected = false
       // A failure after spawn (handshake refused, tools/list timed out) leaves
       // the server process running with nobody holding a handle to it — the
@@ -317,20 +424,7 @@ export class MCPExternalClient {
     if (!this.connected) throw new Error('Not connected')
 
     const result = await this.sendRequest('tools/call', { name, arguments: args })
-
-    // MCP returns a content array of `{ type, ... }` blocks.
-    const content = prop(result, 'content')
-    if (Array.isArray(content)) {
-      return content
-        .map((c: unknown) => {
-          const type = prop(c, 'type')
-          if (type === 'text') return asString(prop(c, 'text')) ?? ''
-          if (type === 'image') return `[Image: ${String(prop(c, 'mimeType'))}]`
-          return JSON.stringify(c)
-        })
-        .join('\n')
-    }
-    return JSON.stringify(result)
+    return toolResultText(result)
   }
 
   async disconnect() {
@@ -427,7 +521,17 @@ export class MCPExternalClient {
 
   // ── Private ─────────────────────────────────────────────────
 
-  private sendRequest(method: string, params?: unknown): Promise<unknown> {
+  /**
+   * `waitMore`, when given, is asked each time the wait runs out: a number is
+   * how much longer to wait, null ends the request with a timeout.
+   */
+  private sendRequest(
+    method: string,
+    params?: unknown,
+    timeoutMs: number = REQUEST_TIMEOUT_MS,
+    waitMore?: () => number | null,
+    timeoutWhy?: string,
+  ): Promise<unknown> {
     return new Promise((resolve, reject) => {
       if (!this.child) {
         reject(new Error('Not connected'))
@@ -441,11 +545,18 @@ export class MCPExternalClient {
         params,
       }
 
-      const timer = setTimeout(() => {
-        if (this.pendingRequests.delete(id)) {
-          reject(new Error(`Request ${method} timed out`))
+      const expire = () => {
+        const entry = this.pendingRequests.get(id)
+        if (!entry) return
+        const more = waitMore?.() ?? null
+        if (more !== null) {
+          entry.timer = setTimeout(expire, more)
+          return
         }
-      }, 30000)
+        this.pendingRequests.delete(id)
+        reject(new Error(`Request ${method} timed out${timeoutWhy ? ` (${timeoutWhy})` : ''}`))
+      }
+      const timer = setTimeout(expire, timeoutMs > 0 ? timeoutMs : REQUEST_TIMEOUT_MS)
 
       this.pendingRequests.set(id, { resolve, reject, timer })
 
@@ -453,8 +564,9 @@ export class MCPExternalClient {
       // of becoming an unhandled rejection and letting it sit for 30 s.
       const msg = JSON.stringify(request) + '\n'
       Promise.resolve(this.child.write(msg)).catch((err: unknown) => {
-        if (this.pendingRequests.delete(id)) {
-          clearTimeout(timer)
+        const entry = this.pendingRequests.get(id)
+        if (entry && this.pendingRequests.delete(id)) {
+          clearTimeout(entry.timer)
           reject(err instanceof Error ? err : new Error(String(err)))
         }
       })
@@ -551,6 +663,10 @@ export function isStartableMcpCommand(command: string): boolean {
  * hat, ist schlimmer als keiner, weil der Nutzer nach einem Feld sucht, das
  * es nie gab.
  *
+ * Seit M1 (13.11.2026) gibt es den Weg: ein Server kann als URL eingetragen
+ * werden (http-client.ts, Streamable HTTP). Der Satz hier bleibt beim Befehl,
+ * weil er einem Eintrag mit Befehl antwortet.
+ *
  * Am 05.09.2026 fiel ein zweiter Ausweg derselben Sorte auf, diesmal von einem
  * Tester, der die App zum ersten Mal bediente. Der Ersatzsatz sagte "Change the
  * command to one of those". Aendern konnte man aber nichts: die Zeile trug
@@ -578,6 +694,44 @@ export function notStartableMessage(name: string, command: string): string {
   )
 }
 
+/**
+ * Die Umgebung, mit der ein Server startet.
+ *
+ * Ein Mac-LU aus dem Finder hat den launchd-PATH `/usr/bin:/bin:/usr/sbin:/sbin`.
+ * uvx liegt nach Astrals Installer in `~/.local/bin`, nach Homebrew in
+ * `/opt/homebrew/bin`, npx bei nvm in dessen Ordner: alles unsichtbar. Am
+ * 28.10.2026 im gebauten Testbau nachgestellt: ein installiertes uvx brachte
+ * "`uvx` was not found", und "LU neu oeffnen" aenderte daran nichts. REA bekam
+ * den PATH der Login-Shell schon (commands/plugin_rea.rs); jetzt jeder Server.
+ * Rust sucht das Programm unter Unix in genau diesem PATH. Ein PATH, den der
+ * Nutzer selbst eingetragen hat, bleibt seiner. Windows und Linux antworten
+ * mit null und behalten die Umgebung der App.
+ */
+export async function spawnEnv(configured?: Record<string, string>): Promise<Record<string, string> | undefined> {
+  if (configured && Object.keys(configured).some((k) => k.toUpperCase() === 'PATH')) return configured
+  if (!isTauri()) return configured
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const path = await invoke<string | null>('mcp_child_path')
+    if (!path) return configured
+    return { ...(configured ?? {}), PATH: path }
+  } catch {
+    return configured
+  }
+}
+
+/**
+ * Scope-Name des Eintrags, der uvx an seinem offiziellen Windows-Ort startet.
+ *
+ * Astrals Installer legt `uvx.exe` nach `%USERPROFILE%\.local\bin` und traegt
+ * den Ordner in den Benutzer-PATH ein (docs.astral.sh/uv, Installation und
+ * Deinstallation, Stand 26.10.2026). Ein LU, das vor der Installation lief,
+ * erbt den alten PATH und findet den blanken Namen trotzdem nicht. Der Eintrag
+ * in `capabilities/default.json` ist derselbe uvx an einem festen Ort, kein
+ * weiteres Programm.
+ */
+export const UVX_LOCAL_BIN_SCOPE = 'uvx-local-bin'
+
 export function commandCandidatesForPlatform(
   command: string,
   platform: string = typeof navigator !== 'undefined' ? navigator.platform : ''
@@ -587,5 +741,39 @@ export function commandCandidatesForPlatform(
   if (/[\\/]|\.(cmd|bat|exe)$/i.test(command)) return [command]
   const CMD_SHIM_FIRST = new Set(['npx', 'npm', 'pnpm', 'yarn', 'corepack'])
   if (CMD_SHIM_FIRST.has(command)) return [`${command}.cmd`, command]
+  // uv liefert unter Windows `uvx.exe`, nie ein `.cmd`. Den Shim gibt es nur,
+  // wo jemand einen gebaut hat (ein Versionsmanager, ein eigener Wrapper),
+  // deshalb kommt er nach dem echten Programm und vor dem festen Ort.
+  if (command.toLowerCase() === 'uvx') return ['uvx', 'uvx.cmd', UVX_LOCAL_BIN_SCOPE]
   return [command, `${command}.cmd`]
+}
+
+/** Tauris Ablehnung eines Programms, das nicht in `shell:allow-spawn` steht. */
+const SCOPE_REFUSAL = /not allowed on the configured shell scope/i
+/** Was Rust sagt, wenn es das Programm nicht findet: Windows bzw. macOS/Linux. */
+const NOT_FOUND = /program not found|cannot find the file|no such file or directory|os error 2\b/i
+
+/**
+ * Der Satz, wenn kein Startversuch einen Prozess ergeben hat.
+ *
+ * Eine Bereichsablehnung ist hier nie die Ursache: was gar nicht starten darf,
+ * hat `isStartableMcpCommand` vorher abgefangen, und eine Ablehnung kann nur
+ * noch einen Rueckfall-Namen treffen. Gezeigt wird darum der erste echte
+ * Fehler, und wenn das Programm schlicht fehlt, wie man es bekommt.
+ */
+export function spawnFailureMessage(command: string, errors: unknown[]): string {
+  const texte = errors.map((e) => (e instanceof Error ? e.message : String(e)))
+  const echt = texte.filter((t) => !SCOPE_REFUSAL.test(t))
+  if (echt.length === 0) return texte[0] ?? `could not start \`${command}\``
+  if (!echt.every((t) => NOT_FOUND.test(t))) return echt[0]
+  const nackt = command.trim().toLowerCase().replace(/\.(cmd|exe)$/, '')
+  if (nackt === 'uvx') {
+    return '`uvx` was not found. Install uv from https://docs.astral.sh/uv/getting-started/installation/ '
+      + '(on Windows: winget install --id=astral-sh.uv -e), then quit and reopen LU so it sees the new PATH.'
+  }
+  if (nackt === 'npx') {
+    return '`npx` was not found. Install Node.js from https://nodejs.org, '
+      + 'then quit and reopen LU so it sees the new PATH.'
+  }
+  return echt[0]
 }

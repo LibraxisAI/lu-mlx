@@ -24,6 +24,7 @@ let ctx: ActiveContext
 
 vi.mock('../../../hooks/useActiveContextWindow', () => ({
   useActiveContextWindow: () => ctx,
+  useActiveWindowUse: () => 'chat',
 }))
 
 import { ContextDropdown } from '../ContextDropdown'

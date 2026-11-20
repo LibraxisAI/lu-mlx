@@ -1,36 +1,59 @@
-import { useState, useEffect, useRef } from 'react'
+import { displayModelName } from '../../api/providers/registry'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { motion } from 'framer-motion'
 import {
-  Download, ArrowLeft, RefreshCw, Search, MessagesSquare, Images, Clapperboard,
-  X as XIcon, HardDrive, Sparkles, PackageOpen, Video as VideoIcon, Image as ImageIcon,
-  Settings as SettingsIcon, Layers,
+  MessagesSquare, Images, Clapperboard,
+  Sparkles, PackageOpen, Video as VideoIcon, Image as ImageIcon,
+  Settings as SettingsIcon, Layers, Music,
 } from 'lucide-react'
 import { useModels } from '../../hooks/useModels'
 import { useModelStore } from '../../stores/modelStore'
 import { useUIStore } from '../../stores/uiStore'
+import { useHfLinkStore } from '../../stores/hfLinkStore'
 import { useProviderStore } from '../../stores/providerStore'
 import { ModelCard } from './ModelCard'
+import { RemoveRefusalsDialog } from './RemoveRefusalsDialog'
+import { useAbliterateStore } from '../../stores/abliterateStore'
+import { downloadLine } from '../../api/abliterate'
+import { prefixModelName } from '../../api/providers/model-name'
 import { PullModelDialog } from './PullModelDialog'
 import { DiscoverModels } from './DiscoverModels'
 import { CivitaiSearchPanel } from './CivitaiSearchPanel'
-import { LoraManager, LORA_USE_HINT, type LoraRow } from './LoraManager'
+import { LoraLinkPanel } from './LoraLinkPanel'
+import { LORA_USE_HINT, type LoraRow } from './LoraManager'
+import { LoraAddons } from './LoraAddons'
 import { Modal } from '../ui/Modal'
-import { GlowButton } from '../ui/GlowButton'
+import { ModalActions, ModalButton } from '../ui/ModalActions'
+import { RenameNoteDialog, type RenameKind } from './RenameNoteDialog'
 import { showModel } from '../../api/ollama'
+import { comfyModelInfo } from '../../api/discover'
+import { ModelFileInfo, type ModelFileInfoState } from './ModelFileInfo'
+import { useModelSourceStore } from '../../stores/modelSourceStore'
+import { comfyKindLabel } from '../../lib/model-source'
 import { checkComfyConnection, refreshComfyModels } from '../../api/comfyui'
 import { isMlxImageHost } from '../../api/mlx-image'
-import { MlxMediaSettings } from '../settings/MlxMediaSettings'
+import { MacMediaLane } from './MacMediaLane'
+import { MacLoraLane } from './MacLoraLane'
+import { useMlxLoras } from '../../hooks/useMlxLoras'
+import { modelSkin, type RailEntry } from './skin'
+import { useMlxMedia } from '../../hooks/useMlxMedia'
 import { backendCall } from '../../api/backend'
-import { customModelDirs, deleteBundledModel, stopBundledEngine } from '../../api/engine'
+import { addGgufFile, customModelDirs } from '../../api/engine'
 import { counterView } from '../../lib/inventory-counter'
 import { groupInstalledByProvider, needsBackendSwitchHeading, foldedRowsSentence, LU_ENGINE_GROUP } from '../../lib/lu-engine-rows'
 import { isBuiltinEngineEntry } from '../../lib/lmstudio-match'
-import { installedRowMatchesSearch } from '../../lib/model-search'
+import { externalDeleteHint, servesItsOwnFiles } from '../../lib/external-model-hint'
+import { catalogNamesFor, installedModelMatchesSearch, installedRowMatchesSearch } from '../../lib/model-search'
+import { installedCatalogNames } from '../../lib/installed-catalog-names'
 import { isLoraRow } from '../../lib/lora-rows'
 import { useBuiltinEngineStatus, engineIsIdle } from '../../hooks/useBuiltinEngineStatus'
 import { LuEngineSwitchBar } from '../chat/LuEngineSwitchBar'
 import type { InstalledModelLike } from '../../lib/lmstudio-match'
 import type { ModelCategory, AIModel } from '../../types/models'
+import { usePageMemoryStore } from '../../stores/pageMemoryStore'
+import { UninstallDialog, type UninstallRequest } from './UninstallDialog'
+import { useLoraNotesStore } from '../../stores/loraNotesStore'
+import { revealComfyModel } from '../../api/discover'
 
 // One category drives BOTH views (Discover + Installed) — the old split
 // discoverMode/categoryFilter pair collapsed into the persisted store value.
@@ -40,10 +63,11 @@ type Mode = Extract<ModelCategory, 'text' | 'image' | 'video'>
  *  not a fourth model category, they are the add-on files that sit beside the
  *  image models. So the rail selection is Mode PLUS that one lane, and only
  *  the three real categories are written back into the store. */
-type Rail = Mode | 'lora'
+type Rail = Mode | 'lora' | 'music'
 
-// Monochrome on purpose — the active state is carried by the pill background,
-// not by per-category accent colors (David 2026-07-17 design pass).
+// The lanes of the rail. How an entry looks, and how the active one is
+// marked, is the business of the face the page wears (skin/classic.tsx on
+// Windows and Linux, skin/mac.tsx on the Mac).
 const RAIL_ITEMS: { key: Mode; label: string; icon: typeof MessagesSquare }[] = [
   { key: 'text',  label: 'Chat',  icon: MessagesSquare },
   { key: 'image', label: 'Image', icon: Images },
@@ -55,21 +79,10 @@ const RAIL_ITEMS: { key: Mode; label: string; icon: typeof MessagesSquare }[] = 
  *  is typed on the store's category and this one is not a category. */
 const LORA_RAIL = { key: 'lora' as const, label: 'LoRAs', icon: Layers }
 
-/** The mark a counter wears while it has nothing counted to show. Not a 0:
- *  a 0 next to a card that reads Installed is a wrong answer, and this one
- *  stood for five seconds on the real box (Befund 2, 2026-08-29). */
-function CountingDots({ label }: { label: string }) {
-  return (
-    <span
-      className="text-[0.55rem] font-normal opacity-50 animate-pulse"
-      role="status"
-      aria-label={label}
-      title={label}
-    >
-      &middot;&middot;&middot;
-    </span>
-  )
-}
+/** The Mac's music engine (ACE-Step 1.5, commands/music.rs). Its own entry
+ *  for the same reason as LoRAs, and only on the Mac: on Windows and Linux a
+ *  music model is a ComfyUI checkpoint of the Image lane. */
+const MUSIC_RAIL = { key: 'music' as const, label: 'Music', icon: Music }
 
 export function ModelManager() {
   const {
@@ -77,6 +90,17 @@ export function ModelManager() {
     categoryFilter, setCategoryFilter, inventoryLoaded, inventoryRefreshing,
   } = useModels()
   const { setView, openSettingsAt } = useUIStore()
+  // A14: the refusal-removal run, if one is going. The store keeps polling
+  // while it runs, whichever page is open, so leaving this page and coming
+  // back finds it there without a call of its own.
+  const ablStatus = useAbliterateStore((s) => s.status)
+  const openRemoveRefusals = useAbliterateStore((s) => s.openDialog)
+  const ablDialogOpen = useAbliterateStore((s) => s.dialogPath !== null)
+  const useFinishedCopy = async (outputPath: string) => {
+    await fetchModels()
+    const stem = (outputPath.split(/[\\/]/).pop() ?? '').replace(/\.gguf$/i, '')
+    if (stem) await setActiveModel(prefixModelName('openai', stem))
+  }
   const ollamaEnabled = useProviderStore(s => s.providers.ollama.enabled)
   // A14: whether the LU Engine itself is serving the chat. Decides whether its
   // group needs a heading even when it is the only group (review 7).
@@ -98,15 +122,47 @@ export function ModelManager() {
   // der Rest ist `unknown`. Gelesen wird ohnehin nur `name` (Modal-Titel) und
   // das Ganze als JSON.stringify.
   const [modelInfo, setModelInfo] = useState<({ name: string } & Record<string, unknown>) | null>(null)
+  // The plain confirm of one file: the LoRA lane (a LoRA is one file).
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
+  // C17: a model row's bin opens the uninstall dialog, which lists every file
+  // of the model and the space it frees before anything goes.
+  const [uninstall, setUninstall] = useState<UninstallRequest | null>(null)
+  // D1: Details for a ComfyUI file (image or video model, LoRA, VAE, …).
+  const [fileInfo, setFileInfo] = useState<ModelFileInfoState | null>(null)
+  const fileInfoFor = useRef<string | null>(null)
   // Open on Discover by default — most opens are to find and install
   // something new. Installed is one click away in the segment control.
-  const [tab, setTab] = useState<'installed' | 'discover'>('discover')
+  // C22: Installed or Get new, the lane and the search are the page memory's,
+  // so going to Chat or Create and back lands where the user left.
+  const tab = usePageMemoryStore((s) => s.modelsTab)
+  const setTab = usePageMemoryStore((s) => s.setModelsTab)
 
   // Header search: always visible (no hidden magnifier), live filter +
   // Enter submits the HuggingFace catalog search in Discover.
-  const [searchQuery, setSearchQuery] = useState('')
-  const [searchSubmitToken, setSearchSubmitToken] = useState(0)
+  // A button elsewhere may open Models with a search (Neurons' "Get the
+  // original"): it starts the field and the catalog search once.
+  const [searchQuery, setSearchQueryState] = useState(() => useUIStore.getState().discoverQuery ?? usePageMemoryStore.getState().modelsSearch)
+  const setSearchQuery = (q: string) => {
+    setSearchQueryState(q)
+    usePageMemoryStore.getState().setModelsSearch(q)
+  }
+  const [searchSubmitToken, setSearchSubmitToken] = useState(() => (useUIStore.getState().discoverQuery ? 1 : 0))
+  // That search looks for an original model: its changed versions go last.
+  const [originalFor] = useState(() => { const s = useUIStore.getState(); return s.discoverOriginal ? s.discoverQuery : null })
+  useEffect(() => {
+    const ui = useUIStore.getState()
+    // A button elsewhere that opens Get new (with or without a search) wins
+    // over the remembered tab: it says where it sends the user.
+    if (ui.discoverQuery || ui.discoverTarget) {
+      setTab('discover')
+      setExtraRail(null)
+    }
+    if (ui.discoverQuery) {
+      usePageMemoryStore.getState().setModelsSearch(ui.discoverQuery)
+      ui.clearDiscoverQuery()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   const searchInputRef = useRef<HTMLInputElement>(null)
 
   // The store still defaults categoryFilter to 'all' for legacy reasons, but
@@ -131,16 +187,38 @@ export function ModelManager() {
     (categoryFilter === 'text' || categoryFilter === 'image' || categoryFilter === 'video')
       ? categoryFilter
       : 'text'
-  // The LoRA lane is ComfyUI's loras folder and nothing else. On the Mac local
-  // media is MLX, which has no LoRA folder to list and no CivitAI target to
-  // download into, so the rail is not offered there at all rather than offered
-  // and dead. Windows and Linux both get it.
-  const loraRailOffered = !macMlxMedia
-  const [loraRail, setLoraRail] = useState(false)
-  const rail: Rail = loraRail && loraRailOffered ? 'lora' : mode
-  // No `rail !== 'lora'` here: the LoRA rail is not offered while macMlxMedia
-  // holds, so the two can never be true together.
-  const showMlxPanel = macMlxMedia && (mode === 'image' || mode === 'video')
+  // The LoRA lane. On Windows and Linux it is ComfyUI's loras folder. On the
+  // Mac local media is MLX: there the lane is the LoRA folder of the Mac's
+  // image engine (MacLoraLane), which the LoRA stack in Create reads. Until
+  // that folder existed the rail was not offered on the Mac at all.
+  const extraRail = usePageMemoryStore((s) => s.modelsExtraRail)
+  const setExtraRail = usePageMemoryStore((s) => s.setModelsExtraRail)
+
+  // A Hugging Face link (HfLinkInbox) opens the Chat lane of Discover, where
+  // its dialog lives, whatever lane or tab was open.
+  const hfLink = useHfLinkStore((s) => s.pending)
+  useEffect(() => {
+    if (!hfLink) return
+    setExtraRail(null)
+    setTab('discover')
+    setCategoryFilter('text')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hfLink])
+  const rail: Rail = extraRail === 'lora' ? 'lora' : extraRail === 'music' && macMlxMedia ? 'music' : mode
+  const showMlxPanel = macMlxMedia && rail !== 'lora' && (rail === 'music' || mode === 'image' || mode === 'video')
+  /** The Mac's own LoRA lane, in place of the ComfyUI one below. */
+  const showMacLoras = macMlxMedia && rail === 'lora'
+  const macLoras = useMlxLoras(macMlxMedia)
+  // One reading of the Mac catalogue for the lane, the rail badges and the
+  // Installed counter, so the three cannot disagree.
+  const mlxMedia = useMlxMedia(macMlxMedia)
+  const mlxInstalled = {
+    image: mlxMedia.image.models.filter((m) => m.installed).length,
+    video: mlxMedia.video.models.filter((m) => m.installed).length,
+    music: mlxMedia.music.models.filter((m) => m.installed).length,
+  }
+  /** The Mac lane on screen, when it is one. */
+  const macLane = rail === 'music' ? 'music' : mode === 'video' ? 'video' : 'image'
 
   useEffect(() => {
     fetchModels()
@@ -153,6 +231,13 @@ export function ModelManager() {
   const luEngineFile = (m: AIModel): m is AIModel & { path: string } =>
     m.type === 'text' && isBuiltinEngineEntry(m) && 'path' in m && typeof m.path === 'string' && m.path.length > 0
 
+  // A chat model another app serves (LM Studio, any OpenAI-compatible
+  // server). Neither Ollama nor LU can delete it, and Details used to ask
+  // Ollama about it and then show nothing at all.
+  const externalTextModel = (m: AIModel): boolean =>
+    m.type === 'text' && 'provider' in m && !isBuiltinEngineEntry(m)
+    && servesItsOwnFiles(m.provider, 'providerName' in m ? m.providerName : undefined)
+
   const handleInfo = async (name: string) => {
     const model = models.find((m: AIModel) => m.name === name)
     if (model && luEngineFile(model)) {
@@ -160,23 +245,84 @@ export function ModelManager() {
       setInfoOpen(true)
       return
     }
+    if (model && externalTextModel(model)) {
+      const providerName = 'providerName' in model ? model.providerName : undefined
+      setModelInfo({ name, engine: providerName, deleteHint: externalDeleteHint(providerName) })
+      setInfoOpen(true)
+      return
+    }
+    if (model && (model.type === 'image' || model.type === 'video')) {
+      await handleFileInfo(name)
+      return
+    }
     try {
       const info = await showModel(name)
       setModelInfo({ name, ...info })
-      setInfoOpen(true)
-    } catch {
-      // ignore
+    } catch (e) {
+      // D1: the click used to end here without a word.
+      setModelInfo({ name, error: `Ollama could not describe this model: ${e instanceof Error ? e.message : String(e)}` })
+    }
+    setInfoOpen(true)
+  }
+
+  /** D1 (a user on Discord, 01.11.2026): the ⓘ of an image model asked
+   *  Ollama, which knows no ComfyUI file, and the error went nowhere. The
+   *  dialog opens at once with what the list knows; the disk fills in the
+   *  rest, or the reason it could not. */
+  const handleFileInfo = async (name: string) => {
+    const row = models.find((m: AIModel) => m.name === name)
+    const source = row && 'source' in row ? row.source : undefined
+    fileInfoFor.current = name
+    const base: ModelFileInfoState = {
+      name,
+      kind: comfyKindLabel(source),
+      size: row?.size ?? 0,
+      facts: null,
+      error: null,
+      page: useModelSourceStore.getState().pageFor(name),
+    }
+    setFileInfo(base)
+    try {
+      const facts = await comfyModelInfo(name)
+      if (fileInfoFor.current === name) setFileInfo({ ...base, facts })
+    } catch (e) {
+      if (fileInfoFor.current === name) setFileInfo({ ...base, error: e instanceof Error ? e.message : String(e) })
     }
   }
 
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  // C41: the rename-and-note dialog of a LoRA, and what a folder open said.
+  const [loraEdit, setLoraEdit] = useState<{ name: string; kind: RenameKind } | null>(null)
+  const [loraNotice, setLoraNotice] = useState<string | null>(null)
+
+  // D17: a GGUF from anywhere on the drive. The dialog picks it, the import
+  // links it into the LU Engine folder, and the Installed list shows it with
+  // its Use button. What happened is said in a dialog either way.
+  const [ggufNote, setGgufNote] = useState<{ ok: boolean; text: string } | null>(null)
+  const handleAddGguf = async () => {
+    try {
+      const name = await addGgufFile()
+      if (!name) return
+      await fetchModels()
+      setTab('installed')
+      setGgufNote({ ok: true, text: `${name} is now one of your LU Engine models. Find it under Installed and press Use to chat with it.` })
+    } catch (e) {
+      setGgufNote({ ok: false, text: e instanceof Error ? e.message : String(e) })
+    }
+  }
+  /** C17: what the uninstall dialog is asked about for this row. */
+  const uninstallRequestFor = (model: AIModel): UninstallRequest => {
+    if (model.type === 'image' || model.type === 'video') return { kind: 'comfy-file', name: model.name }
+    if (luEngineFile(model)) return { kind: 'engine', name: displayModelName(model.name), path: model.path, active: model.name === activeModel }
+    return { kind: 'ollama', name: model.name, bytes: model.size ?? 0 }
+  }
   const handleDelete = async (name: string) => {
     try {
       const model = models.find((m: AIModel) => m.name === name)
       if (model && (model.type === 'image' || model.type === 'video')) {
-        // ComfyUI file model (cpl.sardinas7489, Discord): delete the file from
+        // ComfyUI file model (Discord): delete the file from
         // the models tree, then rescan so the enum and the list drop it.
-        // The folder the user named under Model Storage goes along: ComfyUI
+        // The folder the user named under Storage goes along: ComfyUI
         // lists files from it now (GH #122) and LU does not delete out of it,
         // so the backend needs it to say that instead of "was not found".
         await backendCall('delete_comfy_model', { filename: name, extraDirs: customModelDirs() })
@@ -189,20 +335,15 @@ export function ModelManager() {
         // word.
         setConfirmDelete(null)
         useModelStore.getState().removeInventoryModel(name)
+        // C41: the note of a file that is gone goes too.
+        useLoraNotesStore.getState().forget(name)
         await refreshComfyModels().catch(() => { /* rescan is best-effort */ })
         await fetchModels()
         return
       }
-      if (model && luEngineFile(model)) {
-        // The loaded file is locked on Windows, so the engine is stopped first
-        // when the row is the active one; the backend refuses otherwise.
-        if (model.name === activeModel) await stopBundledEngine()
-        await deleteBundledModel(model.path)
-        setConfirmDelete(null)
-        await fetchModels()
-        return
-      }
-      await removeModel(name)
+      // Every other row goes through the uninstall dialog (C17), which knows
+      // the LU Engine's files and Ollama's models; this confirm is the LoRA
+      // lane's, and a LoRA is a ComfyUI file.
       setConfirmDelete(null)
     } catch (e) {
       setDeleteError(e instanceof Error ? e.message : String(e))
@@ -217,14 +358,34 @@ export function ModelManager() {
   // encoders and the rest of the addon folders stay exactly where they were,
   // since nothing else has a place to go to.
   const loraModels = models.filter((m: AIModel) => isLoraRow(m))
-  const loraRows: LoraRow[] = loraModels.map((m) => ({ name: m.name, size: m.size ?? 0 }))
+  // C41: the user's names, notes and hidden marks, kept by LU beside the files.
+  const loraNotes = useLoraNotesStore((s) => s.notes)
+  const showHiddenLoras = usePageMemoryStore((s) => s.lorasShowHidden)
+  const loraRows: LoraRow[] = loraModels.map((m) => {
+    const n = loraNotes[m.name]
+    return { name: m.name, size: m.size ?? 0, ...(n?.label ? { label: n.label } : {}), ...(n?.note ? { note: n.note } : {}), ...(n?.hidden ? { hidden: true } : {}) }
+  })
+  const hiddenLoraCount = loraRows.filter((r) => r.hidden).length
+  const loraMatches = (r: LoraRow, q: string) =>
+    installedRowMatchesSearch(r.name, q) || (!!r.label && installedRowMatchesSearch(r.label, q)) || (!!r.note && r.note.toLowerCase().includes(q.trim().toLowerCase()))
   const filteredModels = models.filter((m: AIModel) => m.type === mode && !isLoraRow(m))
+  // An installed file also answers to the catalogue name it was downloaded
+  // under ("Gemma 4 12B Abliterated" finds `Huihui-gemma-4-12B-…-Q4_K`).
+  const catalogByFile = useMemo(() => installedCatalogNames(), [])
   const modeMeta = RAIL_ITEMS.find(r => r.key === mode)!
   /** What the Installed counter and the Installed view are about right now. */
-  const installedCount = rail === 'lora' ? loraRows.length : filteredModels.length
+  const installedCount = showMacLoras
+    ? macLoras.loras.length
+    : rail === 'lora'
+    ? loraRows.length
+    : showMlxPanel ? mlxInstalled[macLane] : filteredModels.length
   // One rule for the rail badges and the Installed badge, so the two can
   // never again disagree about what an uncounted lane looks like.
   const inventoryState = { loaded: inventoryLoaded, refreshing: inventoryRefreshing }
+  /** The Mac's media lanes count their own catalogue, which has its own
+   *  moment of not knowing yet. */
+  const mlxInventoryState = { loaded: mlxMedia.loaded, refreshing: false }
+  const macMediaKey = (key: string): key is 'image' | 'video' | 'music' => macMlxMedia && (key === 'image' || key === 'video' || key === 'music')
 
   // d37d7bf5 + neejuh (2.5.5): "models show installed in Discover but the
   // Installed tab is empty and I can't select them." Image/video models are
@@ -238,7 +399,8 @@ export function ModelManager() {
   const imageOrVideo = mode === 'image' || mode === 'video'
   // The LoRA lane is served by the same engine and empties for the same
   // reason, so it asks the same question and shows the same answer.
-  const comfyBackedLane = rail === 'lora' || imageOrVideo
+  // Never on the Mac: its LoRA lane is a folder of the app, not ComfyUI's.
+  const comfyBackedLane = !showMacLoras && (rail === 'lora' || imageOrVideo)
   useEffect(() => {
     if (!(tab === 'installed' && comfyBackedLane && installedCount === 0)) return
     let alive = true
@@ -255,162 +417,98 @@ export function ModelManager() {
 
   // ── Render ──────────────────────────────────────────────────────
 
+  // The face of the page: the classic one on Windows and Linux, the redesign
+  // on the Mac (skin/which.ts). It lays out and colours. Everything above
+  // this line, and every handler below it, is the same for both.
+  const skin = modelSkin()
+
+  const macLoraState = { loaded: macLoras.loaded, refreshing: false }
+  const railEntries: RailEntry[] = [...RAIL_ITEMS, ...(macMlxMedia ? [MUSIC_RAIL] : []), LORA_RAIL].map(({ key, label, icon }) => ({
+    key,
+    label,
+    Icon: icon,
+    active: rail === key,
+    badge: macMediaKey(key)
+      ? counterView(mlxInstalled[key], mlxInventoryState)
+      : macMlxMedia && key === 'lora'
+      ? counterView(macLoras.loras.length, macLoraState)
+      : counterView(
+        key === 'lora'
+          ? loraRows.length
+          : models.filter((m) => m.type === key && !isLoraRow(m)).length,
+        inventoryState,
+      ),
+    onPick: () => {
+      if (key === 'lora' || key === 'music') { setExtraRail(key); return }
+      setExtraRail(null)
+      setCategoryFilter(key)
+    },
+  }))
+  const installedBadge = counterView(installedCount, showMacLoras ? macLoraState : showMlxPanel ? mlxInventoryState : inventoryState)
+
   return (
     <div className="h-full flex overflow-hidden">
-      {/* Category rail — the big, labeled home of Chat / Image / Video */}
-      <aside className="shrink-0 w-12 lg:w-36 border-r border-gray-200 dark:border-white/[0.06] bg-gray-50/60 dark:bg-white/[0.015] flex flex-col py-3 px-1.5 lg:px-2 gap-1">
-        {[...RAIL_ITEMS, ...(loraRailOffered ? [LORA_RAIL] : [])].map(({ key, label, icon: Icon }) => {
-          const active = rail === key
-          const badge = counterView(
-            key === 'lora'
-              ? loraRows.length
-              : models.filter((m) => m.type === key && !isLoraRow(m)).length,
-            inventoryState,
-          )
-          return (
-            <button
-              key={key}
-              onClick={() => {
-                if (key === 'lora') { setLoraRail(true); return }
-                setLoraRail(false)
-                setCategoryFilter(key)
-              }}
-              title={label}
-              aria-pressed={active}
-              className={`flex items-center justify-center lg:justify-start gap-2 px-2 py-2 rounded-lg transition-colors ${
-                active
-                  ? 'bg-white dark:bg-white/[0.08] shadow-sm border border-gray-200 dark:border-white/[0.08]'
-                  : 'border border-transparent hover:bg-gray-100 dark:hover:bg-white/[0.04]'
-              }`}
-            >
-              <Icon size={15} className={active ? 'text-gray-800 dark:text-gray-100' : 'text-gray-400 dark:text-gray-500'} />
-              <span className={`hidden lg:block t-micro font-medium ${active ? 'text-gray-900 dark:text-white' : 'text-gray-500 dark:text-gray-400'}`}>
-                {label}
-              </span>
-              {badge.kind === 'loading' ? (
-                <span className="hidden lg:block ml-auto">
-                  <CountingDots label={key === 'lora' ? 'Counting installed LoRAs' : `Counting installed ${label.toLowerCase()} models`} />
-                </span>
-              ) : badge.value > 0 ? (
-                <span className="hidden lg:block ml-auto text-[0.55rem] text-gray-400 dark:text-gray-500 tabular-nums">{badge.value}</span>
-              ) : null}
-            </button>
-          )
-        })}
-        <div className="mt-auto hidden lg:block px-2 pb-1 text-[0.5rem] leading-relaxed text-gray-400 dark:text-gray-600">
-          Models run 100% on your computer.
-        </div>
-      </aside>
-
-      {/* Content */}
-      <div className="flex-1 min-w-0 overflow-y-auto scrollbar-thin">
-        {/* Full pane width like the chat area — no centered max-w cap, so wide
-            windows get more grid columns instead of side gutters. */}
-        <div className="p-4 space-y-4">
-          {/* Top bar */}
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setView('chat')}
-              className="p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-white/10 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors"
-              title="Back to chat"
-            >
-              <ArrowLeft size={16} />
-            </button>
-            <h1 className="text-[0.85rem] font-semibold text-gray-900 dark:text-white">Models</h1>
-
-            {/* Get new / Installed segment. The MLX panel is one list with
-                per-model Install/Remove, so the split would switch nothing. */}
-            <div className={`ml-2 flex items-center p-0.5 rounded-lg bg-gray-100 dark:bg-white/[0.04] border border-gray-200 dark:border-white/[0.06] ${showMlxPanel ? 'hidden' : ''}`}>
-              <button
-                onClick={() => setTab('discover')}
-                aria-pressed={tab === 'discover'}
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md t-micro font-semibold transition-colors ${
-                  tab === 'discover'
-                    ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm'
-                    : 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'
-                }`}
-              >
-                <Sparkles size={11} /> Get new
-              </button>
-              <button
-                onClick={() => setTab('installed')}
-                aria-pressed={tab === 'installed'}
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md t-micro font-semibold transition-colors ${
-                  tab === 'installed'
-                    ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm'
-                    : 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'
-                }`}
-              >
-                <HardDrive size={11} /> Installed
-                {(() => {
-                  const badge = counterView(installedCount, inventoryState)
-                  return badge.kind === 'loading' ? (
-                    <CountingDots label="Counting installed models" />
-                  ) : (
-                    <span className="text-[0.55rem] font-normal opacity-70 tabular-nums">{badge.value}</span>
-                  )
-                })()}
-              </button>
-            </div>
-
-            <div className="flex-1" />
-
-            {/* Always-visible search */}
-            <div className="relative w-40 sm:w-56">
-              <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
-              <input
-                ref={searchInputRef}
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') { setTab('discover'); setSearchSubmitToken((t) => t + 1) }
-                  else if (e.key === 'Escape') setSearchQuery('')
-                }}
-                placeholder="Search models…"
-                className="w-full pl-7 pr-6 py-1.5 rounded-lg bg-gray-100 dark:bg-white/5 border border-gray-200 dark:border-white/10 t-micro text-gray-900 dark:text-white placeholder-gray-500 focus:outline-none focus:border-gray-400 dark:focus:border-white/20"
-              />
-              {searchQuery && (
-                <button
-                  onClick={() => setSearchQuery('')}
-                  className="absolute right-1.5 top-1/2 -translate-y-1/2 p-0.5 rounded text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
-                  title="Clear search"
-                  aria-label="Clear search"
-                >
-                  <XIcon size={11} />
-                </button>
-              )}
-            </div>
-
-            <button onClick={fetchModels} className="p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-white/10 text-gray-500 hover:text-gray-900 dark:hover:text-white transition-colors" title="Refresh">
-              <RefreshCw size={13} />
-            </button>
-            {ollamaEnabled && (
-              <button
-                onClick={() => setPullOpen(true)}
-                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-gray-100 dark:bg-white/5 border border-gray-200 dark:border-white/10 t-micro text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-white/10 transition-colors"
-                title="Pull any Ollama model by name"
-              >
-                <Download size={11} /> Pull
-              </button>
-            )}
-          </div>
-
+      <skin.ManagerFrame
+        rail={rail}
+        entries={railEntries}
+        onBack={() => setView('chat')}
+        tab={tab}
+        onTab={setTab}
+        installedBadge={installedBadge}
+        searchRef={searchInputRef}
+        search={{
+          value: searchQuery,
+          onChange: setSearchQuery,
+          onKeyDown: (e) => {
+            if (e.key === 'Enter') { setTab('discover'); setSearchSubmitToken((t) => t + 1) }
+            else if (e.key === 'Escape') setSearchQuery('')
+          },
+        }}
+        onRefresh={() => { void fetchModels(); if (macMlxMedia) { void mlxMedia.refresh(); void macLoras.refresh() } }}
+        // Pull fetches an Ollama chat model by name. On the media and LoRA
+        // rails it has nothing to pull into.
+        onPull={ollamaEnabled && rail === 'text' ? () => setPullOpen(true) : undefined}
+        // A GGUF runs on the LU Engine, which serves the chat lane only.
+        onAddFile={rail === 'text' ? () => { void handleAddGguf() } : undefined}
+      >
           {/* Views */}
           {showMlxPanel && (
-            <div className="pt-1">
-              <MlxMediaSettings only={mode === 'image' ? 'image' : 'video'} />
-            </div>
+            <MacMediaLane
+              kind={macLane}
+              media={mlxMedia}
+              tab={tab}
+              search={searchQuery}
+              onGetNew={() => setTab('discover')}
+            />
           )}
 
-          {!showMlxPanel && tab === 'installed' && (
+          {showMacLoras && (
+            <MacLoraLane
+              folder={macLoras}
+              tab={tab}
+              search={searchQuery}
+              searchSubmitToken={searchSubmitToken}
+              onGetNew={() => setTab('discover')}
+              onEdit={(name) => setLoraEdit({ name, kind: 'lora' })}
+            />
+          )}
+
+          {!showMlxPanel && !showMacLoras && tab === 'installed' && (
             <>
+              {ablStatus?.status === 'running' && !ablDialogOpen && (
+                // One quiet line above the list, not the empty-state block:
+                // the list stays where it was while the run goes on.
+                <p data-testid="remove-refusals-strip" className="t-body text-gray-500 dark:text-gray-400 mb-2">
+                  Removing refusals from {ablStatus.modelName}: {ablStatus.phaseLabel || 'starting'}
+                  {ablStatus.bytes && ablStatus.total > 0 && ` (${downloadLine(ablStatus)})`}.{' '}
+                  <button type="button" className="underline hover:text-gray-900 dark:hover:text-white" onClick={() => openRemoveRefusals(ablStatus.sourcePath)}>Open</button>
+                </p>
+              )}
               {counterView(installedCount, inventoryState).kind === 'loading' ? (
                 // The empty state is the same claim the counter makes, in
                 // words: you own none of these. It waits for the count for
                 // the same reason (Befund 2, abnahme counter-check).
-                <div className="text-center py-16 px-6">
-                  <p className="text-[0.7rem] text-gray-500">Reading your installed models…</p>
-                </div>
+                <skin.QuietLine>Reading your installed models…</skin.QuietLine>
               ) : comfyBackedLane && installedCount === 0 && comfyReachable !== true ? (
                 // comfyReachable: null = still probing, false = confirmed down.
                 // Never show the misleading "no models installed" here while the
@@ -418,91 +516,74 @@ export function ModelManager() {
                 // out when ComfyUI is down (a few seconds), and that flashed the
                 // wrong message before the hint appeared (caught in desktop E2E).
                 comfyReachable === null ? (
-                  <div className="text-center py-16 px-6">
-                    <p className="text-[0.7rem] text-gray-500">Checking ComfyUI…</p>
-                  </div>
+                  <skin.QuietLine>Checking ComfyUI…</skin.QuietLine>
                 ) : (
-                <div className="flex flex-col items-center justify-center text-center py-16 px-6 gap-3">
-                  <div className="w-14 h-14 rounded-full bg-gray-100 dark:bg-white/[0.04] border border-gray-200 dark:border-white/[0.06] flex items-center justify-center">
-                    {rail === 'lora'
-                      ? <Layers size={28} className="text-gray-400 dark:text-gray-500" />
-                      : mode === 'video' ? <VideoIcon size={28} className="text-gray-400 dark:text-gray-500" /> : <ImageIcon size={28} className="text-gray-400 dark:text-gray-500" />}
-                  </div>
-                  <div className="space-y-1">
-                    {/* The LoRA lane hangs off the same engine, so it gets the
-                        same state and the same sentence, with its own noun. */}
-                    <p className="t-control text-gray-800 dark:text-gray-200">Start ComfyUI to see your {rail === 'lora' ? 'LoRA' : mode} models</p>
-                    <p className="t-micro text-gray-500 max-w-[300px] leading-relaxed">
-                      {rail === 'lora' ? 'LoRA' : mode === 'image' ? 'Image' : 'Video'} models are served by ComfyUI, which isn't running right now, so the ones you've downloaded can't be listed yet. Open Settings, go to AI Backends, and press Start under ComfyUI (Image &amp; Video), then come back.
-                    </p>
-                  </div>
-                  {/* Nebenbefund 3, R8 re-measure: the sentence above names a
-                      Start button that sits inside a collapsed section, and
-                      said nothing about unfolding it. The button knows the
-                      whole route, so it walks all of it: Settings, the AI
-                      Backends tab, the ComfyUI section open. */}
-                  <button
-                    onClick={() => openSettingsAt({ tab: 'backends', section: 'comfyui' })}
-                    className="flex items-center gap-1.5 mt-1 px-3 py-1.5 rounded-md bg-gray-900 dark:bg-white/10 hover:bg-gray-800 dark:hover:bg-white/15 text-white t-micro font-medium transition-colors"
+                  <skin.EmptyState
+                    kind="engine-down"
+                    Icon={rail === 'lora' ? Layers : mode === 'video' ? VideoIcon : ImageIcon}
+                    // The LoRA lane hangs off the same engine, so it gets the
+                    // same state and the same sentence, with its own noun.
+                    title={`Start ComfyUI to see your ${rail === 'lora' ? 'LoRA' : mode} models`}
+                    // Nebenbefund 3, R8 re-measure: the sentence names a Start
+                    // button that sits inside a collapsed section, and said
+                    // nothing about unfolding it. The button knows the whole
+                    // route, so it walks all of it: Settings, the AI Backends
+                    // tab, the ComfyUI section open.
+                    action={{
+                      Icon: SettingsIcon,
+                      label: 'Open Settings',
+                      onClick: () => openSettingsAt({ tab: 'backends', section: 'comfyui' }),
+                    }}
                   >
-                    <SettingsIcon size={11} /> Open Settings
-                  </button>
-                </div>
+                    {rail === 'lora' ? 'LoRA' : mode === 'image' ? 'Image' : 'Video'} models are served by ComfyUI, which isn't running right now, so the ones you've downloaded can't be listed yet. Open Settings, go to AI Backends, and press Start under ComfyUI (Image &amp; Video), then come back.
+                  </skin.EmptyState>
                 )
               ) : rail === 'lora' ? (
-                <LoraManager
-                  rows={searchQuery ? loraRows.filter((r) => installedRowMatchesSearch(r.name, searchQuery)) : loraRows}
+                <skin.LoraManager
+                  rows={loraRows
+                    .filter((r) => showHiddenLoras || !r.hidden)
+                    .filter((r) => !searchQuery || loraMatches(r, searchQuery))}
                   total={loraRows.length}
                   searchQuery={searchQuery}
                   onDelete={(name) => setConfirmDelete(name)}
+                  onInfo={(name) => { void handleFileInfo(name) }}
                   onGetNew={() => setTab('discover')}
+                  onEdit={(name) => setLoraEdit({ name, kind: 'lora' })}
+                  onToggleHidden={(name) => {
+                    const hidden = !!useLoraNotesStore.getState().notes[name]?.hidden
+                    useLoraNotesStore.getState().setNote(name, { hidden: !hidden })
+                  }}
+                  onReveal={(name) => {
+                    revealComfyModel(name).catch((e) => setLoraNotice(e instanceof Error ? e.message : String(e)))
+                  }}
+                  hiddenCount={hiddenLoraCount}
+                  showHidden={showHiddenLoras}
+                  onShowHidden={(v) => usePageMemoryStore.getState().setLorasShowHidden(v)}
                 />
               ) : models.length === 0 ? (
-                <div className="flex flex-col items-center justify-center text-center py-16 px-6 gap-3">
-                  <div className="w-14 h-14 rounded-full bg-gray-100 dark:bg-white/[0.04] border border-gray-200 dark:border-white/[0.06] flex items-center justify-center">
-                    <PackageOpen size={28} className="text-gray-400 dark:text-gray-500" />
-                  </div>
-                  <div className="space-y-1">
-                    <p className="text-[12px] font-medium text-gray-800 dark:text-gray-200">No models installed yet</p>
-                    <p className="t-micro text-gray-500 max-w-[280px] leading-relaxed">
-                      Browse curated chat, image and video models and install them with one click.
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => setTab('discover')}
-                    className="flex items-center gap-1.5 mt-1 px-3 py-1.5 rounded-md bg-gray-900 dark:bg-white/10 hover:bg-gray-800 dark:hover:bg-white/15 text-white t-micro font-medium transition-colors"
-                  >
-                    <Sparkles size={11} /> Get new models
-                  </button>
-                </div>
+                <skin.EmptyState
+                  kind="nothing-installed"
+                  Icon={PackageOpen}
+                  title="No models installed yet"
+                  action={{ Icon: Sparkles, label: 'Get new models', onClick: () => setTab('discover') }}
+                >
+                  Browse curated chat, image and video models and install them with one click.
+                </skin.EmptyState>
               ) : filteredModels.length === 0 ? (
-                <div className="text-center py-10 space-y-2">
-                  <p className="text-[0.7rem] text-gray-500">
-                    No {modeMeta.label.toLowerCase()} models installed
-                  </p>
-                  <button
-                    onClick={() => setTab('discover')}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-gray-100 dark:bg-white/5 border border-gray-200 dark:border-white/10 t-micro text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-white/10 transition-colors"
-                  >
-                    <Sparkles size={11} /> Get new {modeMeta.label.toLowerCase()} models
-                  </button>
-                </div>
+                <skin.EmptyState
+                  kind="lane-empty"
+                  Icon={modeMeta.icon}
+                  title={`No ${modeMeta.label.toLowerCase()} models installed`}
+                  action={{ Icon: Sparkles, label: `Get new ${modeMeta.label.toLowerCase()} models`, onClick: () => setTab('discover') }}
+                />
               ) : (
                 (() => {
-                  const SectionIcon = modeMeta.icon
                   const shown = searchQuery
-                    ? filteredModels.filter(m => installedRowMatchesSearch(m.name, searchQuery))
+                    ? filteredModels.filter(m => installedModelMatchesSearch(m.name, catalogNamesFor(m.name, catalogByFile), searchQuery))
                     : filteredModels
                   return (
-                    <section className="space-y-1.5">
-                      <div className="flex items-center gap-2 px-1">
-                        <SectionIcon size={11} />
-                        <h2 className="t-micro font-semibold uppercase tracking-[0.12em] text-gray-700 dark:text-gray-300">
-                          {modeMeta.label}
-                        </h2>
-                        <span className="text-[0.55rem] text-gray-400 dark:text-gray-500 tabular-nums">{shown.length}</span>
-                        <div className="flex-1 h-px bg-gray-200 dark:bg-white/[0.06]" />
-                      </div>
+                    <section className={skin.cls.group}>
+                      <skin.Head place="installed" Icon={modeMeta.icon} title={modeMeta.label} count={shown.length} />
                       <div className="space-y-1.5">
                         {/* A14: a click on an LU Engine card can move the chat
                             backend, so the same line the composer shows stands
@@ -519,7 +600,7 @@ export function ModelManager() {
                         {foldedRows && (
                           <p
                             data-testid="installed-folded-rows"
-                            className="px-1 pt-0.5 text-[0.55rem] text-gray-500 dark:text-gray-500"
+                            className={skin.cls.foldedRows}
                           >
                             {foldedRowsSentence(foldedRows)}
                           </p>
@@ -541,7 +622,7 @@ export function ModelManager() {
                           return providerGroups.map(({ label, models: rows }) => (
                             <div key={label} className="space-y-1.5">
                               {showHeadings && (
-                                <p className="px-1 pt-1 t-label font-medium text-gray-500 dark:text-gray-500">
+                                <p className={skin.cls.providerHeading}>
                                   {label}
                                 </p>
                               )}
@@ -577,8 +658,28 @@ export function ModelManager() {
                               // Zeile: welche davon sie bedient, entscheidet
                               // die Karte selbst.
                               engineStopped={engineRuht}
-                              onDelete={() => setConfirmDelete(model.name)}
+                              onDelete={() => setUninstall(uninstallRequestFor(model))}
                               onInfo={() => handleInfo(model.name)}
+                              // W33: a ComfyUI file gets a name of its own (the file stays).
+                              onRename={
+                                model.type === 'image' || model.type === 'video'
+                                  ? () => setLoraEdit({ name: model.name, kind: 'model' })
+                                  : undefined
+                              }
+                              // W33: a ComfyUI file can be shown in its folder.
+                              onReveal={
+                                model.type === 'image' || model.type === 'video'
+                                  ? () => { revealComfyModel(model.name).catch((e) => setLoraNotice(e instanceof Error ? e.message : String(e))) }
+                                  : undefined
+                              }
+                              // A14: where the file names its original weights
+                              // and is not itself a copy the tool made.
+                              onRemoveRefusals={
+                                luEngineFile(model) && 'sourceRepo' in model && model.sourceRepo && !model.refusalsRemoved
+                                  ? () => openRemoveRefusals(model.path)
+                                  : undefined
+                              }
+                              infoTitle={externalTextModel(model) ? `Details. ${externalDeleteHint('providerName' in model ? model.providerName : undefined)}` : undefined}
                               canDelete={
                                 // Ollama text models via the Ollama API; image/video
                                 // models are ComfyUI files we can delete from disk;
@@ -595,7 +696,7 @@ export function ModelManager() {
                           ))
                         })()}
                         {shown.length === 0 && (
-                          <p className="text-center t-micro text-gray-500 py-6">No installed {modeMeta.label.toLowerCase()} models match "{searchQuery}"</p>
+                          <p className={skin.cls.installedNoMatch}>No installed {modeMeta.label.toLowerCase()} models match "{searchQuery}"</p>
                         )}
                       </div>
                     </section>
@@ -605,16 +706,18 @@ export function ModelManager() {
             </>
           )}
 
-          {!showMlxPanel && tab === 'discover' && (
+          {!showMlxPanel && !showMacLoras && tab === 'discover' && (
             rail === 'lora' ? (
               // Same panel as the checkpoint search one rail up, asked for a
               // different type. The folder a hit lands in follows from that
               // type inside searchCivitaiModels, so there is no second place
               // that decides where a LoRA is written.
-              <div className="space-y-2">
-                <p className="px-1 t-micro text-gray-500 dark:text-gray-500">
+              <div className={skin.cls.loraDiscover}>
+                <p className={skin.cls.loraDiscoverNote}>
                   Downloads land in ComfyUI&apos;s models/loras folder. {LORA_USE_HINT}
                 </p>
+                <LoraLinkPanel installed={loraRows.map((r) => r.name)} />
+                <LoraAddons search={searchQuery} />
                 <CivitaiSearchPanel
                   modelType="LORA"
                   title="Search CivitAI for LoRAs"
@@ -628,43 +731,73 @@ export function ModelManager() {
                 category={mode}
                 search={searchQuery}
                 searchSubmitToken={searchSubmitToken}
+                originalFor={originalFor}
               />
             )
           )}
-        </div>
-      </div>
+      </skin.ManagerFrame>
 
       <PullModelDialog open={pullOpen} onClose={() => setPullOpen(false)} />
 
+      <RemoveRefusalsDialog onUse={useFinishedCopy} onModelsChanged={async () => { await fetchModels() }} />
+
       <Modal open={!!confirmDelete} onClose={() => setConfirmDelete(null)} title="Delete Model">
         <p className="text-[0.7rem] text-gray-600 dark:text-gray-300 mb-3">
-          Are you sure you want to delete <span className="text-gray-900 dark:text-white font-mono">{confirmDelete}</span>?
+          Are you sure you want to delete <span className="text-gray-900 dark:text-white font-mono">{confirmDelete ? displayModelName(confirmDelete) : null}</span>?
           This removes the model file from your disk and frees the space.
         </p>
-        {(() => {
-          const row = models.find((m: AIModel) => m.name === confirmDelete)
-          return row && luEngineFile(row) ? (
-            <p className="t-micro font-mono text-gray-500 dark:text-gray-400 mb-3 break-all" data-testid="delete-file-path">{row.path}</p>
-          ) : null
-        })()}
-        <div className="flex gap-2">
-          <GlowButton variant="secondary" onClick={() => setConfirmDelete(null)} className="flex-1">
+        <ModalActions>
+          <ModalButton variant="quiet" onClick={() => setConfirmDelete(null)}>
             Cancel
-          </GlowButton>
-          <GlowButton variant="danger" onClick={() => confirmDelete && handleDelete(confirmDelete)} className="flex-1">
+          </ModalButton>
+          <ModalButton variant="danger" onClick={() => confirmDelete && handleDelete(confirmDelete)}>
             Delete
-          </GlowButton>
-        </div>
+          </ModalButton>
+        </ModalActions>
+      </Modal>
+
+      <UninstallDialog
+        request={uninstall}
+        onClose={() => setUninstall(null)}
+        onDone={async () => { await fetchModels() }}
+        removeOllamaModel={async (name) => { await removeModel(name) }}
+      />
+
+      {/* C41, W33: one dialog for a LoRA and an image or video model. */}
+      <RenameNoteDialog name={loraEdit?.name ?? null} kind={loraEdit?.kind ?? 'lora'} onClose={() => setLoraEdit(null)} />
+
+      <Modal open={!!loraNotice} onClose={() => setLoraNotice(null)} title="Could not open the folder">
+        <p className="t-micro text-red-500 dark:text-red-400 mb-3">{loraNotice}</p>
+        <ModalActions><ModalButton onClick={() => setLoraNotice(null)}>Close</ModalButton></ModalActions>
       </Modal>
 
       <Modal open={!!deleteError} onClose={() => setDeleteError(null)} title="Delete failed">
         <p className="text-[0.7rem] text-red-500 dark:text-red-400 mb-3">{deleteError}</p>
-        <GlowButton variant="secondary" onClick={() => setDeleteError(null)} className="w-full">
-          Close
-        </GlowButton>
+        <ModalActions>
+          <ModalButton onClick={() => setDeleteError(null)}>
+            Close
+          </ModalButton>
+        </ModalActions>
       </Modal>
 
-      <Modal open={infoOpen} onClose={() => setInfoOpen(false)} title={modelInfo?.name || 'Model Info'}>
+      <Modal open={!!ggufNote} onClose={() => setGgufNote(null)} title={ggufNote?.ok ? 'Model added' : 'Could not add the model'}>
+        <p className={ggufNote?.ok ? 't-micro text-gray-600 dark:text-gray-300 mb-3' : 't-micro text-red-500 dark:text-red-400 mb-3'}>{ggufNote?.text}</p>
+        <ModalActions>
+          <ModalButton onClick={() => setGgufNote(null)}>
+            Close
+          </ModalButton>
+        </ModalActions>
+      </Modal>
+
+      <ModelFileInfo info={fileInfo} onClose={() => { fileInfoFor.current = null; setFileInfo(null) }} />
+
+      <Modal open={infoOpen} onClose={() => setInfoOpen(false)} title={typeof modelInfo?.name === 'string' && modelInfo.name ? displayModelName(modelInfo.name) : 'Model Info'}>
+        {typeof modelInfo?.error === 'string' && (
+          <p role="alert" className="t-micro text-red-500 dark:text-red-400 mb-3 break-words">{modelInfo.error}</p>
+        )}
+        {typeof modelInfo?.deleteHint === 'string' && (
+          <p className="t-label text-gray-700 dark:text-gray-200 mb-3">{modelInfo.deleteHint}</p>
+        )}
         {modelInfo && (
           <pre className="t-micro text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-black/30 rounded-lg p-3 overflow-auto max-h-80 scrollbar-thin font-mono">
             {JSON.stringify(modelInfo, null, 2)}

@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Locally Uncensored v3.0.6: Voice, Computer Control, First Mac Build</title>
+<meta name="description" content="v3.0.6 release notes: talk to LU and hear it answer, a model that uses mouse and keyboard in apps you approve, image input for local models in one download, ten more chat models on LU Cloud, and a Mac build for Apple Silicon. Four of these are in beta.">
+<meta name="keywords" content="locally uncensored 3.0.6, locally uncensored release, local voice chat ai, local ai computer control, local vision model download, local ai mac apple silicon">
+<meta property="og:title" content="Locally Uncensored v3.0.6: Voice, Computer Control, and the First Mac Build">
+<meta property="og:description" content="Voice, computer control, Create in chat and ten new cloud models, all in beta, plus image input in one download and the first build for Macs with Apple Silicon.">
+<meta property="og:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<meta property="og:url" content="https://locallyuncensored.com/blog/locally-uncensored-v3-0-6-release.html">
+<meta property="og:type" content="article">
+<meta property="article:published_time" content="2026-10-14">
+<meta property="article:author" content="PurpleDoubleD">
+<meta property="article:tag" content="Release">
+<meta property="article:tag" content="Voice">
+<meta property="article:tag" content="Agent">
+<meta property="article:tag" content="Mac">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Locally Uncensored v3.0.6: Voice, Computer Control, a Mac Build">
+<meta name="twitter:description" content="Voice, computer control, Create in chat and ten new cloud models, all in beta, plus image input in one download and the first build for Macs with Apple Silicon.">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<link rel="canonical" href="https://locallyuncensored.com/blog/locally-uncensored-v3-0-6-release.html">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="../favicon.png">
+<!-- Privacy: No external fonts loaded. Using system fonts. -->
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BlogPosting","headline":"Locally Uncensored v3.0.6: Voice, Computer Control, and the First Mac Build","description":"v3.0.6 release notes: talk to LU and hear it answer, a model that uses mouse and keyboard in apps you approve, image input for local models in one download, ten more chat models on LU Cloud, and a Mac build for Apple Silicon. Four of these are in beta.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-10-14","dateModified":"2026-10-14","inLanguage":"en","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/locally-uncensored-v3-0-6-release.html"},"keywords":"locally uncensored 3.0.6, locally uncensored release, local voice chat ai, local ai computer control, local vision model download, local ai mac apple silicon"}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"What is new in Locally Uncensored 3.0.6?","acceptedAnswer":{"@type":"Answer","text":"You can talk to LU and hear it answer, and a model can use the mouse and keyboard in apps you approve. Local models with image input download with their image part, a chat on LU Cloud can order images and clips, LU Cloud lists ten more chat models, and there is a build for Macs with Apple Silicon. Voice, computer control, Create in chat and the ten new models are in beta."}},{"@type":"Question","name":"Does Voice in 3.0.6 run locally?","acceptedAnswer":{"@type":"Answer","text":"Speech recognition, the voice and the turn taking run on your own machine, and the model that answers is the chat model you picked. Voice is English only for now and is shown in local mode only, because LU Cloud has no voice service yet."}},{"@type":"Question","name":"Is computer control on by default?","acceptedAnswer":{"@type":"Answer","text":"No. It stays off until you switch it on under Settings, Agent, Agent Permissions, Computer control. In every new chat LU asks once before it looks at the screen or acts, it asks before it touches an app for the first time, and by default before every action. Ctrl+Alt+Space pauses and Ctrl+Alt+Esc stops."}},{"@type":"Question","name":"Is there a Mac build of 3.0.6?","acceptedAnswer":{"@type":"Answer","text":"Yes, in beta. The Mac build is for Apple Silicon and needs macOS 14 or newer. Intel Macs are not supported. The app has run on one Mac only, an M5 Pro with 48 GB."}},{"@type":"Question","name":"Is the Windows installer signed?","acceptedAnswer":{"@type":"Answer","text":"The Windows installers of this release are not code signed, so SmartScreen and some antivirus engines can warn about them. SECURITY.md in the repository says how to check a download."}}]}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://locallyuncensored.com/"},{"@type":"ListItem","position":2,"name":"Blog","item":"https://locallyuncensored.com/blog/"},{"@type":"ListItem","position":3,"name":"v3.0.6: Talk to Your Model, Let It Use the Screen, and a Mac Build","item":"https://locallyuncensored.com/blog/locally-uncensored-v3-0-6-release.html"}]}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/lu.css">
+<script defer src="/assets/lu.js"></script>
+  <script data-goatcounter="https://purple47.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</head>
+<body>
+<nav class="lu-nav">
+  <a class="lu-nav-brand" href="/" aria-label="Locally Uncensored">
+    <span class="lu-mono" data-mono="nav" data-size="40" aria-hidden="true"></span>
+    <span class="lu-nav-word">Locally <span class="accent">Uncensored</span></span>
+  </a>
+  <div class="lu-nav-links" id="lu-nav-links">
+    <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/pricing/">Pricing</a>
+    <a class="lu-nav-link" href="/blog/">Blog</a>
+    <a class="lu-nav-link" href="/guide/">Guide</a>
+    <a class="lu-nav-link" href="/remote-access/">Remote</a>
+  </div>
+  <div class="lu-nav-right">
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">4200+&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">1700+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <span class="lu-nav-sep"></span>
+    <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="he-cta" href="/pricing/" aria-label="LU Cloud plans and what they include"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>Cloud</a>
+    <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
+    <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </div>
+</nav>
+<div class="container lu-doc">
+  <div class="breadcrumb"><a href="../">Locally Uncensored</a> / <a href="./">Blog</a> / This Post</div>
+
+  <div class="post-meta">
+    <span class="post-tag">Release</span>
+    <span>October 14, 2026</span>
+    <span>&middot;</span>
+    <span>9 min read</span>
+  </div>
+
+  <article>
+    <h1>v3.0.6: Talk to Your Model, Let It Use the Screen, and a Mac Build</h1>
+
+    <p><em>This post covers an older release. The current release is <a href="locally-uncensored-v3-0-7-release.html">3.0.7</a>, and the <a href="/guide/install/">handbook</a> explains how updates arrive.</em></p>
+
+    <p><a href="https://github.com/PurpleDoubleD/locally-uncensored">Locally Uncensored</a> 3.0.6 came out on October 11, 2026. You can talk to LU and hear it answer, and a model can use the mouse and keyboard in apps you approve. Local models with image input now download with their image part, a chat on LU Cloud can order images and clips, and the cloud lists ten more chat models. It is also the first release with a build for Macs with Apple Silicon.</p>
+
+    <p>Four of these are in beta: Voice, computer control, Create in chat and the ten new models. The app marks each of them with the word Beta, and hovering the mark says what that means. We list what we have not tested at the end of this post, and the list is long.</p>
+
+    <p>The short version:</p>
+
+    <ul>
+      <li><strong>Voice (Beta)</strong>: a spoken conversation with the chat model you picked. Speech recognition, the voice and the turn taking run on your own machine. English only for now</li>
+      <li><strong>Computer control (Beta)</strong>: a model works in the apps you approve. It is off by default and asks in every new chat before it looks at the screen</li>
+      <li><strong>Image input for local models</strong>: the model and its image part arrive as one download, with a checksum for each file</li>
+      <li><strong>Create in chat (Beta)</strong>: ask for an image or a clip in a Cloud chat, read the order, then approve it</li>
+      <li><strong>Ten more chat models on LU Cloud</strong>, marked Uncensored (Beta)</li>
+      <li><strong>A Mac build (Beta)</strong> for Apple Silicon on macOS 14 or newer</li>
+    </ul>
+
+    <h2>Voice: Talk to LU and Hear It Answer</h2>
+
+    <p>Voice is a new surface in the main navigation. The model that answers is the chat model you already picked, so there is no second model to choose. The first time, LU shows what it downloads and where it goes, then installs its own voice engine with one click. You can interrupt an answer by speaking, and the session is saved as a normal conversation.</p>
+
+    <p>There are fifteen voices: Alba, Anna, Azelma, Charles, Eponine, Eve, Fantine, George, Jane, Javert, Marius, Mary, Michael, Paul and Vera. Changing the voice fetches one small file and installs nothing else again.</p>
+
+    <p>Four switches sit next to the title: Voice settings, Agent, Where it may work and Thinking. You can move all of them while a session runs. With Agent off, the session is a conversation without tools. With Agent on, a voice session has the tools of the agent chat with the same permissions, and a tool that needs your approval waits for a click on Approve or Reject.</p>
+
+    <p>Where it may work decides how far those tools reach. Workspace only is the default: files stay inside the folder of the session, LU asks before every command, and there is no screen. Whole computer opens files by any path your user account can open, commands in any folder, and the screen. LU asks once before that level is used for the first time. System folders and the folders that hold keys and passwords stay closed at both levels.</p>
+
+    <p>Thinking is off by default, and a thought is never read aloud. While the voice engine is in memory, a switch next to the title shows how much memory it holds. On our Windows test machine that was about 1 GB. One click ends the session and stops the engine. Without the click, the engine shuts down five minutes after the last session.</p>
+
+    <div class="callout info">
+    <div class="callout-title">What Voice does not do yet</div>
+    Voice is English only, and the voices are fixed. It is shown in local mode only, because LU Cloud has no voice service yet. The first session after setup or a restart took 23 to 63 seconds to start in our Windows tests, against about one second for later ones. Our check in the real app ran on Windows. On a Mac, Voice has been tried by hand in the app. On Linux it has not been run in the app.
+    </div>
+
+    <p>The <a href="talk-to-local-llm-voice-chat.html">Voice guide</a> walks through setup, the four switches and the first session.</p>
+
+    <h2>Computer Control: Off Until You Switch It On</h2>
+
+    <p>With computer control, a model uses the mouse and keyboard in apps you approve. It is new and not proven in every app yet, so watch what it does and stop it when it goes wrong.</p>
+
+    <p>It stays off until you switch it on under Settings, Agent, Agent Permissions, Computer control. After that, LU still asks at several points:</p>
+
+    <ul>
+      <li>The first time a chat wants the screen, a card asks "Allow computer control in this chat?" with Allow and Deny. Until you click, LU takes no screenshot and does nothing. The yes holds for that one chat, and a new chat asks again</li>
+      <li>LU asks before it touches an app for the first time and, by default, before every action</li>
+      <li>Autonomous, for one session, asks only before sending, buying, deleting or changing permissions. Those four always need your click, in a supervised session as in an autonomous one</li>
+    </ul>
+
+    <p>Some places are always off limits: terminals, password managers, system sign-in and permission dialogs, security settings, the Run dialog and windows with administrator rights. LU never types into a password field.</p>
+
+    <p>Ctrl+Alt+Space pauses and Ctrl+Alt+Esc stops. In an autonomous session LU also pauses when you move the mouse, shows what it did so far, and asks whether you take over or let it continue. A screen task ends after at most 25 steps or 8 minutes.</p>
+
+    <p>On Windows the LU window shrinks to a small window in the top right corner while LU works, and the edge of that screen glows softly in purple. On Linux the window stays as it is and a bar at the top says "LU is controlling this computer".</p>
+
+    <p>You can also ask for something on the screen by voice. In our test on Windows, typing a note in Notepad by voice took 11 to 22 seconds from the end of the command to the spoken result, with a local 9B model. That was measured before the question in every new chat existed, so in a new chat your click on Allow comes on top.</p>
+
+    <div class="callout info">
+    <div class="callout-title">Where computer control stands</div>
+    There is no background mode: LU works in the foreground with the real pointer. The list of buttons and fields and the autonomous mode exist on Windows only. On Linux and macOS LU cannot name what a click would press, so every click there is asked as a sensitive action. On a Mac, computer control is in the app but not fully tested yet. On Linux it has not been run in the app and needs an X11 session. Text on the screen can try to give the model instructions. LU marks what it reads from the screen as untrusted and asks before sensitive actions. For anything that matters, stay in the supervised mode.
+    </div>
+
+    <h2>Local Models With Image Input Arrive Complete</h2>
+
+    <p>A local chat model of the LU Engine takes pictures only when a second file, its image part, lies next to the model. Before 3.0.6 it was easy to end up with only the first file. LU now fetches both as one download on the Models page, in onboarding and for a model you find through the hub search, with one progress bar and a checksum for each file.</p>
+
+    <p>The download dialogs have a ticked box, Include image input, with the size it adds. For a model you already have, Add image input fetches the missing file: on the model's row under Models, and at the top of a chat once a picture is attached. The chat catalog has 54 image parts, shared by 122 model downloads, each with its exact size and checksum. If the graphics memory has no room for the part next to the model, the model loads without it and LU says so.</p>
+
+    <p>An image part you placed by hand under its original name is now found too, as long as it is clear which model it belongs to.</p>
+
+    <h2>Create in Chat (Beta)</h2>
+
+    <p>In Cloud mode the Plugins menu has a Create switch. With it on, the chat model puts together an order from what you ask for. The order appears as a card, and nothing runs until you approve it. Read the order before you start it.</p>
+
+    <p>The switch appears once your account has it, because Create in chat is switched on account by account. It has not yet run in the installed app against the live service.</p>
+
+    <h2>Ten More Chat Models on LU Cloud</h2>
+
+    <p>The Cloud model picker opens with a new group of ten models, marked Uncensored (Beta). Their makers release them to answer without refusing. Among them are Gemma 4 Uncensored, GLM 4.7 Flash Heretic, Aion 3.5 and Abliterated Large V2. A model shows up once the cloud catalogue lists it.</p>
+
+    <p>Five of the ten say Limited capacity in grey after their names. At busy times such a model can ask you to wait a moment. All ten are new in LU Cloud and can still change.</p>
+
+    <p>One rename in the same area: the No refusals mark is now called No Filter. It keeps its meaning. Only a model that answered in full in our measurement carries it.</p>
+
+    <h2>A Build for Macs With Apple Silicon (Beta)</h2>
+
+    <p>3.0.6 is the first release with a Mac build. It needs Apple Silicon and macOS 14 or newer. Intel Macs are not supported.</p>
+
+    <p>On a Mac, chat runs on local models through the bundled server with Metal, and Create makes images and video on the Mac itself, without ComfyUI. On an M5 Pro with 48 GB, DreamShaper XL Turbo made an image in 33 seconds and Qwen-Image 2.1 Turbo in 38. LTX-2.3 Distilled 4-bit made a clip of two seconds at 768x512 with sound in 64 seconds.</p>
+
+    <p>It is a beta for a plain reason: the app has run on that one Mac only. It has not run on macOS 14 or 15, and not on a Mac with 16 or 24 GB. Remote Access and the automatic update are not confirmed on macOS. The <a href="/mac/">Mac page</a> keeps the current state.</p>
+
+    <h2>Smaller Changes</h2>
+
+    <ul>
+      <li>A running task says what it is doing. The status line shows plain words such as Reading, Writing, Searching or Working on the screen in place of internal tool names, with the seconds the step has taken</li>
+      <li>Dialogs have a new look: one dark glass style and one row of buttons for confirmations, questions and settings pop-ups</li>
+      <li>Every result in Create shows the prompt it was made from, with a Copy button in the large view</li>
+      <li>An Ollama model that runs partly on the processor says so, in the context window list and on the model's row in the picker</li>
+      <li>You can choose your microphone under Settings, Voice &amp; Remote, Speech. The choice holds for dictation in the chat and for Voice</li>
+      <li>Settings, Privacy and the README now describe what the app sends. What it sends has not changed. The Privacy section used to say "No telemetry" next to a counter, and the texts are now exact about the update check, the count of presses on the Cloud switch and the account check while you are signed in</li>
+    </ul>
+
+    <h2>Fixes Worth Knowing About</h2>
+
+    <ul>
+      <li>Dictation in the chat works again on installs with Python 3.12 or newer. The fix comes with the app, so an install that was hit needs no reinstall</li>
+      <li>Going from Chat to Voice no longer loads an Ollama model again, and switching to another Ollama model after a voice session no longer hangs</li>
+      <li>Loading an LM Studio model can be cancelled, ends after five minutes at the latest and says what failed</li>
+      <li>A picture made in the running session can be used as a source in Edit. It used to fail with "Could not load that gallery image: Load failed"</li>
+      <li>A CUDA "unknown error" in Create comes with an explanation: it comes from the graphics driver and not from the model or your prompt</li>
+      <li>Restart Now starts the app again on macOS and Linux after an update. The fix is part of 3.0.6, so it works from the next update after this one</li>
+      <li>A compacted conversation keeps its code blocks. Thanks to ALANDVO for the fix</li>
+    </ul>
+
+    <h2>Security</h2>
+
+    <p>A security review of everything new in this release led to ten fixes before shipping. No key press puts a character into a password field, and pasting is refused there as well. A double click on a program, an installer, a script or a shortcut asks first. Sensitive buttons are recognised in eleven more languages, and the question about an app starts with the focus on Deny.</p>
+
+    <p>With Whole computer, token files, mail and browser data and LU's own folders stay closed. The start files of the shell, such as <code>.zshrc</code>, <code>.bashrc</code> or the PowerShell profile, can be read and not changed, because a line written there is a command that runs later without a question. The agent can no longer fetch from a private network, and a page over 8 MB is refused.</p>
+
+    <h2>What We Have Not Tested</h2>
+
+    <p>The changelog has the full list. These are the points we think you should know before you rely on something:</p>
+
+    <ul>
+      <li>Voice and computer control were checked point by point in the real app on one Windows 10 machine. Eight corrections and the ten security fixes made after that check have run in automated tests only</li>
+      <li>Voice and computer control have not been run in the app on Linux. The x86_64 packages were built and inspected in an emulated environment and have not been started on a real machine by us</li>
+      <li>On a Mac, Voice has been tried by hand in the app, and computer control is not fully tested yet. The app says so at its switch</li>
+      <li>Small local models misjudge when a screen task is finished. A task can end as stopped although the work is done</li>
+      <li>The microphone field has run in automated tests and not yet with a real microphone</li>
+      <li>The Windows installers of this release are not code signed, so SmartScreen and some antivirus engines can warn about them. <a href="/is-locally-uncensored-safe/">Is Locally Uncensored safe?</a> explains the warning and how to check a download</li>
+    </ul>
+
+    <h2>Download</h2>
+
+    <p>Each link loads the 3.0.6 file directly. The current version is on the <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest">releases page</a>.</p>
+
+    <ul>
+      <li>Windows: <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases/download/v3.0.6/Locally.Uncensored_3.0.6_x64-setup.exe" download>Locally.Uncensored_3.0.6_x64-setup.exe</a></li>
+      <li>Mac with Apple Silicon, macOS 14 or newer: <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases/download/v3.0.6/LU_3.0.6_aarch64.dmg" download>LU_3.0.6_aarch64.dmg</a></li>
+      <li>Linux: <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases/download/v3.0.6/Locally.Uncensored_3.0.6_amd64.AppImage" download>AppImage</a>, <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases/download/v3.0.6/Locally.Uncensored_3.0.6_amd64.deb" download>deb</a> or <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases/download/v3.0.6/Locally.Uncensored-3.0.6-1.x86_64.rpm" download>rpm</a></li>
+    </ul>
+
+    <p>New here? The <a href="/guide/">handbook</a> takes you from installer to first generation, and the <a href="/guide/install/">install chapter</a> explains the SmartScreen warning and how updates arrive.</p>
+
+    <h2>Related</h2>
+
+    <ul>
+      <li><a href="talk-to-local-llm-voice-chat.html">Talk to a local LLM</a>, the Voice guide for this release</li>
+      <li><a href="what-a-mac-can-run-locally-2026.html">What a Mac can run locally in 2026</a>, by memory tier</li>
+      <li><a href="/vs/lm-studio/">Locally Uncensored vs LM Studio</a>, the comparison page</li>
+      <li><a href="locally-uncensored-v3-0-1-release.html">v3.0.1 release notes</a>, the previous release write-up on this site</li>
+    </ul>
+
+    <hr>
+
+    <p><em>Locally Uncensored 3.0.6. AGPL-3.0 licensed. Built by <a href="https://github.com/PurpleDoubleD">PurpleDoubleD</a>. Bug reports and feature requests on <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">GitHub Issues</a> or in the <a href="https://locallyuncensored.com/discord">Discord</a>.</em></p>
+    <h2>In the handbook</h2>
+
+    <ul>
+      <li><a href="/guide/chat/">Chat</a>, the model picker, the context window and thinking mode</li>
+      <li><a href="/guide/agent/">Agent</a>, the tools and the permissions a voice session shares</li>
+      <li><a href="/guide/install/">Install and update</a>, the SmartScreen warning and how updates arrive</li>
+      <li><a href="/guide/settings-and-troubleshooting/">Settings and troubleshooting</a>, every settings tab in one line each and where the log file is</li>
+    </ul>
+
+  </article>
+
+  <div class="post-footer">
+    <p>Voice, computer control and a Mac build, with the limits written down</p>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest" class="cta-btn" target="_blank">
+      Download the latest version
+    </a>
+    <p style="margin-top:14px;margin-bottom:0">No GPU? LU Cloud runs in a browser, paid from credit packs that start at 15 EUR and need no subscription. <a href="/pricing/">See what it costs</a> or <a href="https://lu-labs.ai/pricing?tab=credits&amp;src=luc-v306-end" target="_blank" rel="noopener">open LU Cloud</a>.</p>
+  </div>
+</div>
+
+<footer>
+  <div class="footer-row footer-meta"><span>&copy; 2026 &middot; Locally Uncensored &middot; AGPL-3.0</span></div>
+  <div class="footer-row footer-links">
+    <a href="https://locallyuncensored.com/blog/">Blog</a>
+    <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/pricing/">Pricing</a>
+    <a href="https://locallyuncensored.com/cloud/">LU Cloud</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-chat-online/">Uncensored AI chat online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-image-generator-online/">Image generator online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-video-generator-online/">Video generator online</a>
+    <a href="https://locallyuncensored.com/unrestricted-ai/">Unrestricted AI</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-coding-agent/">AI coding agent</a>
+    <a href="https://locallyuncensored.com/alternatives/">Alternatives</a>
+    <a href="https://locallyuncensored.com/is-locally-uncensored-safe/">Is it safe?</a>
+    <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
+    <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/discussions">Discussions</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
+    <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
+    <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+    <a href="https://locallyuncensored.com/privacy/">Privacy</a>
+    <a href="https://locallyuncensored.com/terms/">Terms</a>
+    <a href="https://locallyuncensored.com/impressum/">Impressum</a>
+  </div>
+</footer>
+</body>
+</html>

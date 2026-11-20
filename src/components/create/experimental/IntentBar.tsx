@@ -1,8 +1,13 @@
 import { Cloud } from 'lucide-react'
 import { useCreateStore } from '../../../stores/createStore'
 import { useUIStore, type CloudTeaserTarget } from '../../../stores/uiStore'
-import { isIntentLocked, mlxOnlyCreateHost, visibleIntents } from './intents'
+import { useSettingsStore } from '../../../stores/settingsStore'
+import { isIntentLocked, mlxOnlyCreateHost, pillEntries, visibleIntents, type IntentMeta } from './intents'
+import { HUB_INTENTS, isHubIntent } from '../../../lib/create/character-hub'
 import { isMlxImageHost } from '../../../api/mlx-image'
+import { mlxFollowsMotion, mlxTakesStartImage, mlxTalking } from '../../../api/mlx-video'
+import { mlxMakesMusic } from '../../../lib/mac-music'
+import { mlxTakesEditImage } from '../../../lib/image-engines'
 import { cn } from '../ui/cn'
 import { ICON_SM } from '../../ui/icon-size'
 
@@ -61,16 +66,9 @@ type TeaserIntent = Extract<CloudTeaserTarget, { surface: 'intent' }>['intent']
 export function IntentBar() {
   const intent = useCreateStore((s) => s.intent())
   const setIntent = useCreateStore((s) => s.setIntent)
-  const backend = useCreateStore((s) => s.backend)
+  const openCharacterHub = useCreateStore((s) => s.openCharacterHub)
   const setCloudTeaser = useUIStore((s) => s.setCloudTeaser)
-  // Every tool is always in the bar. Lanes with hasLocalLane (lipsync / music /
-  // extend / motion / character / upscale / eraser) are REAL local tabs on a
-  // ComfyUI host — plain selectable pills, no cloud glyph. On an MLX-only Mac
-  // (no ComfyUI connected) only image, video and Character Studio run locally;
-  // the rest lock as teasers until the user's own ComfyUI answers.
-  // The rule lives in intents.ts so it stays pure + unit tested.
-  const mlxHost = mlxOnlyCreateHost(isMlxImageHost(), useCreateStore((s) => s.comfyRunning))
-  const intents = visibleIntents(backend, mlxHost)
+  const { intents, lockedOf } = useIntentLanes()
 
   return (
     <div
@@ -85,7 +83,7 @@ export function IntentBar() {
       // jede rem-Laenge dieser Leiste ist ihr altes Mass mal 0,763, in
       // ganzen Pixeln des 16px-Rasters (36px Pille -> 28px, 16px Icon ->
       // 12px = ICON_SM, 12px Label -> 9px).
-      // David, 05.09.2026: die Leiste klebte an der Hauptnavigation. Gemessen
+      // 05.09.2026: die Leiste klebte an der Hauptnavigation. Gemessen
       // am Windows-Bau (1296x808): 9,2 gerenderte px zwischen Kopfzeilenkante
       // und Leiste, 10,9 bis zur ersten Pille. `pt-1.5` legt 4,5
       // Entwurfspixel dazu, gerendert gut 5. Das ist die „minimale
@@ -93,9 +91,13 @@ export function IntentBar() {
       // den 1,5px: darunter steht die Buehne, und die stand nie zu eng.
       className="flex flex-wrap items-center justify-center gap-x-[3px] gap-y-[3px] px-3 pt-1.5 pb-[1.5px] [--text-control:9px]"
     >
-      {intents.map((meta) => {
-        const locked = isIntentLocked(meta, backend, mlxHost, isMlxImageHost())
-        const selected = !locked && intent === meta.id
+      {pillEntries(intents).map(({ meta, hub }) => {
+        // The Character pill locks only where none of its actions runs here
+        // (never so far: Character Studio has a lane on every host).
+        const locked = hub
+          ? intents.filter((m) => HUB_INTENTS.includes(m.id)).every((m) => lockedOf(m))
+          : lockedOf(meta)
+        const selected = !locked && (hub ? isHubIntent(intent) : intent === meta.id)
         const Icon = meta.icon
         return (
           <button
@@ -107,7 +109,7 @@ export function IntentBar() {
             onClick={() =>
               locked
                 ? setCloudTeaser({ surface: 'intent', intent: meta.id as TeaserIntent })
-                : setIntent(meta.id)
+                : hub ? openCharacterHub() : setIntent(meta.id)
             }
             className={cn(
               'relative flex items-center h-7 rounded-full border transition-[background-color,border-color,box-shadow,color] duration-200',
@@ -131,12 +133,58 @@ export function IntentBar() {
                 aria-hidden
               />
             )}
-            <span className="whitespace-nowrap t-control pl-[3px] pr-[10.5px]">
+            <span className={cn('whitespace-nowrap t-control pl-[3px]', hub ? 'pr-[5px]' : 'pr-[10.5px]')}>
               {meta.short}
             </span>
+            {hub && (
+              // The area is new in 3.1.0: one quiet mark, accent text on a
+              // faint accent ground, as in the sketches.
+              <span className="mr-[5px] rounded-full bg-lu-accent/15 px-[5px] py-px lu-new-mark text-lu-accent" aria-hidden>
+                NEW
+              </span>
+            )}
           </button>
         )
       })}
     </div>
   )
+}
+
+/** The tabs this host shows and which of them are locked cloud teasers: one
+ *  answer for the bar and for step 2 of the Character area. The rules live
+ *  in intents.ts (pure, unit tested); this only reads the host. */
+export function useIntentLanes(): { intents: IntentMeta[]; lockedOf: (meta: IntentMeta) => boolean } {
+  const backend = useCreateStore((s) => s.backend)
+  // Every tool that can run or be previewed is in the bar. With "Show Cloud
+  // features in Local mode" off, the hosted-only tools are left out of the
+  // local bar (visibleIntents). The 2.5.8 lanes with hasLocalLane
+  // (lipsync / music / extend / motion) are REAL local tabs, plain selectable
+  // pills with NO cloud glyph (2026-07-19: the top row only carries a
+  // cloud badge for the genuinely hosted-only tools). Enhance Image runs on
+  // local ComfyUI since 3.0.7. Only eraser (cloudOnly, no local backend)
+  // renders as a locked, cloud-tagged pill in local mode; a tap opens the
+  // teaser sheet / plans gate.
+  //
+  // On an MLX Mac (no ComfyUI at all) those lanes have no local implementation
+  // either, so they lock there too. Both rules live in intents.ts so they stay
+  // pure + unit tested; this component only renders the verdict.
+  const macHost = isMlxImageHost()
+  const mlxHost = mlxOnlyCreateHost(macHost, useCreateStore((s) => s.comfyRunning))
+  const cloudFeatures = useSettingsStore((s) => s.settings.cloudTeasersEnabled)
+  // Animate Image is a local tab on the Mac while an installed video model
+  // starts from an image (the catalogue's word, carried on the list entry).
+  const mlxAnimate = useCreateStore((s) => mlxTakesStartImage(s.videoModelList))
+  // And Edit while an installed image model takes an image (Qwen-Image 2.1).
+  const mlxEdit = useCreateStore((s) => mlxTakesEditImage(s.imageModelList))
+  // And Enhance Image while an upscaler is installed (SeedVR2), and Music
+  // while the music engine (ACE-Step 1.5) is installed.
+  const mlxUpscale = useCreateStore((s) => s.mlxUpscale)
+  const mlxMusic = useCreateStore((s) => mlxMakesMusic(s.audioModelList))
+  // And Motion Control while an installed LTX-2.3 pack follows a motion video.
+  const mlxMotion = useCreateStore((s) => mlxFollowsMotion(s.videoModelList))
+  // And Talking Character while a video model that talks is installed.
+  const mlxTalk = useCreateStore((s) => mlxTalking(s.videoModelList).tab)
+  const intents = visibleIntents(backend, mlxHost, cloudFeatures, mlxAnimate, mlxEdit, mlxUpscale, mlxMusic, mlxMotion, mlxTalk, macHost)
+  const lockedOf = (meta: IntentMeta) => isIntentLocked(meta, backend, mlxHost, mlxAnimate, mlxEdit, mlxUpscale, mlxMusic, mlxMotion, mlxTalk, macHost)
+  return { intents, lockedOf }
 }

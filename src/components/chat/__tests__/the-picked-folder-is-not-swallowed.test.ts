@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * Bug D, symptom 3. Discord ticket, aldrich_ironhart, 2026-09-08, Windows 11,
+ * Bug D, symptom 3. Discord ticket, 2026-09-08, Windows 11,
  * LU 2.6.8, provider Ollama, DESKTOP app, Code tab:
  *
  *   "Error: Not an allowed workspace folder (only a folder you chose in LU's
@@ -32,9 +32,17 @@
  *
  * Run: npx vitest run src/components/chat/__tests__/the-picked-folder-is-not-swallowed.test.ts
  */
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { createElement } from 'react'
+import { render, screen, fireEvent, act, waitFor, cleanup } from '@testing-library/react'
+// Loaded with the file and not inside a test: the first load of the panel's
+// module graph took 6.3 s on a loaded machine, more than the five seconds a
+// test has (both panel tests red in a full run on 09.10.2026).
+import * as backend from '../../../api/backend'
+import { useCodexStore } from '../../../stores/codexStore'
+import { ExplorerPanel } from '../ExplorerPanel'
 import { workspacePickRefusedMessage } from '../../../lib/workspace-rejected'
 
 const src = (...parts: string[]) => readFileSync(resolve(__dirname, '..', '..', '..', ...parts), 'utf8')
@@ -155,13 +163,12 @@ describe('the sentence the user reads', () => {
  * abgewiesene Aufruf im Zustand angekommen ist (R2-43).
  */
 describe('die Ablehnung im leeren Zustand', () => {
-  it('steht im Rumpf, statt vom leeren Zustand verdeckt zu werden', async () => {
-    const { render, screen, fireEvent, act, cleanup } = await import('@testing-library/react')
-    const { createElement } = await import('react')
-    const { useCodexStore } = await import('../../../stores/codexStore')
-    const backend = await import('../../../api/backend')
-    const { ExplorerPanel } = await import('../ExplorerPanel')
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+  })
 
+  it('steht im Rumpf, statt vom leeren Zustand verdeckt zu werden', async () => {
     vi.spyOn(backend, 'isTauri').mockReturnValue(true)
     vi.spyOn(backend, 'backendCall').mockImplementation(async (cmd: string) => {
       if (cmd === 'pick_folder') throw new Error('a home or mount container is not a workspace')
@@ -173,27 +180,16 @@ describe('die Ablehnung im leeren Zustand', () => {
     expect(screen.queryByTestId('explorer-no-folder'), 'ohne Klick steht der leere Zustand da')
       .not.toBeNull()
 
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('explorer-pick-folder'))
-      await new Promise((r) => setTimeout(r, 30))
-    })
+    fireEvent.click(screen.getByTestId('explorer-pick-folder'))
 
-    const fehler = screen.queryByTestId('explorer-error')
-    expect(fehler, 'die Ablehnung wird weiterhin verschluckt').not.toBeNull()
-    expect(fehler!.textContent).toContain('a home or mount container is not a workspace')
+    // Bis die Ablehnung da ist, nicht eine feste Zeit lang.
+    const fehler = await screen.findByTestId('explorer-error')
+    expect(fehler.textContent).toContain('a home or mount container is not a workspace')
     expect(screen.queryByTestId('explorer-no-folder'), 'der leere Zustand verdeckt den Grund')
       .toBeNull()
-    cleanup()
-    vi.restoreAllMocks()
   })
 
   it('R2-43: survives a later, unrelated successful load of the still-valid root', async () => {
-    const { render, screen, fireEvent, act, cleanup } = await import('@testing-library/react')
-    const { createElement } = await import('react')
-    const { useCodexStore } = await import('../../../stores/codexStore')
-    const backend = await import('../../../api/backend')
-    const { ExplorerPanel } = await import('../ExplorerPanel')
-
     vi.spyOn(backend, 'isTauri').mockReturnValue(true)
     vi.spyOn(backend, 'backendCall').mockImplementation(async (cmd: string) => {
       if (cmd === 'pick_folder') throw new Error('a home or mount container is not a workspace')
@@ -203,26 +199,25 @@ describe('die Ablehnung im leeren Zustand', () => {
     // A root that keeps loading fine on its own, unrelated to the refused pick.
     useCodexStore.setState({ workingDirectory: '/Users/x/existing-project' })
 
+    const fsList = () => vi.mocked(backend.backendCall).mock.calls.filter(([cmd]) => cmd === 'fs_list').length
     render(createElement(ExplorerPanel, { onApprovePlan: () => {} }))
-    await act(async () => { await new Promise((r) => setTimeout(r, 10)) })
+    // The root has loaded once before anything is picked.
+    await waitFor(() => expect(fsList()).toBeGreaterThan(0))
 
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('explorer-pick-folder'))
-      await new Promise((r) => setTimeout(r, 30))
-    })
-    expect(screen.queryByTestId('explorer-error')!.textContent)
+    fireEvent.click(screen.getByTestId('explorer-pick-folder'))
+    expect((await screen.findByTestId('explorer-error')).textContent)
       .toContain('a home or mount container is not a workspace')
 
     // The agent writes a file: fileTreeVersion bumps, the (unchanged, valid)
     // root reloads and succeeds. The refusal must still be on screen.
-    await act(async () => {
-      useCodexStore.getState().bumpFileTreeVersion()
-      await new Promise((r) => setTimeout(r, 30))
-    })
+    const before = fsList()
+    act(() => { useCodexStore.getState().bumpFileTreeVersion() })
+    await waitFor(() => expect(fsList()).toBeGreaterThan(before))
+    // One turn of the event loop: the answer of that reload has been taken
+    // in and rendered, however many steps it takes. Not a wait on the clock.
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     const fehler = screen.queryByTestId('explorer-error')
     expect(fehler, 'a harmless reload of the root wiped the refusal').not.toBeNull()
     expect(fehler!.textContent).toContain('a home or mount container is not a workspace')
-    cleanup()
-    vi.restoreAllMocks()
   })
 })

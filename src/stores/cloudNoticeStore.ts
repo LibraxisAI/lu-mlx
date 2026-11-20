@@ -9,7 +9,7 @@ import { safeJSONStorage } from "../lib/storage-quota"
  * Server side: `RESULT_SIGNED_URL_TTL_SEC` defaults to 604800 (7 days), which
  * is the signed URL lifetime, and the desktop silently re-signs an expired one
  * via the job id (galleryUrl.ts refreshResultUrl). Actually DELETING the
- * results bucket on that schedule is a server job David owns and operates in
+ * results bucket on that schedule is a server job the owner owns and operates in
  * lu-labs (his call, 2026-07-25) — the desktop's part is stating the policy,
  * which is what this notice does. If the sweep is ever turned off, this copy is
  * the thing that has to change, not the other way round.
@@ -17,7 +17,7 @@ import { safeJSONStorage } from "../lib/storage-quota"
 export const CLOUD_RETENTION_DAYS = 7;
 
 /**
- * Gallery retention notice for cloud mode (David 2026-07-24). Shown while the
+ * Gallery retention notice for cloud mode (2026-07-24). Shown while the
  * Create surface is on the cloud backend so nobody treats the cloud gallery as
  * permanent storage.
  *

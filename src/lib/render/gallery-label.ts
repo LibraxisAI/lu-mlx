@@ -1,6 +1,6 @@
 // Wie ein Eintrag der Galerie heisst.
 //
-// 19.09.2026, gemeldet von David: "Danach kommt nur noch Cloud-Videos. Man kann
+// 19.09.2026, gemeldet vom Inhaber: "Danach kommt nur noch Cloud-Videos. Man kann
 // gar nicht mehr identifizieren, welches Video denn was ist." Zwei Ursachen:
 // die Listenroute gab den Prompt nicht heraus, also hiess nach jedem Neuladen
 // alles gleich; und ein Lauf ohne Prompt (Schaerfen, Verlaengern, ein Schritt
@@ -10,7 +10,7 @@
 // jede Stelle ihren eigenen Notnamen ("Cloud video", "Generated audio",
 // "Audio"), und keiner davon sagte, was der Eintrag ist.
 //
-// Port aus uselu apps/web/lib/render/gallery-label.ts: der Desktop haelt den
+// Port aus the web app: der Desktop haelt den
 // Katalog in einem Store statt in einer statischen Liste, deshalb kommt
 // cloudModelById hier aus cloudCatalogStore statt aus cloud-models.
 import type { GalleryItem } from '../../stores/createStore'
@@ -31,6 +31,7 @@ const TYPE_NAME: Record<GalleryItem['type'], string> = {
   image: 'Image',
   video: 'Clip',
   audio: 'Audio',
+  '3d': '3D model',
 }
 
 // Review A kleiner Punkt 3: this used to be its own copy (STUDIO_MODELS
@@ -52,7 +53,7 @@ export function galleryLabel(item: GalleryItem): string {
   const prompt = item.prompt?.trim()
   const label = item.label?.trim()
   // Beides, wenn es beides gibt: der Titel sagt, was der Lauf war, der Prompt
-  // sagt, welcher von den dreien es ist. David am 19.09.2026 zum Ergebnis
+  // sagt, welcher von den dreien es ist. Am 19.09.2026 zum Ergebnis
   // eines Presets: "das Endprodukt soll dann auch als ein Ganzes stehen und
   // erkennbar sein, was es ist."
   if (label && prompt) return label === prompt ? label : `${label} · ${prompt}`

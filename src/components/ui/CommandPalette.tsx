@@ -21,6 +21,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { Modal } from './Modal'
+import { ModelRowMarks } from '../models/ModelRowMarks'
 import {
   buildCommands,
   matchCommands,
@@ -28,6 +29,7 @@ import {
   type Command,
   type CommandContext,
   type Selection,
+  paletteModels,
 } from './command-actions'
 import { nextFocusIndex } from './dialog-a11y'
 import { SHORTCUT_ACTIONS, shortcutKeys } from '../../hooks/useKeyboardShortcuts'
@@ -64,7 +66,7 @@ export function CommandPalette() {
       openCompare,
       toggleSidebar,
       setActiveModel,
-      models,
+      models: paletteModels(models, { cloud: appMode === 'cloud' }),
       activeModel,
       // Models/Benchmark existieren im Cloud-Modus nicht (Header.tsx:301,
       // dazu der Umleitungs-Effekt in AppShell). Eine Palette, die trotzdem
@@ -234,6 +236,9 @@ export function CommandPalette() {
                 }
               >
                 <span className="min-w-0 flex-1 truncate">{cmd.label}</span>
+                {cmd.mark && (
+                  <ModelRowMarks model={{ unfiltered: cmd.mark === 'measured' ? 'full' : undefined, unrestricted: cmd.mark === 'statement' }} row />
+                )}
                 {cmd.keys && (
                   <kbd className="shrink-0 rounded border border-gray-200 px-1.5 py-0.5 font-mono text-[0.55rem] text-gray-500 dark:border-white/15 dark:text-gray-400">
                     {cmd.keys}

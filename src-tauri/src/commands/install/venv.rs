@@ -9,10 +9,11 @@
 //! Genau diese Mitfahrer sind der Grund für die Naht. faster-whisper und
 //! Piper landen in ComfyUIs venv, weil das "LUs Python" ist; die Reparatur
 //! löscht dieses venv im Ganzen. Wer eines von beidem ändert, muss das
-//! andere vor Augen haben — also stehen sie in einer Datei. `is_pep668_protected`
-//! gehört dazu, weil es die Frage beantwortet, ob überhaupt ein venv nötig
-//! ist: auf einer PEP-668-Distribution ist es der einzige Weg, überhaupt zu
-//! installieren.
+//! andere vor Augen haben, also stehen sie in einer Datei. `probe_python_site`
+//! gehört dazu, weil es die Frage beantwortet, in was für einen Python pip
+//! gerade schreibt: ein venv bekommt nie `--user` und nie
+//! `--break-system-packages`, ein PEP-668-geschütztes System-Python ohne venv
+//! bekommt beides.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -24,44 +25,115 @@ use std::sync::{Arc, Mutex};
 use tracing::warn;
 
 use super::children::{wait_or_cancel, TrackedInstallerChild};
+use super::pip::user_site_allowed;
 use crate::os_error;
 use crate::python::{venv_python_path, venv_python_path_named};
 use crate::state::AppState;
 
 
-// ── PEP 668 / venv helpers (Bug E — rzgrozt Arch externally-managed) ─────────
+// ── PEP 668 / venv helpers (Bug E — a user Arch externally-managed) ─────────
 
-/// True iff the Python pointed to by `python_bin` is PEP 668 protected
-/// (Arch Linux, Debian 12+, Fedora 38+, Ubuntu 23.04+ ship Python with an
-/// `EXTERNALLY-MANAGED` marker file in the stdlib dir, which makes
-/// `python -m pip install ...` exit with
-/// `error: externally-managed-environment` unless `--break-system-packages`
-/// is passed). We probe by asking Python itself whether the marker exists
-/// — robust against distro-specific path layouts and avoids parsing locale
-/// dependent pip error strings.
-///
-/// Returns `false` on any probe error (Python missing, sysconfig broken,
-/// stdout unparseable). That is the safe default: a false negative just
-/// means we install without a venv exactly like LU did before this bug,
-/// which is fine on every distro that *isn't* PEP 668 protected.
-pub fn is_pep668_protected(python_bin: &str) -> bool {
+/// Python one-liner behind [`probe_python_site`]. Prints two flags, marker
+/// and venv, e.g. `1 0`. The marker is looked up in `sysconfig`'s stdlib dir,
+/// which inside a venv still points at the BASE interpreter's stdlib, so the
+/// marker of a PEP 668 system Python is visible from a venv built on it.
+/// pip itself skips the marker check inside a venv, so the venv flag has to
+/// be read here too. `real_prefix` covers the old virtualenv package.
+const PYTHON_SITE_PROBE: &str = "import os, sys, sysconfig; \
+     d = sysconfig.get_path('stdlib'); \
+     m = os.path.exists(os.path.join(d, 'EXTERNALLY-MANAGED')); \
+     v = sys.prefix != getattr(sys, 'base_prefix', sys.prefix) or hasattr(sys, 'real_prefix'); \
+     print(int(m), int(v))";
+
+/// What [`PYTHON_SITE_PROBE`] found out about one interpreter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PythonSite {
+    /// The `EXTERNALLY-MANAGED` marker sits in the (base) stdlib dir.
+    pub(crate) externally_managed: bool,
+    /// The interpreter is a venv (`sys.prefix != sys.base_prefix`).
+    pub(crate) in_venv: bool,
+}
+
+impl PythonSite {
+    /// True iff this is a PEP 668 protected SYSTEM Python (Arch Linux,
+    /// Debian 12+, Fedora 38+, Ubuntu 23.04+ ship Python with an
+    /// `EXTERNALLY-MANAGED` marker file in the stdlib dir, which makes
+    /// `python -m pip install ...` exit with
+    /// `error: externally-managed-environment` unless
+    /// `--break-system-packages` is passed). The probe asks Python itself
+    /// whether the marker exists, which is robust against distro-specific
+    /// path layouts and avoids parsing locale dependent pip error strings.
+    ///
+    /// A venv is NEVER protected, even when it was built on a protected
+    /// system Python (zzammerr, Ubuntu 24.04, 02.10.: the ComfyUI venv saw
+    /// the base interpreter's marker, so the voice installs passed `--user`
+    /// and pip answered "Can not perform a '--user' install. User
+    /// site-packages are not visible in this virtualenv").
+    pub(crate) fn pep668_protected(self) -> bool {
+        self.externally_managed && !self.in_venv
+    }
+
+    /// Extra pip flags for an install into this interpreter. Empty for
+    /// everything except a protected system Python, where the user-site
+    /// install with the escape hatch is the only way pip will write. A venv
+    /// gets neither flag: it needs no escape hatch, and pip refuses `--user`
+    /// inside it (see [`user_site_allowed`]).
+    pub(crate) fn pip_escape_args(self) -> Vec<&'static str> {
+        if self.pep668_protected() && user_site_allowed(self.in_venv) {
+            vec!["--break-system-packages", "--user"]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+/// Parse the probe's stdout (`"<marker> <venv>"`). `None` for anything else.
+fn parse_python_site_probe(stdout: &str) -> Option<PythonSite> {
+    let mut it = stdout.split_whitespace();
+    let flag = |s: &str| match s {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    };
+    let site = PythonSite {
+        externally_managed: flag(it.next()?)?,
+        in_venv: flag(it.next()?)?,
+    };
+    it.next().is_none().then_some(site)
+}
+
+/// Ask `python_bin` itself whether it is PEP 668 marked and whether it is a
+/// venv. `None` on any probe error (Python missing, sysconfig broken, stdout
+/// unparseable), which every caller reads as "not protected, not a venv".
+/// That is the safe default: the install goes out as a plain `pip install`
+/// exactly like on Windows / macOS / Debian 11.
+pub(crate) fn probe_python_site(python_bin: &str) -> Option<PythonSite> {
     if python_bin.is_empty() {
-        return false;
+        return None;
     }
     let mut cmd = python_command(python_bin);
-    cmd.args([
-        "-c",
-        "import os, sysconfig; \
-         d = sysconfig.get_path('stdlib'); \
-         print('YES' if os.path.exists(os.path.join(d, 'EXTERNALLY-MANAGED')) else 'NO')",
-    ])
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
-    let Ok(out) = cmd.output() else { return false };
+    cmd.args(["-c", PYTHON_SITE_PROBE])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let out = cmd.output().ok()?;
     if !out.status.success() {
-        return false;
+        return None;
     }
-    String::from_utf8_lossy(&out.stdout).trim() == "YES"
+    parse_python_site_probe(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// True iff `python_bin` is a venv interpreter. `false` on any probe error.
+pub(crate) fn is_venv_python(python_bin: &str) -> bool {
+    probe_python_site(python_bin).is_some_and(|site| site.in_venv)
+}
+
+/// The pip flags to append for `python_bin`: one place for every installer
+/// that targets "LU's Python", which is the ComfyUI venv when one exists and
+/// the system Python otherwise. A failed probe gives no flags at all.
+pub(crate) fn pip_escape_args_for(python_bin: &str) -> Vec<&'static str> {
+    probe_python_site(python_bin)
+        .map(PythonSite::pip_escape_args)
+        .unwrap_or_default()
 }
 
 /// Create a venv inside `comfyui_dir/venv` using the system `python_bin`.
@@ -581,7 +653,7 @@ pub(crate) fn detect_venv_passengers(venv_dir: &Path) -> Vec<&'static VenvPassen
         .collect()
 }
 
-// ── Piper neural TTS installer (David 2026-06-06 — local neural TTS) ──────────
+// ── Piper neural TTS installer (2026-06-06 — local neural TTS) ──────────
 
 /// Resolve the Python LU's tooling uses: the ComfyUI venv when present, else
 /// the resolved system Python. Shared by the faster-whisper + Piper-TTS
@@ -710,7 +782,7 @@ mod tests {
         assert!(venv_site_packages(plain.path()).is_empty());
     }
 
-    // ── Bug E (rzgrozt — Arch PEP 668 externally-managed) ─────────────────
+    // ── Bug E (a user — Arch PEP 668 externally-managed) ─────────────────
     //
     // The detection function spawns a Python subprocess, so we can't unit
     // test it without a Python install. We DO test the safety guarantees:
@@ -718,20 +790,116 @@ mod tests {
     // diagnose path surfaces a useful hint when the marker error reaches
     // the user despite the auto-venv path.
 
+    const SYSTEM_PLAIN: PythonSite = PythonSite { externally_managed: false, in_venv: false };
+    const SYSTEM_MARKED: PythonSite = PythonSite { externally_managed: true, in_venv: false };
+    const VENV_ON_MARKED: PythonSite = PythonSite { externally_managed: true, in_venv: true };
+    const VENV_ON_PLAIN: PythonSite = PythonSite { externally_managed: false, in_venv: true };
+
     #[test]
-    fn is_pep668_protected_returns_false_for_empty_bin() {
-        // Empty sentinel from python.rs::get_python_bin must short-circuit
-        // to false so a missing Python doesn't accidentally trigger venv
-        // creation (which would also fail and confuse the error chain).
-        assert!(!is_pep668_protected(""));
+    fn only_a_marked_system_python_is_pep668_protected() {
+        assert!(SYSTEM_MARKED.pep668_protected(), "Ubuntu 24.04 /usr/bin/python3");
+        assert!(!VENV_ON_MARKED.pep668_protected(), "ComfyUI venv on Ubuntu 24.04");
+        assert!(!SYSTEM_PLAIN.pep668_protected(), "Windows, macOS, old distros");
+        assert!(!VENV_ON_PLAIN.pep668_protected(), "ComfyUI venv on Windows or macOS");
     }
 
     #[test]
-    fn is_pep668_protected_returns_false_for_garbage_bin() {
-        // Probing a non-existent path can't crash — the function must
-        // swallow the spawn error and return false so install proceeds as
-        // it always did on systems that aren't PEP 668 protected.
-        assert!(!is_pep668_protected("/definitely/not/a/real/python-9.99"));
+    fn pip_escape_args_per_case() {
+        // No ComfyUI venv on Ubuntu 24.04, Debian 12, Arch, Fedora 38+.
+        assert_eq!(
+            SYSTEM_MARKED.pip_escape_args(),
+            vec!["--break-system-packages", "--user"]
+        );
+        // zzammerr: the ComfyUI venv on Ubuntu 24.04. pip refuses `--user`
+        // in a venv, so neither flag may appear.
+        assert!(VENV_ON_MARKED.pip_escape_args().is_empty());
+        // Windows and macOS, with and without a venv: unchanged, no flags.
+        assert!(SYSTEM_PLAIN.pip_escape_args().is_empty());
+        assert!(VENV_ON_PLAIN.pip_escape_args().is_empty());
+    }
+
+    #[test]
+    fn no_case_ever_passes_user_into_a_venv() {
+        for externally_managed in [false, true] {
+            let site = PythonSite { externally_managed, in_venv: true };
+            let args = site.pip_escape_args();
+            assert!(!args.contains(&"--user"), "{site:?}");
+            assert!(!args.contains(&"--break-system-packages"), "{site:?}");
+        }
+    }
+
+    #[test]
+    fn parse_python_site_probe_reads_both_flags() {
+        assert_eq!(parse_python_site_probe("1 0\n"), Some(SYSTEM_MARKED));
+        assert_eq!(parse_python_site_probe("1 1\r\n"), Some(VENV_ON_MARKED));
+        assert_eq!(parse_python_site_probe("0 0\n"), Some(SYSTEM_PLAIN));
+        assert_eq!(parse_python_site_probe("0 1"), Some(VENV_ON_PLAIN));
+    }
+
+    #[test]
+    fn parse_python_site_probe_rejects_anything_else() {
+        for junk in ["", "1", "YES", "NO", "garbage", "1 2", "True False", "1 0 1"] {
+            assert_eq!(parse_python_site_probe(junk), None, "{junk:?}");
+        }
+    }
+
+    #[test]
+    fn probe_script_asks_for_marker_and_venv() {
+        assert!(PYTHON_SITE_PROBE.contains("EXTERNALLY-MANAGED"));
+        assert!(PYTHON_SITE_PROBE.contains("base_prefix"));
+        assert!(PYTHON_SITE_PROBE.contains("real_prefix"));
+    }
+
+    #[test]
+    fn a_failed_probe_gives_no_flags_and_no_venv() {
+        for bin in ["", "/definitely/not/a/real/python-9.99"] {
+            assert_eq!(probe_python_site(bin), None, "{bin:?}");
+            assert!(pip_escape_args_for(bin).is_empty(), "{bin:?}");
+            assert!(!is_venv_python(bin), "{bin:?}");
+        }
+    }
+
+    /// A stand-in interpreter that answers every call with one fixed line,
+    /// the way [`PYTHON_SITE_PROBE`] would on that kind of Python.
+    fn write_fake_python_answering(dir: &std::path::Path, name: &str, answer: &str) -> String {
+        #[cfg(not(windows))]
+        {
+            let path = dir.join(format!("{name}.sh"));
+            crate::test_support::write_script(&path, format!("#!/bin/sh\necho {answer}\n"));
+            path.to_string_lossy().to_string()
+        }
+        #[cfg(windows)]
+        {
+            let path = dir.join(format!("{name}.bat"));
+            std::fs::write(&path, format!("@echo off\r\necho {answer}\r\n")).unwrap();
+            path.to_string_lossy().to_string()
+        }
+    }
+
+    #[test]
+    fn a_venv_on_a_protected_base_installs_without_user_or_escape_hatch() {
+        // zzammerr, Ubuntu 24.04: the target is the ComfyUI venv, the marker
+        // of /usr/lib/python3.12 shines through, and the install must still
+        // go out as a plain `pip install`.
+        let dir = tempfile::tempdir().unwrap();
+        let venv = write_fake_python_answering(dir.path(), "fake-venv-python", "1 1");
+        assert_eq!(probe_python_site(&venv), Some(VENV_ON_MARKED));
+        assert!(pip_escape_args_for(&venv).is_empty());
+        assert!(is_venv_python(&venv));
+    }
+
+    #[test]
+    fn a_protected_system_python_installs_into_the_user_site() {
+        // No ComfyUI venv (never installed, or python3-venv is missing):
+        // the user site with the escape hatch is the only way in.
+        let dir = tempfile::tempdir().unwrap();
+        let system = write_fake_python_answering(dir.path(), "fake-system-python", "1 0");
+        assert_eq!(probe_python_site(&system), Some(SYSTEM_MARKED));
+        assert_eq!(
+            pip_escape_args_for(&system),
+            vec!["--break-system-packages", "--user"]
+        );
+        assert!(!is_venv_python(&system));
     }
 
     // ── ENG-14 (matrix point 83): `python -m venv`'s hint reaches stdout ───
@@ -838,17 +1006,13 @@ mod tests {
     #[cfg(not(windows))]
     fn write_fake_python_eng14_stdout_only(dir: &std::path::Path) -> String {
         let path = dir.join("fake-python-eng14.sh");
-        std::fs::write(
+        crate::test_support::write_script(
             &path,
             format!(
                 "#!/bin/sh\ncat <<'EOF'\n{}EOF\nexit 1\n",
                 ENG14_REAL_UBUNTU_STDOUT
             ),
-        )
-        .unwrap();
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-        std::fs::set_permissions(&path, perms).unwrap();
+        );
         path.to_string_lossy().to_string()
     }
 
@@ -925,10 +1089,7 @@ mod tests {
         #[cfg(not(windows))]
         let fake_python = {
             let path = tmp.path().join("fake-python-silent.sh");
-            std::fs::write(&path, "#!/bin/sh\nexit 3\n").unwrap();
-            let mut perms = std::fs::metadata(&path).unwrap().permissions();
-            std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-            std::fs::set_permissions(&path, perms).unwrap();
+            crate::test_support::write_script(&path, "#!/bin/sh\nexit 3\n");
             path.to_string_lossy().to_string()
         };
         #[cfg(windows)]
@@ -977,14 +1138,14 @@ mod tests {
         // and check the more interesting assertions.
 
         // ── Phase 1: PEP 668 detection ──
-        let detected = is_pep668_protected(&fake_python);
+        let detected = probe_python_site(&fake_python).is_some_and(PythonSite::pep668_protected);
         assert!(
             detected,
-            "is_pep668_protected({}) returned false — was the EXTERNALLY-MANAGED \
+            "probe_python_site({}) saw no protected Python. Was the EXTERNALLY-MANAGED \
              marker planted in this Python's stdlib?",
             fake_python
         );
-        println!("[live E2E] ✓ is_pep668_protected detected the marker");
+        println!("[live E2E] ✓ probe_python_site detected the marker");
 
         // ── Phase 2: create_comfyui_venv ──
         let comfy_root = std::env::temp_dir().join("lu-pep668-live-comfyui");
@@ -1045,7 +1206,7 @@ mod tests {
 
     #[test]
     fn a_venv_held_by_another_process_is_reported_in_our_words() {
-        let dir = PathBuf::from("C:\\Users\\ddrob\\ComfyUI\\venv");
+        let dir = PathBuf::from("C:\\Users\\alice\\ComfyUI\\venv");
         let e = std::io::Error::from_raw_os_error(32);
         let msg = venv_removal_error(&dir, &e);
         assert_eq!(
@@ -1484,7 +1645,7 @@ mod tests {
     /// instead of claiming a Windows-only cause.
     #[test]
     fn a_locked_old_venv_gets_a_close_comfyui_message_on_windows_only() {
-        let dir = PathBuf::from("C:\\Users\\ddrob\\ComfyUI\\venv");
+        let dir = PathBuf::from("C:\\Users\\alice\\ComfyUI\\venv");
         for code in [5, 32] {
             let e = std::io::Error::from_raw_os_error(code);
             let msg = windows_lock_aware_retire_error(&dir, &e);

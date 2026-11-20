@@ -1,9 +1,24 @@
 import { useStagedChangesStore } from '../../stores/stagedChangesStore'
 import { computeUnifiedDiff } from '../../lib/diff'
-import { applyUniqueEdit } from '../../lib/surgical-edit'
+import { applyEdits, editsFromArgs } from '../../lib/surgical-edit'
 import { findStagedForPath, stagedReadResult, stagedListingNote } from '../../lib/staged-overlay'
 import { codexReadCtx, type CodexFsCtx, type CodexFileRead } from './workspace-fs'
 import type { ToolArgs } from '../../api/mcp/types'
+import type { StagedReview } from '../../lib/staged-apply'
+import type { ReviewNote } from '../../types/staged-changes'
+
+/** What the model hears after a blocking review. A partial apply (some hunks
+ *  rejected) left a note for this change; that note is the better answer. */
+export function reviewResult(review: StagedReview, path: string, kind: 'write' | 'edit', note?: string): string {
+  if (note && (review.outcome === 'applied' || review.outcome === 'rejected')) return note
+  switch (review.outcome) {
+    case 'applied': return kind === 'write' ? `Wrote ${path}. The user approved the change and it is on disk now.` : `Edited ${path}. The user approved the change and it is on disk now.`
+    case 'rejected': return `The user declined this change. ${path} was not written.`
+    case 'replaced': return `A later write to ${path} in this turn replaced this one; that one is reviewed instead.`
+    case 'failed': return `The approved change to ${path} could not be written: ${review.reason}`
+    case 'stopped': return `The run was stopped before the change to ${path} was reviewed. Nothing was written.`
+  }
+}
 
 /**
  * Die Warteschlange der noch nicht geschriebenen Aenderungen — und ALLES, was
@@ -49,12 +64,24 @@ import type { ToolArgs } from '../../api/mcp/types'
  * einzige pruefbar.
  */
 
+/** Review notes as one block for the model. Short on purpose. */
+export function reviewNotesText(notes: readonly ReviewNote[]): string {
+  return `[User review: ${notes.map((n) => n.text).join(' ')}]`
+}
+
 export interface StagedWriterDeps {
   convId: string
   /** Der Ordner, den auch der Systemprompt nennt. `'.'` = Sandbox pro Chat. */
   workDir: string
   workspaceSlug: string
   readFile: (path: string, ctx: CodexFsCtx) => Promise<CodexFileRead>
+  /**
+   * Set for a turn from the paired phone (shared chats): the write waits for
+   * its review (once/chat/deny on the phone, or Apply/Reject at the desktop)
+   * and the model hears what really happened. Without it the write is staged
+   * and the run goes on, as at the desktop.
+   */
+  waitForReview?: (changeId: string, path: string) => Promise<StagedReview>
 }
 
 export interface StagedWriter {
@@ -84,7 +111,15 @@ function resolveStagedPath(path: string, workDir: string): string {
 }
 
 export function createStagedWriter(deps: StagedWriterDeps): StagedWriter {
-  const { convId, workDir, workspaceSlug, readFile } = deps
+  const { convId, workDir, workspaceSlug, readFile, waitForReview } = deps
+
+  // A blocking review answers in the tool result itself, so its note is taken
+  // here and not handed out a second time with a later result.
+  const reviewed = async (stagedId: string, path: string, kind: 'write' | 'edit'): Promise<string> => {
+    const review = await waitForReview!(stagedId, path)
+    const note = useStagedChangesStore.getState().takeNotes(convId, stagedId)[0]?.text
+    return reviewResult(review, path, kind, note)
+  }
 
   // Multi-File Stage-and-Approve (B10). When the user has codex
   // stage mode on, file_write calls don't hit the disk — they
@@ -113,6 +148,13 @@ export function createStagedWriter(deps: StagedWriterDeps): StagedWriter {
     } else {
       try {
         const r = await readFile(resolvedPath, stageReadCtx)
+        // A file that is not UTF-8 (Latin-1, UTF-16 from PowerShell) comes
+        // back without content. Read as '' it was reviewed as a brand new
+        // file, an all-insert diff hiding what gets overwritten (bug hunt
+        // 01.10.2026, C8). Refused like file_edit refuses it.
+        if (r?.encoding === 'binary' || r?.encoding === 'base64') {
+          return `file_write: ${path} exists but is not a UTF-8 text file, so the review cannot show what this write would replace. It was not staged. Ask the user before overwriting it.`
+        }
         oldContent = r?.content ?? ''
       } catch {
         // New file — leave oldContent empty so the diff renders an
@@ -120,7 +162,7 @@ export function createStagedWriter(deps: StagedWriterDeps): StagedWriter {
       }
     }
     const diff = computeUnifiedDiff(path, oldContent, newContent)
-    useStagedChangesStore.getState().stage(convId, {
+    const stagedId = useStagedChangesStore.getState().stage(convId, {
       path,
       resolvedPath,
       // Capture the workspace root so Apply (which runs after the loop's
@@ -132,6 +174,7 @@ export function createStagedWriter(deps: StagedWriterDeps): StagedWriter {
       newContent,
       diff,
     })
+    if (waitForReview) return reviewed(stagedId, path, 'write')
     return `Staged for review: ${path}. The user will apply or reject the change before it lands on disk.`
   }
 
@@ -142,8 +185,7 @@ export function createStagedWriter(deps: StagedWriterDeps): StagedWriter {
   const stageFileEdit = async (args: ToolArgs): Promise<string> => {
     const path = String(args.path ?? '')
     if (!path) return 'file_edit: missing path'
-    const oldString = typeof args.old_string === 'string' ? args.old_string : ''
-    const newString = typeof args.new_string === 'string' ? args.new_string : ''
+    const edits = editsFromArgs(args).map((e) => ({ ...e, new_string: e.new_string ?? '' }))
     const resolvedPath = resolveStagedPath(path, workDir)
     const stageReadCtx = codexReadCtx(workspaceSlug, workDir)
     // Read-your-writes: chain onto the STAGED content when this path is
@@ -166,7 +208,7 @@ export function createStagedWriter(deps: StagedWriterDeps): StagedWriter {
         return `file_edit: could not read ${path}. To create a new file use file_write.`
       }
     }
-    const applied = applyUniqueEdit(baseContent, oldString, newString)
+    const applied = applyEdits(baseContent, edits)
     if (!applied.ok) {
       switch (applied.reason) {
         case 'empty_old': return 'file_edit: old_string must be non-empty. Use file_write to create a new file.'
@@ -180,7 +222,7 @@ export function createStagedWriter(deps: StagedWriterDeps): StagedWriter {
     // Diff and oldContent stay anchored on the DISK state, so the user
     // reviews (and apply writes) disk → final, not staged → staged.
     const diff = computeUnifiedDiff(path, diskContent, newContent)
-    useStagedChangesStore.getState().stage(convId, {
+    const stagedId = useStagedChangesStore.getState().stage(convId, {
       path,
       resolvedPath,
       workingDirectory: workDir && workDir !== '.' ? workDir : undefined,
@@ -188,10 +230,23 @@ export function createStagedWriter(deps: StagedWriterDeps): StagedWriter {
       newContent,
       diff,
     })
+    if (waitForReview) return reviewed(stagedId, path, 'edit')
     return `Staged for review: ${path} (surgical edit). The user will apply or reject the change before it lands on disk.`
   }
 
-  const dispatch = (name: string, args: ToolArgs, passthrough: () => Promise<string>): Promise<string> => {
+  const dispatch = (name: string, args: ToolArgs, passthrough: () => Promise<string>): Promise<string> =>
+    route(name, args, passthrough).then(withReviewNotes)
+
+  // The desktop review runs beside the loop: a file or hunk the user rejected
+  // in the panel is invisible to the model, which then builds on code that is
+  // not there. The next tool result carries what was rejected, once.
+  const withReviewNotes = (result: string): string => {
+    if (!convId) return result
+    const notes = useStagedChangesStore.getState().takeNotes(convId)
+    return notes.length === 0 ? result : `${result}\n\n${reviewNotesText(notes)}`
+  }
+
+  const route = (name: string, args: ToolArgs, passthrough: () => Promise<string>): Promise<string> => {
     if (name === 'file_write') return stageFileWrite(args)
     if (name === 'file_edit') return stageFileEdit(args)
     // Read-your-writes: staged content is invisible on disk, so reads

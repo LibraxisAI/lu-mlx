@@ -22,6 +22,7 @@
  * smaller allocation than before (that would only trade money for a trim
  * loop).
  */
+import { isCompatProviderId } from '../api/providers/compat-id'
 
 /**
  * Providers where a token sent is a token billed.
@@ -38,8 +39,20 @@
  */
 export const PAID_PROVIDER_IDS: ReadonlySet<string> = new Set(['lu-cloud', 'openai', 'anthropic'])
 
-/** Default ceiling for one sent step, in tokens. Power users may raise it. */
-export const DEFAULT_SEND_WINDOW_TOKENS = 64000
+/**
+ * Default ceiling for one sent step, in tokens. Power users may raise it.
+ *
+ * 64k until 3.0.4. A long Code-tab run rides that ceiling on every step, and
+ * on a model without a prompt cache every one of those tokens is sent, and
+ * paid for, again on every step. With the age
+ * decay capping old results and the run ledger keeping the dropped steps
+ * known, 32k carries a coding run at half the price per step.
+ */
+export const DEFAULT_SEND_WINDOW_TOKENS = 32768
+
+/** The pre-3.0.4 default. No UI ever wrote this setting, so a stored 64000 is
+ *  the old default riding along in a profile, not anyone's choice. */
+export const RETIRED_SEND_WINDOW_DEFAULT = 64000
 
 /** The share of the model window a step was already limited to before 2.6.6. */
 export const WINDOW_SHARE = 0.8
@@ -48,6 +61,21 @@ export const WINDOW_SHARE = 0.8
 export const SMALL_MODEL_SHARE = 0.5
 export const SMALL_MODEL_CEILING = 6000
 
+/**
+ * The send window setting for one model: the user's per-model pick from the
+ * context dropdown, else the global default. Every caller of
+ * effectiveSendWindow reads it through here, so the counter, the request
+ * builder and /compact always agree on the same number.
+ */
+export function sendWindowFor(
+  settings: { codexSendWindowTokens?: number; cloudSendWindowByModel?: Record<string, number> },
+  model: string,
+): number | undefined {
+  const pick = settings.cloudSendWindowByModel?.[model]
+  if (typeof pick === 'number' && pick > 0) return Math.floor(pick)
+  return settings.codexSendWindowTokens
+}
+
 export interface SendWindowInput {
   /** Provider id of the active model ('lu-cloud', 'ollama', …). */
   providerId: string
@@ -55,7 +83,9 @@ export interface SendWindowInput {
   modelWindow: number
   /** settings.codexSendWindowTokens. */
   sendWindowTokens?: number
-  /** settings.contextDecay. The notaus switches the cap off with the decay. */
+  /** settings.contextDecay. Ignored for the cap since CA (14.11.2026): a paid
+   *  provider is always capped, decay on or off. Kept so callers need not
+   *  change. */
   capEnabled?: boolean
   /** settings.smallModelMode. */
   smallModelMode?: boolean
@@ -71,7 +101,9 @@ export interface SendWindowInput {
 export function isPaidProvider(providerId: string, localBackend?: boolean): boolean {
   // A server in the next room bills nobody, whichever protocol it speaks.
   if (localBackend === true) return false
-  return PAID_PROVIDER_IDS.has(providerId)
+  // An extra OpenAI-compatible slot (`openai-<slug>`) is a hosted API with
+  // the user's own key unless `localBackend` already said otherwise above.
+  return PAID_PROVIDER_IDS.has(providerId) || isCompatProviderId(providerId)
 }
 
 /**
@@ -83,11 +115,33 @@ export function effectiveSendWindow(input: SendWindowInput): number {
   const base = input.smallModelMode
     ? Math.floor(Math.min(window * SMALL_MODEL_SHARE, SMALL_MODEL_CEILING))
     : Math.floor(window * WINDOW_SHARE)
-  if (input.capEnabled === false) return base
   if (!isPaidProvider(input.providerId, input.localBackend)) return base
+  // The decay switch (`capEnabled`) no longer lifts the cap on a provider
+  // that bills (CA, 14.11.2026). Turning decay off means "do not shorten old
+  // results", and it had silently also meant "send the whole history on every
+  // step, however long": the support logs of that week show runs sending
+  // 120-278k tokens per step on LU Cloud, every one of them paid in full. A
+  // run that wants more than the cap per step picks it per model in the
+  // context menu, where the price per step is shown.
+  void input.capEnabled
   const cap =
     typeof input.sendWindowTokens === 'number' && input.sendWindowTokens > 0
       ? Math.floor(input.sendWindowTokens)
       : DEFAULT_SEND_WINDOW_TOKENS
   return Math.min(base, cap)
+}
+
+/** What the messages of a step are left with at the very least, however large the catalogue is. */
+export const MIN_MESSAGE_BUDGET = 4096
+
+/**
+ * The budget of the messages once the tool catalogue has its place. The
+ * catalogue is sent as a field of its own, so the estimate of the messages
+ * never sees it; without this a full history plus the catalogue is more than
+ * the window. Never below `MIN_MESSAGE_BUDGET`, and never above the budget
+ * that came in.
+ */
+export function budgetBesideTheCatalog(sendWindow: number, catalogTokens: number): number {
+  const catalog = Number.isFinite(catalogTokens) && catalogTokens > 0 ? Math.ceil(catalogTokens) : 0
+  return Math.min(sendWindow, Math.max(MIN_MESSAGE_BUDGET, sendWindow - catalog))
 }

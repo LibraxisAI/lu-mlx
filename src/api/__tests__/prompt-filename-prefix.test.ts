@@ -1,5 +1,5 @@
 /**
- * Prompt-derived output filenames (David 2026-06-11): images/videos should be
+ * Prompt-derived output filenames (2026-06-11): images/videos should be
  * named after what was asked ("red_apple_on_white_plate_00001_.png"), not the
  * opaque "locally_uncensored_00123_.png", so the result string is self-
  * descriptive and a follow-up "animate the red-apple image" can pass the name

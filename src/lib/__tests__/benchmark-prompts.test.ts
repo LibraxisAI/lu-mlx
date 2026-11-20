@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { BENCHMARK_PROMPTS } from '../benchmark-prompts'
 
 /**
- * B6 (David 2026-08-05): the benchmark checks the ANSWER, not the reasoning.
+ * B6 (2026-08-05): the benchmark checks the ANSWER, not the reasoning.
  * The failure this guards against is a model that reasons its way to the right
  * number and then runs out of token budget before printing it. A speed-only
  * benchmark calls that a fast run; the check calls it wrong.
@@ -35,7 +35,7 @@ describe('benchmark prompt checks', () => {
       expect(reasoning('17 minus 9 is 8, so 8 sheep are left.')).toBe(false)
     })
     it('fails an answer that never states the number', () => {
-      // The exact case David hit: the reasoning reached 9 but the budget ran
+      // The exact case the owner hit: the reasoning reached 9 but the budget ran
       // out first, so the visible answer carries no number at all.
       expect(reasoning('Let me work through this carefully. A farmer keeps')).toBe(false)
     })

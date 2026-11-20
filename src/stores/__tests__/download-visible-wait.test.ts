@@ -4,7 +4,7 @@
  * A finished download is not a finished install. ComfyUI serves what its own
  * directory scan has picked up, and on the big files that scan is still
  * running when the last byte lands. Create learned to wait for that on
- * 2026-08-13 (Voxyl AI with a screenshot, confirmed by Aldrich Ironhart) and
+ * 2026-08-13 (a user AI with a screenshot, confirmed by a user) and
  * the Model Manager path never did: the poller fired one event on the
  * completion transition, useModels ran one fetch against a stale
  * /object_info, and the model was simply absent from the Installed tab and
@@ -34,6 +34,8 @@ vi.mock('../../api/discover', () => ({
   lookupFileMeta: (...a: unknown[]) => lookupFileMeta(...(a as [string])),
   modelsNotVisibleInComfy: (...a: unknown[]) => modelsNotVisibleInComfy(...(a as [string[]])),
   ENUM_SUBFOLDERS: new Set(['checkpoints', 'diffusion_models', 'vae', 'text_encoders']),
+  // The ComfyUI here is on this machine; a remote one skips the wait (GH #143).
+  comfyModelTarget: vi.fn(async () => ({ remote: false })),
 }))
 
 vi.mock('../../api/comfyui', () => ({

@@ -331,3 +331,27 @@ describe('tool-executor — applyResultToToolCall', () => {
     expect(call.cacheHit).toBe(true)
   })
 })
+
+describe('the duration is the tool\'s own time, not the approval wait (Gegenprobe 01.10.2026)', () => {
+  it('a call that sat on the approval card reports only its run time', async () => {
+    const runtime = makeRuntime({
+      tools: { file_write: { executor: async () => { await sleep(5); return 'ok' } } },
+      awaitApproval: async () => { await sleep(150); return true },
+    })
+    const [out] = await executeParallel([req('1', 'file_write')], runtime)
+    expect(out.status).toBe('completed')
+    expect(out.durationMs).toBeLessThan(100)
+    // The start stays the moment the call was scheduled (the audit trail).
+    expect(out.completedAt - out.startedAt).toBeGreaterThanOrEqual(150)
+  })
+
+  it('a rejected call reports no wait as its duration either', async () => {
+    const runtime = makeRuntime({
+      tools: { file_write: { executor: async () => 'ok' } },
+      awaitApproval: async () => { await sleep(150); return false },
+    })
+    const [out] = await executeParallel([req('1', 'file_write')], runtime)
+    expect(out.status).toBe('rejected')
+    expect(out.durationMs).toBeLessThan(100)
+  })
+})

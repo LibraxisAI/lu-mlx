@@ -2,7 +2,7 @@
  * The effort ladder, the arithmetic of it.
  *
  * Three things have to hold, and each one has a live measurement behind it
- * (ops/wissen/deepinfra-modellmatrix-2026-09-02.md, 52 models against the real
+ * (52 models against the real
  * API on 2026-09-02):
  *
  *  1. CLAMPING. Qwen/Qwen3.8-27B answers 400 to 'high' AND 'max' and names

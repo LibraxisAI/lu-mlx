@@ -142,7 +142,7 @@ describe('both hooks still carry the guard', () => {
 })
 
 describe('/loop actually loops', () => {
-  // David, 2026-07-25: a loop is not a deadline. `/loop 30s <task>` means come
+  // 2026-07-25: a loop is not a deadline. `/loop 30s <task>` means come
   // back every 30 seconds and check again, so the agent cannot forget a piece
   // and cannot get away with an early "done". An earlier build read the number
   // as a time limit and Qwen3-32B tried to cram the whole task into 30 seconds.
@@ -166,7 +166,7 @@ describe('/loop actually loops', () => {
   it('stops on the done marker or on a cap the user set, and NOTHING else', () => {
     const src = read('../../hooks/useCodex.ts')
     expect(src).toContain('loopPassSaysDone(')
-    // The cap comes from settings and 0 means unlimited (David 2026-07-25:
+    // The cap comes from settings and 0 means unlimited (2026-07-25:
     // "loop darf keine maximal loops erhalten").
     expect(src).toContain('settings.loopMaxPasses ?? 0')
     expect(src).toContain('cap > 0 && nextPass > cap')

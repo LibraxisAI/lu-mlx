@@ -1,5 +1,5 @@
 /**
- * Bug C (aldrich): FLUX "CLIPLoader: Value not in list".
+ * Bug C: FLUX "CLIPLoader: Value not in list".
  *
  * Root cause was buildDynamicWorkflow's silent catch fallback
  * (`clip = models.clips[0] || ''`): when no matching text encoder was found it

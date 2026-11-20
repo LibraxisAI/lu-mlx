@@ -1,6 +1,7 @@
-import { useEffect, useRef } from "react"
+import { useEffect, useImperativeHandle, useRef, type Ref } from "react"
 import { Mic, MicOff, Loader2 } from "lucide-react"
 import { useVoice } from "../../hooks/useVoice"
+import { platformText } from "../../lib/platform-text"
 import { useVoiceStore } from "../../stores/voiceStore"
 import { useSettingsStore } from "../../stores/settingsStore"
 
@@ -25,12 +26,18 @@ import { useSettingsStore } from "../../stores/settingsStore"
  *    out is the account, not an install.
  */
 export function micUnavailableHint(cloudMode: boolean): string {
-  return cloudMode
-    ? "Cloud dictation needs a signed-in account with credits. Sign in under Settings → Account."
-    : "Speech-to-text is not installed. Install faster-whisper in Settings → Voice & Remote."
+  return cloudMode ? platformText("micHintCloud") : platformText("micHintLocal")
+}
+
+/** What the composer can ask of the microphone. */
+export interface VoiceButtonHandle {
+  /** The message was sent while recording: end the take, keep nothing of it
+   *  back. The words already in the field went out with the message. */
+  endOnSend: () => void
 }
 
 interface Props {
+  ref?: Ref<VoiceButtonHandle>
   onTranscript: (text: string) => void
   /** Live interim transcript while recording (streaming dictation). */
   onInterim?: (text: string) => void
@@ -38,8 +45,8 @@ interface Props {
   disabled?: boolean
 }
 
-export function VoiceButton({ onTranscript, onInterim, onRecordingChange, disabled }: Props) {
-  const { isRecording, isTranscribing, sttSupported, sttError, clearSttError, startRecording, stopRecording, recheckStt, maxRecordingMs } = useVoice()
+export function VoiceButton({ ref, onTranscript, onInterim, onRecordingChange, disabled }: Props) {
+  const { isRecording, isTranscribing, sttSupported, sttError, clearSttError, startRecording, stopRecording, cancelRecording, recheckStt, maxRecordingMs } = useVoice()
   // Only for the greyed-out hint: cloud mode and local mode fail for different
   // reasons and have different ways out.
   const appMode = useSettingsStore((s) => s.settings.appMode)
@@ -88,6 +95,18 @@ export function VoiceButton({ onTranscript, onInterim, onRecordingChange, disabl
     }
   }
 
+  // Sent while recording (David, 15.10.2026): the take went on after the
+  // send, and the button that ends it was greyed out with the answer
+  // running, so only a stop of the answer got the microphone back.
+  useImperativeHandle(ref, () => ({
+    endOnSend: () => {
+      if (autoStopRef.current) { clearTimeout(autoStopRef.current); autoStopRef.current = null }
+      if (!useVoiceStore.getState().isRecording) return
+      onRecordingChange?.(false)
+      void cancelRecording()
+    },
+  }))
+
   const handleClick = async () => {
     if (disabled || isTranscribing) return
 
@@ -126,7 +145,7 @@ export function VoiceButton({ onTranscript, onInterim, onRecordingChange, disabl
         >
           <MicOff size={14} />
         </button>
-        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 w-max max-w-[240px] bg-gray-800 dark:bg-gray-700 text-white t-micro leading-snug rounded text-center opacity-0 group-hover/mic:opacity-100 transition-opacity pointer-events-none">
+        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 w-max max-w-[240px] bg-gray-800 dark:bg-gray-700 !text-white t-micro leading-snug rounded text-center opacity-0 group-hover/mic:opacity-100 transition-opacity pointer-events-none">
           {hint}
         </div>
       </div>

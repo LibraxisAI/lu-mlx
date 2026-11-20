@@ -89,7 +89,7 @@ beforeEach(() => {
   useChatStore.setState({ conversations: [], activeConversationId: null })
   useGenerationStore.setState({ generating: {}, aborters: {}, runs: {} })
   useModelStore.setState({ models: [], activeModel: MODEL })
-  useSettingsStore.setState({ settings: { ...DEFAULT_SETTINGS, appMode: 'cloud', cavemanMode: 'off', chatToolsEnabled: false } })
+  useSettingsStore.setState({ settings: { ...DEFAULT_SETTINGS, appMode: 'cloud', cavemanMode: 'off' } })
   useProviderStore.setState((s) => ({ providers: { ...s.providers, 'lu-cloud': { ...s.providers['lu-cloud'], enabled: true } } }))
 })
 afterEach(() => vi.restoreAllMocks())
@@ -115,7 +115,7 @@ describe('Fenster schliessen / Abmelden / App beenden setzt den Sendeknopf wirkl
     expect(__activeChatRunConvIdsForTests()).toEqual([convId])
     expect(useGenerationStore.getState().generating[convId]).toBe(true)
 
-    // Fenster schliessen: derselbe Weg wie main.rs' `app:hidden` nach der
+    // Fenster schliessen: derselbe Weg wie lib.rs' `app:hidden` nach der
     // Karenzzeit, lib/background-shutdown.ts.
     await act(async () => {
       stopAllBackgroundWork()

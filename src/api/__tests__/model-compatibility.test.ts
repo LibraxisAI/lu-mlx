@@ -38,12 +38,12 @@ describe('isAgentCompatible', () => {
       expect(isAgentCompatible('mistral-small:22b')).toBe(true)
     })
 
-    it('ministral models are compatible (AnonN10, GitHub #65)', () => {
+    it('ministral models are compatible (GitHub #65)', () => {
       // Ministral (Mistral's 3B/8B edge line) has native tool calling, but the
       // name isn't a substring of "mistral" so Agent Mode wrongly rejected it.
       expect(isAgentCompatible('ministral-8b:latest')).toBe(true)
       expect(isAgentCompatible('ministral-3b:latest')).toBe(true)
-      // AnonN10's exact custom-GGUF tag shape from the issue.
+      // a user's exact custom-GGUF tag shape from the issue.
       expect(isAgentCompatible('ministral-8b-instruct-2410-abliterated-i1-iq3xxs:latest')).toBe(true)
     })
 
@@ -72,7 +72,7 @@ describe('isAgentCompatible', () => {
     })
 
     it('abliterated variants of agent-capable bases ARE compatible', () => {
-      // Discord-reported by diimmortalis (2026-04-25): the previous heuristic
+      // Discord-reported by a user (2026-04-25): the previous heuristic
       // only allow-listed a tiny set of abliterated bases (qwen3-coder, hermes)
       // and silently disabled the Agent toggle for everyone else, including
       // popular uncensored Qwen 3.5 / Llama 3.1 / Qwen 2.5 builds. We now
@@ -83,7 +83,7 @@ describe('isAgentCompatible', () => {
       expect(isAgentCompatible('LEONW24/Qwen3.5-9B-Uncensored:Q4_K_M')).toBe(true)
     })
 
-    it('Gemma 4 community-uncensored builds keep agent capability (Bug X, leonsk29 2026-05-24)', () => {
+    it('Gemma 4 community-uncensored builds keep agent capability (Bug X, a user 2026-05-24)', () => {
       // The Discord 2026-05-24 report: Agent + Thinking toggles grayed out
       // for every Gemma 4 community variant the Discover tab pulls (TrevorJS,
       // nohurry, Stabhappy, LiconStudio, huihui). Their tag shapes use the
@@ -182,7 +182,7 @@ describe('getRecommendedAgentModels', () => {
 
   it('hermes3 is NOT recommended: 8B is under the 9B rule', () => {
     // War bis 3.0.0 das Gegenteil ("hermes3 is marked as hot"). Der Fall hat
-    // die Zeile gehalten, die Davids 9B-Grenze verletzte (R5-68); er faellt
+    // die Zeile gehalten, die die 9B-Grenze verletzte (R5-68); er faellt
     // mit ihr, statt sie zu ueberleben. Die Regel selbst steht in
     // src/lib/__tests__/model-compatibility-smoke.test.ts.
     //

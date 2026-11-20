@@ -17,7 +17,7 @@
  *     rechnerisch bedeutet.
  *
  * Was ausdruecklich NICHT geprueft ist: die 294px aus D-S38. Die sind eine
- * Messung an gerendertem DOM; AUDIT-COVERAGE fuehrt D-S38 aus genau diesem
+ * Messung an gerendertem DOM; das Audit fuehrt D-S38 aus genau diesem
  * Grund als „nicht verifizierbar hier". Geprueft ist hier nur die URSACHE,
  * die das Audit benennt — `fixed top-10` plus zentrierter Inhalt.
  *

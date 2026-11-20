@@ -245,7 +245,7 @@ describe('R4-1 (final review Runde 4): a stale status from an earlier run must n
     // click, if the Rust side did not reset it.
     let installStatus: Record<string, unknown> = {
       status: 'complete',
-      logs: ['Update finished. Restart ComfyUI to load the new nodes.'],
+      logs: ['Update finished. ComfyUI is starting again with the new nodes.'],
     }
     let pollsSinceUpdateClicked = 0
     backendCall.mockImplementation(async (cmd: string) => {
@@ -304,7 +304,7 @@ describe('R4-1 (final review Runde 4): a stale status from an earlier run must n
 
     let installStatus: Record<string, unknown> = {
       status: 'complete',
-      logs: ['Update finished. Restart ComfyUI to load the new nodes.'],
+      logs: ['Update finished. ComfyUI is starting again with the new nodes.'],
     }
     let pollsSinceUpdateClicked = 0
     backendCall.mockImplementation(async (cmd: string) => {

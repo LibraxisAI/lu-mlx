@@ -31,16 +31,28 @@ import { resolve, join } from 'node:path'
 const src = resolve(__dirname, '..', '..')
 const rust = resolve(__dirname, '..', '..', '..', 'src-tauri', 'src')
 
-/** Die Beschriftungen der Reiterleiste, gelesen aus der Models-Seite. */
+/**
+ * Die Beschriftungen der Reiterleiste, gelesen aus der Models-Seite.
+ *
+ * Die Leiste zeichnet seit dem 08.10.2026 die jeweilige Fassung der Seite:
+ * die klassische auf Windows und Linux (ein Icon vor jedem Wort), das
+ * Redesign auf dem Mac (nur das Wort). Beide werden gelesen und muessen
+ * dieselben Namen tragen: ein Wegweiser gilt fuer jede Plattform.
+ */
 function reiterBeschriftungen(): string[] {
-  const datei = readFileSync(join(src, 'components', 'models', 'ModelManager.tsx'), 'utf8')
-  const namen: string[] = []
-  for (const knopf of datei.matchAll(/aria-pressed=\{tab === '[a-z]+'\}/g)) {
-    const rest = datei.slice(knopf.index ?? 0)
-    const text = rest.match(/\/>\s*([A-Za-z][A-Za-z ]*)/)
-    if (text) namen.push(text[1].trim())
+  const lies = (fassung: string, beschriftung: RegExp) => {
+    const datei = readFileSync(join(src, 'components', 'models', 'skin', fassung), 'utf8')
+    const namen: string[] = []
+    for (const knopf of datei.matchAll(/aria-pressed=\{tab === '[a-z]+'\}/g)) {
+      const rest = datei.slice(knopf.index ?? 0)
+      const text = rest.slice(0, rest.indexOf('</button>')).match(beschriftung)
+      if (text) namen.push(text[1].trim())
+    }
+    expect(namen.length, fassung).toBeGreaterThan(1)
+    return namen
   }
-  expect(namen.length).toBeGreaterThan(1)
+  const namen = lies('classic.tsx', /\/>\s*([A-Za-z][A-Za-z ]*)/)
+  expect(lies('mac.tsx', />\s*([A-Z][A-Za-z ]*)/)).toEqual(namen)
   return namen
 }
 

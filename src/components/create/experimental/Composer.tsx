@@ -1,33 +1,53 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Sparkles, X, SlidersHorizontal, Square, Workflow } from 'lucide-react'
-import { useCreateStore, MODEL_TYPE_DEFAULTS } from '../../../stores/createStore'
-import { classifyModel } from '../../../api/comfyui'
+import { Sparkles, X, SlidersHorizontal, Square, Upload, Workflow } from 'lucide-react'
+import { isMlxImageHost, MAC_UPSCALE_FACTORS, type MacUpscaleFactor } from '../../../api/mlx-image'
+import { laneImageModel, runsAtOwnSampling } from '../../../lib/image-engines'
+import { MLX_VIDEO_MIN_FRAMES, mlxFramesOnGrid, mlxVideoLaneEntry, mlxVideoMaxFrames, mlxTalking } from '../../../api/mlx-video'
+import { useMacMemoryGb } from '../../../lib/mac-memory'
+import { applyAspect } from '../../../lib/create-resolution'
+import { useCreateStore, MODEL_TYPE_DEFAULTS, EDIT_MAX_DENOISE, imageQualityLadder, type ImageQuality } from '../../../stores/createStore'
+import { classifyModel, resolveLocalOpPick } from '../../../api/comfyui'
+import { readsEditStrength, EDIT_STRENGTH_HINT, EDIT_DENOISE_HINT } from '../../../lib/edit-references'
 import { useCreateExp } from './CreateContext'
-import { intentToJob } from '../../../lib/render/cloud-jobs'
+import { intentToJob, quotaCostKind } from '../../../lib/render/cloud-jobs'
 import { meterState } from '../../../lib/render/credits-meter'
-import {
-  cloudModelById,
-  defaultCloudModel,
-  defaultEditModel,
-  isEditCapable,
-  modelForOp,
-  runCredits,
-} from '../../../stores/cloudCatalogStore'
-import { intentRequiredInputs, intentRoles, isStudioModel, resolveIntentPick } from '../../../lib/render/create-studio'
+import { runImageCount } from '../../../lib/render/image-count'
+import { useCloudCatalogStore, cloudModelById, defaultCloudModel, editNeedsMask, modelForOp, runCredits, lengthCredits, lengthPrice } from '../../../stores/cloudCatalogStore'
+import { createRunModel, intentRequiredInputs, isStudioModel, studioIntentOf } from '../../../lib/render/create-studio'
 import { STUDIO_MODELS } from '../../../lib/render/studio-contract'
+import { swapBilledPhotos, swapPricedSeconds, swapShortCredits } from '../../../lib/render/swap'
+import { swapReady } from '../../../lib/create/swap-run'
+import { HubActionRow } from './hub/HubActionRow'
+import { useHubRun } from './hub/hubRun'
+import { ACTION_LABEL, actionOfIntent } from '../../../lib/create/character-hub'
+import { mediaRefFrom } from './mediaRef'
+import { swapConfirmedFrame } from '../../../lib/create/swap-frame'
+import { soundApplies, soundInputError } from '../../../lib/render/sound'
+import { useCharacterHubReleased } from '../../../lib/create/character-hub-release'
 import { effectiveVideoDurations, snapToVideoDuration } from '../../../lib/render/video-duration'
 import { mediaSeconds, useStudioPrice } from './useStudioPrice'
 import { getJob } from '../../../api/cloud/jobs'
-import { resolveCharacterModel } from '../../../hooks/useCloudCreate'
-import { INTENT_MAP } from './intents'
+import { INTENT_MAP, intentNeedsSource, intentTakesOptionalPrompt, intentTakesPrompt } from './intents'
+import { MUSIC_PLACEHOLDER, musicText } from '../../../lib/render/music-ui'
 import { subscribeInstallRuns, getInstallRun } from '../../../lib/model-install-runs'
 import { useWorkflowStore, shouldShowManagerNotice } from '../../../stores/workflowStore'
-import { noPromptHint, shouldShowLaneHint } from './laneHint'
+import { isInputHint, missingSourceHint, noPromptHint, shouldShowLaneHint } from './laneHint'
+import { stageShowsSetupCard, laneModelCount } from './stageGate'
+import { localUpscaleReady } from '../../../lib/local-upscale'
+import { UpscaleSizeControls } from './UpscaleSizeControls'
+import { frameRangeFor, framesOnRange } from '../../../lib/video-length'
 import { needsMaskFor } from './maskGate'
 import { ModelChip } from './ModelChip'
+import { MOTION_OWN_WORKFLOW_NOTE, useMotionOwnWorkflow } from './motionWorkflow'
+import { ImageCountChip } from './ImageCountChip'
+import { CharacterChip, CharacterNote, characterMakesStart } from './CharacterChip'
 import { PromptHistory } from './PromptHistory'
+import { PromptAssistant } from './PromptAssistant'
 import { SpecialControls } from './SpecialIntentControls'
+import { ThreeDControls } from './ThreeDControls'
+import { threeDControlFacts } from '../../../lib/three/three-d-models'
+import { isPictureFirstRun, pictureStepCredits } from '../../../lib/three/picture-first'
 import { CreditsMeter } from './CreditsMeter'
 import { Button } from '../ui/Button'
 import { PromptField } from '../ui/PromptField'
@@ -39,9 +59,32 @@ import { cn } from '../ui/cn'
 interface Props {
   onOpenAdvanced: () => void
   onOpenWorkflows: () => void
+  /** The Character tab (David, 16.11.2026). The window is this same one, at
+   *  the same place and width. Over it stands the row of the tab (Image,
+   *  Swap, Motion, Talk); in it only the text field, an upload where the
+   *  action takes a video, the settings and Create. Everything else of the
+   *  tab is in the settings (AdvancedDrawer) or in the area above. */
+  hub?: boolean
 }
 
-export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
+/** What the disabled Create says while the Stage offers the Mac's setup. */
+const MAC_SETUP_FIRST = 'Set this up first: Download & install, above.'
+
+/** What the disabled Create says while local Enhance has no upscale model. */
+const UPSCALE_MODEL_FIRST = 'Get the upscale model first: Download & install, above.'
+
+/** The tabs where the workflow button names itself: the video tabs and
+ *  Motion Control, where a workflow of the user's own replaces LU's graph. */
+const OWN_WORKFLOW_INTENTS: ReadonlySet<string> = new Set(['video', 'animate', 'motion'])
+
+/** The negative field grows less far than the prompt: both open at once
+ *  must still leave the stage its room (PROMPT_FIELD_MAX). */
+const NEGATIVE_FIELD_MAX = 'min(120px, calc(9vh / var(--ui-scale, 1)))'
+
+/** The prompt field of the Mac's local Edit tab. See the placeholder below. */
+const MAC_EDIT_PLACEHOLDER = 'Describe what to change in this image. Paint a mask to change only that area…'
+
+export function Composer({ onOpenAdvanced, onOpenWorkflows, hub = false }: Props) {
   const intent = useCreateStore((s) => s.intent())
   const meta = INTENT_MAP[intent]
   const prompt = useCreateStore((s) => s.prompt)
@@ -52,10 +95,19 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
   const toggleNegative = useCreateStore((s) => s.toggleNegative)
   const source = useCreateStore((s) => s.source)
   const mask = useCreateStore((s) => s.mask)
-  const isGenerating = useCreateStore((s) => s.isGenerating)
+  // A batch over several source images counts as one run in flight, also in
+  // the short gap between two of its images: the button stays Cancel.
+  const isGenerating = useCreateStore((s) => s.isGenerating || s.batchRun !== null)
   const backend = useCreateStore((s) => s.backend)
+  const trainKind = useCreateStore((s) => s.trainKind)
   const targetResolution = useCreateStore((s) => s.targetResolution)
   const setTargetResolution = useCreateStore((s) => s.setTargetResolution)
+  const upscaleModelCount = useCreateStore((s) => s.upscaleModelList.length)
+  // Enhance Image on a Mac runs SeedVR2, which takes a factor and nothing
+  // else from Create (commands/mlx.rs mlx_upscale).
+  const macUpscaleScale = useCreateStore((s) => s.macUpscaleScale)
+  const setMacUpscaleScale = useCreateStore((s) => s.setMacUpscaleScale)
+  const macUpscale = backend === 'local' && isMlxImageHost()
   const cloudImageModel = useCreateStore((s) => s.cloudImageModel)
   const cloudVideoModel = useCreateStore((s) => s.cloudVideoModel)
   const cloudOpModel = useCreateStore((s) => s.cloudOpModel)
@@ -71,8 +123,24 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
   const videoInput = useCreateStore((s) => s.videoInput)
   const extendSource = useCreateStore((s) => s.extendSource)
   const musicDuration = useCreateStore((s) => s.musicDuration)
+  // Swap Character: the people, the chosen length and the consent.
+  const swapFigures = useCreateStore((s) => s.swapFigures)
+  const swapSeconds = useCreateStore((s) => s.swapSeconds)
+  const swapConsent = useCreateStore((s) => s.swapConsent)
+  // SCAIL 2 and Kling: the video starts only on the confirmed first frame,
+  // and only while it fits video, photos and marks.
+  const swapBuilt = useCreateStore((s) => s.swapBuilt)
   const managerNoticeSeen = useWorkflowStore((s) => s.managerNoticeSeen)
-  const { generate, cancel, quota } = useCreateExp()
+  const { generate, cancel, quota, mlxMissing, modelsLoaded } = useCreateExp()
+  const imageModels = useCreateStore((s) => s.imageModelList)
+  const videoModels = useCreateStore((s) => s.videoModelList)
+  // Motion Control's list: on a Mac it stays empty until its LoRA is in.
+  const motionModels = useCreateStore((s) => s.motionModelList)
+  const videoModel = useCreateStore((s) => s.videoModel)
+  // Der Katalog kommt vom Server und kann nach dem ersten Zeichnen eintreffen:
+  // die Waehler und die Studio-Wahl unten lesen ihn, also zeichnet dieser
+  // Abonnent den Composer neu, sobald er sich aendert.
+  useCloudCatalogStore((s) => s.models)
 
   // The Create button turns into Cancel in place — a double-click's second
   // press would instantly cancel the run it just started. Ignore cancel
@@ -93,8 +161,11 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
   // 2.5.8 categories with their own composer surfaces + input contracts.
   const special =
     intent === 'character' || intent === 'lipsync' || intent === 'music' ||
-    intent === 'extend' || intent === 'motion'
+    intent === 'extend' || intent === 'motion' || intent === 'swap_character'
+  const swap = intent === 'swap_character'
   const characterUse = intent === 'character' && characterTab === 'use'
+  const threeDWay = useCreateStore((s) => s.threeDWay)
+  const needsSource = intentNeedsSource(intent, threeDWay)
   let { kind: intentKind, op: intentOp } = intentToJob(intent)
   if (characterUse) {
     // The use-surface is a plain image generate with the character attached.
@@ -102,48 +173,54 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
     intentOp = 'generate'
   }
   // The prompt field shows wherever the run consumes one — that's the meta
-  // flag, plus Character-Studio's use-surface (train has no prompt).
-  const needPrompt = meta.needsPrompt || characterUse
+  // flag, plus Character-Studio's use-surface (train has no prompt), plus
+  // Motion Control on the local lanes, whose prompt may stay empty.
+  const optionalPrompt = intentTakesOptionalPrompt(intent, backend)
+  const needPrompt = intentTakesPrompt(intent, characterUse, threeDWay) || optionalPrompt
   // Gate on the exact run's cost (model + op + clip length), the same figure
   // the CreditsMeter shows — quota.costs[kind] is only the tier's
   // representative per-kind number and would mis-gate utility ops / pricier
   // models.
   // Studio-Spur (Portplan Abschnitt 3d): ein DRITTER Zweig, strikt hinter
-  // `backend === 'cloud'`. Nur die vier Rollen-Absichten (lipsync/music/
-  // extend/motion, intentRoles(intent), P2) koennen ueberhaupt ein
-  // Studio-Modell fahren; character-use bleibt bei seiner festen
-  // -lora-Familie (resolveCharacterModel) und ruehrt Studio nie an. Auf der
-  // lokalen Spur ist `studioPick` immer undefined, und ausschliesslich das
-  // haelt useStudioPrice unten von jedem Netzabruf ab.
-  const roleIntent = backend === 'cloud' && !characterUse && intentRoles(intent).length > 0
-  const rolePick = roleIntent ? resolveIntentPick(intent, cloudOpModel) : undefined
-  const studioPick = rolePick && isStudioModel(rolePick) ? rolePick : undefined
-  const pickedModel = characterUse
-    ? (resolveCharacterModel(selectedCharacter?.family ?? '', cloudOpModel) ?? '')
-    : roleIntent
-      ? (rolePick ?? '')
-      : special
-        ? cloudOpModel
-        : (intentKind === 'video' ? cloudVideoModel : cloudImageModel) ||
-          defaultCloudModel(intentKind)?.id || ''
+  // `backend === 'cloud'`. Die Rollen-Absichten (lipsync/music/extend/motion/
+  // video_upscale, intentRoles(intent)) fahren ein Studio-Modell aus ihrer Rolle;
+  // seit 02.10.2026 koennen auch Image, Edit, Video und Animate eines fahren
+  // (Web-Paritaet), die Wahl kommt dort durch modelForOp. character-use bleibt
+  // bei seiner festen -lora-Familie (resolveCharacterModel) und ruehrt Studio
+  // nie an. Auf der lokalen Spur ist `studioPick` immer undefined, und
+  // ausschliesslich das haelt useStudioPrice unten von jedem Netzabruf ab.
+  // Dieselbe Aufloesung wie Zaehler, Speicher und Start (createRunModel): eine
+  // Wahl, die die Unterkategorie nicht fahren kann, rechnet hier als das Modell,
+  // das wirklich laeuft. Rollen-Absichten behalten ihre Wahl.
+  const runModel = createRunModel(
+    studioIntentOf(intent, threeDWay),
+    { image: cloudImageModel, video: cloudVideoModel, op: cloudOpModel },
+    characterUse ? selectedCharacter?.family ?? '' : undefined,
+  )
   // A Studio pick runs on its own schema-driven endpoint (studioBaseCredits /
   // studioQuote), not on the classic per-kind picker's kind.
+  const studioPick = backend === 'cloud' && !characterUse && isStudioModel(runModel) ? runModel : undefined
   const runKind = studioPick ? STUDIO_MODELS[studioPick].kind : intentKind
   const runSeconds =
     intentOp === 'music'
       ? musicDuration
-      : runKind === 'video' && (intentOp === 'generate' || intentOp === 'animate') && fps > 0
+      : runKind === 'video' && !studioPick && (intentOp === 'generate' || intentOp === 'animate') && fps > 0
         ? frames / fps
         : undefined
   // Die im Browser gemessene Laenge einer angehaengten Datei, gebraucht nur von den
   // Modellen, die danach abrechnen (studio-contract.ts, price.mode 'input'/'both');
   // useStudioPrice ruft dafuer nichts ab, solange sie fehlt.
+  // Ein klassisches Modell, das der Anbieter nach der Laenge der Eingabe
+  // abrechnet (credits.length im Katalog des Servers). Ein Lip-Sync-Modell
+  // kann nach dem Clip statt nach der Tonspur rechnen, dann wird der Clip
+  // gemessen.
+  const lengthRate = backend === 'cloud' && !studioPick ? lengthPrice(runModel, intentOp) : undefined
   const mediaUrl =
-    intent === 'lipsync' ? audioInput?.url
-      : intent === 'motion' ? videoInput?.url
+    intent === 'lipsync' ? (lengthRate?.basis === 'video' ? videoInput?.url : audioInput?.url)
+      : intent === 'motion' || swap ? videoInput?.url
         : intent === 'extend' ? extendSource?.url
           : undefined
-  const mediaKind = intent === 'lipsync' ? ('audio' as const) : ('video' as const)
+  const mediaKind = intent === 'lipsync' && lengthRate?.basis !== 'video' ? ('audio' as const) : ('video' as const)
   // Measured async only, and only into state the async callback itself
   // writes. Resetting synchronously inside the effect body (setState right
   // where mediaUrl is falsy) is exactly the cascading-render pattern the
@@ -170,7 +247,7 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
   // measured in review-studio-B.md B3). Same async-only write rule as
   // `measured` above; the job fetch and the duration probe both go through
   // the callback, never the render body.
-  const voiceJobId = backend === 'cloud' && intent === 'lipsync' && !audioInput ? voiceFromJob?.jobId : undefined
+  const voiceJobId = backend === 'cloud' && intent === 'lipsync' && !audioInput && lengthRate?.basis !== 'video' ? voiceFromJob?.jobId : undefined
   const [measuredVoice, setMeasuredVoice] = useState<{ jobId: string; seconds: number | undefined } | null>(null)
   useEffect(() => {
     let alive = true
@@ -184,12 +261,42 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
   const inputSeconds =
     (measured && measured.url === mediaUrl ? measured.seconds : undefined) ??
     (measuredVoice && measuredVoice.jobId === voiceJobId ? measuredVoice.seconds : undefined)
-  const studioPrice = useStudioPrice(studioPick, cloudStudioOptions, prompt, runSeconds ?? inputSeconds)
+  // Fotos der Referenzleiste und Bilder pro Lauf gehen in den Preis ein: die
+  // Fotos in den Preis EINES Bildes (der Anbieter rechnet sie je Bild), die
+  // Anzahl als Faktor darueber.
+  const references = useCreateStore((s) => s.references)
+  const cloudImageCount = useCreateStore((s) => s.cloudImageCount)
+  const extraPhotos = intent === 'edit' || intent === 'animate' ? references.length : 0
+  const imageCount = backend === 'cloud' ? runImageCount(intent, cloudImageCount, characterUse) : 1
+  // Swap: the chosen length counts, not the whole video, and every photo is
+  // billed on its own (the same seconds as the slider and the server).
+  const priceSeconds = swap && studioPick && inputSeconds !== undefined ? swapPricedSeconds(studioPick, swapSeconds, inputSeconds) : inputSeconds
+  const billedPhotos = swap && studioPick ? swapBilledPhotos(studioPick, swapFigures.length) : 0
+  const studioPrice = useStudioPrice(studioPick, cloudStudioOptions, prompt, runSeconds ?? priceSeconds, extraPhotos, billedPhotos)
   const setCloudStudioCredits = useCreateStore((s) => s.setCloudStudioCredits)
+  // Der Preis der gemessenen Laenge, bei einer Stimme der Zeichen des Textes.
+  // Er steht im selben Speicher wie ein Studio-Preis, geht als Deckel mit dem
+  // Start mit (useCloudCreate), und nach einem 409 quote_changed steht dort
+  // die Zahl des Servers, der selbst misst.
+  const lengthShown = lengthRate
+    ? lengthCredits(runModel, lengthRate.basis === 'chars' ? Array.from(prompt).length || undefined : inputSeconds)
+    : null
   useEffect(() => {
-    setCloudStudioCredits(studioPrice?.credits ?? null)
-  }, [studioPrice?.credits, setCloudStudioCredits])
-  const costFallback = quota?.costs[runKind === 'audio' ? 'image' : runKind] ?? 0
+    setCloudStudioCredits(studioPrice?.credits ?? lengthShown ?? null)
+  }, [studioPrice?.credits, lengthShown, setCloudStudioCredits])
+  // Dieselbe Zahl wie im Zaehler: nach einem 409 steht im Speicher der Preis
+  // des Servers, und die Deckungspruefung muss ihn benutzen.
+  const cloudStudioCredits = useCreateStore((s) => s.cloudStudioCredits)
+  // New voice with lips (14.11.2026): the second step belongs to the price of
+  // this start; button and cover check count it (lib/render/sound.ts).
+  const sound = useCreateStore((s) => s.sound)
+  const hubReleased = useCharacterHubReleased()
+  const soundOn = soundApplies(intent, backend, hubReleased) ? sound : undefined
+  const lipsyncOn = soundOn === 'lipsync'
+  const lipsyncExtra = useCreateStore((s) => (lipsyncOn ? s.lipsyncCredits ?? 0 : 0))
+  const lipsyncModel = useCreateStore((s) => s.lipsyncModel)
+  const soundProblem = soundInputError(soundOn, swap ? swapFigures.length : 1, backend, !!audioInput || !!voiceFromJob, lipsyncModel)
+  const costFallback = quota?.costs[quotaCostKind(runKind)] ?? 0
   // The exact rule the meter chip renders, so the button can never invite a run
   // the chip is already refusing. Credits alone were not enough: a user out of
   // monthly character trainings kept an enabled Create button and got a 429.
@@ -202,20 +309,31 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
       !(studioPick && studioPrice?.error) &&
       meterState(
         quota,
-        studioPick ? (studioPrice?.credits ?? costFallback) : runCredits(intentKind, intentOp, pickedModel, runSeconds, costFallback, targetResolution),
+        imageCount * (studioPick
+          ? (studioPrice?.credits ?? costFallback) + pictureStepCredits(intent, threeDWay, studioPick, prompt)
+          : lengthRate
+            ? (cloudStudioCredits ?? lengthShown ?? costFallback)
+            : runCredits(intentKind, intentOp, runModel, runSeconds, costFallback, targetResolution)) + lipsyncExtra,
         runKind,
         intentOp,
       ).kind === 'ok')
-  // Match useCloudCreate's submit-time edit fallback so the Neg gate reflects
-  // the model the run actually uses, not a t2i model still in the picker.
-  const runModel =
-    intentOp === 'edit' && !isEditCapable(pickedModel) ? (defaultEditModel()?.id ?? pickedModel) : pickedModel
   // The hosted endpoints only honour negative_prompt for a few families —
   // hide the toggle (and the collapsed field) where it would be silently
   // dropped, like the other dead knobs on cloud.
-  const negSupported = backend !== 'cloud' || cloudModelById(runModel)?.negative_prompt === true
+  // The same on the Mac's video lane: Wan and the dev pipelines of LTX read
+  // one, a distilled LTX reads none and the second engine ends with an error
+  // on the flag. The catalogue entry of the model the lane runs says which
+  // (`negativePrompt` of `video_list_models`).
+  // Extend runs on the same engines, from the clip's last frame.
+  const macVideoLane = backend === 'local' && isMlxImageHost() && (intent === 'video' || intent === 'animate' || intent === 'extend')
+  // The Mac's music engine takes a style and lyrics and no negative prompt.
+  const macMusicLane = backend === 'local' && isMlxImageHost() && intent === 'music'
+  const negSupported = backend === 'cloud'
+    ? cloudModelById(runModel)?.negative_prompt === true
+    : macMusicLane ? false
+    : !macVideoLane || mlxVideoLaneEntry(videoModels, videoModel, intent)?.mlxVideo?.negativePrompt === true
   // R5-66: see maskGate.ts for the full rule and why 'edit' differs from Web.
-  const needsMask = needsMaskFor(intent, backend, cloudModelById(runModel)?.maskless)
+  const needsMask = needsMaskFor(intent, backend, !editNeedsMask(runModel))
   // Per-intent readiness for the 2.5.8 categories (mirrors the submit-time
   // checks of BOTH lanes so the button never invites a doomed run). The
   // local lanes always speak from a portrait (no hosted resync endpoints)
@@ -229,21 +347,36 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
   // schema). A presenter endpoint (HeyGen) reads only the voice and needs no
   // photo at all, unlike every classic lipsync model.
   const studioNeeds = studioPick ? intentRequiredInputs(intent, studioPick) : []
+  // A character on the chip makes the start image itself (CharacterChip):
+  // a video tab without an image of the user's own is ready all the same.
+  const macTalkReady = useCreateStore((s) => mlxTalking(s.videoModelList).ready)
+  const characterStart = characterMakesStart(backend, intent, selectedCharacter, !!source, macTalkReady)
+  const hasStart = !!source || characterStart
   const specialReady =
     intent === 'character'
       ? (characterUse ? !!selectedCharacter : trainImages.length >= 4)
       : intent === 'lipsync'
+        // A Mac runs it once the model's own download is on disk (the line
+        // above the chips offers it).
         ? (!!audioInput || (backend === 'cloud' && !!voiceFromJob)) &&
+          !(backend === 'local' && isMlxImageHost() && !macTalkReady) &&
           (lipsyncNeedsClip
             ? !!videoInput
             : studioPick
               ? (!studioNeeds.includes('source_path') || !!source)
-              : !!source)
+              : hasStart)
         : intent === 'extend'
-          ? (backend === 'cloud' ? !!extendSource : !!source)
+          ? (backend === 'cloud' ? !!extendSource : hasStart)
           : intent === 'motion'
-            ? !!source && !!videoInput
-            : true
+            ? hasStart && !!videoInput
+            : swap
+              // Studio models only: without one in the server's catalogue the
+              // tab says so (SwapControls) and the button stays off.
+              ? !!studioPick && swapReady(studioPick, {
+                hasVideo: !!videoInput, figures: swapFigures, consent: swapConsent,
+                frameJobId: swapConfirmedFrame(swapBuilt, videoInput?.url, swapFigures),
+              })
+              : true
   // A half-installed bundle is pickable long before it is usable: the lane
   // list refills as soon as the diffusion model lands, while the VAE it needs
   // is still coming down. Measured on the box 2026-08-15 at 88 percent of the
@@ -254,21 +387,88 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
     subscribeInstallRuns,
     () => (backend === 'local' && meta.requiresModels ? getInstallRun(meta.requiresModels).running : false),
   )
+  // On a Mac the Stage offers the setup while a lane has nothing to run on
+  // (./stageGate, the same rule). Create stayed armed below that card, and a
+  // press answered "Add checkpoints or FLUX models to ComfyUI." in red, on a
+  // machine that has no ComfyUI (persona walk, 09.10.2026). The button waits
+  // for the setup and says so. `mlxMissing` is null off the Mac, so nothing
+  // changes there.
+  const macSetupFirst = !!mlxMissing && stageShowsSetupCard({
+    backend,
+    requiresModels: meta.requiresModels,
+    mlxMissing,
+    connected: null,
+    modelsLoaded,
+    laneModelCount: laneModelCount(intent, meta.requiresModels, { image: imageModels, video: videoModels, audio: [], lipsync: [], motion: motionModels }),
+  })
+  // Local Enhance runs on a file in models/upscale_models. Without one the
+  // Stage offers the download and the button waits for it.
+  // A Mac runs Enhance with SeedVR2 (macUpscale) and shows the tab only
+  // with it installed, so models/upscale_models does not count there.
+  const upscaleReady = macUpscale || localUpscaleReady({ backend, intent, upscaleModelCount })
   const canGenerate =
-    (!needPrompt || prompt.trim().length > 0) &&
-    (!meta.needsSource || !!source) &&
+    !macSetupFirst &&
+    (!needPrompt || optionalPrompt || prompt.trim().length > 0) &&
+    (!needsSource || hasStart) &&
     (!needsMask || !!mask) &&
     specialReady &&
+    !soundProblem &&
+    upscaleReady &&
     creditsOk &&
     !installing
-  const showNoPromptHint = shouldShowLaneHint({ needPrompt, isGenerating, intent, specialReady })
+  const showNoPromptHint = shouldShowLaneHint({ needPrompt: needPrompt && !optionalPrompt, isGenerating, intent, specialReady })
+  // A caption that names the missing inputs is a note above the prompt
+  // window (laneHint.ts isInputHint); the action captions stay inside it.
+  const inputNote = showNoPromptHint && !needsMask && isInputHint(intent)
+  const laneCaption = noPromptHint(meta.id, backend, backend === 'local' && isMlxImageHost(), trainKind)
+  // The disabled button says which input it waits for (laneHint.ts).
+  const missingSource = missingSourceHint({ intent, needsSource, hasSource: hasStart })
+  // The price of a cloud run of the Character tab, named on the button.
+  // Local runs cost nothing and show none.
+  const hubCredits = hub && backend === 'cloud'
+    ? ((studioPick ? studioPrice?.credits : (cloudStudioCredits ?? lengthShown)) ?? null) !== null
+      ? (studioPick ? studioPrice!.credits : (cloudStudioCredits ?? lengthShown)!) * imageCount + lipsyncExtra
+      : null
+    : null
+  // Swap Character names its price on the button (the web's CreateButton):
+  // a paid video run, priced by its length. With a new voice the lip sync
+  // step is in the figure too. In the Character tab every cloud run names it.
+  const createPrice = swap && backend === 'cloud' && priceSeconds !== undefined && studioPrice
+    ? swapShortCredits(studioPrice.credits + lipsyncExtra)
+    : lipsyncOn && lipsyncExtra > 0 && (studioPrice?.credits ?? cloudStudioCredits ?? lengthShown) != null
+      ? swapShortCredits((studioPrice?.credits ?? cloudStudioCredits ?? lengthShown ?? 0) + lipsyncExtra)
+      : hub && hubCredits != null ? swapShortCredits(hubCredits) : null
+  // The Character tab: what the area above says about this window (hubRun).
+  // The one click swap and the states of the stage in which nothing can be
+  // made yet bring their own button; everything else is the run of the tab.
+  const hubSwap = useHubRun((st) => st.swap)
+  const hubStage = useHubRun((st) => st.stage)
+  const hubRun = hub ? (hubSwap ?? hubStage?.run ?? null) : null
+  const hubField = hubRun?.field ?? null
+  const hubAction = actionOfIntent(intent)
+  // The field stands on every action. Where the action takes no text, it
+  // says so and takes none.
+  const hubNoText = hub && !needPrompt && !hubField
+  const hubNote = !hub ? null
+    : hubRun ? (!hubRun.ready && !hubRun.running ? hubRun.hint ?? null : null)
+      : showNoPromptHint && !needsMask && isInputHint(intent) ? laneCaption : null
+  // The video of Swap and Motion can come in through the window as well.
+  const hubUpload = hub && (intent === 'motion' || (swap && hubReleased && backend === 'cloud'))
+  const setHubWindow = useHubRun((st) => st.setWindow)
+  const hubTakesNegative = needPrompt && !optionalPrompt && negSupported
+  useEffect(() => { if (hub) setHubWindow(needPrompt && !hubField, hubTakesNegative) }, [hub, needPrompt, hubField, hubTakesNegative, setHubWindow])
+  const submit = () => {
+    if (hubRun) { if (hubRun.ready && !hubRun.running) hubRun.run(); return }
+    if (canGenerate && !isGenerating) guardedGenerate()
+  }
+
 
   return (
     // A stable min-height (bottom-anchored) so the prompt window occupies the
     // same vertical space on every tab — utility modes (no LaneControls / no
     // prompt) don't shrink it. That keeps the viewer + gallery row above it the
     // exact SAME height across all tabs, not just within one.
-    <div className="shrink-0 px-4 pb-4 pt-2 min-h-[192px] flex flex-col justify-end">
+    <div className="shrink-0 flex flex-col justify-end px-4 pb-4 pt-2 min-h-[192px]" data-prompt-window-area>
       {/* 660, nicht 760: dieselbe Spalte wie im Chat, und dieselbe Rechnung.
           Die 760 waren hier als KOPIE von --lu-measure eingetippt; seit die
           App eine --ui-scale hat, wird die Zahl mitskaliert, 760 ergaebe also
@@ -276,27 +476,64 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
           vor der Umstellung hatte. Siehe --lu-measure in index.css; dass die
           Zahl hier doppelt steht statt den Token zu lesen, ist ein eigener
           Befund und hier nicht behoben. */}
+      {/* The same in every tab, the Character tab included (David,
+          16.11.2026): this width, this place, this frame. */}
       <div className="mx-auto w-full max-w-[660px] space-y-2.5">
-        {special && <SpecialControls intent={intent} />}
-        {!isUtility && <LaneControls />}
+        {special && !hub && <SpecialControls intent={intent} />}
+        {intent === '3d' && <ThreeDControls {...threeDControlFacts(backend, studioPick)} studioId={studioPick} pictureFirst={backend === 'local' || isPictureFirstRun(threeDWay, studioPick)} />}
+        {/* Swap Character's options are its own panel above (SpecialControls). */}
+        {!isUtility && !swap && !hub && <LaneControls />}
+        {!hub && <CharacterNote />}
+        {/* The Character tab's row, where the other tabs have theirs. */}
+        {hub && <HubActionRow />}
+        {hubNote && (
+          <p className="t-body text-gray-500 text-center px-3.5" data-testid="lane-input-note">{hubNote}</p>
+        )}
+        {inputNote && !hub && (
+          <p className="t-body text-gray-500 text-center px-3.5" data-testid="lane-input-note">{laneCaption}</p>
+        )}
 
-        <div className="rounded-[var(--radius-panel)] bg-white/[0.03] border border-white/[0.06] focus-within:border-white/15 transition-colors">
-          {needPrompt && (
-            <div className="px-3.5 pt-3">
+        <div className="rounded-[var(--radius-panel)] bg-white/[0.03] border border-white/[0.06] focus-within:border-white/15 transition-colors" data-prompt-window>
+          {(needPrompt || hub) && (
+            // The prompt assistant (B43) sits in the field's corner, not in the
+            // action bar: there every pixel is the model chip's, whose whole
+            // name has to fit at 760 px (FEHLER-Q4 #2). The field keeps its
+            // width and only leaves room for the button inside (pr-7).
+            <div className="relative px-3.5 pt-3">
+              {!hub && (
+                <div className="absolute top-2 right-2">
+                  <PromptAssistant onUse={setPrompt} align="right" />
+                </div>
+              )}
               <PromptField
-                value={prompt}
-                onChange={setPrompt}
+                className={hub ? undefined : 'pr-7'}
+                value={hubField ? hubField.value : hubNoText ? '' : prompt}
+                onChange={hubField ? hubField.onChange : setPrompt}
+                disabled={hubNoText}
                 placeholder={
-                  characterUse
+                  hubField ? hubField.placeholder
+                  : hubNoText ? `${hubAction && !(intent === 'character' && characterTab === 'train') ? ACTION_LABEL[hubAction] : 'Training'} needs no text.`
+                  : hub && characterUse && hubStage?.placeholder ? hubStage.placeholder
+                  : characterUse
                     ? 'Describe the scene for your character…'
                     // R5-66: the shared 'edit' placeholder promises a maskless
                     // restyle that only the local lane actually allows once a
                     // cloud model requires a mask.
                     : (intent === 'edit' && needsMask
                       ? 'Describe the new look. Paint an area first to tell it what to change…'
-                      : meta.placeholder)
+                      // The Mac edits from the prompt, and under a mask
+                      // where one is painted. Without one it does not
+                      // restyle at a denoise as the Windows graph does, so
+                      // the shared sentence would promise the wrong thing.
+                      : intent === 'edit' && backend === 'local' && isMlxImageHost()
+                        ? MAC_EDIT_PLACEHOLDER
+                      // Cloud music: the field asks for what the model does
+                      // with it, a description or the lyrics it sings.
+                      : intent === 'music' && backend === 'cloud'
+                        ? MUSIC_PLACEHOLDER[musicText(runModel).main]
+                        : meta.placeholder)
                 }
-                onSubmit={() => canGenerate && !isGenerating && guardedGenerate()}
+                onSubmit={submit}
               />
             </div>
           )}
@@ -317,7 +554,7 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
               der Platzhalter dagegen zuruecktritt, entscheidet jetzt
               ausschliesslich die ::placeholder-Regel in index.css. */}
           <AnimatePresence>
-            {showNegative && needPrompt && negSupported && (
+            {showNegative && needPrompt && !optionalPrompt && negSupported && (
               <motion.div
                 initial={{ height: 0, opacity: 0 }}
                 animate={{ height: 'auto', opacity: 1 }}
@@ -333,6 +570,7 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
                     value={negativePrompt}
                     onChange={setNegativePrompt}
                     placeholder="What to avoid…"
+                    maxHeight={NEGATIVE_FIELD_MAX}
                   />
                 </div>
               </motion.div>
@@ -346,9 +584,9 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
               Zustand der Maske selbst beschreibt, sonst stuende dort ein
               Text, der beim Radiergummi nie zutrifft ("remove the
               background"). */}
-          {showNoPromptHint && !needsMask && (
+          {showNoPromptHint && !needsMask && !inputNote && !hub && (
             <div className="px-3.5 py-3 t-body text-gray-500">
-              {noPromptHint(meta.id)}
+              {laneCaption}
             </div>
           )}
           {needsMask && !needPrompt && !isGenerating && (
@@ -359,6 +597,7 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
 
           {/* Action bar */}
           <div className="flex items-center gap-1.5 px-2.5 py-2 border-t border-white/[0.05]">
+            {hubUpload && <HubVideoUpload disabled={isGenerating || !!hubRun?.running} />}
             {/* Ein Schalter, der sagt, dass er einer ist. „Neg" war eine
                 Abkuerzung, deren Aufloesung nur im Hover-`title` stand, und
                 der Knopf meldete seinen Zustand an nichts ausser der
@@ -366,7 +605,7 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
                 also fuer einen Screenreader ein gewoehnlicher Knopf ohne
                 Zustand. Beides steht jetzt da, und `aria-controls` zeigt auf
                 das Feld, das er aufklappt. */}
-            {needPrompt && negSupported && (
+            {needPrompt && !optionalPrompt && negSupported && !hub && (
               <button
                 onClick={toggleNegative}
                 aria-pressed={showNegative}
@@ -378,11 +617,11 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
                 Negative
               </button>
             )}
-            {needPrompt && <PromptHistory onPick={setPrompt} />}
+            {needPrompt && !hub && <PromptHistory onPick={setPrompt} />}
             <div className="flex-1" />
             {/* The backend axis moved to the global header switch (2.5.7) —
                 the Composer just reflects it via the CreditsMeter. */}
-            {backend === 'cloud' && <CreditsMeter />}
+            {backend === 'cloud' && !hub && <CreditsMeter />}
             {/* Portplan Abschnitt 5, Punkt 3: der Server ist die einzige
                 Preiswahrheit fuer ein Studio-Modell. Ist er nicht erreichbar
                 oder zu alt (studio.ts, OLDER_SERVER_MESSAGE), bleibt Create
@@ -391,7 +630,22 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
             {studioPick && studioPrice?.error && (
               <span className="t-control text-red-300">{studioPrice.error}</span>
             )}
-            {meta.id === 'upscale' && (
+            {meta.id === 'upscale' && backend === 'local' && !macUpscale && <UpscaleSizeControls />}
+            {meta.id === 'upscale' && macUpscale && (
+              <Tooltip content="How much larger the picture gets. Up to 4096 pixels on the longest side.">
+                <div>
+                  <Segmented
+                    size="sm"
+                    layoutId="mac-upscale-scale"
+                    ariaLabel="Enhance factor"
+                    value={String(macUpscaleScale)}
+                    onChange={(v) => setMacUpscaleScale(Number(v) as MacUpscaleFactor)}
+                    options={MAC_UPSCALE_FACTORS.map((f) => ({ value: String(f), label: `${f}x` }))}
+                  />
+                </div>
+              </Tooltip>
+            )}
+            {meta.id === 'upscale' && backend === 'cloud' && (
               <Tooltip content="Target resolution for the upscale pass.">
                 <div>
                   <Segmented
@@ -406,13 +660,21 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
             )}
             {/* Custom ComfyUI graphs only run on the local backend, so the
                 manager only shows where it can do something. Until the button
-                was clicked once, a small dot marks it as new (David
+                was clicked once, a small dot marks it as new (the owner
                 2026-08-02: no banner line, just a minimal marker that goes
                 away on click). */}
-            {backend === 'local' && (
+            {/* On the video tabs and Motion Control the button carries words.
+                Discord, 15.10.2026: a reporter had a Wan 2.2 Animate workflow
+                running in ComfyUI and did not know LU could run it; the bare
+                icon never told him. */}
+            {backend === 'local' && !isMlxImageHost() && !hub && (
               <Tooltip content="Your own ComfyUI workflows, and the tags that pair them with models.">
                 <div className="relative">
-                  <Button variant="ghost" size="sm" icon={Workflow} iconOnly onClick={onOpenWorkflows} title="Workflows and tags" />
+                  {OWN_WORKFLOW_INTENTS.has(meta.id) ? (
+                    <Button variant="ghost" size="sm" icon={Workflow} onClick={onOpenWorkflows} title="Workflows and tags" ariaLabel="Use your own ComfyUI workflow">Use your own ComfyUI workflow</Button>
+                  ) : (
+                    <Button variant="ghost" size="sm" icon={Workflow} iconOnly onClick={onOpenWorkflows} title="Workflows and tags" />
+                  )}
                   {shouldShowManagerNotice(backend, managerNoticeSeen) && (
                     <span
                       aria-hidden
@@ -422,18 +684,44 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
                 </div>
               </Tooltip>
             )}
-            {!isUtility && (
+            {hub && (
+              // The one settings icon of the window: the model, the size and
+              // everything else of the tab (AdvancedDrawer).
+              <Tooltip content="Model, size and all other settings.">
+                <Button variant="ghost" size="sm" icon={SlidersHorizontal} iconOnly onClick={onOpenAdvanced} title="Advanced settings" />
+              </Tooltip>
+            )}
+            {!isUtility && !hub && (
               <>
+                <CharacterChip />
                 <ModelChip />
+                <ImageCountChip />
                 <Tooltip content="All advanced settings. Sampler, seed, LoRA, VAE and more.">
                   <Button variant="ghost" size="sm" icon={SlidersHorizontal} iconOnly onClick={onOpenAdvanced} title="Advanced settings" />
                 </Tooltip>
               </>
             )}
-            {isGenerating ? (
+            {hubRun?.running ? (
+              <Button variant="danger" size="md" icon={X} onClick={hubRun.cancel} disabled={hubRun.cancelDisabled}>Cancel</Button>
+            ) : isGenerating ? (
               <Button variant="danger" size="md" icon={X} onClick={guardedCancel}>Cancel</Button>
+            ) : hubRun ? (
+              <span className="inline-flex" title={hubRun.ready ? undefined : hubRun.hint}>
+                <Button variant="primary" size="lg" icon={Sparkles} disabled={!hubRun.ready} onClick={hubRun.run}>
+                  {hubRun.price ? `${hubRun.label} · ${hubRun.price}` : hubRun.label}
+                </Button>
+              </span>
             ) : (
-              <Button variant="primary" size="lg" icon={Sparkles} disabled={!canGenerate} onClick={guardedGenerate}>Create</Button>
+              // The span carries the hint: a disabled button takes no pointer,
+              // so a title on the button itself would never show.
+              <span className="inline-flex" title={macSetupFirst ? MAC_SETUP_FIRST : (missingSource ?? (upscaleReady ? undefined : UPSCALE_MODEL_FIRST))}>
+                <Button variant="primary" size="lg" icon={Sparkles} disabled={!canGenerate} onClick={guardedGenerate}>
+                  {/* Swap Character names its price on the button (the web's
+                      CreateButton): a paid video run, priced by its length. */}
+                  {/* With a new voice the lip sync step is in the figure too. */}
+                  {createPrice ? `Create · ${createPrice}` : 'Create'}
+                </Button>
+              </span>
             )}
           </div>
         </div>
@@ -442,15 +730,38 @@ export function Composer({ onOpenAdvanced, onOpenWorkflows }: Props) {
   )
 }
 
+/** The upload of the window (Character tab): the video of Swap and Motion,
+ *  the same file the line in the area above takes. */
+function HubVideoUpload({ disabled }: { disabled: boolean }) {
+  const setVideoInput = useCreateStore((s) => s.setVideoInput)
+  const input = useRef<HTMLInputElement>(null)
+  return (
+    <>
+      <input
+        ref={input}
+        type="file"
+        accept="video/mp4,video/webm,video/quicktime"
+        className="hidden"
+        aria-label="Upload the video"
+        data-hub-upload
+        onChange={(e) => { const f = e.target.files?.[0]; if (f) setVideoInput(mediaRefFrom(f)); e.target.value = '' }}
+      />
+      <Tooltip content="Add the video.">
+        <Button variant="ghost" size="sm" icon={Upload} iconOnly disabled={disabled} onClick={() => input.current?.click()} title="Upload the video" />
+      </Tooltip>
+    </>
+  )
+}
+
 /**
  * Die Reglerzeile steht MITTIG ueber der Promptbox.
  *
- * David, 05.09.2026, am Windows-Bau: „die einstellungen ueber der promptbox
+ * 05.09.2026, am Windows-Bau: „die einstellungen ueber der promptbox
  * sollen immer mittig ueber der promptbox zentriert stehen." Das dreht D-S32
  * aus 2.6.8 zurueck, und zwar bewusst: dort war die Zeile auf die linke Kante
  * des Prompttextes gesetzt worden (`justify-start` plus 15px Polster), weil
  * eine mittige Zeile ueber linksbuendigem Text als zweite Kante gelesen
- * wurde. David sieht es umgekehrt, und ihm gehoert die Entscheidung.
+ * wurde. Der Inhaber sieht es umgekehrt, und ihm gehoert die Entscheidung.
  *
  * Gemessen am laufenden Bau (1296x808, --ui-scale 1.15, gerenderte Pixel):
  * die Promptbox steht auf Mitte x=648, der Inhalt der Reglerzeile auf x=505,7
@@ -475,7 +786,7 @@ const LANE_ROW = 'flex items-center flex-wrap justify-center'
 //     submit "bare" (fixed server-side), so the sliders would do nothing
 //   • audio LOCAL (music): steps (Length lives in MusicControls)
 //   • audio CLOUD (music): hidden — bare submit carries only duration + lyrics
-function LaneControls() {
+export function LaneControls() {
   const intent = useCreateStore((s) => s.intent())
   const meta = INTENT_MAP[intent]
   const backend = useCreateStore((s) => s.backend)
@@ -484,7 +795,11 @@ function LaneControls() {
   const setSteps = useCreateStore((s) => s.setSteps)
   const denoise = useCreateStore((s) => s.denoise)
   const setDenoise = useCreateStore((s) => s.setDenoise)
+  const editStrength = useCreateStore((s) => s.editStrength)
+  const setEditStrength = useCreateStore((s) => s.setEditStrength)
   const imageModelType = useCreateStore((s) => s.imageModelType)
+  const imageModel = useCreateStore((s) => s.imageModel)
+  const setImageQuality = useCreateStore((s) => s.setImageQuality)
   const width = useCreateStore((s) => s.width)
   const height = useCreateStore((s) => s.height)
   const setSize = useCreateStore((s) => s.setSize)
@@ -504,10 +819,35 @@ function LaneControls() {
   const setCloudFps = useCreateStore((s) => s.setCloudFps)
   const videoModel = useCreateStore((s) => s.videoModel)
   const cloudVideoModel = useCreateStore((s) => s.cloudVideoModel)
+  const cloudImageModel = useCreateStore((s) => s.cloudImageModel)
+
+  // On the Mac: a pack that runs at its own steps has no use for the Quality
+  // buttons, and the local Edit is an edit from the prompt alone, sampled
+  // from pure noise like the Qwen-Image 2.1 edit on Windows, where the
+  // strength slider does not reach the model either.
+  const imageModelList = useCreateStore((s) => s.imageModelList)
+  const mlxLocal = backend === 'local' && isMlxImageHost()
+  // The long LTX clip goes by the Mac's memory (api/mlx-video
+  // mlxVideoMaxFrames); Motion Control has not run so long.
+  const macMemoryGb = useMacMemoryGb(mlxLocal)
+  const macLengthGb = intent === 'motion' ? null : macMemoryGb
+  const ownSampling = mlxLocal && runsAtOwnSampling(imageModelList, laneImageModel(imageModelList, imageModel, intent))
+  // A Qwen edit through ComfyUI reads its own Edit strength, 1 = the
+  // template's edit, as on the Mac (lib/edit-references, B46).
+  const listedImageType = imageModelList.find((m) => m.name === imageModel)?.type
+  const qwenStrength = backend === 'local' && !mlxLocal && readsEditStrength(listedImageType ?? classifyModel(imageModel), imageModel)
+  const videoModelList = useCreateStore((s) => s.videoModelList)
+  // Motion Control on the Mac runs the model of its own list.
+  const motionModelList = useCreateStore((s) => s.motionModelList)
+  const localOpModel = useCreateStore((s) => s.localOpModel)
+  // Motion Control with a workflow of the user's own runs that workflow's
+  // steps, size and length: the sliders below would set nothing.
+  const motionWorkflow = useMotionOwnWorkflow()
 
   const base = MODEL_TYPE_DEFAULTS[imageModelType]?.steps ?? 25
-  const qSteps = { Draft: Math.round(base * 0.6), Standard: base, High: Math.round(base * 1.5) }
-  const activeQ = nearestKey(qSteps, steps)
+  // The button shown as picked is the one whose step count is nearest to the
+  // current one, measured on the ladder of the picked model.
+  const activeQ = nearestKey(imageQualityLadder({ backend, imageModel, imageModelType }).steps, steps)
 
   // Character-Studio forks: the Train surface owns its own step control
   // (trainSteps in SpecialControls); Use is a plain image generate with the
@@ -552,7 +892,16 @@ function LaneControls() {
     }
   }, [backend, kind, specialOp, cloudVideoSeconds, cloudFrames, cloudFps, setCloudFrames, setCloudFps])
 
+  // Ein Studio-Modell bringt Format, Laenge und Qualitaet in seinem eigenen
+  // Schema mit (die Schublade mit den Einstellungen). Die Regler hier schickten
+  // Werte, die sein Endpunkt nicht liest, also stehen sie dort nicht.
+  const laneKind = meta.isVideo ? 'video' : 'image'
+  const lanePicked = (laneKind === 'video' ? cloudVideoModel : cloudImageModel) || defaultCloudModel(laneKind)?.id || ''
+  if (backend === 'cloud' && !characterUse && !specialOp && isStudioModel(modelForOp(laneKind, cloudVideoOp, lanePicked))) return null
+
   if (characterTrain) return null
+  // 3D has its own row (ThreeDControls): no size, steps or aspect.
+  if (intent === '3d') return null
 
   // ── Image lanes: quality + aspect (+ edit strength) ──
   if (kind === 'image') {
@@ -566,15 +915,17 @@ function LaneControls() {
             Zielgroessen, nicht als Faktor: 26px Control -> 18px, 12px
             Controltext -> 8px, 10px Label -> 7px, 8px Radius -> 6px. */}
         <div className="flex items-center gap-1.5 [--control-h-sm:18px] [--text-control:8px] [--text-label:7px] [--radius-control:6px]">
+          {!ownSampling && (
           <LabeledControl label="Quality">
             <Segmented
               size="sm"
               layoutId="quality"
               value={activeQ}
-              onChange={(k) => setSteps(qSteps[k as keyof typeof qSteps])}
+              onChange={(k) => setImageQuality(k as ImageQuality)}
               options={[{ value: 'Draft', label: 'Draft' }, { value: 'Standard', label: 'Standard' }, { value: 'High', label: 'High' }]}
             />
           </LabeledControl>
+          )}
 
           {/* Aspect only where the output size is actually user-chosen — a pure
               from-scratch image. Edit/mask ops force the output to the source
@@ -586,7 +937,10 @@ function LaneControls() {
                 size="sm"
                 layoutId="aspect"
                 value={aspectKey(width, height)}
-                onChange={(k) => { const p = aspectPresets(imageModelType)[k as AspectKey]; setSize(p.w, p.h) }}
+                // B49 (3.0.9, Discord): the same rule as the ratio buttons in
+                // Advanced settings (lib/create-resolution applyAspect), so
+                // 16:9 here and 16:9 there give the same size.
+                onChange={(k) => { const [rw, rh] = k.split(':').map(Number); const p = applyAspect(width, height, rw, rh); setSize(p.width, p.height) }}
                 options={[
                   { value: '1:1', label: '1:1', icon: Square },
                   { value: '3:4', label: '3:4' },
@@ -598,9 +952,14 @@ function LaneControls() {
           )}
         </div>
 
-        {meta.id === 'edit' && (
+        {meta.id === 'edit' && !mlxLocal && !qwenStrength && (
           <div className="w-44">
-            <Slider label="Edit strength" min={0.05} max={1} step={0.05} value={denoise} onChange={setDenoise} format={(v) => v.toFixed(2)} />
+            <Slider label="Edit strength" min={0.05} max={EDIT_MAX_DENOISE} step={0.05} value={Math.min(denoise, EDIT_MAX_DENOISE)} onChange={setDenoise} format={(v) => v.toFixed(2)} hint={EDIT_DENOISE_HINT} />
+          </div>
+        )}
+        {meta.id === 'edit' && qwenStrength && (
+          <div className="w-44">
+            <Slider label="Edit strength" min={0.05} max={1} step={0.05} value={editStrength} onChange={setEditStrength} format={(v) => v.toFixed(2)} hint={EDIT_STRENGTH_HINT} />
           </div>
         )}
       </div>
@@ -613,12 +972,63 @@ function LaneControls() {
   if (!knobsLive) return null
 
   // ── Audio (music) LOCAL: steps only — Length lives in MusicControls. ──
+  //    Not on a Mac: its music engine runs the turbo model at its own eight
+  //    steps (commands/music.rs), so a steps slider there set nothing. ──
   if (kind === 'audio') {
+    if (mlxLocal) return null
     return (
       <div className={LANE_ROW}>
         <div className="w-56">
           <Slider label="Quality (steps)" min={1} max={Math.max(60, base)} step={1} value={steps} onChange={setSteps} format={(v) => `${v}`} />
         </div>
+      </div>
+    )
+  }
+
+  // ── Video on the Mac: the length, and nothing else. `video_generate` takes
+  //    a prompt, a seed, a start image and a length; steps, guidance and size
+  //    are the model's own (its catalogue entry and its engine), so a slider
+  //    for them set nothing, and showed Wan's 25 steps under a distilled LTX
+  //    (persona walk, 09.10.2026, Fund 19). The length counts on the grid
+  //    and at the rate of the model the lane runs. With no model installed
+  //    there is no row: its values would belong to no model (Fund 20). ──
+  //    Extend is the same run from the clip's last frame, so it has the
+  //    same row and not the sliders of the ComfyUI graph.
+  // Talking Character on the Mac: no knob at all. Its length is the voice's,
+  // its shape the portrait's, and the engine's a2v runs its own steps.
+  if (mlxLocal && intent === 'lipsync') {
+    return (
+      <div className={LANE_ROW} data-testid="mac-talking-length">
+        <span className="t-label text-gray-600">clip length follows your voice, up to 10 seconds</span>
+      </div>
+    )
+  }
+  if (mlxLocal && (intent === 'video' || intent === 'animate' || intent === 'extend' || intent === 'motion')) {
+    const clip = intent === 'motion'
+      ? motionModelList.find((m) => m.name === resolveLocalOpPick(localOpModel, motionModelList))?.mlxVideo
+      : mlxVideoLaneEntry(videoModelList, videoModel, intent)?.mlxVideo
+    if (!clip) return null
+    return (
+      <div className={LANE_ROW} data-testid="mac-video-length">
+        <div className="w-56">
+          <Slider
+            label="Length"
+            min={MLX_VIDEO_MIN_FRAMES}
+            max={mlxVideoMaxFrames(clip.frameStep, macLengthGb)}
+            step={clip.frameStep}
+            value={mlxFramesOnGrid(frames, clip.frameStep, macLengthGb)}
+            onChange={setFrames}
+            format={(v) => `${v} frames · ${(v / clip.fps).toFixed(1)}s`}
+          />
+        </div>
+      </div>
+    )
+  }
+
+  if (motionWorkflow) {
+    return (
+      <div className={LANE_ROW} data-testid="motion-own-workflow">
+        <span className="t-label text-gray-600">{MOTION_OWN_WORKFLOW_NOTE}</span>
       </div>
     )
   }
@@ -643,6 +1053,11 @@ function LaneControls() {
   }
   const stepMax = Math.max(40, Math.round((vdef.steps ?? 25) * 1.5))
   const showFrames = intent !== 'lipsync' // lipsync frames follow the voice length
+  // The family's own range, as in the advanced settings (lib/video-length.ts).
+  // This row had 9 to 121 for every model, so 362 frames of MiniMax H3 set in
+  // the advanced settings drew the bar three times the width of the slider
+  // (Discord, 20.10.).
+  const frameRange = frameRangeFor(laneType)
 
   return (
     <div className={cn(LANE_ROW, 'gap-4')}>
@@ -685,7 +1100,7 @@ function LaneControls() {
         <span className="t-label text-gray-600">clip length is not available for this model yet</span>
       ) : showFrames ? (
         <div className="w-44">
-          <Slider label="Frames" min={9} max={121} step={4} value={frames} onChange={setFrames} format={(v) => `${v}f · ${(v / (fps || 16)).toFixed(1)}s`} />
+          <Slider label="Frames" min={frameRange.min} max={frameRange.max} step={frameRange.step} value={framesOnRange(frames, frameRange)} onChange={setFrames} format={(v) => `${v}f · ${(v / (fps || 16)).toFixed(1)}s`} />
         </div>
       ) : (
         <span className="t-label text-gray-600">clip length follows your voice</span>
@@ -709,21 +1124,9 @@ function LabeledControl({ label, children }: { label: string; children: React.Re
 type AspectKey = '1:1' | '3:4' | '4:3' | '16:9'
 const RATIO: Record<AspectKey, number> = { '1:1': 1, '3:4': 3 / 4, '4:3': 4 / 3, '16:9': 16 / 9 }
 
-function snap64(n: number): number { return Math.max(64, Math.round(n / 64) * 64) }
 // Video dims want a multiple of 16 (the VAE/latent grid of the WAN/S2V/VACE
 // families) — snap the resolution tiers to it so the graph never rejects them.
 function snap16(n: number): number { return Math.max(128, Math.round(n / 16) * 16) }
-
-function aspectPresets(modelType: string): Record<AspectKey, { w: number; h: number }> {
-  const def = MODEL_TYPE_DEFAULTS[modelType as keyof typeof MODEL_TYPE_DEFAULTS] ?? MODEL_TYPE_DEFAULTS.sdxl
-  const baseLong = Math.max(def.width, def.height)
-  const out = {} as Record<AspectKey, { w: number; h: number }>
-  for (const k of Object.keys(RATIO) as AspectKey[]) {
-    const r = RATIO[k]
-    out[k] = r >= 1 ? { w: baseLong, h: snap64(baseLong / r) } : { w: snap64(baseLong * r), h: baseLong }
-  }
-  return out
-}
 
 function aspectKey(w: number, h: number): AspectKey {
   const r = w / h

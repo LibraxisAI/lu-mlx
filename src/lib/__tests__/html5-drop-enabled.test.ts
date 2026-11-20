@@ -1,7 +1,7 @@
 /**
  * Every drop zone in the app was dead on Windows.
  *
- * ElBiggus mentioned it in one clause of issue #111: dragging images onto the
+ * A user mentioned it in one clause of issue #111: dragging images onto the
  * Character Studio board does nothing, picking them through the dialog works.
  * That pairing is the tell. The handler is fine (Stage.tsx, TrainSetBoard):
  * onDragOver preventDefault, onDrop reads dataTransfer.files. It never runs.

@@ -16,7 +16,7 @@
  *
  * Run: npx vitest run src/api/__tests__/vram-handoff.test.ts
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -85,6 +85,20 @@ vi.mock('../dynamic-workflow', () => ({
   buildDynamicWorkflow: (...a: unknown[]) => buildDynamicWorkflow(...a),
 }))
 
+// The real question and the real retry (lib/render-fixups.ts). Only the update
+// itself is replaced: it would run git and pip.
+const updateComfy = vi.fn()
+vi.mock('../render-fixup-deps', async () => {
+  const actual = await vi.importActual<typeof import('../render-fixup-deps')>('../render-fixup-deps')
+  return {
+    renderFixupDeps: (...args: Parameters<typeof actual.renderFixupDeps>) => ({
+      ...actual.renderFixupDeps(...args),
+      updateComfy: (...a: unknown[]) => updateComfy(...a),
+      refresh: async () => undefined,
+    }),
+  }
+})
+
 vi.mock('../agent-context', () => ({
   getActiveAgentModel: () => getActiveAgentModel(),
 }))
@@ -102,6 +116,7 @@ vi.mock('../comfyui-ws', () => ({
 
 import { decideUnload, vramHandoffGenerate, pollGone, resolveClip, resolveModelName, resolveI2VResolution, comfyErrorHint, requestGenerationCancel, resolveTunables, __resetGenerationStateForTests } from '../vram-handoff'
 import { useSettingsStore } from '../../stores/settingsStore'
+import { useCreateStore } from '../../stores/createStore'
 import type { ModelCapabilities } from '../comfyui-nodes'
 
 const GB = 1024 * 1024 * 1024
@@ -194,7 +209,7 @@ describe('decideUnload', () => {
   })
 })
 
-// ── resolveClip: video length from seconds/frames/fps (David: "video nur 1s") ──
+// ── resolveClip: video length from seconds/frames/fps (the owner: "video nur 1s") ──
 
 describe('resolveClip', () => {
   const SVD = { defFps: 8, defFrames: 25, maxFrames: 25 }
@@ -228,7 +243,7 @@ describe('resolveClip', () => {
   })
 
   // FramePack packs long video, so its I2V branch uses a high ceiling instead of
-  // SVD's 25 (David 2026-06-04: "FramePacks frame cap anheben durch input von uns").
+  // SVD's 25 (2026-06-04: "FramePacks frame cap anheben durch input von uns").
   const FRAMEPACK = { defFps: 16, defFrames: 49, maxFrames: 600 }
 
   it('FramePack default → 49 frames @ 16fps (model default)', () => {
@@ -244,7 +259,7 @@ describe('resolveClip', () => {
   })
 })
 
-// ── resolveI2VResolution: pick native res from source aspect (David 2026-06-11:
+// ── resolveI2VResolution: pick native res from source aspect (2026-06-11:
 //    "I2V results are never what the source image showed" — portrait stills came
 //    back as squished 768×448 landscape) ──
 describe('resolveI2VResolution', () => {
@@ -293,12 +308,52 @@ describe('comfyErrorHint', () => {
     expect(comfyErrorHint(undefined, undefined, 'CUDA out of memory')).toMatch(/GPU memory/i)
   })
 
+  // Discord #bug-reports 12.10. and 17.10.2026: an edit with three images.
+  it('aimdo memory compile error → names graphics memory and what to lower', () => {
+    const h = comfyErrorHint('KSampler', 'RuntimeError', 'aimdo memory compile error')
+    expect(h).toMatch(/out of graphics memory/i)
+    expect(h).toMatch(/fewer images or a smaller size/i)
+    expect(h).toMatch(/restart ComfyUI under Settings, AI Backends/)
+    expect(comfyErrorHint('SamplerCustomAdvanced', 'RuntimeError', 'aimdo memory compile error: could not start recording')).toBe(h)
+    // Negative control: an unrelated aimdo import error is not memory.
+    expect(comfyErrorHint(undefined, 'ModuleNotFoundError', "No module named 'comfy_aimdo.storage'")).toBe('')
+  })
+
   it('Windows pagefile too small (os error 1455) → virtual-memory advice, not an LU bug (#61)', () => {
     const h = comfyErrorHint('CLIPLoader', undefined, 'The paging file is too small for this operation to complete. (os error 1455)')
     expect(h).toMatch(/virtual memory|page file/i)
     expect(h).toMatch(/not an LU bug/i)
     // matches on the bare os-error code too, regardless of node
     expect(comfyErrorHint(undefined, undefined, 'os error 1455')).toMatch(/virtual memory/i)
+  })
+
+  // GH discussion 130: the verbatim text a user got from Create.
+  it('CUDA "unknown error" → points at the graphics driver, not the model', () => {
+    const RAW = "CUDA error: unknown error Search for `cudaErrorUnknown' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information."
+    const h = comfyErrorHint('CLIPTextEncode', 'RuntimeError', RAW)
+    expect(h).toMatch(/graphics driver/i)
+    expect(h).toMatch(/not from the model/i)
+    expect(h).toMatch(/restarting ComfyUI or the computer/i)
+    expect(h).toMatch(/update the graphics driver/i)
+    // either half of the message is enough, torch does not always print both
+    expect(comfyErrorHint(undefined, undefined, 'CUDA error: unknown error')).toBe(h)
+    expect(comfyErrorHint(undefined, undefined, "Search for `cudaErrorUnknown' in the docs")).toBe(h)
+  })
+
+  it('NEGATIVE CONTROL: the driver hint and the out-of-memory hint stay apart', () => {
+    const driver = comfyErrorHint(undefined, undefined, 'CUDA error: unknown error')
+    for (const oom of [
+      comfyErrorHint(undefined, undefined, 'CUDA out of memory'),
+      comfyErrorHint(undefined, undefined, 'CUDA error: out of memory'),
+      comfyErrorHint('KSampler', 'torch.OutOfMemoryError', 'Allocation on device'),
+    ]) {
+      expect(oom).toMatch(/GPU memory/i)
+      expect(oom).not.toMatch(/graphics driver/i)
+    }
+    expect(driver).not.toMatch(/GPU memory/i)
+    // other named CUDA errors keep standing alone
+    expect(comfyErrorHint('KSampler', 'RuntimeError', 'CUDA error: device-side assert triggered')).toBe('')
+    expect(comfyErrorHint('KSampler', 'RuntimeError', 'CUDA error: invalid argument')).toBe('')
   })
 
   it('unknown error → no hint (verbatim error stands alone)', () => {
@@ -346,6 +401,46 @@ function completedHistory() {
     outputs: { '9': { images: [{ filename: 'out.png', subfolder: '', type: 'output' }] } },
   }
 }
+
+// ── The version gate in the agent's tool ──────────────────────────
+
+describe('vramHandoffGenerate, a ComfyUI too old for the model', () => {
+  const GATE = 'Qwen-Image 2.1 needs ComfyUI 0.37.0 or newer. Update ComfyUI in Settings.'
+  const tooOld = () => Object.assign(new Error(GATE), { name: 'WorkflowUnavailableError', needsComfyUpdate: true })
+
+  beforeEach(() => {
+    updateComfy.mockReset()
+    updateComfy.mockResolvedValue(undefined)
+    useCreateStore.setState({ fixupPrompt: null } as never)
+    getActiveAgentModel.mockReturnValue({ name: 'gpt-4o', providerId: 'openai', remote: false })
+    getImageModels.mockResolvedValue([{ name: 'qwen_image_2.1_int8_convrot.safetensors', type: 'qwenimage21', source: 'unet' }])
+    submitWorkflow.mockResolvedValue('pid-1')
+    getHistory.mockResolvedValue(completedHistory())
+  })
+
+  it('the image tool asks once, updates on yes, builds again and renders', async () => {
+    buildDynamicWorkflow.mockRejectedValueOnce(tooOld()).mockResolvedValue({ '9': { class_type: 'SaveImage' } })
+    const run = vramHandoffGenerate('image', { prompt: 'a cat' })
+    await vi.waitFor(() => expect(useCreateStore.getState().fixupPrompt).not.toBeNull())
+    expect(useCreateStore.getState().fixupPrompt?.title).toBe('ComfyUI needs an update')
+    useCreateStore.getState().fixupPrompt?.resolve(true)
+    const out = await run
+    expect(updateComfy).toHaveBeenCalledTimes(1)
+    expect(buildDynamicWorkflow).toHaveBeenCalledTimes(2)
+    expect(out).toContain('Image generated: out.png')
+  })
+
+  it('a no is reported to the model as not started, with the reason', async () => {
+    buildDynamicWorkflow.mockRejectedValue(tooOld())
+    const run = vramHandoffGenerate('image', { prompt: 'a cat' })
+    await vi.waitFor(() => expect(useCreateStore.getState().fixupPrompt).not.toBeNull())
+    useCreateStore.getState().fixupPrompt?.resolve(false)
+    const out = await run
+    expect(updateComfy).not.toHaveBeenCalled()
+    expect(submitWorkflow).not.toHaveBeenCalled()
+    expect(out).toBe(`Image generation was not started. ${GATE}`)
+  })
+})
 
 // ── 2. cloud/remote SKIP path ─────────────────────────────────────
 
@@ -467,7 +562,7 @@ describe('vramHandoffGenerate — finally always restores the text model', () =>
     await vramHandoffGenerate('image', { prompt: 'a fox' })
     // 5GB + ~4GB sd15 = 9GB < 24GB → fits → no eviction.
     expect(unloadModel).not.toHaveBeenCalled()
-    // Bug C (David 2026-06-16): when nothing was evicted we now SKIP the ComfyUI
+    // Bug C (2026-06-16): when nothing was evicted we now SKIP the ComfyUI
     // freeMemory in the finally so the checkpoint stays resident and the NEXT
     // generation reuses it warm instead of cold-loading every time. Nothing
     // evicted → no reload either.
@@ -739,7 +834,7 @@ describe('pollAndExtract — a dead ComfyUI ends the wait, with the reason', () 
   }, 20_000)
 })
 
-describe('resolveModelName — fuzzy model match (David 2026-06-04: "FramePack" must be enough)', () => {
+describe('resolveModelName — fuzzy model match (2026-06-04: "FramePack" must be enough)', () => {
   const installed = [
     { name: 'FramePackI2V_HY_fp8_e4m3fn.safetensors' },
     { name: 'svd_xt_1_1.safetensors' },
@@ -919,7 +1014,7 @@ describe('vramHandoffGenerate — Stop / cancel gating', () => {
   })
 })
 
-// ── Per-model auto-settings (David 2026-06-22: "setze die settings für jedes
+// ── Per-model auto-settings (2026-06-22: "setze die settings für jedes
 //    image+video modell"). Two layers: resolveTunables must honor the MODEL
 //    default over ComfyUI's generic KSampler caps default (20 steps / cfg 8.0),
 //    and the chat-gen IMAGE path must use per-architecture defaults (Flux cfg 1,
@@ -990,5 +1085,77 @@ describe('chat-gen image path — per-architecture defaults (not one hardcoded c
     getHistory.mockResolvedValue(completedHistory())
     await vramHandoffGenerate('image', { prompt: 'a tree' })
     expect(buildDynamicWorkflow.mock.calls[0][0].width).toBe(512)
+  })
+})
+
+// ── The chat image tool: framing (GH #142) and the model family (Discord) ──
+
+describe('vramHandoffGenerate — what the image tool builds', () => {
+  beforeEach(() => {
+    getActiveAgentModel.mockReturnValue({ name: 'gpt-4o', providerId: 'openai', remote: false })
+    buildDynamicWorkflow.mockResolvedValue({ '9': { class_type: 'SaveImage' } })
+    submitWorkflow.mockResolvedValue('pid-1')
+    getHistory.mockResolvedValue(completedHistory())
+  })
+  const built = () => buildDynamicWorkflow.mock.calls[0] as [Record<string, unknown>, string]
+
+  it('GH #142: a full-body prompt with no size gets the portrait frame, not the square', async () => {
+    getImageModels.mockResolvedValue([{ name: 'sdxl.safetensors', type: 'sdxl', source: 'checkpoint' }])
+    await vramHandoffGenerate('image', { prompt: 'full body shot of a woman kneeling on a bed, whole bed in frame' })
+    expect([built()[0].width, built()[0].height]).toEqual([832, 1216])
+  })
+
+  it('SD 1.5 gets its own trained portrait size', async () => {
+    getImageModels.mockResolvedValue([{ name: 'sd15.safetensors', type: 'sd15', source: 'checkpoint' }])
+    await vramHandoffGenerate('image', { prompt: 'a knight, head to toe, standing' })
+    expect([built()[0].width, built()[0].height]).toEqual([512, 768])
+  })
+
+  it('a size the caller named wins', async () => {
+    getImageModels.mockResolvedValue([{ name: 'sdxl.safetensors', type: 'sdxl', source: 'checkpoint' }])
+    await vramHandoffGenerate('image', { prompt: 'full body shot of a woman', width: 1216, height: 832 })
+    expect([built()[0].width, built()[0].height]).toEqual([1216, 832])
+  })
+
+  it('COUNTER-CHECK: anything else keeps the model default', async () => {
+    getImageModels.mockResolvedValue([{ name: 'sdxl.safetensors', type: 'sdxl', source: 'checkpoint' }])
+    await vramHandoffGenerate('image', { prompt: 'close-up portrait of a woman' })
+    expect([built()[0].width, built()[0].height]).toEqual([1024, 1024])
+  })
+
+  it('the family comes from the header list, with the parts the file carries', async () => {
+    // A Z-Image under a CivitAI name the name rules cannot place: by name
+    // alone it went to the checkpoint loader and ComfyUI refused it.
+    getImageModels.mockResolvedValue([{
+      name: 'mystery_merge_v3.safetensors', type: 'zimage', source: 'diffusion_model',
+      parts: { textEncoder: false, vae: false },
+    }])
+    await vramHandoffGenerate('image', { prompt: 'a lighthouse at dusk' })
+    const [params, type] = built()
+    expect(type).toBe('zimage')
+    expect(params.modelParts).toEqual({ textEncoder: false, vae: false })
+  })
+
+  // Qwen-Image 2.1 with both editions of its text encoder installed: the
+  // picture made in chat reads the prompt with the one picked in Create.
+  describe('the Qwen-Image 2.1 text encoder picked in Create', () => {
+    const QWEN = { name: 'qwen_image_2.1_int8_convrot.safetensors', type: 'qwenimage', source: 'diffusion_model' }
+    afterEach(() => { useCreateStore.setState({ qwenTextEncoder: 'auto' }) })
+
+    it('the edition without refusals is handed to the builder', async () => {
+      useCreateStore.setState({ qwenTextEncoder: 'unfiltered' })
+      getImageModels.mockResolvedValue([QWEN])
+      await vramHandoffGenerate('image', { prompt: 'a lighthouse at dusk' })
+      const [params, type] = built()
+      expect(type).toBe('qwenimage')
+      expect(params.model).toBe(QWEN.name)
+      expect(params.qwenTextEncoder).toBe('unfiltered')
+    })
+
+    it('COUNTER-CHECK: with nothing picked no pick is sent, the builder takes the official one first', async () => {
+      getImageModels.mockResolvedValue([QWEN])
+      await vramHandoffGenerate('image', { prompt: 'a lighthouse at dusk' })
+      expect('qwenTextEncoder' in built()[0]).toBe(false)
+    })
   })
 })

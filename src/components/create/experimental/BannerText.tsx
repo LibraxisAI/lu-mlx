@@ -6,7 +6,7 @@ import { Check, Copy } from 'lucide-react'
  *
  *  It used to be one `truncate`d line. A training run that dies prints a
  *  Python traceback, and one line of it cut at the window edge is what reached
- *  us as "the error is cut off and I cannot copy it" (GitHub #121; kuroyami,
+ *  us as "the error is cut off and I cannot copy it" (GitHub #121;,
  *  2026-09-04, who read the same bar at full window width). The bar keeps its
  *  height in check by scrolling instead of cutting, and the button puts the
  *  whole message on the clipboard for the bug report.

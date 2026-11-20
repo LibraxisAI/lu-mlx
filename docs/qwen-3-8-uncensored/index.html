@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Qwen 3.8 Uncensored: Abliterated and Heretic GGUF Builds</title>
+<meta name="description" content="Which abliterated, heretic and uncensored Qwen 3.8 27B builds exist, which GGUF file fits your VRAM, and how to run one locally. Sizes read off Hugging Face.">
+<meta name="keywords" content="qwen 3.8 uncensored, qwen 3.8 abliterated, qwen 3.8 27b abliterated, qwen 3.8 heretic, qwen3.8 uncensored gguf">
+<meta property="og:title" content="Qwen 3.8 Uncensored: Abliterated and Heretic GGUF Builds">
+<meta property="og:description" content="Which abliterated, heretic and uncensored Qwen 3.8 27B builds exist, which GGUF file fits your VRAM, and how to run one locally. Sizes read off Hugging Face.">
+<meta property="og:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<meta property="og:url" content="https://locallyuncensored.com/qwen-3-8-uncensored/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Locally Uncensored">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Qwen 3.8 Uncensored: Abliterated and Heretic GGUF Builds">
+<meta name="twitter:description" content="Which abliterated, heretic and uncensored Qwen 3.8 27B builds exist, which GGUF file fits your VRAM, and how to run one locally. Sizes read off Hugging Face.">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<link rel="canonical" href="https://locallyuncensored.com/qwen-3-8-uncensored/">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="/favicon.png">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://locallyuncensored.com/"},{"@type":"ListItem","position":2,"name":"Qwen 3.8 Uncensored","item":"https://locallyuncensored.com/qwen-3-8-uncensored/"}]}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is there an uncensored Qwen 3.8?","acceptedAnswer":{"@type":"Answer","text":"Yes. Abliterated, heretic and uncensored builds of Qwen 3.8 27B have been on Hugging Face since August 14, 2026. They run locally as GGUF files."}},{"@type":"Question","name":"Is Qwen 3.8 uncensored by default?","acceptedAnswer":{"@type":"Answer","text":"No. The original weights and the hosted Qwen 3.8 Max carry the standard alignment and refusals. The uncensored versions are community edits of the open 27B weights."}},{"@type":"Question","name":"Is it legal to abliterate Qwen 3.8?","acceptedAnswer":{"@type":"Answer","text":"Qwen 3.8 27B is released under Apache 2.0, which permits commercial use, fine tuning and redistribution. That covers modified weights. What you do with the output is still your responsibility under your local law."}},{"@type":"Question","name":"How much VRAM does Qwen 3.8 abliterated need?","acceptedAnswer":{"@type":"Answer","text":"A 4 bit file is 16.5 to 16.8 GB, plus 64 KB per token of context. A 24 GB card is the comfortable home. A 16 GB card takes the IQ4_XS file at 15.3 to 15.7 GB."}},{"@type":"Question","name":"What is the difference between abliterated and heretic?","acceptedAnswer":{"@type":"Answer","text":"Both remove the refusal behaviour from the weights without retraining. Abliteration is the technique, and Heretic is an automated tool that applies it and tunes the settings on its own."}},{"@type":"Question","name":"Can I run uncensored Qwen 3.8 without a GPU?","acceptedAnswer":{"@type":"Answer","text":"A 27B model on CPU alone is slow. The options are in How to run Qwen 3.8 without a GPU."}}]}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/lu.css">
+<script defer src="/assets/lu.js"></script>
+  <script data-goatcounter="https://purple47.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</head>
+<body>
+
+<nav class="lu-nav">
+  <a class="lu-nav-brand" href="/" aria-label="Locally Uncensored">
+    <span class="lu-mono" data-mono="nav" data-size="40" aria-hidden="true"></span>
+    <span class="lu-nav-word">Locally <span class="accent">Uncensored</span></span>
+  </a>
+  <div class="lu-nav-links" id="lu-nav-links">
+    <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/pricing/">Pricing</a>
+    <a class="lu-nav-link" href="/blog/">Blog</a>
+    <a class="lu-nav-link" href="/guide/">Guide</a>
+    <a class="lu-nav-link" href="/remote-access/">Remote</a>
+  </div>
+  <div class="lu-nav-right">
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">4200+&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">1700+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <span class="lu-nav-sep"></span>
+    <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="he-cta" href="/pricing/" aria-label="LU Cloud plans and what they include"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>Cloud</a>
+    <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
+    <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </div>
+</nav>
+<div class="container lu-doc">
+  <div class="breadcrumb"><a href="/">Locally Uncensored</a> / Qwen 3.8 Uncensored</div>
+
+  <div class="post-meta">
+    <span class="post-tag">Model Guide</span>
+    <span>October 10, 2026</span>
+    <span>·</span>
+    <span>6 min read</span>
+  </div>
+
+  <article>
+    <h1>Qwen 3.8 Uncensored: Abliterated and Heretic Builds</h1>
+
+    <p><strong>The short version:</strong> Qwen 3.8 27B is Apache 2.0, so the community is free to remove its refusals and republish it. Abliterated, heretic and uncensored builds have been on Hugging Face since August 14, 2026. The usual pick is a Q4 file of about 17 GB on a 24 GB card. The hosted Qwen 3.8 Max keeps its refusals, so uncensored Qwen 3.8 means the 27B on your own hardware.</p>
+
+    <aside class="lu-cloud-box lu-cloud-door">
+      <span class="lu-cloud-kicker">No GPU for 27B? Use it online</span>
+      <p>Qwen 3.8 27B and Qwen 3.8 Max run hosted, in your browser or the desktop app: the <a href="/uncensored-ai-chat-online/">uncensored AI chat online</a>. Credit packs from 15 EUR with no subscription. <a href="https://lu-labs.ai/pricing?tab=credits&amp;src=luc-door-qwen38" target="_blank" rel="noopener">See plans and packs</a>.</p>
+    </aside>
+
+    <h2>Which Qwen 3.8 Can Be Uncensored</h2>
+
+    <table>
+      <thead><tr><th>Model</th><th>License</th><th>Runs at home</th><th>Uncensored builds</th></tr></thead>
+      <tbody>
+        <tr><td>Qwen 3.8 27B</td><td>Apache 2.0</td><td>Yes, 16 to 24 GB cards</td><td>Yes, many</td></tr>
+        <tr><td>Qwen 3.8 Max</td><td>Alibaba's qwen3.8-max licence</td><td>No, 2.4 trillion parameters</td><td>Hosted version carries the standard refusals</td></tr>
+      </tbody>
+    </table>
+
+    <p>Qwen 3.8 27B landed on Hugging Face on August 13, 2026. It is a dense 27B model with a native context of 262,144 tokens, and it reads images and video. The first abliterated builds followed one day later. Background on the base model is in <a href="/blog/how-to-run-qwen-3-8-27b-locally.html">How to Run Qwen 3.8 27B Locally</a>.</p>
+
+    <h2>The Builds People Actually Download</h2>
+
+    <p>These four GGUF packs were among the most downloaded uncensored Qwen 3.8 27B builds on Hugging Face on October 10, 2026. All four name <code>Qwen/Qwen3.8-27B</code> as base model and Apache 2.0 as license. File sizes were read off the repositories on the same day.</p>
+
+    <table>
+      <thead><tr><th>Repository</th><th>Published</th><th>Method named by the author</th><th>4 bit file</th></tr></thead>
+      <tbody>
+        <tr><td><a href="https://huggingface.co/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF" target="_blank" rel="noopener">JonathanColetti/Qwen3.8-27B-Uncensored-GGUF</a></td><td>Aug 14, 2026</td><td>Uncensored</td><td>Q4_K_M, 16.8 GB</td></tr>
+        <tr><td><a href="https://huggingface.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF" target="_blank" rel="noopener">huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF</a></td><td>Aug 16, 2026</td><td>Abliterated</td><td>Q4_K, 16.8 GB</td></tr>
+        <tr><td><a href="https://huggingface.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF" target="_blank" rel="noopener">HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF</a></td><td>Aug 17, 2026</td><td>Uncensored, "Aggressive"</td><td>IQ4_XS, 15.7 GB</td></tr>
+        <tr><td><a href="https://huggingface.co/0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF" target="_blank" rel="noopener">0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF</a></td><td>Aug 14, 2026</td><td>Heretic</td><td>Q4_K_M, 16.5 GB</td></tr>
+      </tbody>
+    </table>
+
+    <p>These are community releases. We list what the repositories state and have not benchmarked the four against each other. Read the model card before you download, and check the file list, because packs change.</p>
+
+    <h2>Abliterated, Heretic, Uncensored: What the Names Mean</h2>
+
+    <p><strong>Abliterated</strong> means the refusal behaviour was removed from the weights directly, without retraining. The model keeps its knowledge and loses the reflex to decline. <strong>Heretic</strong> is the name of an automated tool that does the same job and searches for the settings itself. <strong>Uncensored</strong> is the loosest label. It can mean an abliteration, a fine tune, or both, so the model card is the only reliable source.</p>
+
+    <p>What these edits change, and what they can cost in answer quality, is covered in the <a href="/blog/abliterated-models-guide.html">abliterated models guide</a>.</p>
+
+    <h2>Which File for Which Card</h2>
+
+    <table>
+      <thead><tr><th>VRAM</th><th>File to look for</th><th>Size in the packs above</th></tr></thead>
+      <tbody>
+        <tr><td>12 GB</td><td>IQ2_M or Q2_K</td><td>10.3 to 10.9 GB, with a real quality drop and little context</td></tr>
+        <tr><td>16 GB</td><td>IQ4_XS</td><td>15.3 to 15.7 GB</td></tr>
+        <tr><td>24 GB</td><td>Q4_K_M, Q5_K_M</td><td>16.5 to 16.8 GB and about 19.5 GB</td></tr>
+        <tr><td>32 GB</td><td>Q6_K, Q8_0</td><td>22.4 GB and 29.0 GB</td></tr>
+      </tbody>
+    </table>
+
+    <p>Add the context on top. On this architecture one token of context costs 64 KB, so 32K of context needs about 2 GB next to the weights. On 8 GB or 12 GB a smaller model is the better choice.</p>
+
+
+    <h2>How to Run It</h2>
+
+    <p>The quick way is <a href="/">Locally Uncensored</a>. Take the installer from the <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases">releases page</a>, open the Model Manager and search for Qwen 3.8. The app reads your card and hides the quants that will not fit. Nothing leaves your machine and there is no account.</p>
+
+    <p>By hand with a current llama.cpp build:</p>
+
+    <pre><code>llama-server -m Qwen3.8-27B-Uncensored-Q4_K_M.gguf \
+  --ctx-size 32768 --n-gpu-layers 99 --jinja</code></pre>
+
+    <p>Keep <code>--jinja</code>. It makes llama.cpp use the chat template inside the file, which this model needs for its thinking blocks. For images, the pack has to ship an mmproj file of about 0.9 GB, which you load with <code>--mmproj</code>. Without it the model ignores every picture.</p>
+
+    <h2>Two Things That Go Wrong</h2>
+
+    <p><strong>The chat forgets after a few turns.</strong> The official chat template nests think blocks and truncates the history. It looks like a bad quant and it is the template. Use a pack that ships a corrected template, and download again if your file is from the first hours after release.</p>
+
+    <p><strong>MTP or no MTP.</strong> Some packs carry a small extra head for speculative decoding, marked MTP. It adds roughly 0.3 to 0.8 GB and does nothing for answer quality. If you do not use speculative decoding, take the file without it.</p>
+
+    <h2>Qwen 3.8 or Qwen 3.6 Abliterated?</h2>
+
+    <p>Qwen 3.8 27B is the better model at the same size and the same license, with a longer native context. Qwen 3.6 abliterated has been in use for longer. If you already run it and it does the job, there is no rush. The side by side is in <a href="/blog/qwen-3-8-vs-qwen-3-6.html">Qwen 3.8 vs Qwen 3.6</a>, and other options are in <a href="/blog/best-uncensored-ai-models-2026.html">the 2026 roundup of uncensored models</a>. Everything else on the family is under <a href="/qwen/">all Qwen guides</a>.</p>
+
+    <h2>FAQ</h2>
+
+    <h3>Is there an uncensored Qwen 3.8?</h3>
+    <p>Yes. Abliterated, heretic and uncensored builds of Qwen 3.8 27B have been on Hugging Face since August 14, 2026. They run locally as GGUF files.</p>
+
+    <h3>Is Qwen 3.8 uncensored by default?</h3>
+    <p>No. The original weights and the hosted Qwen 3.8 Max carry the standard alignment and refusals. The uncensored versions are community edits of the open 27B weights.</p>
+
+    <h3>Is it legal to abliterate Qwen 3.8?</h3>
+    <p>Qwen 3.8 27B is released under Apache 2.0, which permits commercial use, fine tuning and redistribution. That covers modified weights. What you do with the output is still your responsibility under your local law.</p>
+
+    <h3>How much VRAM does Qwen 3.8 abliterated need?</h3>
+    <p>A 4 bit file is 16.5 to 16.8 GB, plus 64 KB per token of context. A 24 GB card is the comfortable home. A 16 GB card takes the IQ4_XS file at 15.3 to 15.7 GB.</p>
+
+    <h3>What is the difference between abliterated and heretic?</h3>
+    <p>Both remove the refusal behaviour from the weights without retraining. Abliteration is the technique, and Heretic is an automated tool that applies it and tunes the settings on its own.</p>
+
+    <h3>Can I run uncensored Qwen 3.8 without a GPU?</h3>
+    <p>A 27B model on CPU alone is slow. The options are in <a href="/blog/run-qwen-3-8-without-gpu.html">How to run Qwen 3.8 without a GPU</a>.</p>
+  </article>
+
+  <div class="post-footer">
+    <p>Run Qwen 3.8 on your own hardware. Free and open source.</p>
+    <a href="https://lu-labs.ai/api/download/windows?src=luc-qwen-3-8-uncensored" class="cta-btn" download>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Download for Windows, free
+    </a>
+    <p style="margin-top:14px;margin-bottom:0">Windows 10/11 &middot; AGPL-3.0. Linux builds on <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases">GitHub Releases</a>.</p>
+  </div>
+</div>
+
+<footer>
+  <div class="footer-row footer-meta"><span>&copy; 2026 &middot; Locally Uncensored &middot; AGPL-3.0</span></div>
+  <div class="footer-row footer-links">
+    <a href="https://locallyuncensored.com/blog/">Blog</a>
+    <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/pricing/">Pricing</a>
+    <a href="https://locallyuncensored.com/cloud/">LU Cloud</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-chat-online/">Uncensored AI chat online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-image-generator-online/">Image generator online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-video-generator-online/">Video generator online</a>
+    <a href="https://locallyuncensored.com/unrestricted-ai/">Unrestricted AI</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-coding-agent/">AI coding agent</a>
+    <a href="https://locallyuncensored.com/alternatives/">Alternatives</a>
+    <a href="https://locallyuncensored.com/is-locally-uncensored-safe/">Is it safe?</a>
+    <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
+    <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/discussions">Discussions</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
+    <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
+    <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+    <a href="https://locallyuncensored.com/privacy/">Privacy</a>
+    <a href="https://locallyuncensored.com/terms/">Terms</a>
+    <a href="https://locallyuncensored.com/impressum/">Impressum</a>
+  </div>
+</footer>
+</body>
+</html>

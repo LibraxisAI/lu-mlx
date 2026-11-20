@@ -30,18 +30,62 @@
  * Run: npx vitest run src/components/models/__tests__/vier-glyphen-ein-chip-ein-schatten.test.ts
  */
 import { describe, it, expect } from 'vitest'
-import { createElement } from 'react'
+import { createElement, type ComponentType } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { ModelTile, BundleTile, CapLegend, CAPABILITIES } from '../ModelTiles'
+import {
+  ModelTile, BundleTile, CapLegend, CAPABILITIES,
+  type ModelTileProps, type BundleTileProps,
+} from '../ModelTiles'
+import { ClassicModelTile, ClassicBundleTile, CLASSIC_CAP_LEGEND } from '../skin/ClassicTiles'
 import { ICON_SM } from '../../ui/icon-size'
 import type { DiscoverModel, ModelBundle } from '../../../api/discover'
 
-const TILES = readFileSync(resolve(__dirname, '../ModelTiles.tsx'), 'utf8')
+/** Was beide Fassungen teilen: die Tabelle der Faehigkeiten, ihre Zeichen,
+ *  die Legende und die Regeln einer Kachel (`useModelTile`). */
+const SHARED = readFileSync(resolve(__dirname, '../ModelTiles.tsx'), 'utf8')
 const SCREEN = readFileSync(resolve(__dirname, '../DiscoverModels.tsx'), 'utf8')
+const CSS = readFileSync(resolve(__dirname, '../../../index.css'), 'utf8')
 
-/** Ohne Kommentare — sonst zaehlt der Befund, der ueber der Zeile erklaert
+/**
+ * Die Kachel hat seit dem 08.10.2026 zwei Fassungen. Das Redesign gilt nur
+ * fuer den Mac, Windows und Linux behalten die Kachel von vorher. Die vier
+ * Befunde dieser Datei gelten fuer beide, und jede Fassung wird an dem
+ * gemessen, was SIE zusagt: die klassische an den Zusicherungen von vor dem
+ * Redesign (Stand 9339daa7), die Mac-Fassung an denen des Redesigns.
+ */
+interface Fassung {
+  name: 'klassisch' | 'Mac'
+  Tile: ComponentType<ModelTileProps>
+  Bundle: ComponentType<BundleTileProps>
+  /** Der Quelltext, in dem die Kachel dieser Fassung gezeichnet wird. */
+  quelle: string
+  /** Der Quelltext, der die Filterleiste und die Legende hinstellt. */
+  leiste: string
+  legende: () => string
+}
+
+const FASSUNGEN: Fassung[] = [
+  {
+    name: 'klassisch',
+    Tile: ClassicModelTile,
+    Bundle: ClassicBundleTile,
+    quelle: readFileSync(resolve(__dirname, '../skin/ClassicTiles.tsx'), 'utf8'),
+    leiste: readFileSync(resolve(__dirname, '../skin/classic.tsx'), 'utf8'),
+    legende: () => renderToStaticMarkup(createElement(CapLegend, { ink: CLASSIC_CAP_LEGEND })),
+  },
+  {
+    name: 'Mac',
+    Tile: ModelTile,
+    Bundle: BundleTile,
+    quelle: SHARED,
+    leiste: readFileSync(resolve(__dirname, '../skin/mac.tsx'), 'utf8'),
+    legende: () => renderToStaticMarkup(createElement(CapLegend)),
+  },
+]
+
+/** Ohne Kommentare, sonst zaehlt der Befund, der ueber der Zeile erklaert
  *  wird, als der Befund selbst. */
 const ohneKommentar = (s: string) =>
   s.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/^\s*\/\/.*$/gm, ' ').replace(/\{\/\*[\s\S]*?\*\/\}/g, ' ')
@@ -56,218 +100,296 @@ const M = (name: string, sizeGB: number, extra: Partial<DiscoverModel> = {}): Di
   ...extra,
 })
 
-const tile = (variants: DiscoverModel[], vramGb: number | null = 12) =>
-  renderToStaticMarkup(createElement(ModelTile, {
-    variants,
-    vramGb,
-    isInstalled: () => false,
-    dlState: () => null,
-    onDownload: () => {},
-    onInfo: () => {},
-    onOpenUrl: () => {},
-  }))
+describe.each(FASSUNGEN)('die Kachel, Fassung $name', (f) => {
+  const mac = f.name === 'Mac'
+  const TILES = f.quelle
 
-// ── D-S22 ───────────────────────────────────────────────────────────
-
-describe('D-S22 · vier Bedeutungen, eine Optik, keine Legende', () => {
-  const alles = M('Qwen3 8B', 5, {
-    hot: true,
-    agent: true,
-    lightweight: true,
-    tags: ['Q4_K_M', 'vision'],
-  })
-
-  it('der Faehigkeits-Slot traegt nur noch Faehigkeiten — die Flamme ist keine', () => {
-    // `hot` ist Beliebtheit, dieselbe Kategorie wie `pulls`. Ein Slot, der
-    // zwei Kategorien mischt, ist der Grund, warum er sich nicht lesen laesst.
-    expect(CAPABILITIES.map(c => c.key)).toEqual(['agent', 'vision', 'lightweight'])
-    expect(CAPABILITIES.some(c => c.key === ('hot' as never))).toBe(false)
-  })
-
-  it('die Flamme steht bei der Downloadzahl, nicht beim Titel', () => {
-    const html = tile([alles])
-    const titel = html.indexOf('Qwen3 8B</h3>')
-    const blurb = html.indexOf('</p>')            // Ende des Kachelkopfs
-    const flamme = html.indexOf('Hot right now')
-    const zahl = html.indexOf('120k')
-    expect(titel).toBeGreaterThan(-1)
-    // Aus dem Kopf heraus …
-    expect(flamme).toBeGreaterThan(blurb)
-    // … und in die Metazeile hinein, vor die Downloadzahl.
-    expect(flamme).toBeLessThan(zahl)
-    // Zwischen Flamme und Zahl liegt nichts als das Icon selbst.
-    expect(html.slice(flamme, zahl)).not.toContain('<button')
-  })
-
-  it('jedes Zeichen sagt seinen Namen, auch ohne Maus', () => {
-    const html = tile([alles])
-    for (const cap of CAPABILITIES) {
-      expect(html).toContain(`aria-label="${cap.title}"`)
-      expect(html).toContain(`title="${cap.title}"`)
-    }
-    expect(html).toContain('role="img"')
-  })
-
-  it('es GIBT eine Legende, und sie zeigt dieselben Zeichen in derselben Groesse', () => {
-    const legende = renderToStaticMarkup(createElement(CapLegend))
-    const kachel = tile([alles])
-    for (const cap of CAPABILITIES) {
-      expect(legende).toContain(cap.label)
-      expect(legende).toContain(cap.title)
-    }
-    // Dieselben Pfade heisst: dasselbe Icon. Ein Vergleich der SVG-Rohdaten
-    // faengt einen Austausch, den ein Textvergleich der Labels nicht sieht.
-    const pfade = (s: string) => [...s.matchAll(/ d="([^"]+)"/g)].map(m => m[1])
-    const inLegende = new Set(pfade(legende))
-    expect(inLegende.size).toBeGreaterThan(2)
-    for (const p of inLegende) expect(pfade(kachel)).toContain(p)
-    // Und dieselbe Groesse — sonst ist es keine Legende, sondern ein Bild.
-    expect(legende).toContain(`width="${ICON_SM}"`)
-    expect(kachel).toContain(`width="${ICON_SM}"`)
-  })
-
-  it('und sie steht wirklich auf dem Screen, ueber dem Raster', () => {
-    // Eine Legende, die nur im Test existiert, ist keine.
-    expect(SCREEN).toMatch(/<CapLegend\s*\/>/)
-    const legendeIdx = SCREEN.indexOf('<CapLegend')
-    const rasterIdx = SCREEN.indexOf('{gridGroups.map(')
-    expect(legendeIdx).toBeGreaterThan(-1)
-    expect(legendeIdx).toBeLessThan(rasterIdx)
-  })
-
-  it('die Legende kann nicht von den Kacheln abweichen — eine Tabelle, zwei Leser', () => {
-    // `CapIcons` und `CapLegend` lesen beide `CAPABILITIES`; es gibt keine
-    // zweite Liste, die man vergessen koennte nachzuziehen.
-    const code = TILES.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/^\s*\/\/.*$/gm, ' ')
-    expect(code.match(/CAPABILITIES\s*[.:]/g)?.length ?? 0).toBeGreaterThanOrEqual(2)
-    expect(code).toMatch(/CAPABILITIES\.filter\(/)
-    expect(code).toMatch(/CAPABILITIES\.map\(/)
-  })
-
-  it('ein Modell ohne Faehigkeiten bekommt keinen leeren Slot', () => {
-    const html = tile([M('Plain', 5)])
-    expect(html).not.toContain('role="img"')
-  })
-})
-
-// ── D-S23 ───────────────────────────────────────────────────────────
-
-describe('D-S23 · ein Bedienelement, das aussah wie eine Anzeige', () => {
-  const zweiQuants = [M('Q4', 5, { group: 'Fam' }), M('Q8', 9, { group: 'Fam' })]
-
-  it('der Aufklapper traegt das Control-Rezept des Hauses', () => {
-    const html = tile(zweiQuants)
-    expect(html).toContain('class="lu-control tabular-nums"')
-  })
-
-  it('er sagt, dass er ein Aufklapper ist — und ob er offen ist', () => {
-    const html = tile(zweiQuants)
-    expect(html).toContain('aria-haspopup="listbox"')
-    expect(html).toContain('aria-expanded="false"')
-  })
-
-  it('sein Zustand kommt aus ARIA, nicht aus einer zweiten Faerbung', () => {
-    // `.lu-control[aria-expanded="true"]` faerbt (index.css). Die Call-Site
-    // schreibt keine eigene Offen-Klasse dazu, also koennen Optik und
-    // Barrierefreiheit nicht auseinanderlaufen.
-    const picker = TILES.slice(TILES.indexOf('aria-haspopup="listbox"') - 400, TILES.indexOf('aria-haspopup="listbox"') + 200)
-    expect(picker).not.toMatch(/pickerOpen \? '[^']*bg-/)
-  })
-
-  it('der statische Chip bleibt flach: keine Fuellung mit Hover, kein Rand, kein Chevron', () => {
-    const nurEine = tile([M('Solo', 7)])
-    expect(nurEine).toContain('7 GB')
-    expect(nurEine).not.toContain('lu-control')
-    expect(nurEine).not.toContain('aria-haspopup')
-  })
-
-  it('die beiden Klassenketten sind nicht mehr deckungsgleich', () => {
-    // Der Befund in einem Satz: gleiche Klassen, gleiche Stelle. Der Chip
-    // traegt seine Flaeche, das Control traegt ein Rezept — kein einziges
-    // gemeinsames Erscheinungsmerkmal ausser der Zeile, in der sie stehen.
-    const chip = TILES.match(/t-micro px-1\.5 py-0\.5 rounded-md bg-gray-100[^"]*/)?.[0] ?? ''
-    expect(chip).not.toBe('')
-    expect(chip).not.toContain('lu-control')
-    expect(TILES).not.toMatch(/className="flex items-center gap-1 px-1\.5 py-0\.5 rounded-md bg-gray-100/)
-  })
-
-  it('das Menue ist eine Liste, und Escape schliesst sie', () => {
-    const offen = TILES.slice(TILES.indexOf('role="listbox"'), TILES.indexOf('role="listbox"') + 900)
-    expect(offen).toContain('role="option"')
-    expect(offen).toContain('aria-selected')
-    expect(TILES).toMatch(/e\.key === 'Escape'/)
-  })
-})
-
-// ── D-S24 ───────────────────────────────────────────────────────────
-
-describe('D-S24 · der Schatten, den niemand je gesehen hat', () => {
-  it('kein shadow-sm mehr auf dem ganzen Models-Screen', () => {
-    expect(ohneKommentar(TILES)).not.toContain('shadow-sm')
-    expect(ohneKommentar(SCREEN)).not.toContain('shadow-sm')
-  })
-
-  it('„Get" ist trotzdem der einzige gefuellte UND gerandete Knopf der Kachel', () => {
-    const html = tile([M('Solo', 7)])
-    expect(html).toContain('Get')
-    expect(html).toMatch(/class="[^"]*border border-gray-200[^"]*"/)
-    expect(html).not.toContain('shadow')
-  })
-
-  it('das Bundle-Pendant traegt dasselbe Rezept, nicht seine eigene Kopie', () => {
-    const bundle: ModelBundle = {
-      name: 'SDXL Turbo',
-      description: 'fast image model',
-      files: [{ filename: 'a.safetensors', url: 'https://example.invalid/a', subfolder: 'checkpoints', sizeGB: 6 }],
-      totalSizeGB: 6,
-      vram: '8 GB',
-      category: 'image',
-    } as unknown as ModelBundle
-    const html = renderToStaticMarkup(createElement(BundleTile, {
-      bundle, vramGb: 12, complete: false, downloading: false, hasErrors: false,
-      onInstall: () => {}, onRetry: () => {}, onClear: () => {}, onOpenUrl: () => {},
+  const tile = (variants: DiscoverModel[], vramGb: number | null = 12) =>
+    renderToStaticMarkup(createElement(f.Tile, {
+      variants,
+      vramGb,
+      isInstalled: () => false,
+      dlState: () => null,
+      onDownload: () => {},
+      onInfo: () => {},
+      onOpenUrl: () => {},
     }))
-    expect(html).not.toContain('shadow')
-    expect(html).toContain('Get · 6 GB')
-    // EIN Rezept, zwei Call-Sites — nicht zwei handgeschriebene Ketten.
-    expect((TILES.match(/className=\{TILE_ACTION\}/g) ?? []).length).toBe(2)
+
+  // ── D-S22 ─────────────────────────────────────────────────────────
+
+  describe('D-S22 · vier Bedeutungen, eine Optik, keine Legende', () => {
+    const alles = M('Qwen3 8B', 5, {
+      hot: true,
+      agent: true,
+      lightweight: true,
+      tags: ['Q4_K_M', 'vision'],
+    })
+
+    it('der Faehigkeits-Slot traegt nur noch Faehigkeiten, die Flamme ist keine', () => {
+      // `hot` ist Beliebtheit, dieselbe Kategorie wie `pulls`. Ein Slot, der
+      // zwei Kategorien mischt, ist der Grund, warum er sich nicht lesen laesst.
+      expect(CAPABILITIES.map(c => c.key)).toEqual(['agent', 'vision', 'lightweight'])
+      expect(CAPABILITIES.some(c => c.key === ('hot' as never))).toBe(false)
+    })
+
+    it('die Flamme steht bei der Downloadzahl, nicht beim Titel', () => {
+      const html = tile([alles])
+      const titel = html.indexOf('Qwen3 8B</h3>')
+      const blurb = html.indexOf('</p>')            // Ende des Kachelkopfs
+      const flamme = html.indexOf('Hot right now')
+      const zahl = html.indexOf('120k')
+      expect(titel).toBeGreaterThan(-1)
+      // Aus dem Kopf heraus …
+      expect(flamme).toBeGreaterThan(blurb)
+      // … und in die Metazeile hinein, vor die Downloadzahl.
+      expect(flamme).toBeLessThan(zahl)
+      // Zwischen Flamme und Zahl liegt nichts als das Icon selbst.
+      expect(html.slice(flamme, zahl)).not.toContain('<button')
+    })
+
+    it('jedes Zeichen sagt seinen Namen, auch ohne Maus', () => {
+      const html = tile([alles])
+      for (const cap of CAPABILITIES) {
+        expect(html).toContain(`aria-label="${cap.title}"`)
+        expect(html).toContain(`title="${cap.title}"`)
+      }
+      expect(html).toContain('role="img"')
+    })
+
+    it('es GIBT eine Legende, und sie zeigt dieselben Zeichen in derselben Groesse', () => {
+      const legende = f.legende()
+      const kachel = tile([alles])
+      for (const cap of CAPABILITIES) {
+        expect(legende).toContain(cap.label)
+        expect(legende).toContain(cap.title)
+      }
+      // Dieselben Pfade heisst: dasselbe Icon. Ein Vergleich der SVG-Rohdaten
+      // faengt einen Austausch, den ein Textvergleich der Labels nicht sieht.
+      const pfade = (s: string) => [...s.matchAll(/ d="([^"]+)"/g)].map(m => m[1])
+      const inLegende = new Set(pfade(legende))
+      expect(inLegende.size).toBeGreaterThan(2)
+      for (const p of inLegende) expect(pfade(kachel)).toContain(p)
+      // Und dieselbe Groesse, sonst ist es keine Legende, sondern ein Bild.
+      expect(legende).toContain(`width="${ICON_SM}"`)
+      expect(kachel).toContain(`width="${ICON_SM}"`)
+    })
+
+    it('und sie steht wirklich auf dem Screen, ueber dem Raster', () => {
+      // Eine Legende, die nur im Test existiert, ist keine. Der Screen stellt
+      // die Filterleiste der Fassung ueber das Raster und sagt ihr, wann die
+      // Legende dazugehoert; die Fassung zeichnet sie.
+      const leisteIdx = SCREEN.indexOf('<skin.FilterBar')
+      const rasterIdx = SCREEN.indexOf('{gridGroups.map(')
+      expect(leisteIdx).toBeGreaterThan(-1)
+      expect(leisteIdx).toBeLessThan(rasterIdx)
+      expect(SCREEN.slice(leisteIdx, rasterIdx)).toMatch(/legend=\{isText && /)
+      expect(f.leiste).toMatch(/\{legend && <CapLegend\b[^>]*\/>\}/)
+    })
+
+    it('die Legende kann nicht von den Kacheln abweichen: eine Tabelle, zwei Leser', () => {
+      // `CapIcons` und `CapLegend` lesen beide `CAPABILITIES`; es gibt keine
+      // zweite Liste, die man vergessen koennte nachzuziehen. Das gilt fuer
+      // beide Fassungen, denn beide nehmen Zeichen und Legende aus derselben
+      // Datei und bringen keine eigene Tabelle mit.
+      const code = SHARED.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/^\s*\/\/.*$/gm, ' ')
+      expect(code.match(/CAPABILITIES\s*[.:]/g)?.length ?? 0).toBeGreaterThanOrEqual(2)
+      expect(code).toMatch(/CAPABILITIES\.filter\(/)
+      expect(code).toMatch(/CAPABILITIES\.map\(/)
+      if (!mac) {
+        expect(TILES).toMatch(/CapIcons,[\s\S]{0,200}\} from '\.\.\/ModelTiles'/)
+        expect(ohneKommentar(TILES)).not.toMatch(/Wrench|Feather|\bEye\b/)
+      }
+    })
+
+    it('ein Modell ohne Faehigkeiten bekommt keinen leeren Slot', () => {
+      const html = tile([M('Plain', 5)])
+      expect(html).not.toContain('role="img"')
+    })
   })
 
-  it('echte Erhebung bleibt, wo wirklich etwas schwebt — und kommt aus dem Rezept', () => {
-    // Das Aufklappmenue liegt ueber der Kachel darunter — dort ist ein
-    // Schatten kein Dekor, sondern die Aussage. Seit D-T06/D-T09 kommt sie
-    // nicht mehr aus einer handgeschriebenen Kette (`bg-[#17171c] border
-    // border-white/10 shadow-xl`), sondern aus `.lu-elevated`.
-    //
-    // `ohneKommentar` ist hier keine Kosmetik: die Vorfassung dieser
-    // Zusicherung las `expect(TILES).toContain('shadow-xl')` — und die
-    // Klasse stand ausser im Menue auch im Kommentar ueber TILE_ACTION.
-    // Sie waere gruen geblieben, haette man das Menue ersatzlos gestrichen.
-    const code = ohneKommentar(TILES)
-    expect(code).toContain('lu-elevated')
-    expect(code).not.toContain('shadow-xl')
-    expect(code).not.toContain('#17171c')
+  // ── D-S23 ─────────────────────────────────────────────────────────
+
+  describe('D-S23 · ein Bedienelement, das aussah wie eine Anzeige', () => {
+    const zweiQuants = [M('Q4', 5, { group: 'Fam' }), M('Q8', 9, { group: 'Fam' })]
+
+    it('der Aufklapper traegt das Control-Rezept des Hauses', () => {
+      const html = tile(zweiQuants)
+      // Mit Rand (`--outline`), in beiden Fassungen: auf der ruhigeren Kachel
+      // war der randlose Aufklapper von der Groessenangabe daneben nicht mehr
+      // zu unterscheiden, also genau der Befund von D-S23. Die klassische
+      // Fassung traegt die Kante seit dem 10.10.2026 (Farben des Mac).
+      expect(html).toContain('class="lu-control lu-control--outline tabular-nums"')
+    })
+
+    it('er sagt, dass er ein Aufklapper ist, und ob er offen ist', () => {
+      const html = tile(zweiQuants)
+      expect(html).toContain('aria-haspopup="listbox"')
+      expect(html).toContain('aria-expanded="false"')
+    })
+
+    it('sein Zustand kommt aus ARIA, nicht aus einer zweiten Faerbung', () => {
+      // `.lu-control[aria-expanded="true"]` faerbt (index.css). Die Call-Site
+      // schreibt keine eigene Offen-Klasse dazu, also koennen Optik und
+      // Barrierefreiheit nicht auseinanderlaufen.
+      // Ohne Kommentare gesucht: der Satz ueber Escape nennt das Attribut
+      // auch, und der Ausschnitt laege sonst auf dem Kommentar.
+      const code = ohneKommentar(TILES)
+      const at = code.indexOf('aria-haspopup="listbox"')
+      expect(at).toBeGreaterThan(400)
+      const picker = code.slice(at - 400, at + 200)
+      expect(picker).toContain('aria-expanded={pickerOpen}')
+      expect(picker).not.toMatch(/pickerOpen \? '[^']*bg-/)
+    })
+
+    it('der statische Chip bleibt flach: keine Fuellung mit Hover, kein Rand, kein Chevron', () => {
+      const nurEine = tile([M('Solo', 7)])
+      expect(nurEine).toContain('7 GB')
+      if (mac) {
+        // Gefragt wird die Groessenangabe selbst. Die Kachel als Ganzes traegt
+        // im Redesign das Control-Rezept am Details-Knopf, das ist richtig so.
+        const angabe = nurEine.match(/<span class="([^"]*)" data-tile-size="true">7 GB<\/span>/)?.[1] ?? ''
+        expect(angabe).not.toBe('')
+        expect(angabe).not.toContain('lu-control')
+        expect(angabe).not.toMatch(/(?<![\w-])(bg|border|hover)[-:]/)
+      } else {
+        expect(nurEine).not.toContain('lu-control')
+        const angabe = nurEine.match(/<span class="([^"]*)">7 GB<\/span>/)?.[1] ?? ''
+        expect(angabe).not.toBe('')
+        expect(angabe).not.toMatch(/(?<![\w-])(border|hover)[-:]/)
+      }
+      expect(nurEine).not.toContain('aria-haspopup')
+    })
+
+    it('die beiden Klassenketten sind nicht mehr deckungsgleich', () => {
+      // Der Befund in einem Satz: gleiche Klassen, gleiche Stelle. Der Chip
+      // traegt seine Flaeche, das Control traegt ein Rezept, kein einziges
+      // gemeinsames Erscheinungsmerkmal ausser der Zeile, in der sie stehen.
+      if (mac) {
+        // Im Redesign ist die Anzeige reiner Text (TILE_META) und traegt gar
+        // keine Flaeche mehr; der Abstand zum Control ist groesser geworden.
+        const chip = TILES.match(/export const TILE_META = '([^']*)'/)?.[1] ?? ''
+        expect(chip).not.toBe('')
+        expect(chip).not.toContain('lu-control')
+        expect(chip).not.toMatch(/(?<![\w-])(bg|border|hover)[-:]/)
+        expect(TILES).toMatch(/className=\{TILE_META\} data-tile-size/)
+      } else {
+        const chip = TILES.match(/t-micro px-1\.5 py-0\.5 rounded-md bg-gray-100[^"]*/)?.[0] ?? ''
+        expect(chip).not.toBe('')
+        expect(chip).not.toContain('lu-control')
+      }
+      expect(TILES).not.toMatch(/className="flex items-center gap-1 px-1\.5 py-0\.5 rounded-md bg-gray-100/)
+    })
+
+    it('das Menue ist eine Liste, und Escape schliesst sie', () => {
+      const at = TILES.indexOf('role="listbox"')
+      expect(at).toBeGreaterThan(-1)
+      const offen = TILES.slice(at, at + 900)
+      expect(offen).toContain('role="option"')
+      expect(offen).toContain('aria-selected')
+      // Escape gehoert zu den Regeln der Kachel, und die stehen einmal, in
+      // `useModelTile`. Beide Fassungen muessen wirklich darauf stehen.
+      expect(SHARED).toMatch(/e\.key === 'Escape'/)
+      expect(ohneKommentar(TILES)).toMatch(/= useModelTile\(props\)/)
+    })
+  })
+
+  // ── D-S24 ─────────────────────────────────────────────────────────
+
+  describe('D-S24 · der Schatten, den niemand je gesehen hat', () => {
+    it('kein shadow-sm mehr auf dem ganzen Models-Screen', () => {
+      expect(ohneKommentar(TILES)).not.toContain('shadow-sm')
+      expect(ohneKommentar(SCREEN)).not.toContain('shadow-sm')
+    })
+
+    it('„Get" ist trotzdem der einzige gefuellte UND gerandete Knopf der Kachel', () => {
+      const html = tile([M('Solo', 7)])
+      expect(html).toContain('Get')
+      // Fuellung und Rand kommen in beiden Fassungen aus EINEM Hausrezept,
+      // `.lu-tonal` (index.css), statt aus einer grauen Klassenkette.
+      expect((html.match(/class="lu-tonal"/g) ?? []).length).toBe(1)
+      expect(TILES).toMatch(/export const TILE_ACTION = 'lu-tonal'/)
+      const rezept = CSS.slice(CSS.indexOf('.lu-tonal {'), CSS.indexOf('}', CSS.indexOf('.lu-tonal {')))
+      expect(rezept).toMatch(/background-color:/)
+      expect(rezept).toMatch(/border:/)
+      expect(html).not.toContain('shadow')
+    })
+
+    it('das Bundle-Pendant traegt dasselbe Rezept, nicht seine eigene Kopie', () => {
+      const bundle: ModelBundle = {
+        name: 'SDXL Turbo',
+        description: 'fast image model',
+        files: [{ filename: 'a.safetensors', url: 'https://example.invalid/a', subfolder: 'checkpoints', sizeGB: 6 }],
+        totalSizeGB: 6,
+        vram: '8 GB',
+        category: 'image',
+      } as unknown as ModelBundle
+      const html = renderToStaticMarkup(createElement(f.Bundle, {
+        bundle, vramGb: 12, complete: false, downloading: false, hasErrors: false,
+        onInstall: () => {}, onRetry: () => {}, onClear: () => {}, onOpenUrl: () => {},
+      }))
+      expect(html).not.toContain('shadow')
+      expect(html).toContain('Get · 6.0 GB')
+      expect(html).toContain('class="lu-tonal"')
+      if (mac) {
+        // EIN Rezept. Zwei der drei Call-Sites waehlen zwischen laut und
+        // leise: ein Modell, das hier nicht laeuft, bekommt den ruhigen Knopf.
+        expect((TILES.match(/className=\{(?:fitsHere \? )?TILE_ACTION[ }]/g) ?? []).length).toBe(3)
+      } else {
+        // EIN Rezept, drei Call-Sites (Get, Use, Get des Bundles), nicht
+        // drei handgeschriebene Ketten.
+        expect((TILES.match(/className=\{TILE_ACTION\}/g) ?? []).length).toBe(3)
+      }
+    })
+
+    it('echte Erhebung bleibt, wo wirklich etwas schwebt, und kommt aus dem Rezept', () => {
+      // Das Aufklappmenue liegt ueber der Kachel darunter. Dort ist ein
+      // Schatten kein Dekor, sondern die Aussage. Seit D-T06/D-T09 kommt sie
+      // nicht mehr aus einer handgeschriebenen Kette (`bg-[#17171c] border
+      // border-white/10 shadow-xl`), sondern aus `.lu-elevated`.
+      //
+      // `ohneKommentar` ist hier keine Kosmetik: die Vorfassung dieser
+      // Zusicherung las `expect(TILES).toContain('shadow-xl')`, und die
+      // Klasse stand ausser im Menue auch im Kommentar ueber TILE_ACTION.
+      // Sie waere gruen geblieben, haette man das Menue ersatzlos gestrichen.
+      const code = ohneKommentar(TILES)
+      expect(code).toContain('lu-elevated')
+      expect(code).not.toContain('shadow-xl')
+      expect(code).not.toContain('#17171c')
+    })
   })
 })
 
 // ── D-S25 ───────────────────────────────────────────────────────────
 
 describe('D-S25 · zwei Segmented-Sprachen 47px uebereinander', () => {
-  const rows = SCREEN.slice(SCREEN.indexOf('{/* Filter bar:'), SCREEN.indexOf('{/* D-S22 ·'))
+  // Die beiden Reihen stellt der Screen fuer beide Fassungen der Seite hin:
+  // er reicht sie der Filterleiste der Fassung, die sie nur noch anordnet.
+  const rows = SCREEN.slice(SCREEN.indexOf('{/* Filter bar:'), SCREEN.indexOf('// D-S22 ·'))
 
+  it('der Ausschnitt ist die Filterleiste und nichts anderes', () => {
+    expect(rows.length).toBeGreaterThan(500)
+    expect(rows).toContain('<skin.FilterBar')
+    expect(rows).toContain('aria-label="Catalogue"')
+    expect(rows).toContain('aria-label="Size"')
+  })
+
+  // Seit 3.1.0 (Better Categories, Discord 09.11.2026) gibt es eine dritte
+  // Reihe, die Kategorien. Sie spricht dieselbe Sprache: dieselbe Spur,
+  // dasselbe Segment, Zustand aus aria-pressed. Die Sortierung daneben ist
+  // ein `select` mit demselben Rezept.
   it('beide Reihen stehen in derselben Spur', () => {
-    expect((rows.match(/className=\{SEGMENT_TRACK\}/g) ?? []).length).toBe(2)
+    expect((rows.match(/className=\{SEGMENT_TRACK\}/g) ?? []).length).toBe(3)
     expect(SCREEN).toMatch(/const SEGMENT_TRACK\s*=/)
   })
 
   it('beide Reihen benutzen dasselbe Segment-Rezept', () => {
     // Vier Mainstream-/Unfiltered- plus sechs Groessen-Segmente, alle
     // `className="lu-control"` ohne Zusatz.
-    expect((rows.match(/className="lu-control"/g) ?? []).length).toBe(3)
+    expect((rows.match(/className="lu-control"/g) ?? []).length).toBe(5)
   })
 
   it('kein Segment faerbt sich mehr selbst — der Zustand kommt aus aria-pressed', () => {
-    expect((rows.match(/aria-pressed=/g) ?? []).length).toBe(3)
+    expect((rows.match(/aria-pressed=/g) ?? []).length).toBe(4)
     expect(rows).not.toMatch(/subTab === '(mainstream|uncensored)'\s*\n?\s*\?\s*'bg-/)
     expect(rows).not.toMatch(/vramTier === tier\.key\s*\n?[^\n]*\n?\s*\?\s*'bg-/)
   })

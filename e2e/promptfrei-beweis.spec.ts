@@ -7,7 +7,7 @@ import { routeCloud, seedOnboardingDone, signInViaGate, cloudSwitch } from './su
 /**
  * Die Bilder zu „NICHTS im prompt fenster!"
  *
- * David, 21.09.2026, am echten Windows-Bau, mehrfach und veraergert. Zwei
+ * 21.09.2026, am echten Windows-Bau, mehrfach und veraergert. Zwei
  * Befunde lagen als Bild vor:
  *
  *   B3-dropdown-hint.png     IM Kasten des Composers, direkt ueber der Zeile,

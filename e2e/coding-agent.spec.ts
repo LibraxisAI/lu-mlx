@@ -14,7 +14,7 @@ import { toolCalls } from './support/recorded'
  *
  *   A1  the Code tab streams on a NON-Ollama transport (the built-in engine
  *       is providerId 'openai'); it used to sit silent until the whole call
- *       returned, which is what David reported repeatedly.
+ *       returned, which is what the owner reported repeatedly.
  *   A2  a run started before a tab switch is still stoppable afterwards — the
  *       view unmounts, the hook is rebuilt, and the store aborter is what
  *       carries the handle across.
@@ -29,12 +29,13 @@ const FILE_LINES = Array.from({ length: 200 }, (_, i) => `line ${i + 1}`).join('
 
 type Turn = { text?: string; toolCalls?: Array<{ name: string; args: Record<string, unknown> }> }
 
-async function boot(page: Page, agentTurns: Turn[]) {
+async function boot(page: Page, agentTurns: Turn[], holdTools = false) {
   await page.addInitScript(tauriMockInit, {
     assistantReply: 'unused in agent specs',
     modelName: DEFAULT_MODEL_NAME,
     replyChunkDelayMs: 8,
     agentTurns,
+    holdTools,
     files: { 'big.ts': FILE_LINES },
   })
   await seedOnboardingDone(page)
@@ -62,8 +63,9 @@ async function instruct(page: Page, text: string) {
   await expect(page.getByRole('button', { name: 'Send message' })).toBeVisible({ timeout: 20_000 })
 
   // And then verify the instruction actually went in. ChatInput drops a send
-  // in silence in more than one situation (a 700 ms double-fire lock, a view
-  // that has not finished wiring its model), leaving the text sitting in the
+  // in silence in more than one situation (the 700 ms double-fire lock, which
+  // since 3.0.7 holds only for the same message, a view that has not
+  // finished wiring its model), leaving the text sitting in the
   // composer with no error anywhere. Without this check the drop surfaces
   // twenty seconds later as "the answer never appeared", which points at the
   // wrong half of the app.
@@ -92,16 +94,23 @@ test('the Code tab streams on the built-in engine instead of painting in one tic
 })
 
 test('a run survives a tab switch and is still stoppable afterwards', async ({ page }) => {
-  // A long script so the run is still going while we switch away and back.
+  // The run has to be going for the whole trip to another view and back, and a
+  // script of tool rounds cannot promise that: the mock answers on timers, so
+  // forty rounds are over after about 3.8 s whatever the machine is doing,
+  // while the trip (0.9 s on an idle machine) waits for a lazy chunk and grows
+  // with every worker that shares the dev server. With enough workers the run
+  // ended first, and the Stop this spec looks for was honestly not there.
+  // So the first tool call is held open instead: the run sits inside it until
+  // the spec lets go, however long the trip takes.
   const turns: Turn[] = Array.from({ length: 40 }, (_, i) => ({
     text: `step ${i + 1}`,
     toolCalls: [{ name: 'file_read', args: { path: `src/file-${i}.ts` } }],
   }))
-  await boot(page, turns)
+  await boot(page, turns, true)
 
   await instruct(page, 'walk the whole source tree')
-  // The run is under way.
-  await expect.poll(async () => (await toolCalls(page)).length, { timeout: 20_000 }).toBeGreaterThan(0)
+  // The first tool call has reached the bridge and waits there.
+  await expect.poll(async () => (await toolCalls(page)).length, { timeout: 20_000 }).toBe(1)
 
   // Look at another view and come back. AppShell mounts ChatView on
   // `currentView === 'chat'`, so this really unmounts CodexView and rebuilds
@@ -120,27 +129,27 @@ test('a run survives a tab switch and is still stoppable afterwards', async ({ p
   // fresh hook reported idle, offered a second Send and no Stop at all.
   const stop = page.getByRole('button', { name: /Stop/i })
   await expect(stop).toBeVisible({ timeout: 20_000 })
+  // Still the same run, and still inside its first tool call.
+  expect((await toolCalls(page)).length).toBe(1)
 
   await stop.click()
+  // The held call answers now, the way a tool that was in flight when Stop
+  // landed still reports back through the bridge. From here every tool answers
+  // at once, so a loop that Stop did not reach would run on through the script.
+  await page.evaluate(() => (window as unknown as { __E2E_RELEASE_TOOLS__: () => void }).__E2E_RELEASE_TOOLS__())
   // Stop actually reached the controller the OLD hook instance created. The
   // observable proof is the composer: Stop gives its slot back to Send only
   // when the run is really over, so this waits for the stop instead of
   // sleeping through it.
   await expect(page.getByRole('button', { name: 'Send message' })).toBeVisible({ timeout: 20_000 })
 
-  // A tool call that was already in flight when Stop landed still reports back
-  // through the bridge, so give it one short settle before taking the
-  // reference count …
-  await page.waitForTimeout(1_000)
-  const settled = (await toolCalls(page)).length
-  // … and after that nothing more may arrive at all. This is the falsifiable
-  // half and it is the one the audit cares about: an orphaned loop would keep
-  // pushing calls into this window. There is no event for "no event", so this
-  // half needs a window — but it is now ONLY the observation, not also the
-  // wait for the stop to take effect, which is what the old 1.5 s + 2.5 s pair
-  // was doing in one lump.
+  // And after that nothing more may arrive at all. This is the falsifiable
+  // half and it is the one the audit cares about: an orphaned loop would ask
+  // the model for step 2 and push its tool call into this window. There is no
+  // event for "no event", so this half needs a window, but the count it is
+  // compared with is exact now and no longer a reading taken after a settle.
   await page.waitForTimeout(2_500)
-  expect((await toolCalls(page)).length).toBe(settled)
+  expect((await toolCalls(page)).length).toBe(1)
 })
 
 /**
@@ -213,9 +222,11 @@ test('agent mode: edit, test, edit, test — the second identical command really
   // is exactly when it HAS changed (audit B1).
   expect(shellRuns.length).toBe(2)
 
-  // And agent mode injects the long shell timeout now, instead of leaving the
-  // Rust default of 120 s to kill a real build (audit B8).
-  expect(shellRuns[0].timeout).toBe(600000)
+  // And agent mode passes a timeout instead of leaving the Rust default of
+  // 120 s to kill a real run (audit B8). `npm test` is a recognised test run,
+  // which keeps run_tests' cap of 300 s (TEST_RUN_TIMEOUT_MS, 3.1.0); any
+  // other command gets the long shell default of 600 s.
+  expect(shellRuns[0].timeout).toBe(300000)
 })
 
 test('file_read pages a large file instead of dumping it whole', async ({ page }) => {
@@ -228,7 +239,8 @@ test('file_read pages a large file instead of dumping it whole', async ({ page }
   await expect(page.getByRole('main').getByText('Read lines 100 to 104.')).toBeVisible({ timeout: 30_000 })
 
   // Open the tool block and read what the window actually returned.
-  await page.getByRole('main').getByText('file_read').first().click()
+  // CA U1: the row says "Read src/big.ts"; the tool's own name is its tooltip.
+  await page.getByRole('main').getByTitle('file_read').first().click()
   const block = page.getByRole('main')
   await expect(block.getByText(/\[lines 100-104 of 200\]/)).toBeVisible({ timeout: 10_000 })
   await expect(block.getByText(/call file_read again with offset: 105/)).toBeVisible()
@@ -272,33 +284,24 @@ test('the plan the model writes shows up above the composer and tracks progress'
   await instruct(page, 'fix the parser and prove it')
   await expect(page.getByRole('main').getByText('PLAN_RUN_DONE')).toBeVisible({ timeout: 30_000 })
 
-  // PlanBar has TWO homes and they disagree about the default state ON PURPOSE
-  // (chat/PlanBar.tsx): 'header' starts collapsed so it costs one line above
-  // the transcript, 'panel' — the Code tab's Explorer column — starts expanded.
-  // The old version assumed "collapsed" and clicked a bare text node, so on the
-  // surface that renders the panel the click COLLAPSED the plan and the step
-  // list it then looked for was the one it had just closed. That is what made
-  // this spec pass or fail with whichever home the run happened to render.
-  //
-  // Which home is showing is not what this spec is about, so it drives the
-  // strip through BOTH states and asserts each one. The toggle names the state
-  // it is in, so nothing here is assumed.
-  const strip = page.getByTestId('plan-header').or(page.getByTestId('plan-panel')).first()
-  const planToggle = strip.getByRole('button', { name: /^plan 1\/3/ })
-  await expect(planToggle).toBeVisible({ timeout: 15_000 })
-  if ((await planToggle.getAttribute('title')) === 'Collapse the plan') await planToggle.click()
-
-  // Collapsed: the counter and the step that is running right now — and NOT
-  // the whole list, which is the part that would push the composer away.
-  await expect(planToggle).toHaveAttribute('title', 'Show every step')
-  await expect(planToggle).toContainText('patch the parser')
-  await expect(strip.getByText('read the config')).toHaveCount(0)
-
-  // Expanded: every step, and the strip follows the model's second update.
-  await planToggle.click()
-  await expect(planToggle).toHaveAttribute('title', 'Collapse the plan')
+  // The plan is pinned under the newest message (CA, 13.11.2026), open by
+  // default (David, 14.11.2026). The toggle names the state it is in, so
+  // nothing here is assumed.
+  const strip = page.getByTestId('plan-pinned')
+  // No count: the head is "Plan", the rows carry the state.
+  await expect(strip.getByTestId('plan-title')).toHaveText('Plan', { timeout: 15_000 })
+  await expect(strip.locator('li[data-state="done"]')).toHaveCount(1)
   await expect(strip.getByText('read the config')).toBeVisible()
   await expect(strip.getByText('run the suite')).toBeVisible()
+
+  // Folded by a click on the head: the name and the step that runs now.
+  await strip.getByTitle('Collapse the plan').click()
+  await expect(strip.getByTitle('Show every step')).toContainText('patch the parser')
+  await expect(strip.getByText('read the config')).toHaveCount(0)
+
+  // And open again.
+  await strip.getByTitle('Show every step').click()
+  await expect(strip.getByText('read the config')).toBeVisible()
 
   // `todo_write` must never have gone near the Rust bridge: it is pure
   // conversation state, and a backend round trip would mean a permission gate
@@ -306,3 +309,89 @@ test('the plan the model writes shows up above the composer and tracks progress'
   const calls = await toolCalls(page)
   expect(calls.filter((c) => c.cmd === 'todo_write')).toEqual([])
 })
+
+test('file_edit: several edits in one call, one of them with the indentation off, land in one write', async ({ page }) => {
+  // 01.10.2026: every failed edit on a paid model was "read again, retry",
+  // two more full-context round trips. The model here sends two changes in one
+  // call, and copies the first with an indentation the file does not have.
+  await bootAgentMode(page, [
+    {
+      text: 'patching',
+      toolCalls: [{
+        name: 'file_edit',
+        args: {
+          path: 'big.ts',
+          edits: [
+            { old_string: '    line 10\n    line 11', new_string: '    LINE TEN\n    LINE ELEVEN' },
+            { old_string: 'line 150', new_string: 'LINE 150' },
+          ],
+        },
+      }],
+    },
+    { text: 'EDITS_DONE' },
+  ])
+
+  await instruct(page, 'rename line 10, 11 and 150 in big.ts')
+  await expect(page.getByRole('main').getByText('EDITS_DONE')).toBeVisible({ timeout: 30_000 })
+
+  const writes = (await toolCalls(page)).filter((c) => c.cmd === 'fs_write')
+  expect(writes).toHaveLength(1)
+  const content = String(writes[0].raw.content)
+  expect(content).toContain('line 9\nLINE TEN\nLINE ELEVEN\nline 12')
+  expect(content).toContain('line 149\nLINE 150\nline 151')
+})
+
+/**
+ * Customer case 30.09.2026 (Windows desktop), second mail: "if
+ * i go to any other tabs like setting or somewhere task is stopped and start
+ * from begining again". The spec above only walked Code → Models → back. This
+ * walks the customer's way, into Settings, in both loops, and checks the two
+ * halves of the complaint separately: the run keeps working while the user is
+ * away, and every later request still carries the steps before the switch.
+ */
+const bodies = (page: Page) =>
+  page.evaluate(() => ((window as unknown as { __E2E_CHAT_BODIES__?: string[] }).__E2E_CHAT_BODIES__ ?? []).slice())
+
+async function awayToSettingsAndBack(page: Page) {
+  const header = page.getByRole('banner')
+  const before = (await toolCalls(page)).length
+  await header.getByRole('button', { name: 'Settings' }).click()
+  await page.waitForTimeout(2_500)
+  const whileAway = (await toolCalls(page)).length
+  await header.getByRole('button', { name: 'Chat' }).click()
+  return { before, whileAway }
+}
+
+for (const mode of ['code', 'agent'] as const) {
+  test(`${mode}: a run keeps going through a trip to Settings and does not start over`, async ({ page }) => {
+    const turns: Turn[] = Array.from({ length: 60 }, (_, i) => ({
+      text: `step ${i + 1}`,
+      toolCalls: [{ name: 'file_read', args: { path: `src/file-${i}.ts` } }],
+    }))
+    if (mode === 'code') await boot(page, turns)
+    else await bootAgentMode(page, turns)
+
+    await instruct(page, 'walk the whole source tree')
+    await expect.poll(async () => (await toolCalls(page)).length, { timeout: 20_000 }).toBeGreaterThan(2)
+
+    const { before, whileAway } = await awayToSettingsAndBack(page)
+    // Not stopped while the user looked at Settings.
+    expect(whileAway).toBeGreaterThan(before)
+
+    // Back in the chat the run is still the same run: Stop is offered and it
+    // keeps working.
+    await expect(page.getByRole('button', { name: /Stop/i })).toBeVisible({ timeout: 20_000 })
+    const back = (await toolCalls(page)).length
+    await expect.poll(async () => (await toolCalls(page)).length, { timeout: 20_000 }).toBeGreaterThan(back)
+
+    // Not started over: the newest request still carries the first step.
+    const all = await bodies(page)
+    expect(all[all.length - 1]).toContain('src/file-0.ts')
+    // And the instruction went out once, not a second time as a fresh run.
+    const lastMsgs = JSON.parse(all[all.length - 1]).messages as Array<{ role: string; content: unknown }>
+    const asks = lastMsgs.filter((m) => m.role === 'user' && String(m.content).includes('walk the whole source tree'))
+    expect(asks.length).toBe(1)
+
+    await page.getByRole('button', { name: /Stop/i }).click()
+  })
+}

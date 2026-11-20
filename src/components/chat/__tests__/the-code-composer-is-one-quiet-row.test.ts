@@ -1,7 +1,7 @@
 /**
  * The Code composer is ONE row, in both states.
  *
- * David, live test of the Code surface, 2026-08-22:
+ * The owner, live test of the Code surface, 2026-08-22:
  *
  *   "das promptfenster ist ueberfuellt, der stop knopf oeffnet eine weitere
  *    zeile, alles sieht asymmetrisch aus"
@@ -15,7 +15,7 @@
  *   2. The bar was `flex-wrap`, so the moment it ran out of width the tail
  *      (model picker, Send) dropped onto a second line.
  *   3. Starting a run WIDENS that bar: the mode trigger gains a run dot, or a
- *      parked "then bypass" label. That was the trigger David actually hit, so
+ *      parked "then bypass" label. That was the trigger the owner actually hit, so
  *      the composer looked one height standing still and another one working,
  *      and Stop appeared to open a line of its own.
  *
@@ -74,7 +74,7 @@ describe('Plugins moved out of the Code composer and into the header', () => {
   })
 
   it('is the icon form there, with the name in the tooltip', () => {
-    expect(CODEX).toMatch(/<PluginsDropdown iconOnly \/>/)
+    expect(CODEX).toMatch(/<PluginsDropdown iconOnly agentTools \/>/)
     expect(PLUGINS).toMatch(/iconOnly = false/)
     // The icon branch carries a tooltip and an accessible name and no label.
     const iconBranch = PLUGINS.slice(
@@ -140,30 +140,45 @@ describe('Stop never opens a second line', () => {
 
   it('Stop is the running state of the send button, one ternary, one handler', () => {
     expect(INPUT).toMatch(/\{isGenerating \? \(/)
-    expect(INPUT.match(/onClick=\{onStop\}/g)).toHaveLength(1)
+    // Called bare (GH #140): handed to onClick as is, Stop got the click
+    // event as the conversation to stop and stopped nothing in the Code view.
+    expect(INPUT.match(/onClick=\{\(\) => onStop\(\)\}/g)).toHaveLength(1)
+    expect(INPUT).not.toMatch(/onClick=\{onStop\}/)
   })
 })
 
 describe('the action bar is one quiet row', () => {
   const bar = INPUT.indexOf('flex flex-nowrap items-center gap-1 px-2 py-1.5')
 
-  it('does not wrap, at any width, in any state', () => {
+  it('does not wrap in any state; by width only below 26rem, and then always the same way', () => {
     expect(bar).toBeGreaterThan(-1)
-    // Only the image-preview strip above the textarea is still allowed to
-    // wrap; the action row itself never is.
+    // Only the image-preview strip above the textarea may wrap freely. The
+    // action row may only wrap in a phone-wide composer (P2, LU 3.0.9: at
+    // 375 px Sampling, the model and Send were pushed out of the frame), and
+    // then the right cluster is a full line of its own, so the height depends
+    // on the WIDTH alone and never on a run starting.
     const wrappers = [...INPUT.matchAll(/className="([^"]*\bflex-wrap\b[^"]*)"/g)].map((m) => m[1])
-    expect(wrappers).toEqual(['flex gap-1.5 mb-1.5 flex-wrap'])
+    expect(wrappers).toEqual([
+      'flex gap-1.5 mb-1.5 flex-wrap',
+      'flex flex-nowrap items-center gap-1 px-2 py-1.5 min-h-[38px] border-t border-gray-200 dark:border-white/[0.05] @max-[26rem]:flex-wrap',
+    ])
+    expect(INPUT).toMatch(/className="contents @max-\[26rem\]:flex @max-\[26rem\]:basis-full[^"]*" data-testid="composer-right-cluster"/)
   })
 
   it('keeps a fixed row height whether a run is in flight or not', () => {
     expect(INPUT).toMatch(/flex flex-nowrap items-center gap-1 px-2 py-1\.5 min-h-\[38px\]/)
   })
 
-  it('gives way in the middle only, so nothing on either end jumps', () => {
+  it('gives way in the middle, then only at the model name, so Stop stays in the frame', () => {
+    // UX pass 30.09.2026: in the Code tab with the explorer open (900 px
+    // window) the fixed row was wider than the composer and pushed Stop out
+    // of the frame. The spacer still gives way first; after it only the model
+    // slot shrinks, down to a floor, and its name ellipsizes.
     const row = INPUT.slice(bar)
     expect(row).toMatch(/<div className="flex flex-nowrap items-center gap-1 shrink-0">\{composerActions\}<\/div>/)
     expect(row).toMatch(/<div className="flex-1 min-w-0" \/>/)
-    expect(row).toMatch(/<div className="shrink-0">\{composerModel\}<\/div>/)
+    expect(row).toMatch(/<div className="min-w-\[4rem\] shrink">\{composerModel\}<\/div>/)
+    expect(row).toMatch(/<div className="shrink-0"><SamplingControls \/><\/div>/)
   })
 
   it('the Code mode trigger grows sideways when a run starts, never downwards', () => {

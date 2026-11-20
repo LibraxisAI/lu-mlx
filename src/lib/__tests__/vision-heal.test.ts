@@ -130,8 +130,13 @@ describe('the agent loop actually wires the N3 rules', () => {
   it('the built-in engine reports the projector on disk as that answer', () => {
     const rust = read('../../../src-tauri/src/commands/engine.rs')
     expect(rust).toContain('pub(crate) fn model_can_see_images(model_path: &str) -> bool')
-    expect(rust).toContain('"vision": model_can_see_images(&m.path)')
+    // A model that is not loaded sees when its part lies next to it. The
+    // loaded one answers with what it was started with, which is no part when
+    // the graphics memory had no room for it.
+    expect(rust).toContain('let image_part = model_can_see_images(&m.path);')
+    expect(rust).toContain('"vision": if is_loaded { loaded_sees } else { image_part }')
     // The same file the engine turns into --mmproj, not a second opinion.
-    expect(rust).toContain('existing_mmproj(model_path).is_some()')
+    // N1: and only when that part is an image part (an LFM3 Audio part hears).
+    expect(rust).toContain('existing_mmproj(model_path).is_some_and(|p| projector_sees_images(&p))')
   })
 })

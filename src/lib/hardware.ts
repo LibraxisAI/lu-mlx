@@ -21,11 +21,17 @@ interface DetectedGpu {
   source: string;
   /** `gcnArchName` from the HIP SDK ("gfx1201"), when a tool named it. */
   arch?: string | null;
+  /**
+   * The whole installed memory of a Mac in MiB, on its Apple entry only. A
+   * Mac has one pool that processor and graphics share; `memory_mib` stays
+   * null there on purpose, because it is read as a card. Null on PC cards.
+   */
+  shared_memory_mib?: number | null;
 }
 
 /**
  * Pure threshold for "is image generation worth surfacing on this machine?".
- * David 2026-06-06: show the image-tool noti only when there is ≥12 GB VRAM
+ * 2026-06-06: show the image-tool noti only when there is ≥12 GB VRAM
  * OR ≥16 GB system RAM — otherwise no noti.
  */
 export function meetsImageGenThreshold(maxVramGb: number, totalRamGb: number): boolean {
@@ -54,45 +60,32 @@ export async function getTotalRamGb(): Promise<number> {
   }
 }
 
+/**
+ * The one memory pool of a Mac in GB (0 if unknown).
+ *
+ * First source is the Apple entry of `detect_gpus` (`shared_memory_mib`, the
+ * hardware probe's own word for it). `system_info` is the fallback: on a Mac
+ * its total RAM is the same pool, and it also answers on a build whose probe
+ * does not carry the field yet. Only meaningful on a Mac; a PC has no Apple
+ * entry and would get its RAM back, which is not what its card can hold.
+ */
+export async function getSharedMemoryGb(): Promise<number> {
+  try {
+    const gpus = await backendCall<DetectedGpu[]>("detect_gpus");
+    const mib = (Array.isArray(gpus) ? gpus : [])
+      .map((g) => (typeof g.shared_memory_mib === "number" ? g.shared_memory_mib : 0))
+      .reduce((max, m) => Math.max(max, m), 0);
+    if (mib > 0) return mib / 1024;
+  } catch {
+    /* fall through to system_info */
+  }
+  return getTotalRamGb();
+}
+
 /** True when the machine clears the image-gen hardware bar (VRAM≥12 OR RAM≥16). */
 export async function isImageGenCapable(): Promise<boolean> {
   const [vram, ram] = await Promise.all([getMaxVramGb(), getTotalRamGb()]);
   return meetsImageGenThreshold(vram, ram);
-}
-
-// ─── Bundle VRAM requirement ────────────────────────────────────────
-
-/** What a media bundle's `vramRequired` string is worth in GB.
- *
- *  The catalogue writes this field for humans: "6-8 GB", "12+ GB",
- *  "16 GB best, offloads on less", and for the small add-ons simply "any".
- *  The old reader took the first number it found and fell back to 99 when it
- *  found none, so "any" meant 99 GB and the two add-ons (a 0.33 GB SDXL VAE
- *  and a 0.17 GB LoRA) were stamped "Too big for your GPU" on a 12 GB card
- *  (counter-check on the Windows box, 2026-08-29). A number the catalogue
- *  never wrote is not a reason to call a 170 MB LoRA too big.
- *
- *  Order of trust: the number in the string, then the bundle's own download
- *  size (weights on disk are the honest floor for weights in VRAM), then 0,
- *  which reads as "nothing here says this will not fit" and only ever drives
- *  a hint, never a gate.
- *
- *  - "6-8 GB"  -> 8   (the upper bound is what it really wants)
- *  - "12+ GB"  -> 14  (a plus means more than the number)
- *  - "8 GB"    -> 8
- *  - "any"     -> the bundle size, e.g. 0.33
- */
-export function bundleVramNeedGb(bundle: { vramRequired?: string; totalSizeGB?: number }): number {
-  const s = bundle.vramRequired ?? ''
-  if (s.includes('+')) {
-    const plus = s.match(/(\d+)\+/)
-    if (plus) return parseInt(plus[1]) + 2
-  }
-  const range = s.match(/(\d+)\s*-\s*(\d+)/)
-  if (range) return parseInt(range[2])
-  const single = s.match(/(\d+)/)
-  if (single) return parseInt(single[1])
-  return bundle.totalSizeGB ?? 0
 }
 
 // ─── AMD compute architecture ───────────────────────────────────────
@@ -106,7 +99,7 @@ let cachedAmdArch: string | null | undefined = undefined;
  * Read, never derived: the mapping from a marketing name ("RX 9070 XT") to a
  * gfx target is AMD's to publish, and a table of it in here would be wrong the
  * day a new card ships. Used to make the hipErrorInvalidValue message name the
- * architecture the user has to match (A12, artoriuskurokami, RDNA4).
+ * architecture the user has to match (A12, a user, RDNA4).
  *
  * Cached because it cannot change while the app runs, and fail-soft because a
  * message that says a little less is better than an error path that throws.

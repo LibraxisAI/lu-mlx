@@ -1,5 +1,5 @@
 /**
- * streamOllamaChatWithTools error-path tests (rikki Discord 2026-06-10).
+ * streamOllamaChatWithTools error-path tests (Discord 2026-06-10).
  *
  * Ollama reports mid-stream failures (runner crash, OOM) as an NDJSON line
  * `{"error":"..."}` inside an HTTP-200 stream. Before the fix the parser

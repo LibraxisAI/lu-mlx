@@ -1,7 +1,7 @@
 /**
  * @vitest-environment jsdom
  *
- * Meldung 4, after David moved it out of sight (2026-09-02).
+ * Meldung 4, after the owner moved it out of sight (2026-09-02).
  *
  * "mach das woanders hin, versteckter bitte, muss nicht so sein."
  *

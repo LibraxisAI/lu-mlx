@@ -17,7 +17,31 @@
  *   - Hints are plain text, no code fencing, no Markdown headers.
  */
 
+import { OUTSIDE_WORKSPACE } from '../../lib/workspace-refusal'
+import { platformText } from '../../lib/platform-text'
+
 type HintRule = { pattern: RegExp; hint: string }
+
+/**
+ * The file tools only work inside the chat's working folder (the Sandbox or a
+ * picked folder, commands/filesystem.rs). The bare refusal left a small model
+ * with "I can't access your files" (Discord 2026-09-28). Worded for
+ * both surfaces, the Agent chat and the Code tab, and checked first.
+ */
+const OUTSIDE_WORKSPACE_HINT: HintRule = {
+  pattern: OUTSIDE_WORKSPACE,
+  hint: platformText('outsideWorkspaceHint'),
+}
+
+/**
+ * A NEW file has no reason to live outside the folder. Asked to write
+ * C:\Users\Public\Desktop\poem.txt, Mistral asked the user for another path
+ * and wrote nothing (3.0.4 box run). The customer wanted the poem.
+ */
+const OUTSIDE_WORKSPACE_WRITE_HINT: HintRule = {
+  pattern: /escapes the allowed workspace/i,
+  hint: 'Outside this chat\'s working folder. Write the file inside it instead, same name as a relative path (e.g. poem.txt), and tell the user.',
+}
 
 /** Shared across any tool — checked last as a catch-all. */
 const GENERIC_HINTS: HintRule[] = [
@@ -29,26 +53,34 @@ const GENERIC_HINTS: HintRule[] = [
 /** Per-tool hint rules. Order matters: first match wins within a tool. */
 const TOOL_HINTS: Record<string, HintRule[]> = {
   file_read: [
+    OUTSIDE_WORKSPACE_HINT,
     { pattern: /ENOENT|no such file|not found|does not exist/i, hint: 'Path not found. Use file_list first to discover existing paths.' },
-    { pattern: /EACCES|EPERM|permission denied|access is denied/i, hint: 'Permission denied. Try a path inside the user home or agent workspace.' },
+    { pattern: /EACCES|EPERM|permission denied|access is denied/i, hint: 'Permission denied. Try a path inside the chat\'s working folder.' },
     { pattern: /EISDIR|is a directory/i, hint: 'Path is a directory, not a file. Use file_list on it instead.' },
     { pattern: /file too large|large file/i, hint: 'File too large to read whole. Use file_search for targeted grep instead.' },
   ],
   file_write: [
+    OUTSIDE_WORKSPACE_WRITE_HINT,
+    OUTSIDE_WORKSPACE_HINT,
     { pattern: /EACCES|EPERM|permission denied|access is denied/i, hint: 'Permission denied. Pick a writable directory, e.g. the agent workspace.' },
     { pattern: /ENOSPC|no space left/i, hint: 'Disk full. Cannot write. Surface this to the user and stop.' },
     { pattern: /EROFS|read-only/i, hint: 'Filesystem is read-only. Choose a different path.' },
     { pattern: /ENOTDIR|not a directory/i, hint: 'Parent path exists but is not a directory. Pick a different path.' },
   ],
   file_list: [
+    OUTSIDE_WORKSPACE_HINT,
     { pattern: /ENOENT|no such file|not found/i, hint: 'Directory does not exist. Check the parent with file_list.' },
     { pattern: /ENOTDIR|not a directory/i, hint: 'Path is a file, not a directory. Use file_read instead.' },
-    { pattern: /EACCES|EPERM|permission denied/i, hint: 'Permission denied to list. Try a path inside your home or workspace.' },
+    { pattern: /EACCES|EPERM|permission denied/i, hint: 'Permission denied to list. Try a path inside the chat\'s working folder.' },
   ],
   file_search: [
+    OUTSIDE_WORKSPACE_HINT,
     { pattern: /ENOENT|no such file|not found/i, hint: 'Search root does not exist. Check the path with file_list.' },
     { pattern: /invalid regex|parse error|unmatched/i, hint: 'Regex pattern is invalid. Escape special characters or simplify.' },
     { pattern: /max results|too many matches/i, hint: 'Too many matches. Narrow the pattern or search a subtree.' },
+  ],
+  file_edit: [
+    OUTSIDE_WORKSPACE_HINT,
   ],
   shell_execute: [
     { pattern: /not recognized|command not found|No such file or directory/i, hint: 'Command is not installed or not on PATH. Try a different tool or surface this to the user.' },
@@ -63,7 +95,14 @@ const TOOL_HINTS: Record<string, HintRule[]> = {
     { pattern: /5\d\d|server error/i, hint: 'Server error. Do not retry immediately; try a different URL.' },
     { pattern: /empty body|empty content/i, hint: 'Page returned empty body. Try a different URL or a web_search snippet instead.' },
   ],
+  web_research: [
+    { pattern: /unavailable right now/i, hint: 'Do not search again in this answer. Answer from what you know and say that search was unavailable.' },
+    { pattern: /none could be read/i, hint: 'Pages were found but not readable. Try web_search for links, or other words.' },
+  ],
   web_search: [
+    // 3.0.8: every tier failed. The sentence itself says what to do; the
+    // hints below (rate limit, no results) would invite another search.
+    { pattern: /unavailable right now/i, hint: 'Do not search again in this answer. Answer from what you know and say that search was unavailable.' },
     { pattern: /api key|unauthorized|401/i, hint: 'Search provider not configured. Tell the user to set Brave/Tavily key in Settings.' },
     { pattern: /rate limit|429/i, hint: 'Rate limited by provider. Wait or use a different tool.' },
     { pattern: /empty|no results/i, hint: 'No results. Broaden the query or switch to web_fetch with a known URL.' },

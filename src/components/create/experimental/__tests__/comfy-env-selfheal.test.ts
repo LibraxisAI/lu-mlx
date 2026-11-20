@@ -1,5 +1,5 @@
 /**
- * GH #98, zweite Welle (joelnewswanger 14.08.): sein torch lebte im geteilten
+ * GH #98, zweite Welle (a user 14.08.): sein torch lebte im geteilten
  * System-Python und starb beim Import. Der Absturz las sich als "nicht
  * installiert", der Re-Install aenderte nichts (pip: already satisfied), und
  * der Settings-Startknopf kippte still auf Stopped, weil der Crash erst nach
@@ -81,7 +81,7 @@ describe('#98: die ComfyUI-Umgebung heilt sich selbst', () => {
 })
 
 /**
- * Ticket 007 (falcon bob, 01.09. bis 02.09.): der Einordner des Installers
+ * Ticket 007 (a user, 01.09. bis 02.09.): der Einordner des Installers
  * kannte WinError 1114 seit 2.6.7, der Startfehler-Pfad hat ihn nie gefragt.
  * Der Kunde bekam den allgemeinen Satz, drueckte Repair, wartete den Neubau ab
  * und stand vor derselben Meldung. Beide Oberflaechen holen den Rat jetzt aus

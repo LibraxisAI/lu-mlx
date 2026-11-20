@@ -33,12 +33,15 @@
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is there an uncensored AI chat online with no filter?","acceptedAnswer":{"@type":"Answer","text":"LU Labs Cloud runs hosted text models with no moderation layer added on top of them. The models answer the way they were trained, which is not the same promise as a model that says anything: a fine tune trained to decline will still decline. That is why the catalog carries community builds like Euryale 70B and Lunaris 8B next to instruction tuned models like DeepSeek V3.2."}},{"@type":"Question","name":"What does uncensored AI chat online cost?","acceptedAnswer":{"@type":"Answer","text":"A 15 EUR credit pack is 450,000 credits with no subscription, and credits never expire. Euryale 70B costs 0.085 credits per output token. Larger packs are 35 EUR for 1,100,000 credits, 75 EUR for 2,400,000, 125 EUR for 4,050,000 and 300 EUR for 9,750,000. The Hosted month is 19 EUR with 900,000 credits."}},{"@type":"Question","name":"Which model should I pick for roleplay?","acceptedAnswer":{"@type":"Answer","text":"Euryale 70B for long form character work, Lunaris 8B when you want fast replies on a small budget, and MythoMax 13B as the classic storytelling build. DeepSeek V3.2 is the cheap everyday default for general chat, and Kimi K3 is worth the credits on hard prompts. The chat catalog is 38 models in total, and every plan and every credit pack reaches all of them."}},{"@type":"Question","name":"Does it work with SillyTavern?","acceptedAnswer":{"@type":"Answer","text":"Yes. Create a key under Settings and Cloud API keys, then in SillyTavern choose Chat Completion with a custom OpenAI compatible source, set the base URL to https://lu-labs.ai/api/inference/v1, paste the key, and enter a model id such as moonshotai/Kimi-K3. Aider, LibreChat and plain curl work the same way."}},{"@type":"Question","name":"Are the image and video models unfiltered too?","acceptedAnswer":{"@type":"Answer","text":"No. Hosted image and video follow the Terms of Service and the prompt is checked before it renders. That is a real difference from the text lane. Content involving minors is refused everywhere, always, with no exception."}},{"@type":"Question","name":"Do I need a subscription?","acceptedAnswer":{"@type":"Answer","text":"No. Any credit pack can be your first purchase, including the 15 EUR one, and the credits never expire. The 19 EUR Hosted month exists for people who want a larger monthly allowance, but it is optional."}},{"@type":"Question","name":"What is the fully private option?","acceptedAnswer":{"@type":"Answer","text":"The free open source desktop app on Windows or Linux, running an abliterated model on your own GPU. Nothing sits between you and the weights, no request leaves the machine, and there is no bill. Hosted chat is the option for people without the hardware."}}]}
 </script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://locallyuncensored.com/"},{"@type":"ListItem","position":2,"name":"Blog","item":"https://locallyuncensored.com/blog/"},{"@type":"ListItem","position":3,"name":"Uncensored AI Chat Online: Browser, App, or API","item":"https://locallyuncensored.com/blog/uncensored-ai-chat-online-guide.html"}]}
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/assets/lu.css">
 <script defer src="/assets/lu.js"></script>
-  <script data-goatcounter="https://lu-uncensored.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+  <script data-goatcounter="https://purple47.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
 </head>
 <body>
 <nav class="lu-nav">
@@ -48,15 +51,17 @@
   </a>
   <div class="lu-nav-links" id="lu-nav-links">
     <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/pricing/">Pricing</a>
     <a class="lu-nav-link" href="/blog/">Blog</a>
     <a class="lu-nav-link" href="/guide/">Guide</a>
     <a class="lu-nav-link" href="/remote-access/">Remote</a>
   </div>
   <div class="lu-nav-right">
-    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">1600+&#8202;⭐</span></a>
-    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">800+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">4200+&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">1700+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
     <span class="lu-nav-sep"></span>
     <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="he-cta" href="/pricing/" aria-label="LU Cloud plans and what they include"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>Cloud</a>
     <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
     <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
   </div>
@@ -78,12 +83,12 @@
 
     <aside class="lu-cloud-box">
       <span class="lu-cloud-kicker">The short version</span>
-      <p>If you only want the short version with current prices, the hub page at <a href="/uncensored-ai-chat-online/">uncensored AI chat online</a> has it on one screen.</p>
+      <p>If you only want the short version with current prices, the hub page at <a href="/uncensored-ai-chat-online/">uncensored AI chat online</a> has it on one screen. <a href="/pricing/">See what it costs</a>.</p>
     </aside>
 
     <h2>Route 1: The Browser at lu-labs.ai</h2>
 
-    <p><a href="https://lu-labs.ai/" target="_blank" rel="noopener">LU Labs Cloud</a> is the hosted layer from the same team that ships Locally Uncensored. Nothing to install:</p>
+    <p><a href="https://lu-labs.ai/?src=luc-b-uncensored-ai-chat-onli" target="_blank" rel="noopener">LU Labs Cloud</a> is the hosted layer from the same team that ships Locally Uncensored. Nothing to install:</p>
 
     <ol>
       <li><strong>Sign in.</strong> Create an account at lu-labs.ai or sign in to one you already have.</li>
@@ -116,7 +121,7 @@
 
     <p>The desktop app is free, open source under AGPL-3.0, and runs on Windows and Linux. It also has a Cloud switch that signs into the same LU Labs account. Flip it and the hosted models appear in the same picker as your local ones, so a 7B running on your own GPU and Kimi K3 running on someone else's sit two rows apart in the same dropdown. That is the setup we use ourselves: local for anything sensitive, hosted for the models that will never fit in consumer VRAM.</p>
 
-    <p>There is no native Mac build. On a Mac you use the browser Studio from Route 1, which is the same product in a tab.</p>
+    <p>The Mac build needs Apple Silicon and macOS 14 or newer. On an Intel Mac you use the browser Studio from Route 1, which is the same product in a tab.</p>
 
     <h2>Route 3: An API Key for Your Own Client</h2>
 
@@ -153,7 +158,7 @@
       </tbody>
     </table>
 
-    <p>The number that makes this concrete: Euryale 70B costs 0.085 credits per output token, which is 85,000 credits per million tokens out. Credits do not expire, so you can spend them in bursts. Current numbers live at <a href="https://lu-labs.ai/pricing" target="_blank" rel="noopener">https://lu-labs.ai/pricing</a>.</p>
+    <p>The number that makes this concrete: Euryale 70B costs 0.085 credits per output token, which is 85,000 credits per million tokens out. Credits do not expire, so you can spend them in bursts. Current numbers live at <a href="https://lu-labs.ai/pricing?src=luc-b-uncensored-ai-chat-onli" target="_blank" rel="noopener">https://lu-labs.ai/pricing</a>.</p>
 
     <h2>The Limits, Written Straight</h2>
 
@@ -171,6 +176,14 @@
     <h2>The Fully Private Option</h2>
 
     <p>Hosted chat is a convenience, not the strongest privacy answer, because a hosted request leaves your machine by definition. If that matters more to you than hardware cost, run the free app locally with an abliterated model and nothing in the middle: no account, no bill, no request that leaves the box. Our walkthrough is <a href="run-uncensored-ai-locally.html">how to run uncensored AI locally</a>, and the model picks with direct download links are in the <a href="abliterated-models-guide.html">abliterated models guide</a>. If you have the GPU, take that route. If you do not, Route 1 gets you a conversation in about two minutes.</p>
+    <h2>In the handbook</h2>
+
+    <ul>
+      <li><a href="/guide/install/">Install and update</a>, the SmartScreen warning and how updates arrive</li>
+      <li><a href="/guide/chat/">Chat</a>, the model picker, the context window and thinking mode</li>
+      <li><a href="/guide/faq-and-glossary/">FAQ and glossary</a>, answers to the questions people really ask</li>
+    </ul>
+
   </article>
 
   <div class="post-footer">
@@ -186,6 +199,15 @@
   <div class="footer-row footer-links">
     <a href="https://locallyuncensored.com/blog/">Blog</a>
     <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/pricing/">Pricing</a>
+    <a href="https://locallyuncensored.com/cloud/">LU Cloud</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-chat-online/">Uncensored AI chat online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-image-generator-online/">Image generator online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-video-generator-online/">Video generator online</a>
+    <a href="https://locallyuncensored.com/unrestricted-ai/">Unrestricted AI</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-coding-agent/">AI coding agent</a>
+    <a href="https://locallyuncensored.com/alternatives/">Alternatives</a>
+    <a href="https://locallyuncensored.com/is-locally-uncensored-safe/">Is it safe?</a>
     <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
     <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
     <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
@@ -193,6 +215,9 @@
     <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
     <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
     <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+    <a href="https://locallyuncensored.com/privacy/">Privacy</a>
+    <a href="https://locallyuncensored.com/terms/">Terms</a>
+    <a href="https://locallyuncensored.com/impressum/">Impressum</a>
   </div>
 </footer>
 </body>

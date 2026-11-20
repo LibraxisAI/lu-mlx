@@ -1,7 +1,7 @@
 /** Picker (ModelChip) and the missing-models gate (Stage) share
  *  videoLaneModels(). Before they did, a box whose only video model was SVD
  *  showed "No matches" in the T2V picker while the gate counted "1 video
- *  model" and withheld the starter-bundle card (David 2026-08-01). */
+ *  model" and withheld the starter-bundle card (2026-08-01). */
 import { describe, it, expect } from 'vitest'
 import { canRunVideoIntent, videoLaneModels, bundleForVideoIntent, type ClassifiedModel } from '../comfyui'
 
@@ -50,7 +50,7 @@ describe('canRunVideoIntent (submit uses this before the model list arrives)', (
  * the card came straight back. The bundle carries a **T2V** model and Extend is
  * an i2v lane, so it could never satisfy the gate that put the card there. An
  * hour later it still said "Download & install". This is the other half of the
- * C8 report from Voxyl AI and Aldrich Ironhart. */
+ * C8 report from Two users. */
 describe('bundleForVideoIntent (the installer picks what the gate accepts)', () => {
   const wan21 = {
     name: 'Wan 2.1 · 1.3B (Lightweight)',

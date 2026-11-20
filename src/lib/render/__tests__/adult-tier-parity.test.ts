@@ -8,7 +8,7 @@
  *
  * This file is the 24-probe table the fixliste calls for, run against
  * Desktop's `checkPromptSafety`. The same 24 probes (verbatim) also run
- * against Web's `apps/web/lib/render/__tests__/safety.test.ts`; both must
+ * against the web app; both must
  * reach the same verdict for each one. The CSAM floor on the server is
  * unchanged by this file, it only brings the client pre-check on Desktop
  * up to what Web already does.

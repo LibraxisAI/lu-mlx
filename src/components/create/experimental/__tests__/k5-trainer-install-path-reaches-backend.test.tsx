@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * K5 (DIE-301-LISTE.md, Discord "Storage", x_guestieco_x, Rang B, 13.09.2026):
+ * K5 (DIE-301-LISTE.md, Discord "Storage", Rang B, 13.09.2026):
  * "everytime I try to force the app to go to my E drive it always takes up
  * space on my C drive". Opus Gesamtabnahme (review-gesamt.md, Abschnitt 7.3,
  * Auflage 3) measured the actual gap: `trainer_root` already redirects
@@ -24,6 +24,9 @@ import { resolve } from 'node:path'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 
 const backendCall = vi.fn(async () => ({ status: 'ok' }))
+// 3.0.8 D20: the Train tab reads the card's memory for the Low VRAM hint;
+// this file is about the trainer setup, so no card is reported.
+vi.mock('../../../../hooks/useGraphicsMemory', () => ({ useGraphicsCardGb: () => null }))
 vi.mock('../../../../api/backend', () => ({
   isTauri: () => true,
   isMacOS: () => false,

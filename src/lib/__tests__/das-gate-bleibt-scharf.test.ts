@@ -50,7 +50,10 @@ beforeAll(async () => {
     filePath: resolve(ROOT, 'src/lib/__lint-probe.ts'),
   })
   expect(warmup.errorCount).toBe(0)
-})
+  // The cold start loads the configuration and the parser from disk. Inside a full
+  // run on a Windows machine it took longer than the 10 s every hook gets by
+  // default, and the file then failed as a whole before any of its tests ran.
+}, 120_000)
 
 /** Regel-IDs, die eslint fuer diesen Quelltext meldet. */
 async function rulesFor(code: string, filePath = 'src/lib/__lint-probe.ts'): Promise<string[]> {

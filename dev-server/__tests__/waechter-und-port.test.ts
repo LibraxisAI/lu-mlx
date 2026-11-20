@@ -13,7 +13,7 @@
  *
  * Run: npx vitest run dev-server/__tests__/waechter-und-port.test.ts
  */
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { createLocalApiGuard } from '../guard'
@@ -247,6 +247,14 @@ describe('der Port ist ein Parameter, kein fest verdrahteter Wert', () => {
   // Build-Konfiguration. Vorher stand da `const DEV_PORT = 5273` und sonst
   // nichts — den Server ein zweites Mal zu starten hiess, die Datei zu ändern.
   const vorher = process.env.LU_DEV_PORT
+
+  // The first load of vite.config.ts pulls in the whole build tooling. On a
+  // loaded machine that took longer than the five seconds the first test has
+  // (red in one of eight full runs on 09.10.2026), while every later load
+  // takes milliseconds. It is paid here once, outside any test.
+  beforeAll(async () => {
+    await import('../../vite.config')
+  }, 120_000)
 
   afterEach(() => {
     if (vorher === undefined) delete process.env.LU_DEV_PORT

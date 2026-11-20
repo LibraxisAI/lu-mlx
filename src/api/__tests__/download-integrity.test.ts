@@ -19,10 +19,11 @@
  */
 import { describe, it, expect } from 'vitest'
 import {
-  bundleBytesToFetch, isPermanentDownloadError, lfsSha256, orphanFilename,
+  isPermanentDownloadError, lfsSha256, orphanFilename,
   planModelDownload, selectGgufFromTree, getVideoBundles, getImageBundles,
   type ModelBundle, type DiscoverModel,
 } from '../discover'
+import { bundleBytesToFetch } from '../../lib/bundle-state'
 
 const GIB = 1_073_741_824
 
@@ -33,7 +34,10 @@ function bundle(files: Array<Partial<DiscoverModel>>, totalSizeGB = 0): ModelBun
     tags: [],
     totalSizeGB,
     vramRequired: '8 GB',
+    vramMinGB: 8,
+    vramComfortGB: 8,
     workflow: 'wan',
+    tier: 'standard',
     files: files.map(f => ({
       name: '', description: '', pulls: '', tags: [], updated: '',
       downloadUrl: 'https://huggingface.co/x/y/resolve/main/f.safetensors',

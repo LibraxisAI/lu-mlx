@@ -18,6 +18,12 @@ vi.mock('../backend', () => ({
   ollamaUrl: (path: string) => `/api${path}`,
 }))
 
+// The window of a request is resolved in api/ollama.ts and nowhere else
+// (one-window-per-ollama-model.test.ts proves that resolver on the wire).
+// Here it is a stand-in, so these tests see exactly one request each.
+const windowOption = vi.hoisted(() => vi.fn(async (_model: string, _choice?: string): Promise<{ num_ctx?: number }> => ({ num_ctx: 16384 })))
+vi.mock('../ollama', () => ({ ollamaWindowOption: windowOption }))
+
 import { OllamaProvider } from '../providers/ollama-provider'
 import { localFetch } from '../backend'
 import { asProviderError } from './provider-test-support'
@@ -454,10 +460,9 @@ describe('OllamaProvider', () => {
       expect(body.options.num_predict).toBe(1024)
     })
 
-    it('Bug AA v2.5.0: forwards contextWindow as num_ctx when > 0', async () => {
-      // Kj103x Discord 2026-05-27: LU never forwarded num_ctx so Ollama
-      // silently used its 2048 default, clipping RAG payloads and long
-      // chats. This test locks in that the override flows through.
+    it('sends the window the one resolver gives for this model and this caller', async () => {
+      // The provider never works a window out and never takes a number from
+      // a caller: it asks api/ollama.ts, for every request alike.
       const provider = new OllamaProvider(makeConfig())
       mockLocalFetch.mockResolvedValueOnce(
         new Response(JSON.stringify({
@@ -465,21 +470,22 @@ describe('OllamaProvider', () => {
           done: true,
         }), { status: 200 })
       )
+      windowOption.mockResolvedValueOnce({ num_ctx: 32768 })
 
       await provider.chatWithTools(
         'llama3.1:8b',
         [{ role: 'user', content: 'test' }],
         [],
-        { temperature: 0.7, contextWindow: 16384 },
+        { temperature: 0.7, window: 'agent' },
       )
 
+      expect(windowOption).toHaveBeenCalledWith('llama3.1:8b', 'agent')
       const body = JSON.parse(mockLocalFetch.mock.calls[0][1]?.body as string)
-      expect(body.options.num_ctx).toBe(16384)
+      expect(body.options.num_ctx).toBe(32768)
     })
 
-    it('Bug AA v2.5.0: omits num_ctx when contextWindow is 0 or undefined', async () => {
-      // 0 means "let Ollama decide" — we must NOT pass num_ctx, otherwise
-      // we'd override the Modelfile/server defaults with garbage.
+    it('sends no window where the resolver gives none', async () => {
+      // `backend-default`: the one call that follows a turn the app did not send.
       const provider = new OllamaProvider(makeConfig())
       mockLocalFetch.mockResolvedValueOnce(
         new Response(JSON.stringify({
@@ -487,14 +493,16 @@ describe('OllamaProvider', () => {
           done: true,
         }), { status: 200 })
       )
+      windowOption.mockResolvedValueOnce({})
 
       await provider.chatWithTools(
         'llama3.1:8b',
         [{ role: 'user', content: 'test' }],
         [],
-        { temperature: 0.7, contextWindow: 0 },
+        { temperature: 0.7, window: 'backend-default' },
       )
 
+      expect(windowOption).toHaveBeenCalledWith('llama3.1:8b', 'backend-default')
       const body = JSON.parse(mockLocalFetch.mock.calls[0][1]?.body as string)
       expect(body.options.num_ctx).toBeUndefined()
     })
@@ -502,7 +510,7 @@ describe('OllamaProvider', () => {
     it('v2.4.6 Bug L: NEVER sets num_gpu — Ollama decides layer placement itself', async () => {
       // Pre-v2.4.6 this asserted body.options === { num_gpu: 99 }, which
       // forced all model layers onto the GPU and pushed the KV cache into
-      // system RAM on 8 GB-VRAM laptop cards (nightmare13740 report:
+      // system RAM on 8 GB-VRAM laptop cards (a user report:
       // 30 tok/s ollama CLI vs 6.9 tok/s LU on RTX 4070 Laptop + gemma3:4b).
       // The fix removes the override so Ollama can apply its own VRAM-aware
       // auto-layer logic.
@@ -522,7 +530,7 @@ describe('OllamaProvider', () => {
 
       const body = JSON.parse(mockLocalFetch.mock.calls[0][1]?.body as string)
       expect(body.options.num_gpu).toBeUndefined()
-      expect(body.options).toEqual({})
+      expect(body.options).toEqual({ num_ctx: 16384 })
     })
 
     it('handles empty message content', async () => {

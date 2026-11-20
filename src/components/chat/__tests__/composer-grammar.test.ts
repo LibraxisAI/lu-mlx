@@ -290,8 +290,8 @@ describe('die Abschnitte, die dieser Test liest, existieren ueberhaupt', () => {
     }
   })
 
-  it('findet zusammen genau die dreizehn Controls der Leiste', () => {
-    // Paperclip · Think · Effort · Stop · Send (ChatInput) · Mikrofon nicht
+  it('findet zusammen genau die vierzehn Controls der Leiste', () => {
+    // Paperclip · Think · Effort · Effort ausgegraut (issue 176) · Stop · Send (ChatInput) · Mikrofon nicht
     // verfuegbar · Mikrofon transkribiert · Mikrofon bereit/aufnehmend
     // (VoiceButton) · Docs (DocsButton) · Tools (ChatView) · Plugins-Icon ·
     // Plugins-Label (PluginsDropdown) · Modellwaehler (ModelSelector).
@@ -299,7 +299,7 @@ describe('die Abschnitte, die dieser Test liest, existieren ueberhaupt', () => {
     // composerActions. Aendert sich die Zahl, ist ein Control
     // dazugekommen oder verschwunden — beides gehoert angesehen.
     const all = REGIONS.flatMap(([, region]) => controlClassNames(region))
-    expect(all).toHaveLength(13)
+    expect(all).toHaveLength(14)
   })
 
   it('das Mikrofon steckt wirklich in dieser Leiste, nicht irgendwo sonst', () => {
@@ -578,9 +578,10 @@ describe('der Zustand kommt aus ARIA, nicht aus einer zweiten Klassenkette', () 
     // `max` und saehe an beiden Enden gleich aus. Die Stufe steht deshalb im
     // zugaenglichen Namen und sichtbar im Knopf; sichtbar ist er ohnehin nur,
     // solange Denken an ist, und das meldet der Think-Knopf daneben.
-    expect(EFFORT).toMatch(/aria-label=\{`Reasoning effort: \$\{effortLabel\(effortNow\)\}`\}/)
+    expect(EFFORT).toMatch(/aria-label=\{`Reasoning effort: \$\{effortText\}`\}/)
     expect(EFFORT).not.toContain('aria-pressed')
-    expect(INPUT).toContain('<span>{effortLabel(effortNow)}</span>')
+    // Visible in the button; below 26rem only for the screen reader (P2, 375 px).
+    expect(INPUT).toContain('<span className="@max-[26rem]:sr-only">{effortText}</span>')
     // Das blaue Pill der Release-Linie ist weg. Es war dieselbe Farbe wie der
     // Fokusring, direkt neben dem Knopf, an dem sie schon abgebaut war.
     // Geprueft wird der KNOPF, nicht die Datei: das Blau der Ablegeflaeche

@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Remote Access in Locally Uncensored: Phone Pairing, Wi-Fi, Tunnel</title>
+<meta name="description" content="Step by step: control the LU desktop app from your phone or a second computer. Pairing by QR code and passcode, Wi-Fi or internet tunnel, the four permission switches, Stop, and common errors.">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="canonical" href="https://locallyuncensored.com/guide/remote-access-setup/">
+<meta property="og:title" content="Remote Access Setup in Locally Uncensored: Phone Pairing, Wi-Fi, Tunnel, Permissions">
+<meta property="og:description" content="Step by step: control the LU desktop app from your phone or a second computer. Pairing by QR code and passcode, Wi-Fi or internet tunnel, the four permission switches, Stop, and common errors.">
+<meta property="og:url" content="https://locallyuncensored.com/guide/remote-access-setup/">
+<meta property="og:type" content="article">
+<meta property="og:image" content="https://locallyuncensored.com/social-preview.png">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"TechArticle","headline":"Remote Access Setup in Locally Uncensored: Phone Pairing, Wi-Fi, Tunnel, Permissions","description":"Step by step: control the LU desktop app from your phone or a second computer. Pairing by QR code and passcode, Wi-Fi or internet tunnel, the four permission switches, Stop, and common errors.","url":"https://locallyuncensored.com/guide/remote-access-setup/","dateModified":"2026-10-14","inLanguage":"en","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/guide/remote-access-setup/"},"isPartOf":{"@type":"WebPage","name":"Locally Uncensored Handbook: Install, Chat, Agent, Code, Create, Cloud","url":"https://locallyuncensored.com/guide/"},"about":{"@type":"SoftwareApplication","name":"Locally Uncensored","operatingSystem":"Windows, Linux, macOS","applicationCategory":"UtilitiesApplication"}}
+</script>
+<link rel="icon" href="/favicon.png">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://locallyuncensored.com/"},{"@type":"ListItem","position":2,"name":"Guide","item":"https://locallyuncensored.com/guide/"},{"@type":"ListItem","position":3,"name":"Remote access setup","item":"https://locallyuncensored.com/guide/remote-access-setup/"}]}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/lu.css">
+<script defer src="/assets/lu.js"></script>
+  <script data-goatcounter="https://purple47.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</head>
+<body>
+<nav class="lu-nav">
+  <a class="lu-nav-brand" href="/" aria-label="Locally Uncensored">
+    <span class="lu-mono" data-mono="nav" data-size="40" aria-hidden="true"></span>
+    <span class="lu-nav-word">Locally <span class="accent">Uncensored</span></span>
+  </a>
+  <div class="lu-nav-links" id="lu-nav-links">
+    <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/pricing/">Pricing</a>
+    <a class="lu-nav-link" href="/blog/">Blog</a>
+    <a class="lu-nav-link" href="/guide/">Guide</a>
+    <a class="lu-nav-link" href="/remote-access/">Remote</a>
+  </div>
+  <div class="lu-nav-right">
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">4200+&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">1700+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <span class="lu-nav-sep"></span>
+    <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="he-cta" href="/pricing/" aria-label="LU Cloud plans and what they include"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>Cloud</a>
+    <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
+    <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </div>
+</nav>
+<article class="lu-doc" data-handbook-guide="remote-access-setup">
+<div class="breadcrumb"><a href="/">Home</a> &rsaquo; <a href="/guide/">Handbook</a> &rsaquo; Remote access setup</div>
+<h1>Remote access, step by step</h1>
+<p class="subtitle">Use your phone or a second computer to chat with the LU desktop app on your own PC. The model keeps running on the PC; the phone only sends your messages and shows the answers. This chapter walks through pairing, the two ways to connect, the four permission switches, and what to do when it does not work.</p>
+<nav class="toc">
+<div class="toc-title">In this chapter</div>
+<a href="#what">What you get</a>
+<a href="#before">Before you start</a>
+<a href="#where">Where it is in the app</a>
+<a href="#lan">Connect over your own Wi-Fi</a>
+<a href="#internet">Connect from anywhere</a>
+<a href="#passcode">The passcode and staying signed in</a>
+<a href="#permissions">The four permission switches</a>
+<a href="#devices">Connected devices and disconnecting</a>
+<a href="#stop">Stop and Restart</a>
+<a href="#sleep">When the PC sleeps or LU is closed</a>
+<a href="#security">Safety</a>
+<a href="#wrong">When it goes wrong</a>
+</nav>
+
+<h2 id="what">What you get</h2>
+
+<p>The desktop app starts a small web server on your PC. Your phone opens it in its normal web browser: there is nothing to install on the phone. In version 3.0.6 there is no separate LU app for phones; the phone side is this web page, and any browser on a second computer works the same way.</p>
+
+<p>On the phone page you can chat with the model that runs on your PC, pick another model, attach pictures, and switch on "Agent" so the model can use tools. What the agent may touch on your PC is decided by four switches on the desktop, and all four are off at the start. The messages from the phone also show up in the chat on the desktop.</p>
+
+<p>For a short overview of the feature there is the <a href="/remote-access/">Remote access</a> page. This chapter follows the app version 3.0.6 screen by screen; where the two read differently, go by this chapter.</p>
+
+<h2 id="before">Before you start</h2>
+
+<ul>
+<li>LU is installed and running on the PC, and a chat model is picked. Without a model the "Dispatch" button stays greyed out.</li>
+<li>For the Wi-Fi way, the phone and the PC are in the same network (the same router). For the internet way, the PC needs an internet connection; the phone can be anywhere.</li>
+<li>Pick a folder the agent may work in when you start. A project folder or an empty folder is right; your home folder or a system folder is refused.</li>
+<li>On a Mac: Remote Access is in the app, but it has not been confirmed on macOS yet.</li>
+</ul>
+
+<h2 id="where">Where it is in the app</h2>
+
+<p>There are two places, and both matter.</p>
+
+<p><strong>The "Remote" tab in the sidebar</strong>, next to "Chat" and "Code". This is where you start a session ("Dispatch"), see the QR code and the passcode, and stop it again. The Settings panel says it too: "Remote access is now controlled from the Remote tab in the sidebar. Use Dispatch to start a remote chat session."</p>
+
+<p><strong>Settings, Voice &amp; Remote, Remote Access.</strong> This holds the four permission switches under "Permissions" and, once a phone is paired, the list "Connected Devices". The fold out "How it works" explains the feature in the app itself. The other settings are described in the chapter <a href="/guide/settings-and-troubleshooting/">Settings and troubleshooting</a>.</p>
+
+<h2 id="lan">Connect over your own Wi-Fi</h2>
+
+<p>This is the fastest way, and the traffic stays in your own network.</p>
+
+<div class="step">
+<span class="step-num">1</span>
+<span class="step-title">Open the Remote tab</span>
+<div class="step-body">
+<p>In the sidebar, click "Remote". The list below shows only remote chats, or "No dispatched chats" when there are none yet.</p>
+</div>
+</div>
+
+<div class="step">
+<span class="step-num">2</span>
+<span class="step-title">Press "Dispatch", then "LAN"</span>
+<div class="step-body">
+<p>The button at the bottom of the sidebar reads "Dispatch". Click it and it splits into two buttons, "LAN" and "Internet". Click "LAN".</p>
+</div>
+</div>
+
+<div class="step">
+<span class="step-num">3</span>
+<span class="step-title">Choose the working folder</span>
+<div class="step-body">
+<p>A folder dialog opens. The folder you choose is the only place where the agent may read and write files for this session, and only if you switch "Filesystem Access" on later. If you cancel the dialog, nothing starts.</p>
+</div>
+</div>
+
+<div class="step">
+<span class="step-num">4</span>
+<span class="step-title">Wait for the green panel</span>
+<div class="step-body">
+<p>LU creates a new remote chat and starts its server. A green panel marked "LIVE" appears at the top of the sidebar with a QR code, a six digit passcode and an address that looks like <code>http://192.168.1.20:11435/mobile</code> (your numbers will differ). The chat itself shows the line "Live, ready for mobile". Click the QR code for a large version: "Scan the QR or enter the 6-digit code on your phone."</p>
+</div>
+</div>
+
+<div class="step">
+<span class="step-num">5</span>
+<span class="step-title">Scan the QR code with the phone</span>
+<div class="step-body">
+<p>Open the camera on the phone and point it at the QR code, then open the link it offers. If scanning does not work, type the address from the panel into the phone's browser. The copy icon next to the address puts it on the clipboard of the PC, which helps when the second device is a computer.</p>
+</div>
+</div>
+
+<div class="step">
+<span class="step-num">6</span>
+<span class="step-title">Type the passcode</span>
+<div class="step-body">
+<p>The phone shows "LU", "Remote" and a field "Access Code". Type the six digits from the desktop panel and tap "Connect". The QR code does not contain the passcode, so you always type it. Once the phone is in, the green panel on the desktop hides itself and the chat line changes to "Live, 1 mobile connected".</p>
+</div>
+</div>
+
+<h2 id="internet">Connect from anywhere</h2>
+
+<p>In the app this way is called "Internet". LU starts a Cloudflare tunnel and gets a public https address ending in <code>trycloudflare.com</code>. You do not change anything on your router. The helper program for the tunnel, cloudflared, is downloaded by LU itself the first time you use it, from Cloudflare's releases on GitHub, and fetched again when the copy is more than 30 days old.</p>
+
+<div class="step">
+<span class="step-num">1</span>
+<span class="step-title">Press "Dispatch", then "Internet"</span>
+<div class="step-body">
+<p>Same as above, but choose "Internet", then the working folder.</p>
+</div>
+</div>
+
+<div class="step">
+<span class="step-num">2</span>
+<span class="step-title">Wait for the tunnel</span>
+<div class="step-body">
+<p>The panel shows "Connecting to Cloudflare…" and "The QR appears once the tunnel is live". The QR code is held back on purpose until the internet address works, so it never points at the wrong address. LU waits up to 15 seconds for the address.</p>
+</div>
+</div>
+
+<div class="step">
+<span class="step-num">3</span>
+<span class="step-title">Scan, then type the passcode</span>
+<div class="step-body">
+<p>The address now ends in <code>trycloudflare.com/mobile</code>. Scan and type the passcode as above. The panel adds: "First connection may take 5 to 10 s while DNS propagates. If you see a DNS error, wait a moment and reload."</p>
+</div>
+</div>
+
+<p>The internet address is new for every session. It exists only while the session runs, and it changes the next time you dispatch.</p>
+
+<h2 id="passcode">The passcode and staying signed in</h2>
+
+<ul>
+<li>The passcode has six digits and is valid for 15 minutes. A countdown next to it shows the time left. When it runs out the panel shows "Expired" and LU makes a new one by itself.</li>
+<li>The small circular arrow next to the passcode makes a new passcode at once. Phones that are already paired stay connected.</li>
+<li>The passcode is only for pairing. After "Connect", the phone stays signed in for an hour, and as long as you keep using it that hour keeps extending, up to 24 hours. After that the phone shows the passcode screen again and you pair once more. Anything you had typed into the message box is kept across that.</li>
+<li>Three wrong codes in a row lock out new tries for 60 seconds.</li>
+</ul>
+
+<h2 id="permissions">The four permission switches</h2>
+
+<p>They sit under Settings, Voice &amp; Remote, Remote Access, "Permissions". All four are off until you turn them on, and they are off again each time LU starts. Only the desktop can change them: the phone's own settings sheet ("Menu", "Settings") shows what is allowed but cannot switch anything.</p>
+
+<table>
+<tr><th>Switch</th><th>What it allows the paired device</th></tr>
+<tr><td>"Filesystem Access"</td><td>"Agent file read/write (sandboxed to the chat workspace)": the agent on the phone may list, read, search and write files in the folder you picked at Dispatch. It also covers taking a screenshot of the PC's screen.</td></tr>
+<tr><td>"Downloads &amp; Installs"</td><td>"Model downloads, ComfyUI/Ollama install" (on a Mac: "Model downloads, engine install"). The phone may start model downloads and installs on the PC.</td></tr>
+<tr><td>"Process Control"</td><td>"Start/stop ComfyUI, Ollama" (on a Mac: "Start/stop the local engines"). This also lets the agent make pictures through the PC and list running programs.</td></tr>
+<tr><td>"Shell &amp; Code Execution"</td><td>"Run shell commands + code from your phone. Risky, leave OFF unless you trust the network." A command from the phone runs on the PC as your user. This is the most dangerous of the four, and "Filesystem Access" never switches it on.</td></tr>
+</table>
+
+<p>With every switch off the phone can still chat, and the agent can still search the web, fetch pages, and read the time and basic system information. That is the safe way to start: chat first, and turn on a switch only when a task needs it.</p>
+
+<p>When the agent on the phone tries a tool whose switch is off, the phone gets a message that starts with "Tool" and the tool's name and ends with "Open the Menu, tap Settings, and turn it on under Remote Permissions." The switch itself is on the desktop, under Settings, Voice &amp; Remote, Remote Access.</p>
+
+<h2 id="devices">Connected devices and disconnecting</h2>
+
+<p>Every paired device appears under Settings, Voice &amp; Remote, Remote Access as "Connected Devices (N)", with its network address and the name its browser reports. The list refreshes every ten seconds while that panel is open. A device that has not been seen for an hour drops off the list.</p>
+
+<p>The trash icon next to a device ("Disconnect") throws it out at once. Its next request is refused with the sentence "Session ended" and the hint to pair again from the desktop. To pair it again it needs the current passcode.</p>
+
+<h2 id="stop">Stop and Restart</h2>
+
+<p>The green panel has three controls. The x ("Hide QR panel (reopen via the QR icon on the chat row)") only hides it; the QR icon on the remote chat in the list ("Show QR &amp; passcode") brings it back.</p>
+
+<p><strong>"Stop"</strong> ends the session: the server on port 11435 stops, the internet tunnel closes, and the phone can no longer reach the PC. The chat stays on the desktop with the line "Server stopped, restart to reconnect mobile" and a "Restart" button ("Start a fresh server and reattach this chat").</p>
+
+<p><strong>"Restart"</strong> ("Restart server (keeps this chat, issues a new passcode)") starts the server again for the same chat. Every phone has to pair again with the new passcode. Restart does not bring back an internet tunnel: after a Restart the address is the Wi-Fi one again. For a new internet address, press "Stop" and dispatch again with "Internet".</p>
+
+<h2 id="sleep">When the PC sleeps or LU is closed</h2>
+
+<p>The remote server is part of the desktop app. Everything the phone does needs the PC to be on, awake and running LU.</p>
+
+<ul>
+<li><strong>The PC goes to sleep.</strong> LU does not keep the computer awake. While it sleeps, the phone gets no answers. If you want to use it away from home for a while, set the computer's own power settings so it does not sleep.</li>
+<li><strong>You click the X on the LU window.</strong> That only hides LU to the tray, so the server keeps running. After a short wait LU unloads the local models to free the graphics card, so the next answer can take longer while a model loads again.</li>
+<li><strong>You quit LU</strong> (tray menu "Quit") <strong>or restart the PC.</strong> The session ends and the phone cannot connect. The phone page then reads "Remote connection unavailable. Reload to try again." Start LU, dispatch again and pair the phone again. The permission switches are off again after a restart of LU.</li>
+</ul>
+
+<h2 id="security">Safety</h2>
+
+<ul>
+<li><strong>What leaves the PC.</strong> The models run on your PC. The only thing that travels is the chat between the PC and the paired device.</li>
+<li><strong>Over your Wi-Fi</strong> the address starts with <code>http://</code>, not <code>https://</code>, so the connection inside your network is not encrypted. Use the Wi-Fi way only on a network you trust, such as your home network, not on a public hotspot.</li>
+<li><strong>Over the internet</strong> Cloudflare relays the traffic. It is encrypted between each device and Cloudflare, not end to end, so Cloudflare could read it.</li>
+<li><strong>The passcode is the key.</strong> Anyone who can reach the address and knows the current passcode can pair. Do not post a photo of the panel. If someone may have seen it, press the circular arrow for a new passcode, and remove unknown devices under "Connected Devices".</li>
+<li><strong>Switches.</strong> A paired phone can do exactly what the four switches allow, nothing less. Leave "Shell &amp; Code Execution" off unless you need it for a task right now.</li>
+<li><strong>The folder.</strong> The agent's file tools stay inside the folder you picked at Dispatch. Pick a project folder, not a folder full of private papers. The chapter <a href="/guide/agent/">Agent mode</a> explains how the workspace folder works.</li>
+</ul>
+
+<h2 id="wrong">When it goes wrong</h2>
+
+<p><strong>The "Dispatch" button is greyed out.</strong> No chat model is picked. Pick one in the model picker, or install one first.</p>
+
+<p><strong>The phone shows "Invalid access code".</strong> A typo, or the code changed in the meantime (it changes after 15 minutes, after the circular arrow and after "Restart"). Type the code that the desktop shows right now.</p>
+
+<p><strong>"Too many attempts. Try again in (N)s".</strong> Three wrong codes. Wait the seconds it names, then type the current code. Over the internet all devices count as one here, so a second phone trying at the same time adds to the same count.</p>
+
+<p><strong>"Enter 6-digit code".</strong> Fewer than six digits were typed.</p>
+
+<p><strong>"Connection failed" on the phone, or the page does not load at all (Wi-Fi way).</strong> Check that the phone is in the same Wi-Fi as the PC and not on mobile data or a guest network. On Windows the firewall is the usual cause: LU adds an allow rule named "LU Remote 11435" for private networks by itself only when it runs with administrator rights. Otherwise allow LU once in the Windows firewall settings, and make sure Windows treats your Wi-Fi as a private network, because the rule does not cover public ones. If none of that helps, use the internet way.</p>
+
+<p><strong>A DNS error on the phone right after scanning (internet way).</strong> The new address needs a few seconds to be known everywhere. Wait 5 to 10 seconds and reload the page.</p>
+
+<p><strong>"Cloudflare tunnel started but no public URL appeared within 15 s (cloudflared PID (number))."</strong> The message goes on to say that cloudflared usually cannot reach Cloudflare, and to check the firewall or VPN. "LAN dispatch still works in the meantime." After you fix the firewall or VPN, press "Stop" and dispatch again with "Internet"; "Restart" alone starts the server without a tunnel.</p>
+
+<p><strong>"Remote server not running. Start it first."</strong> The tunnel was asked for while no session ran. Dispatch again.</p>
+
+<p><strong>"Could not bind 0.0.0.0:11435: (reason)."</strong> The message adds that another instance may be running and to try "Stop" first. Port 11435 is taken, usually by a second LU window or an earlier session. Press "Stop", close other LU instances (tray "Quit"), then dispatch again.</p>
+
+<p><strong>"Cannot use "(folder)" as the workspace: (reason). Nothing was started, and no folder is bound to the remote session. Pick a project folder instead of a system or home directory."</strong> The folder you picked at Dispatch is one the agent may never use. Dispatch again and pick a project folder.</p>
+
+<p><strong>"Remote Access is already starting or stopping. Wait for it to finish."</strong> You clicked while the last step was still running. Wait a moment and try again.</p>
+
+<p><strong>The phone was signed in and suddenly shows the passcode screen.</strong> Someone pressed "Restart", the device was removed under "Connected Devices", or 24 hours have passed since pairing. Pair again with the current passcode.</p>
+
+<p><strong>"Remote memory changed" on the phone.</strong> The memories on the desktop changed while a session ran, so LU blocked the session. Restart Remote Access on the desktop ("Stop", then "Dispatch"), then pair again. The desktop shows the matching sentence "Remote memory changed. Restart Remote Access and reconnect before continuing. Previously delivered data cannot be recalled."</p>
+
+<p><strong>The agent on the phone says a tool needs a permission.</strong> Turn the named switch on under Settings, Voice &amp; Remote, Remote Access on the desktop, see <a href="#permissions">the four switches</a>.</p>
+
+<hr>
+<p class="small">Related chapters: <a href="/guide/agent/">Agent mode</a>, <a href="/guide/settings-and-troubleshooting/">Settings and troubleshooting</a>, <a href="/guide/install/">Install and update</a>. Overview page: <a href="/remote-access/">Remote access</a>. Back to the <a href="/guide/">handbook overview</a>.</p>
+</article>
+<footer>
+  <div class="footer-row footer-meta"><span>&copy; 2026 &middot; Locally Uncensored &middot; AGPL-3.0</span></div>
+  <div class="footer-row footer-links">
+    <a href="https://locallyuncensored.com/blog/">Blog</a>
+    <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/pricing/">Pricing</a>
+    <a href="https://locallyuncensored.com/cloud/">LU Cloud</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-chat-online/">Uncensored AI chat online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-image-generator-online/">Image generator online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-video-generator-online/">Video generator online</a>
+    <a href="https://locallyuncensored.com/unrestricted-ai/">Unrestricted AI</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-coding-agent/">AI coding agent</a>
+    <a href="https://locallyuncensored.com/alternatives/">Alternatives</a>
+    <a href="https://locallyuncensored.com/is-locally-uncensored-safe/">Is it safe?</a>
+    <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
+    <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/discussions">Discussions</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
+    <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
+    <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+    <a href="https://locallyuncensored.com/privacy/">Privacy</a>
+    <a href="https://locallyuncensored.com/terms/">Terms</a>
+    <a href="https://locallyuncensored.com/impressum/">Impressum</a>
+  </div>
+</footer>
+</body>
+</html>

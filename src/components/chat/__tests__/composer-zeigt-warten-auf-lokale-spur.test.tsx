@@ -10,7 +10,7 @@
  *  - `LocalLaneWaitLine`: does it carry the right sentence, and does
  *    `ChatInput` still swap Send for a working Stop while the send waits?
  *    Die Zeile stand bis zum 21.09.2026 IM Composer-Kasten und ist von dort
- *    ausgezogen (David: „NICHTS im prompt fenster!"); das Bauteil ist neu,
+ *    ausgezogen (der Inhaber: „NICHTS im prompt fenster!"); das Bauteil ist neu,
  *    der Wortlaut Wort fuer Wort derselbe, und dieser Test prueft jetzt
  *    beides getrennt: den Satz am Bauteil, die Knopfarbeit am Composer.
  *  - `useIsQueuedForLocalLane`: does the hook that feeds that prop actually

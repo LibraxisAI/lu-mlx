@@ -3,7 +3,7 @@
  *
  * Stop has to mean stop, counted in REQUESTS.
  *
- * Bug s of the 3.0.0 list, reported by helpslowlydying on 2026-09-03 in cloud
+ * Bug s of the 3.0.0 list, reported by a user on 2026-09-03 in cloud
  * mode: "i stopped it but that boy is still working and ready for the next
  * prompt", "holy f its eating my credits", "its not even doing anything jus
  * eating away". Every request that reaches the cloud after Stop is metered on
@@ -185,7 +185,7 @@ describe('Stop, gemessen in Anfragen an die Wolke', () => {
 
     zaehler.nach(1, () => {
       // Der Hintergrundagent wird waehrend des Zuges fertig, der Mensch drueckt
-      // Stop. Genau diese Reihenfolge meldete helpslowlydying.
+      // Stop. Genau diese Reihenfolge meldete a user.
       const aufgabe = makeTaskId(1)
       useAgentTaskStore.getState().start({
         id: aufgabe, convId, goal: 'nachsehen', context: '',

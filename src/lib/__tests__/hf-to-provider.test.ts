@@ -2,12 +2,12 @@
  * hf-to-provider — GGUF quant extraction, Ollama HF refs, and the
  * sharded/incompatible-pull classifier.
  *
- * Regression focus (Aldrich Ironhart, Discord 2026-06-07): unsloth "UD"
+ * Regression focus (a user, Discord 2026-06-07): unsloth "UD"
  * dynamic quants (Q4_K_XL / Q4_K_XS) were not recognised, so the Ollama HF
  * reference dropped the quant tag entirely.
  */
 import { describe, it, expect } from 'vitest'
-import { extractGgufQuant, hfUrlToOllamaRef, isShardedOrIncompatibleGguf } from '../hf-to-provider'
+import { extractGgufQuant, hfUrlToOllamaRef, hfUrlToTreePath, isShardedOrIncompatibleGguf } from '../hf-to-provider'
 
 describe('extractGgufQuant', () => {
   it('reads classic K-quants', () => {
@@ -15,7 +15,7 @@ describe('extractGgufQuant', () => {
     expect(extractGgufQuant('model.Q5_K_S.gguf')).toBe('Q5_K_S')
     expect(extractGgufQuant('model_Q3_K_L.gguf')).toBe('Q3_K_L')
   })
-  it('reads unsloth UD dynamic quants (the konata/Aldrich regression)', () => {
+  it('reads unsloth UD dynamic quants (a reported regression)', () => {
     expect(extractGgufQuant('gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf')).toBe('Q4_K_XL')
     expect(extractGgufQuant('model-UD-Q4_K_XS.gguf')).toBe('Q4_K_XS')
   })
@@ -43,6 +43,20 @@ describe('extractGgufQuant', () => {
   })
 })
 
+describe('hfUrlToTreePath', () => {
+  it('returns the path behind /resolve/<rev>/, folder included', () => {
+    expect(hfUrlToTreePath('https://huggingface.co/a/b/resolve/main/model-Q4_K_M.gguf')).toBe('model-Q4_K_M.gguf')
+    expect(hfUrlToTreePath('https://huggingface.co/a/b/resolve/main/UD-Q3_K_M/GLM-5.2-UD-Q3_K_M-00001-of-00009.gguf'))
+      .toBe('UD-Q3_K_M/GLM-5.2-UD-Q3_K_M-00001-of-00009.gguf')
+  })
+  it('drops the query and undoes percent encoding', () => {
+    expect(hfUrlToTreePath('https://huggingface.co/a/b/resolve/main/my%20model.gguf?download=true')).toBe('my model.gguf')
+  })
+  it('returns null for an address that is not a HuggingFace file address', () => {
+    expect(hfUrlToTreePath('https://example.com/model.gguf')).toBeNull()
+  })
+})
+
 describe('hfUrlToOllamaRef', () => {
   it('builds hf.co/<user>/<repo>:<quant> from a HF blob URL + filename', () => {
     const url = 'https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/main/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf'
@@ -50,8 +64,25 @@ describe('hfUrlToOllamaRef', () => {
     expect(hfUrlToOllamaRef(url, 'gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf'))
       .toBe('hf.co/unsloth/gemma-4-26B-A4B-it-GGUF:Q4_K_XL')
   })
-  it('falls back to a tag-less ref when the filename has no recognised quant', () => {
-    const url = 'https://huggingface.co/acme/Some-Model-GGUF/resolve/main/model.gguf'
+  // Asked on 2026-10-08: the registry behind hf.co answers a file name tag
+  // with exactly that file (RVN-Q4_K_M-multilingual.gguf, 16547400224 bytes),
+  // the bare reference with the older Qwen3.8-27B-Heretic-Q4_K_M.gguf
+  // (16547400032 bytes), and `:Q4_K_P` with HTTP 400.
+  it('tags the file name when the name does not end on a recognised quant', () => {
+    const heretic = 'https://huggingface.co/0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF/resolve/main/RVN-Q4_K_M-multilingual.gguf'
+    expect(hfUrlToOllamaRef(heretic, 'RVN-Q4_K_M-multilingual.gguf'))
+      .toBe('hf.co/0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF:RVN-Q4_K_M-multilingual.gguf')
+    const kp = 'https://huggingface.co/HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive/resolve/main/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q8_K_P.gguf'
+    expect(hfUrlToOllamaRef(kp, 'Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q8_K_P.gguf'))
+      .toBe('hf.co/HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive:Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q8_K_P.gguf')
+    const dated = 'https://huggingface.co/huihui-ai/Huihui-DeepSeek-V4-Flash-0731-abliterated-GGUF/resolve/main/DeepSeek-V4-Flash-Q4_K-0731.gguf'
+    expect(hfUrlToOllamaRef(dated, 'DeepSeek-V4-Flash-Q4_K-0731.gguf'))
+      .toBe('hf.co/huihui-ai/Huihui-DeepSeek-V4-Flash-0731-abliterated-GGUF:DeepSeek-V4-Flash-Q4_K-0731.gguf')
+    expect(hfUrlToOllamaRef('https://huggingface.co/acme/Some-Model-GGUF/resolve/main/model.gguf', 'model.gguf'))
+      .toBe('hf.co/acme/Some-Model-GGUF:model.gguf')
+  })
+  it('stays tag-less for a quant-less file inside a folder, where the name tag is unproven', () => {
+    const url = 'https://huggingface.co/acme/Some-Model-GGUF/resolve/main/sub/model.gguf'
     expect(hfUrlToOllamaRef(url, 'model.gguf')).toBe('hf.co/acme/Some-Model-GGUF')
   })
   it('returns null for a non-HuggingFace URL', () => {

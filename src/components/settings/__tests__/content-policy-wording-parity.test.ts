@@ -18,33 +18,22 @@
  * fixed six-`..` `__dirname` path, which only resolves from
  * `lu-301-wt/<name>/`. Outside that (the main checkout, Windows, CI) the
  * `readFileSync` at module scope threw and took the whole file down. Same
- * fix as `katalog-paritaet-web.test.ts`: LU_WEB_REPO from the environment,
- * then a couple of `process.cwd()`-relative candidates, and a clean skip
- * with a message when none exist, instead of a false green or a hard crash.
+ * fix as `katalog-paritaet-web.test.ts`: only LU_WEB_REPO says where the web
+ * checkout is (web-checkout.ts). Not set, the guard is skipped with a line on
+ * stderr. Set to something that is not a web checkout, it fails.
  *
  * Run: LU_WEB_REPO=/path/to/web npx vitest run \
  *   src/components/settings/__tests__/content-policy-wording-parity.test.ts
  */
 import { describe, it, expect } from 'vitest'
-import { existsSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { webCheckout } from '../../../lib/__tests__/web-checkout'
 
 const DESKTOP_SRC = readFileSync(resolve(__dirname, '../ContentPolicySettings.tsx'), 'utf8')
 
 const REL_PATH = 'apps/web/components/settings/ContentPolicySettings.tsx'
-const KANDIDATEN = [
-  ...(process.env.LU_WEB_REPO?.trim() ? [resolve(process.env.LU_WEB_REPO.trim())] : []),
-  resolve(process.cwd(), '../lu-300-web'),
-  resolve(process.cwd(), '../lu-300-web-katalog'),
-]
-const WEB = KANDIDATEN.find((p) => existsSync(resolve(p, REL_PATH)))
-if (!WEB) {
-  process.stderr.write(
-    '[content-policy-wording-parity] uebersprungen: kein Web-Checkout gefunden. Gesucht in: ' +
-      KANDIDATEN.join(' | ') +
-      '. Setze LU_WEB_REPO, damit der Paritaetswaechter laeuft.\n',
-  )
-}
+const WEB = webCheckout('content-policy-wording-parity', [REL_PATH])
 const WEB_SRC = WEB ? readFileSync(resolve(WEB, REL_PATH), 'utf8') : ''
 
 describe.skipIf(!WEB)('R5-5, R5-6: the strict and off hints match Web word for word', () => {

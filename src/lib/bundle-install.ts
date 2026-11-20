@@ -5,7 +5,7 @@ import type { DownloadProgress } from '../types/downloads'
  * The download half of the Create tab's "Download & install" cards, pulled out
  * of CreateContext so every branch is unit-testable without a live ComfyUI.
  *
- * David 2026-07-25, on the Motion Control card: he clicked Download & install,
+ * 2026-07-25, on the Motion Control card: he clicked Download & install,
  * got a spinner, and had no way to tell whether anything was still downloading.
  * Three separate defects sat behind that:
  *
@@ -93,11 +93,13 @@ export interface BundleFile {
   subfolder: string
   downloadUrl: string
   sizeGB?: number
+  /** Pinned SHA-256 of the file. Sent with EVERY start, so a mirror that swaps the file fails the check. */
+  sha256?: string
 }
 
 export interface DownloadDeps {
   /** start_model_download. Resolves once the transfer is registered, not done. */
-  start: (url: string, subfolder: string, filename: string, expectedBytes?: number) =>
+  start: (url: string, subfolder: string, filename: string, expectedBytes?: number, sha256?: string) =>
     Promise<{ status: string; error?: string }>
   /** download_progress, the whole Rust map keyed by filename. */
   progress: () => Promise<Record<string, DownloadProgress>>
@@ -130,7 +132,7 @@ async function downloadOneFile(file: BundleFile, fileLabel: string, deps: Downlo
   const expected = file.sizeGB ? Math.round(file.sizeGB * 1_073_741_824) : undefined
 
   onStatus?.(`${fileLabel}Starting ${file.filename}.`)
-  const started = await start(file.downloadUrl, file.subfolder, file.filename, expected)
+  const started = await start(file.downloadUrl, file.subfolder, file.filename, expected, file.sha256)
   if (started.status === 'error') {
     throw new Error(started.error || `Could not start the ${file.filename} download.`)
   }
@@ -211,7 +213,7 @@ export async function downloadBundleFiles(files: BundleFile[], deps: DownloadDep
  * Wait until the running ComfyUI actually LISTS the files that were just
  * downloaded, and report what is still missing when it does not.
  *
- * Voxyl AI and Aldrich Ironhart, Discord 2026-08-13, both on Extend Video and
+ * Two users, Discord 2026-08-13, both on Extend Video and
  * Animate Image: the download runs to the end and the card then sits on
  * "Refreshing the model list…" for good. Nothing was hanging. The install
  * refreshed once, called itself done, and left the card on its last status

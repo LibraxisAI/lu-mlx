@@ -1,5 +1,5 @@
 /**
- * GH #118 (nayffy, 2026-08-27, Windows 11, v2.6.6): "Built in engine test
+ * GH #118 (2026-08-27, Windows 11, v2.6.6): "Built in engine test
  * fails and console shows as below", followed by
  * `GET http://127.0.0.1:8127/v1/models net::ERR_CONNECTION_REFUSED`.
  *

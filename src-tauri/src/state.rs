@@ -28,6 +28,18 @@ pub struct DownloadProgress {
     pub dest: String,
 }
 
+/// What a `BundledEngine` holds on to.
+///
+/// On a desktop that is the `llama-server` process. A phone cannot start a
+/// process, there the engine runs inside the app (`commands/engine_inproc.rs`)
+/// and its handle answers the same three calls: `try_wait`, `kill`, `wait`.
+/// That is why the status commands, the dead-engine watch and the shutdown
+/// below are one piece of code for both.
+#[cfg(desktop)]
+pub type EngineChild = Child;
+#[cfg(mobile)]
+pub type EngineChild = crate::commands::engine_inproc::InProcChild;
+
 /// Handle to a running bundled `llama-server`. One model per process, so
 /// `model_path` identifies what's loaded and `port` is the loopback port the
 /// OpenAI-compatible API is served on. Killed in `shutdown_subprocesses` like
@@ -37,7 +49,7 @@ pub struct DownloadProgress {
 /// `--embeddings` server (`bundled_embed`): same lifecycle shape, different
 /// port + model + serve mode. Keeping one struct avoids duplicating the handle.
 pub struct BundledEngine {
-    pub child: Child,
+    pub child: EngineChild,
     pub model_path: String,
     pub port: u16,
     /// Context size the CHAT engine was started with (`None` for the embed
@@ -75,6 +87,19 @@ pub struct BundledEngine {
     /// answers it once, and a user who reads the window a minute later must
     /// still be able to learn why the engine is not on the card.
     pub sanity_note: Option<&'static str>,
+    /// Why THIS process runs without the model's image part although one lies
+    /// next to the model: the card had no room for it, or the engine refused
+    /// it (`engine.rs`, IMAGE_PART_NO_ROOM_NOTE / IMAGE_PART_REFUSED_NOTE).
+    /// `None` on every start that loaded the part and on a model without one.
+    ///
+    /// Part of the idempotence key: an engine that was started without the
+    /// part IS the answer to a request for this model, and must not be torn
+    /// down because the part is still on disk.
+    pub image_part_note: Option<&'static str>,
+    /// The process's stderr as it is being drained, so a death long after the
+    /// start can still name its last lines (C81). `None` where nothing was
+    /// piped (the phone's in-process engine, tests).
+    pub stderr: Option<std::sync::Arc<std::sync::Mutex<crate::commands::shell::Captured>>>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -162,57 +187,78 @@ pub(crate) fn load_comfy_config_values() -> (u16, String) {
     (port, host)
 }
 
+/// Normalise an Ollama address the way Ollama reads OLLAMA_HOST: bare
+/// `host:port`, scheme-less `host`, or full URL, returned as a full URL
+/// without trailing slash. Empty input gives the default.
+fn normalize_ollama_base(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        "http://localhost:11434".to_string()
+    } else if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{}", trimmed)
+    }
+}
+
+/// The address Ollama has when LU's own setting is left out: `OLLAMA_HOST`
+/// if set, else the default. This is what "Reset AI Backends to defaults"
+/// goes back to. config.json is skipped on purpose: it still holds the
+/// address the user is resetting away from, and a reset that kept it would
+/// not be one; a hard-coded port would point past a user's OLLAMA_HOST.
+fn env_or_default_ollama_base(env: Option<&str>) -> String {
+    normalize_ollama_base(env.unwrap_or(""))
+}
+
+pub(crate) fn ollama_default_base() -> String {
+    env_or_default_ollama_base(std::env::var("OLLAMA_HOST").ok().as_deref())
+}
+
 /// Read persisted Ollama base URL with the following priority:
 ///  1. `ollama_base` in config.json (GUI-configured)
 ///  2. `OLLAMA_HOST` env var (Ollama's own convention)
 ///  3. Default `http://localhost:11434`
 ///
-/// Accepts bare `host:port`, scheme-less `host`, or full URL — returns full
-/// URL without trailing slash. Matches Ollama's own OLLAMA_HOST semantics so
-/// setting it as an env var before launching LU "just works".
+/// Matches Ollama's own OLLAMA_HOST semantics so setting it as an env var
+/// before launching LU "just works".
 pub(crate) fn load_ollama_base() -> String {
-    let normalize = |raw: &str| -> String {
-        let trimmed = raw.trim().trim_end_matches('/');
-        if trimmed.is_empty() {
-            "http://localhost:11434".to_string()
-        } else if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-            trimmed.to_string()
-        } else {
-            format!("http://{}", trimmed)
-        }
-    };
-
     // Priority 1: config.json override (GUI takes precedence)
     {
         let config_file = crate::os_paths::app_config_json();
         if let Ok(raw) = std::fs::read_to_string(&config_file) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
                 if let Some(b) = v.get("ollama_base").and_then(|x| x.as_str()) {
-                    let normalized = normalize(b);
-                    if !normalized.is_empty() {
-                        return normalized;
-                    }
+                    return normalize_ollama_base(b);
                 }
             }
         }
     }
 
-    // Priority 2: OLLAMA_HOST env var — same semantics as Ollama itself.
-    // Ollama docs explicitly document e.g. `OLLAMA_HOST=0.0.0.0:11434`.
-    if let Ok(env) = std::env::var("OLLAMA_HOST") {
-        let normalized = normalize(&env);
-        if !normalized.is_empty() {
-            return normalized;
-        }
+    // Priority 2 and 3: OLLAMA_HOST env var, same semantics as Ollama
+    // itself (its docs show e.g. `OLLAMA_HOST=0.0.0.0:11434`), else default.
+    ollama_default_base()
+}
+
+#[cfg(test)]
+mod ollama_default_base_tests {
+    use super::env_or_default_ollama_base;
+
+    #[test]
+    fn reset_follows_ollama_host_and_never_a_fixed_port_when_it_is_set() {
+        assert_eq!(env_or_default_ollama_base(Some("127.0.0.1:18902")), "http://127.0.0.1:18902");
+        assert_eq!(env_or_default_ollama_base(Some("https://box.lan:9000/")), "https://box.lan:9000");
     }
 
-    // Priority 3: default
-    "http://localhost:11434".to_string()
+    #[test]
+    fn reset_without_ollama_host_is_the_default() {
+        assert_eq!(env_or_default_ollama_base(None), "http://localhost:11434");
+        assert_eq!(env_or_default_ollama_base(Some("  ")), "http://localhost:11434");
+    }
 }
 
 pub struct AppState {
     pub comfy_process: Mutex<Option<Child>>,
-    /// Child handle for an Ollama daemon LU spawned itself (kj103x bug, Discord
+    /// Child handle for an Ollama daemon LU spawned itself (a user bug, Discord
     /// 2026-05-23 #help-chat). The Drop impl below kills the tree on shutdown
     /// so `ollama.exe` doesn't linger eating ~200 MB after the tray quit.
     /// IMPORTANT: only populated when `start_ollama` / `auto_start_ollama` /
@@ -230,13 +276,20 @@ pub struct AppState {
     /// managed lifecycle (start/stop/swap) lives in `commands::engine`; this
     /// is just the handle so shutdown can reap it.
     pub bundled_engine: Mutex<Option<BundledEngine>>,
+    /// Somebody asked for the built-in engine to be stopped (the frontend's
+    /// stop, the switch into Cloud, the end of the app). A start that is still
+    /// waiting for its model reads this to tell "my child was taken away on
+    /// purpose" from "my child died", because only a death earns a second
+    /// attempt. Set by `commands::engine::stop_engine_on_request` and by the
+    /// shutdown below, cleared by the next start once it holds the start gate.
+    pub engine_stop_requested: AtomicBool,
     /// Built-in EMBEDDINGS server (P5) — a second bundled `llama-server` run in
     /// `--embeddings` mode on its own port, serving OpenAI `/v1/embeddings` for
     /// Document-Chat / RAG so embeddings no longer require Ollama. `None` until
     /// started via `start_bundled_embed`; reaped in `shutdown_subprocesses`.
     pub bundled_embed: Mutex<Option<BundledEngine>>,
     /// Arc so the ComfyUI install worker thread can persist a custom install
-    /// target as the active path on completion (andy_38747).
+    /// target as the active path on completion.
     pub comfy_path: Arc<Mutex<Option<String>>>,
     pub comfy_port: Mutex<u16>,
     /// Configurable ComfyUI host. Default "localhost". Setting this to a
@@ -257,13 +310,20 @@ pub struct AppState {
     /// first time a LAN endpoint is used after launch (Bug A / GH #49).
     pub openai_hosts: Mutex<HashSet<String>>,
     pub whisper: Arc<Mutex<WhisperServer>>,
+    /// The Astra voice loop: its setup job and its sidecar process
+    /// (`commands::voice_loop`). Cloneable handles, like `whisper`.
+    pub voice_loop: crate::commands::voice_loop::VoiceLoopHandle,
+    /// Astra computer use: the engine that guards every action and the
+    /// state of its stop shortcut (`commands::computer`). Desktop only.
+    #[cfg(desktop)]
+    pub computer: crate::commands::computer::ComputerHandle,
     pub downloads: Arc<Mutex<HashMap<String, DownloadProgress>>>,
     pub download_tokens: Arc<Mutex<HashMap<String, CancellationToken>>>,
     pub pull_tokens: Arc<Mutex<HashMap<String, CancellationToken>>>,
     /// Per-stream cancellation registry for `proxy_localhost_stream_chunked`.
     /// When the user hits Stop or deletes/closes a chat, the JS side calls
     /// `cancel_proxy_stream(stream_id)` → the token fires → the upstream reqwest
-    /// stream is dropped → Ollama actually stops generating (David 2026-06-15:
+    /// stream is dropped → Ollama actually stops generating (2026-06-15:
     /// "Aktivität komplett stoppen"; aborting only stopped the JS loop before).
     /// `CancelRegistry` (not a bare token map) also survives a cancel that
     /// arrives before the matching stream registers (review 2026-09-18, R3
@@ -279,8 +339,12 @@ pub struct AppState {
     /// full generation on the GPU (review 2026-09-18, "Loch 3": the local
     /// engine ignores Stop).
     pub call_tokens: crate::cancel_registry::CancelRegistry,
+    /// One token per running download of a file of the signed-in account
+    /// (`save_cloud_file_dialog`), fired by `cancel_cloud_file`. Its own
+    /// instance for the same reason as the two above.
+    pub cloud_file_tokens: crate::cancel_registry::CancelRegistry,
     pub install_status: Arc<Mutex<InstallState>>,
-    /// Cancel flag for the ComfyUI installer (Bug #1, techx69 v2.4.3).
+    /// Cancel flag for the ComfyUI installer (Bug #1 v2.4.3).
     /// `install_comfyui` polls this between steps; setting it from
     /// `cancel_comfyui_install` aborts the next git/pip subprocess and
     /// flips the install_status to "cancelled".
@@ -335,13 +399,16 @@ pub struct AppState {
     /// a folder during Remote dispatch (#29 follow-up); cleared on
     /// undispatch / chat delete.
     pub chat_workspace_overrides: Arc<Mutex<HashMap<String, std::path::PathBuf>>>,
-    /// Bug BB v2.5.0 — BobbyT Discord 2026-05-26. User-pinned GPU vendor +
+    /// Bug BB v2.5.0 — Discord 2026-05-26. User-pinned GPU vendor +
     /// indices, forwarded as CUDA_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES /
     /// ONEAPI_DEVICE_SELECTOR on next start_ollama / start_comfyui spawn.
     /// Default "auto" + empty indices = no env-var, runtime picks default
     /// (pre-v2.5.0 behaviour).
     pub gpu_selection: Mutex<GpuSelection>,
-    /// flash-attn probe results, keyed by python path (David 2026-06-11:
+    /// Which card each service runs on (3.0.8, A2, commands/gpu_roles.rs).
+    /// Empty = the pick above applies to every service, as before.
+    pub gpu_roles: Mutex<crate::commands::gpu_roles::GpuRoles>,
+    /// flash-attn probe results, keyed by python path (2026-06-11:
     /// measured 4-5x faster WAN video sampling vs pytorch SDPA on a 3060).
     /// The probe imports torch (~5-10 s), so only the first ComfyUI start /
     /// Create-tab check per python pays it.
@@ -351,12 +418,12 @@ pub struct AppState {
     /// ROCm AND ZLUDA builds — the exact condition under which ComfyUI's main.py
     /// won't crash on `torch.cuda.current_device()`. Lets an AMD/ROCm ComfyUI run
     /// on the GPU instead of being force-dropped to `--cpu`.
-    pub comfy_gpu_cache: Mutex<HashMap<String, bool>>,
+    pub comfy_gpu_cache: Mutex<HashMap<String, Option<&'static str>>>,
     /// Frontend-owned override for the ComfyUI CPU/GPU decision
     /// (settings.comfyGpuMode): "auto" (probe), "cpu" (force --cpu), "gpu"
     /// (never --cpu). Pushed via set_comfy_gpu_mode on boot + change.
     pub comfy_gpu_mode: Mutex<String>,
-    /// Whether the LAST ComfyUI start actually passed `--cpu` (shd_scorpion,
+    /// Whether the LAST ComfyUI start actually passed `--cpu` (a user,
     /// RX 7900 XTX: gen "timed out after 20 minutes" with zero hint that it
     /// ran on the CPU). None = LU hasn't started ComfyUI this session.
     /// Surfaced to the Create tab via `get_comfy_gpu_status`.
@@ -373,7 +440,7 @@ pub struct AppState {
     /// measured 2026-08-14). `comfy_starting_state` dates the wait against it.
     pub comfy_start_at: Mutex<Option<std::time::Instant>>,
     // ── In-process MLX media engine (macOS Apple-Silicon local image/video) ──
-    // Ported from uselu/apps/bridge's `commands::mlx` / `commands::video`. The
+    // Ported from the bridge daemon's `commands::mlx` / `commands::video`. The
     // app spawns its OWN Python MLX sidecar (server.py on 127.0.0.1:47712) —
     // no separate daemon. Hard rule: Mac local image/video is MLX only, never
     // ComfyUI.
@@ -386,6 +453,12 @@ pub struct AppState {
     pub install_mlx_video: crate::install_state::InstallSlot,
     /// Install progress for a single MLX video-catalog model download/convert.
     pub install_video_model: crate::install_state::InstallSlot,
+    /// Install progress of the Mac's music engine and its weights
+    /// (`commands::music`), one slot for both.
+    pub install_music: crate::install_state::InstallSlot,
+    /// Install progress of the Mac's 3D engine, its source and its weights
+    /// (`commands::mesh3d`), one slot for all three.
+    pub install_mesh3d: crate::install_state::InstallSlot,
     /// Live progress/log of the currently running (or last) video generation.
     pub video_progress: crate::install_state::InstallSlot,
     /// Handle to the running `mlx_video.*.generate` subprocess, if any. `Arc`-
@@ -408,6 +481,9 @@ impl AppState {
         // Fixes a pre-existing bug where `set_comfyui_port` wrote to disk but
         // startup never read it back. Same loader now handles the new host field.
         let (initial_port, initial_host) = load_comfy_config_values();
+        // 3.1.0: the GPU picks of the last session, so the boot starts of
+        // ComfyUI and Ollama apply them (commands/gpu_roles.rs).
+        let (initial_gpu_selection, initial_gpu_roles) = crate::commands::gpu_roles::load_persisted_picks();
         if initial_port != default_comfy_port() {
             println!("[ComfyUI] Loaded persisted port: {}", initial_port);
         }
@@ -428,6 +504,7 @@ impl AppState {
             comfy_process: Mutex::new(None),
             ollama_process: Arc::new(Mutex::new(None)),
             bundled_engine: Mutex::new(None),
+            engine_stop_requested: AtomicBool::new(false),
             bundled_embed: Mutex::new(None),
             comfy_path: Arc::new(Mutex::new(None)),
             comfy_port: Mutex::new(initial_port),
@@ -435,11 +512,15 @@ impl AppState {
             ollama_base: Mutex::new(initial_ollama_base),
             openai_hosts: Mutex::new(HashSet::new()),
             whisper: Arc::new(Mutex::new(WhisperServer::new())),
+            voice_loop: crate::commands::voice_loop::VoiceLoopHandle::default(),
+            #[cfg(desktop)]
+            computer: crate::commands::computer::ComputerHandle::default(),
             downloads: Arc::new(Mutex::new(HashMap::new())),
             download_tokens: Arc::new(Mutex::new(HashMap::new())),
             pull_tokens: Arc::new(Mutex::new(HashMap::new())),
             stream_tokens: crate::cancel_registry::CancelRegistry::new(),
             call_tokens: crate::cancel_registry::CancelRegistry::new(),
+            cloud_file_tokens: crate::cancel_registry::CancelRegistry::new(),
             install_status: Arc::new(Mutex::new(InstallState::default())),
             comfyui_install_cancel: Arc::new(AtomicBool::new(false)),
             ollama_install: Arc::new(Mutex::new(InstallState::default())),
@@ -462,7 +543,9 @@ impl AppState {
             chat_workspace_overrides: Arc::new(Mutex::new(HashMap::new())),
             // Bug BB v2.5.0 — start in "auto" mode so existing installs are
             // unchanged until the user explicitly picks a GPU in Settings.
-            gpu_selection: Mutex::new(GpuSelection::default()),
+            // "auto" unless the user picked a card in an earlier session.
+            gpu_selection: Mutex::new(initial_gpu_selection),
+            gpu_roles: Mutex::new(initial_gpu_roles),
             flash_attn_cache: Mutex::new(HashMap::new()),
             comfy_gpu_cache: Mutex::new(HashMap::new()),
             comfy_gpu_mode: Mutex::new("auto".to_string()),
@@ -473,6 +556,8 @@ impl AppState {
             install_mlx_image_model: crate::install_state::InstallSlot::default(),
             install_mlx_video: crate::install_state::InstallSlot::default(),
             install_video_model: crate::install_state::InstallSlot::default(),
+            install_music: crate::install_state::InstallSlot::default(),
+            install_mesh3d: crate::install_state::InstallSlot::default(),
             video_progress: crate::install_state::InstallSlot::default(),
             video_process: Arc::new(Mutex::new(None)),
         }
@@ -495,6 +580,12 @@ impl AppState {
     }
     pub fn install_video_model(&self) -> crate::install_state::InstallSlot {
         self.install_video_model.clone()
+    }
+    pub fn install_music(&self) -> crate::install_state::InstallSlot {
+        self.install_music.clone()
+    }
+    pub fn install_mesh3d(&self) -> crate::install_state::InstallSlot {
+        self.install_mesh3d.clone()
     }
     pub fn video_progress(&self) -> crate::install_state::InstallSlot {
         self.video_progress.clone()
@@ -523,6 +614,22 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 use std::os::windows::process::CommandExt;
 
 impl AppState {
+    /// Stop every MLX install that is running, image and video, engine and
+    /// model. Returns how many there were.
+    pub fn cancel_mlx_installs(&self) -> usize {
+        [
+            &self.install_mlx_diffusion,
+            &self.install_mlx_image_model,
+            &self.install_mlx_video,
+            &self.install_video_model,
+            &self.install_music,
+            &self.install_mesh3d,
+        ]
+        .into_iter()
+        .filter(|slot| slot.cancel())
+        .count()
+    }
+
     /// Kill every subprocess we spawned (the Cloudflare tunnel, ComfyUI,
     /// Ollama, Claude Code, Whisper).
     ///
@@ -532,7 +639,7 @@ impl AppState {
     /// in `auto_start_*` survived every "graceful" quit path (tray → Quit,
     /// auto-updater's `exit_app`, etc.). The `Drop` impl below is still
     /// correct, but we can't rely on it firing. Call this method explicitly
-    /// from every quit path instead so kj103x's Ollama-orphan stays fixed even
+    /// from every quit path instead so a user's Ollama-orphan stays fixed even
     /// when Tauri's destructor chain skips us.
     pub fn shutdown_subprocesses(&self) {
         // The Cloudflare quick tunnel — FIRST, and the position is an
@@ -588,6 +695,10 @@ impl AppState {
         // Built-in engine (bundled llama-server, P1). Plain kill on all
         // platforms — it's a single loopback process with no child tree, so
         // the taskkill /T dance the daemons need isn't required here.
+        // Said before the kill: a start that is still loading this model must
+        // read the empty slot as a stop and not start the model again while
+        // the app is on its way out.
+        self.engine_stop_requested.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Ok(mut engine) = self.bundled_engine.lock() {
             if let Some(ref mut e) = *engine {
                 let _ = e.child.kill();
@@ -648,10 +759,36 @@ impl AppState {
         // mechanism as the Stop button" — there was no Stop button, and the
         // `mlx_stop` that described one had no bridge and no caller (KF-19,
         // removed 01.09.2026).
+        //
+        // The server this session started is ended through its handle first,
+        // so it is waited on. The port sweep stays for the one this session
+        // only found: a sidecar left behind by a run that ended hard.
+        crate::commands::mlx::stop_sidecar();
+        crate::commands::mlx::stop_mflux();
+        // A track holds its models as a process of its own, like an image of
+        // the second engine.
+        crate::commands::music::stop();
+        // And a 3D model of the Mac's 3D engine, the same way.
+        crate::commands::mesh3d::stop();
+        // And a character training, the same way.
+        crate::commands::mlx::train::stop();
+        // Only a sidecar of THIS app (its server.py, started by this process
+        // or orphaned by an earlier run of it), and never from a test: this
+        // path also runs in `Drop for AppState`, and `cargo test` ended the
+        // real LU's sidecar through it (N2, 13.11.2026).
         #[cfg(target_os = "macos")]
         {
-            crate::process_util::kill_listeners_on_port(crate::commands::mlx::MLX_PORT);
-            println!("[MLX] image sidecar stopped (explicit shutdown)");
+            if !crate::commands::mlx::sweep_orphaned_sidecar().is_empty() {
+                println!("[MLX] image sidecar stopped (explicit shutdown)");
+            }
+        }
+
+        // MLX installs: pip and the hub downloads. Each one registers the
+        // process it waits on with its slot, and until 08.10.2026 nothing on
+        // the quit path asked the slots, so a 3 GB pip run went on with no app
+        // left to show or stop it.
+        if self.cancel_mlx_installs() > 0 {
+            println!("[MLX] running install stopped (explicit shutdown)");
         }
 
         // Character-LoRA training. The PID sits in AppState like every other
@@ -680,6 +817,19 @@ impl AppState {
         if let Ok(mut whisper) = self.whisper.lock() {
             whisper.stop();
         }
+        // Parakeet dictation's server (#233), when it was started.
+        #[cfg(desktop)]
+        crate::commands::parakeet::stop();
+
+        // The voice loop sidecar. It would leave by itself once its stdin
+        // closes with this process; stopping it here means quit does not
+        // return while it still holds its port and the model files, which is
+        // what an update that replaces the installation trips over on Windows.
+        self.voice_loop.shutdown();
+
+        // A computer use action that is still running stops with the app.
+        #[cfg(desktop)]
+        self.computer.shutdown();
     }
 }
 
@@ -688,7 +838,7 @@ impl Drop for AppState {
         // Belt-and-suspenders. Tauri v2 doesn't reliably drop the managed
         // state on `app.exit(0)` on Windows, so every quit path explicitly
         // calls `shutdown_subprocesses` itself (see `commands::system::exit_app`
-        // and the tray "quit" handler in `main.rs`). This Drop covers the
+        // and the tray "quit" handler in `lib.rs`). This Drop covers the
         // remaining "Tauri-managed shutdown DID happen to run our Drop" case
         // — and every branch now take()s its slot, so a second pass has
         // nothing left to kill. It used to leave the pids in place and call

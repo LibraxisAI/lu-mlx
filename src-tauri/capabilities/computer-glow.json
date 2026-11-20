@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "computer-glow",
+  "description": "Capability of the window that draws the glow at the edge of the display while computer control works (label `computer-glow`, built in src/commands/computer/surface.rs). It is empty on purpose: the page is one static file with a style sheet and no script, it lets every click through and takes no focus. It needs no permission, and it gets none.",
+  "windows": ["computer-glow"],
+  "permissions": []
+}

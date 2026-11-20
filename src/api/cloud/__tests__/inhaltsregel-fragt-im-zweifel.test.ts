@@ -1,9 +1,9 @@
 /**
  * Die Altersbestaetigung haengt am Server, und im Zweifel wird gefragt.
  *
- * Entscheid David vom 13.09.2026: fuer 3.0.0 faellt der Bestaetigungsschritt
+ * Entscheid vom 13.09.2026: fuer 3.0.0 faellt der Bestaetigungsschritt
  * weg und kommt in 3.0.1 wieder. Die Stellung steht im Server
- * (`AGE_CONFIRMATION_REQUIRED`, `apps/web/lib/launch.ts`) und kommt mit der
+ * (`AGE_CONFIRMATION_REQUIRED`, the web app) und kommt mit der
  * GET-Antwort von `/api/account/content-policy` als `ageConfirmationRequired`
  * mit. Die App haelt keine eigene Kopie davon.
  *

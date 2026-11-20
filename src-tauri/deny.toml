@@ -1,0 +1,82 @@
+# cargo-deny policy for the desktop crate. CI runs `cargo deny check` from
+# src-tauri (job `dependency-audit` in .github/workflows/ci.yml), so a new
+# advisory, a licence outside the list below or a crate from an unknown
+# source fails the build that master and every release are held to.
+
+[graph]
+all-features = false
+
+[advisories]
+# A crate that is merely unmaintained fails only when we depend on it
+# ourselves. The transitive ones (unic-*, proc-macro-error, fxhash, zvariant,
+# unsafe-libyaml ...) come in through tauri, wry and the GTK stack and go
+# away when those move; `cargo audit` still lists them as warnings.
+unmaintained = "workspace"
+unsound = "workspace"
+yanked = "deny"
+ignore = [
+    # zip 4.6.1, pulled in by tauri-plugin-updater (2.12.0 today, the newest 2.x).
+    # Our own zip dependency is on 9.x and not affected. The updater only
+    # unpacks on Windows, and only an archive whose minisign signature it has
+    # already checked against the key in tauri.conf.json, so the archive
+    # cannot come from anyone but our release workflow (updater.rs: download()
+    # verifies the signature, install() extracts afterwards). The first three
+    # advisories are about Unix permission bits and symlinks on extraction;
+    # RUSTSEC-2026-0429 (05.11.2026) is an abort on a symlink entry with a
+    # huge declared size, i.e. a crash, again only from an archive we signed.
+    # Drop these lines when the updater moves to zip >= 9.
+    { id = "RUSTSEC-2026-0367", reason = "zip 4.x inside tauri-plugin-updater, signed archives only, see comment" },
+    { id = "RUSTSEC-2026-0368", reason = "zip 4.x inside tauri-plugin-updater, signed archives only, see comment" },
+    { id = "RUSTSEC-2026-0369", reason = "zip 4.x inside tauri-plugin-updater, signed archives only, see comment" },
+    { id = "RUSTSEC-2026-0429", reason = "zip 4.x inside tauri-plugin-updater, signed archives only, see comment" },
+    # RUSTSEC-2026-0545 (AES entries) and RUSTSEC-2026-0548 (ZipStreamReader
+    # trusting local-header names) also land on that zip 4.6.1. Neither path
+    # is used there: the updater builds zip 4 without the aes-crypto feature
+    # and opens the archive with ZipArchive (updater.rs: install()), never
+    # with ZipStreamReader. Our own zip 9.0.0 has the AES fix; 0548 is listed
+    # for it as well, because nothing in src/ uses ZipStreamReader (only
+    # ZipArchive). zip 9.0.5 would need libc >= 0.2.186, and libc stays on
+    # 0.2.183 until sysinfo moves (see the libc pin in Cargo.toml).
+    { id = "RUSTSEC-2026-0545", reason = "17.11.2026: zip 4.x inside tauri-plugin-updater, built without aes-crypto, only ZipArchive. Lift with zip >= 9.0.5 + libc/sysinfo raise in 3.1.2" },
+    { id = "RUSTSEC-2026-0548", reason = "17.11.2026: no ZipStreamReader, neither in src/ (zip 9.0.0) nor in tauri-plugin-updater (zip 4.x), only ZipArchive. Lift with zip >= 9.0.5 + libc/sysinfo raise in 3.1.2" },
+    # chrono is marked unmaintained (17.11.2026). It is a notice, not a known
+    # flaw, and no safe upgrade exists. We call it in about twenty files and
+    # trash pulls it in as well, so moving to jiff or time is planned work for
+    # a later release, not something for a hotfix.
+    { id = "RUSTSEC-2026-0543", reason = "17.11.2026: chrono is only unmaintained, no known flaw. Lift with the move to jiff or time in 3.1.2" },
+]
+
+[licenses]
+# Every licence that appears in Cargo.lock today, all compatible with
+# shipping inside an AGPL-3.0 application.
+allow = [
+    "AGPL-3.0-only",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    "0BSD",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Tauri, GTK and the Windows crates bring several majors of the same crates;
+# that is noise here, not a policy question.
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Download } from 'lucide-react'
 import { Modal } from '../ui/Modal'
-import { GlowButton } from '../ui/GlowButton'
+import { ModalActions, ModalButton } from '../ui/ModalActions'
 import { useModels } from '../../hooks/useModels'
 
 interface Props {
@@ -34,11 +34,13 @@ export function PullModelDialog({ open, onClose }: Props) {
           <p className="t-micro text-gray-500 mt-1">Progress appears in the download icon in the header.</p>
         </div>
 
-        <GlowButton onClick={handlePull} disabled={!modelName.trim()} className="w-full flex items-center justify-center gap-2">
-          <Download size={16} />
-          Pull Model
-        </GlowButton>
       </div>
+      <ModalActions>
+        <ModalButton variant="primary" onClick={handlePull} disabled={!modelName.trim()}>
+          <Download size={14} />
+          Pull Model
+        </ModalButton>
+      </ModalActions>
     </Modal>
   )
 }

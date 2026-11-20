@@ -244,7 +244,7 @@ function subscribeRunLanesAndApprovals(listener: () => void): () => void {
  * another answer" is a lie in that window: no model is thinking, a person is,
  * and there is no bound on how long a person takes. The line has to say that,
  * so a customer does not read a silent multi-minute wait as a hang and file
- * the exact support ticket B1 already fixed once (David 2026-06-16 lineage).
+ * the exact support ticket B1 already fixed once (2026-06-16 lineage).
  *
  * `false` while not queued, or while the holder IS generating: the ordinary
  * "another answer" wording stays correct there and this hook must not flap

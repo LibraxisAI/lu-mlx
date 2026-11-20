@@ -1,7 +1,7 @@
 /**
  * Die eine Regel fuer Anmerkungen und Fehlermeldungen in der Oberflaeche.
  *
- * David, 04.09.2026: „ich will nirgends gelbe anmerkungen oder fehlermeldungen
+ * 04.09.2026: „ich will nirgends gelbe anmerkungen oder fehlermeldungen
  * sehen, das sieht ja todes scheisse aus ... kein gelb mehr ohne farbe. und
  * sauber, nicht so klotzig ueberall die fehlermeldungen und anmerkungen."
  *

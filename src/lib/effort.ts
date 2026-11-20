@@ -3,7 +3,7 @@
  * actually asks for.
  *
  * Why a ladder per model instead of one fixed scale. Measured against the live
- * DeepInfra API on 2026-09-02 (ops/wissen/deepinfra-modellmatrix-2026-09-02.md):
+ * hosted API on 2026-09-02 ():
  * most reasoners take low, medium and high, GLM 5.3 adds max, and
  * Qwen/Qwen3.8-27B answers 400 to BOTH high and max, naming low and medium as
  * the only rungs it has. A composer that sends one fixed scale to every model

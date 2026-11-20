@@ -61,7 +61,7 @@ describe('ContentPolicySettings', () => {
   })
 
   it('zeigt keinen Bestaetigungsschritt, wenn der Server keinen verlangt', async () => {
-    // Entscheid David vom 13.09.2026. Die Stellung kommt aus der GET-Antwort,
+    // Entscheid vom 13.09.2026. Die Stellung kommt aus der GET-Antwort,
     // nicht aus der App: AGE_CONFIRMATION_REQUIRED steht im Server.
     api.get.mockResolvedValue({ policy: 'soft', ageConfirmedAt: null, ageConfirmationRequired: false })
     render(<ContentPolicySettings />)
@@ -116,10 +116,8 @@ describe('ContentPolicySettings', () => {
   })
 
   /**
-   * Derselbe Grund wie beim Blatt in A5 (R6-2): der Meldeweg steht nicht.
-   * SAFETY_ALERT_WEBHOOK_URL ist auf dem Droplet nicht gesetzt, alertCsamBlock
-   * steigt ohne Ziel sofort aus, und keine Migration legt eine Tabelle dafuer
-   * an. Die Sperre selbst bleibt wortgleich und wird nie schwaecher; nur die
+   * Derselbe Grund wie beim Blatt in A5 (R6-2): die App verspricht
+   * keine Meldung, die sie nicht selbst einloest. Die Sperre selbst bleibt wortgleich und wird nie schwaecher; nur die
    * Zusage, die die App nicht einloest, faellt weg.
    */
   it('verspricht keine Meldung, die niemand verschickt', () => {
@@ -148,7 +146,7 @@ describe('ContentPolicySettings', () => {
    * Der Wortlaut steht hier ausgeschrieben und nicht aus dem Web-Baum gelesen:
    * ein Checkout ohne das Nachbar-Repo wuerde sonst entweder fehlschlagen oder,
    * schlimmer, still gruen melden. Quelle des Satzes:
-   * `apps/web/components/settings/ContentPolicySettings.tsx:135-136`.
+   * the web app.
    */
   const WEB_SATZ = 'Switching to another option clears that confirmation.'
 

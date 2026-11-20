@@ -5,7 +5,7 @@
  * four levels down." Persona P2 hat am 04.09.2026 am echten Build gemessen:
  * gelesen wurde der gesetzte Ordner wirklich, heruntergeladen wurde aber
  * weiter ins Roaming-Profil. Zweimal mit verschiedenen Modellen, beide Male
- *   destDir: "C:\\Users\\ddrob\\AppData\\Roaming\\Locally Uncensored\\models"
+ *   destDir: "C:\\Users\\alice\\AppData\\Roaming\\Locally Uncensored\\models"
  * bei gesetztem und bestaetigtem C:\lu-test-p2. Der erste Halbsatz des Textes
  * stimmte nicht.
  *

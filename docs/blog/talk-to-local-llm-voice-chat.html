@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Talk to a Local LLM: Voice Chat on Your Own Machine (Step by Step)</title>
+<meta name="description" content="How to set up local voice chat with the model you already use: install the voice engine, pick one of fifteen voices, start a session, and decide what the model may do by voice. English only and in beta, with the limits listed.">
+<meta name="keywords" content="local voice chat ai, talk to local llm, voice chat with local model, offline voice assistant llm, locally uncensored voice, whisper local voice chat">
+<meta property="og:title" content="Talk to a Local LLM: Voice Chat on Your Own Machine (Step by Step)">
+<meta property="og:description" content="Set up local voice chat in Locally Uncensored: the one-time install, fifteen voices, the four switches next to the title, and the limits of the beta.">
+<meta property="og:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<meta property="og:url" content="https://locallyuncensored.com/blog/talk-to-local-llm-voice-chat.html">
+<meta property="og:type" content="article">
+<meta property="article:published_time" content="2026-10-14">
+<meta property="article:author" content="PurpleDoubleD">
+<meta property="article:tag" content="Tutorial">
+<meta property="article:tag" content="Voice">
+<meta property="article:tag" content="Local AI">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Talk to a Local LLM: Voice Chat on Your Own Machine">
+<meta name="twitter:description" content="Set up local voice chat in Locally Uncensored: the one-time install, fifteen voices, the four switches next to the title, and the limits of the beta.">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<link rel="canonical" href="https://locallyuncensored.com/blog/talk-to-local-llm-voice-chat.html">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="../favicon.png">
+<!-- Privacy: No external fonts loaded. Using system fonts. -->
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BlogPosting","headline":"Talk to a Local LLM: Voice Chat on Your Own Machine (Step by Step)","description":"How to set up local voice chat with the model you already use: install the voice engine, pick one of fifteen voices, start a session, and decide what the model may do by voice. English only and in beta, with the limits listed.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-10-14","dateModified":"2026-10-14","inLanguage":"en","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/talk-to-local-llm-voice-chat.html"},"keywords":"local voice chat ai, talk to local llm, voice chat with local model, offline voice assistant llm, locally uncensored voice, whisper local voice chat"}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Does my voice leave my computer?","acceptedAnswer":{"@type":"Answer","text":"Speech recognition, the voice and the turn taking run on your own machine. The answer comes from the chat model you picked, and Voice is shown in local mode only. If you switch Agent on and ask for something on the web, the web tool fetches pages like it does in the agent chat."}},{"@type":"Question","name":"Which model should I use for voice chat?","acceptedAnswer":{"@type":"Answer","text":"The one you already chat with, as long as it takes tools and is 7B or larger. Below that, the empty Voice surface recommends a local model that fits."}},{"@type":"Question","name":"Can I use Voice in German, Spanish or another language?","acceptedAnswer":{"@type":"Answer","text":"Not yet. Voice is English only for now."}},{"@type":"Question","name":"Does Voice work on a Mac or on Linux?","acceptedAnswer":{"@type":"Answer","text":"The Mac build has Voice, and it has been tried by hand in the app there. It did not go through the point by point check the Windows app got. The Linux packages carry the voice engine, but Voice has not been run in the app on Linux by us."}},{"@type":"Question","name":"How do I remove the voice engine again?","acceptedAnswer":{"@type":"Answer","text":"The Voice settings have an uninstall for the voice engine, and a Repair that checks the packages and every model file and downloads again only what is missing or does not match."}}]}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://locallyuncensored.com/"},{"@type":"ListItem","position":2,"name":"Blog","item":"https://locallyuncensored.com/blog/"},{"@type":"ListItem","position":3,"name":"Talk to a Local LLM: Voice Chat on Your Own Machine","item":"https://locallyuncensored.com/blog/talk-to-local-llm-voice-chat.html"}]}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/lu.css">
+<script defer src="/assets/lu.js"></script>
+  <script data-goatcounter="https://purple47.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</head>
+<body>
+<nav class="lu-nav">
+  <a class="lu-nav-brand" href="/" aria-label="Locally Uncensored">
+    <span class="lu-mono" data-mono="nav" data-size="40" aria-hidden="true"></span>
+    <span class="lu-nav-word">Locally <span class="accent">Uncensored</span></span>
+  </a>
+  <div class="lu-nav-links" id="lu-nav-links">
+    <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/pricing/">Pricing</a>
+    <a class="lu-nav-link" href="/blog/">Blog</a>
+    <a class="lu-nav-link" href="/guide/">Guide</a>
+    <a class="lu-nav-link" href="/remote-access/">Remote</a>
+  </div>
+  <div class="lu-nav-right">
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">4200+&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">1700+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <span class="lu-nav-sep"></span>
+    <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="he-cta" href="/pricing/" aria-label="LU Cloud plans and what they include"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>Cloud</a>
+    <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
+    <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </div>
+</nav>
+<div class="container lu-doc">
+  <div class="breadcrumb"><a href="../">Locally Uncensored</a> / <a href="./">Blog</a> / This Post</div>
+
+  <div class="post-meta">
+    <span class="post-tag">Tutorial</span>
+    <span>October 14, 2026</span>
+    <span>&middot;</span>
+    <span>8 min read</span>
+  </div>
+
+  <article>
+    <h1>Talk to a Local LLM: Voice Chat on Your Own Machine</h1>
+
+    <p>Since version 3.0.6, <a href="https://github.com/PurpleDoubleD/locally-uncensored">Locally Uncensored</a> has a Voice surface. You speak, the chat model you picked answers, and you hear the answer. Speech recognition, the voice and the turn taking run on your own machine. This guide goes through the setup, the first session, the four switches next to the title, and the limits.</p>
+
+    <p>Voice is in beta and English only. Our check in the real app ran on Windows. On a Mac it has been tried by hand in the app, and on Linux it has not been run in the app yet. If something is rough on your computer, that is why the word Beta stands next to the title.</p>
+
+    <h2>What You Need</h2>
+
+    <ul>
+      <li>Locally Uncensored 3.0.6 or newer, in local mode. With the Cloud switch on, Voice is hidden, because LU Cloud has no voice service yet</li>
+      <li>A local chat model. Voice has no model of its own. It talks with the one selected in the chat</li>
+      <li>A microphone. A headset helps, for a reason explained below</li>
+      <li>Free disk space for the voice engine. The setup screen shows the exact download size, the space needed and your free space before anything is fetched</li>
+    </ul>
+
+    <p>If your chat model takes no tools or is smaller than 7B, the empty Voice surface recommends a local model that fits. The <a href="/guide/chat/">chat chapter of the handbook</a> covers the model picker.</p>
+
+    <h2>Step 1: Install the Voice Engine</h2>
+
+    <p>Open Voice in the main navigation. The first time, you see a setup screen titled "Talk to your model". It lists three numbers: Download, Space needed and Free space. A line named "What is downloaded" opens the list of parts with the size of each one, and "Stored in" names the folder they go to.</p>
+
+    <p>Pick a voice if you like, then click Install. You can cancel while it runs. What was already downloaded is kept, and Continue setup picks up where it stopped.</p>
+
+    <p>What gets installed, in plain terms: Whisper base.en for speech recognition and Pocket TTS for the voice, plus the engine that handles turn taking. All of it runs locally after the one-time setup.</p>
+
+    <h2>Step 2: Pick a Voice</h2>
+
+    <p>There are fifteen voices: Alba, Anna, Azelma, Charles, Eponine, Eve, Fantine, George, Jane, Javert, Marius, Mary, Michael, Paul and Vera. Choose one in the setup or later in the Voice settings. Changing it fetches one small file and installs nothing else again.</p>
+
+    <p>Listen plays a short sentence in the chosen voice once the voice engine is installed. A new voice speaks from the next session on, so stop a running session if you want to compare voices.</p>
+
+    <h2>Step 3: Start Talking</h2>
+
+    <p>Click Start. A quiet chord of about a second says that the session is listening. You can switch that sound off in the Voice settings.</p>
+
+    <p>The first session after setup or after a restart is slow to start. In our Windows tests it took 23 to 63 seconds cold, against about one second warm. You do not have to wait in silence, though. What you say after the Start click is kept for up to a minute, also while the speech models are still loading, and answered once the session is up.</p>
+
+    <p>From there it is a conversation. Ask something, listen, ask the next thing. If the answer runs long or goes the wrong way, speak, and LU stops talking and listens. The microphone button mutes you without ending the session. Stop ends it, and the whole exchange is saved as a normal conversation you can open again in the chat.</p>
+
+    <p>A few things to try in a first session:</p>
+
+    <ul>
+      <li>"Explain what a context window is, in two sentences."</li>
+      <li>"Give me three names for a small bakery." Then interrupt after the first one and ask for something shorter</li>
+      <li>"Summarize what we have talked about so far."</li>
+    </ul>
+
+    <h2>Step 4: The Four Switches</h2>
+
+    <p>Four switches sit next to the title. You can move all of them while a session runs, and the session follows at once.</p>
+
+    <table>
+      <thead><tr><th>Switch</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td>Voice settings</td><td>Voice, microphone, the start sound, starting with the microphone muted, thinking length, repair and uninstall</td></tr>
+        <tr><td>Agent</td><td>On: Voice can use tools, such as the web, files and commands. Off: a conversation without tools</td></tr>
+        <tr><td>Where it may work</td><td>Workspace only, which is the default, or Whole computer</td></tr>
+        <tr><td>Thinking</td><td>Shows the thought in the transcript as a folded Thinking block. Off by default, and never read aloud</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Agent: Tools by Voice</h3>
+
+    <p>With Agent on, a voice session has the tools of the agent chat with the same permissions. A tool call looks the way it does in the chat. When a tool needs your approval, the same approval bar asks in plain words, for example "Voice wants to change a file." You answer it with a click on Approve or Reject. Saying yes does not approve it.</p>
+
+    <p>Local models get a shorter tool list in Voice (web, files, shell and the screen), so the first answer comes quickly. If the model cannot use tools, the Agent switch says so.</p>
+
+    <p>Requests that fit this mode:</p>
+
+    <ul>
+      <li>"Look up the release date of Python 3.13 and tell me."</li>
+      <li>"Create a file called notes.txt with three ideas for the weekend."</li>
+      <li>"List the files in the workspace and read me the names."</li>
+    </ul>
+
+    <h3>Where It May Work</h3>
+
+    <p>Workspace only is the default. Files stay inside the folder of the session, LU asks before every command, and there is no screen.</p>
+
+    <p>Whole computer opens files by any path your user account can open, commands in any folder, and the screen. LU asks once before that level is used for the first time, in a dialog titled "Let Voice work on the whole computer?". System folders and the folders that hold keys and passwords stay closed at both levels.</p>
+
+    <p>The screen part is computer control, which is its own beta feature with its own questions. In every new chat a card asks "Allow computer control in this chat?" and waits for a click. In a voice session LU says aloud that it waits for your click. A spoken yes does not allow it, and a spoken no or stop declines. On a Mac, computer control is in the app but not fully tested yet.</p>
+
+    <h3>Thinking</h3>
+
+    <p>Thinking is off by default. Switched on, the thought appears in the transcript and stays silent. Thinking length in the Voice settings limits a thought to between 128 and 4096 tokens, 512 by default. When a thought runs longer, LU ends it and asks the model again for a direct answer.</p>
+
+    <h2>Free the Memory When You Are Done</h2>
+
+    <p>While the voice engine is in memory, a switch next to the title shows how much memory it holds. LU measures that number. On our Windows test machine it was about 1 GB. One click ends the session and stops the engine, and if the voice session loaded the chat model, that model is unloaded too. Without the click, the engine shuts down five minutes after the last session.</p>
+
+    <h2>Use the Same Engine for Dictation</h2>
+
+    <p>The microphone button in the chat uses the speech recognition of the voice engine if no separate speech-to-text install exists. So once Voice is installed, you can dictate a message in the normal chat as well.</p>
+
+    <p>To pick the microphone, go to Settings, Voice &amp; Remote, Speech. The Microphone field lists the system default and your input devices by name, and the choice holds for dictation and for Voice. The names appear once the app may use the microphone. This field is new in 3.0.6 and has run in automated tests, not yet with a real microphone on our side.</p>
+
+    <h2>Limits You Should Know</h2>
+
+    <ul>
+      <li>English only, and the voices are fixed</li>
+      <li>Local mode only. Voice is hidden while the Cloud switch is on</li>
+      <li>Speaking while LU speaks relies on the echo cancellation of your system. With loud speakers and no headset, the first words of an interruption can be quiet or missing</li>
+      <li>For the first six seconds after the Start click, a voice that reaches the microphone only faintly is turned down. A headset is not affected</li>
+      <li>The first session after setup or a restart starts much slower than later ones</li>
+      <li>Only a serious error ends a session, and it says why. Smaller ones go to the log, with one line under the status when you would miss something, for example a sentence that could not be spoken</li>
+    </ul>
+
+    <h2>Questions</h2>
+
+    <h3>Does my voice leave my computer?</h3>
+
+    <p>Speech recognition, the voice and the turn taking run on your own machine. The answer comes from the chat model you picked, and Voice is shown in local mode only. If you switch Agent on and ask for something on the web, the web tool fetches pages like it does in the agent chat.</p>
+
+    <h3>Which model should I use?</h3>
+
+    <p>The one you already chat with, as long as it takes tools and is 7B or larger. Below that, the empty Voice surface recommends a local model that fits.</p>
+
+    <h3>Can I use Voice in German, Spanish or another language?</h3>
+
+    <p>Not yet. Voice is English only for now.</p>
+
+    <h3>Does Voice work on a Mac or on Linux?</h3>
+
+    <p>The Mac build has Voice, and it has been tried by hand in the app there. It did not go through the point by point check the Windows app got. The Linux packages carry the voice engine, but Voice has not been run in the app on Linux by us.</p>
+
+    <h3>How do I remove it again?</h3>
+
+    <p>The Voice settings have an uninstall for the voice engine, and a Repair that checks the packages and every model file and downloads again only what is missing or does not match.</p>
+
+    <h2>Related</h2>
+
+    <ul>
+      <li><a href="locally-uncensored-v3-0-6-release.html">v3.0.6 release notes</a>, everything else that came with Voice</li>
+      <li><a href="/is-locally-uncensored-safe/">Is Locally Uncensored safe?</a>, what the app sends and what it does not</li>
+      <li><a href="/vs/lm-studio/">Locally Uncensored vs LM Studio</a>, the comparison page</li>
+    </ul>
+
+    <hr>
+
+    <p><em>Locally Uncensored is AGPL-3.0 licensed and built by <a href="https://github.com/PurpleDoubleD">PurpleDoubleD</a>. Corrections welcome on <a href="https://github.com/PurpleDoubleD/locally-uncensored/discussions">GitHub Discussions</a> or in the <a href="https://locallyuncensored.com/discord">Discord</a>.</em></p>
+    <h2>In the handbook</h2>
+
+    <ul>
+      <li><a href="/guide/chat/">Chat</a>, the model picker, dictation and read-aloud</li>
+      <li><a href="/guide/agent/">Agent</a>, the tools and permissions a voice session shares</li>
+      <li><a href="/guide/settings-and-troubleshooting/">Settings and troubleshooting</a>, every settings tab in one line each and where the log file is</li>
+    </ul>
+
+  </article>
+
+  <div class="post-footer">
+    <p>Voice comes with the free desktop app, version 3.0.6 or newer</p>
+    <p style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin:0">
+      <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest/download/Locally.Uncensored_3.1.2_x64-setup.exe" class="cta-btn" download>Download for Windows</a>
+      <a data-mac-latest href="https://github.com/PurpleDoubleD/locally-uncensored/releases/download/v3.1.2/LU_3.1.2_aarch64.dmg" class="cta-btn" download>Download for Mac (Apple Silicon)</a>
+      <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest/download/Locally.Uncensored_3.1.2_amd64.AppImage" class="cta-btn" download>Download for Linux</a>
+    </p>
+    <p style="margin-top:14px;margin-bottom:0">No GPU? LU Cloud runs in a browser, paid from credit packs that start at 15 EUR and need no subscription. Voice itself is local only. <a href="/pricing/">See what it costs</a> or <a href="https://lu-labs.ai/pricing?tab=credits&amp;src=luc-voice-guide-end" target="_blank" rel="noopener">open LU Cloud</a>.</p>
+  </div>
+</div>
+
+<footer>
+  <div class="footer-row footer-meta"><span>&copy; 2026 &middot; Locally Uncensored &middot; AGPL-3.0</span></div>
+  <div class="footer-row footer-links">
+    <a href="https://locallyuncensored.com/blog/">Blog</a>
+    <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/pricing/">Pricing</a>
+    <a href="https://locallyuncensored.com/cloud/">LU Cloud</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-chat-online/">Uncensored AI chat online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-image-generator-online/">Image generator online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-video-generator-online/">Video generator online</a>
+    <a href="https://locallyuncensored.com/unrestricted-ai/">Unrestricted AI</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-coding-agent/">AI coding agent</a>
+    <a href="https://locallyuncensored.com/alternatives/">Alternatives</a>
+    <a href="https://locallyuncensored.com/is-locally-uncensored-safe/">Is it safe?</a>
+    <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
+    <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/discussions">Discussions</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
+    <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
+    <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+    <a href="https://locallyuncensored.com/privacy/">Privacy</a>
+    <a href="https://locallyuncensored.com/terms/">Terms</a>
+    <a href="https://locallyuncensored.com/impressum/">Impressum</a>
+  </div>
+</footer>
+</body>
+</html>

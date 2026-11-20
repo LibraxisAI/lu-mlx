@@ -452,7 +452,7 @@ describe('OpenAIProvider', () => {
           choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
         }), { status: 200 })
       )
-      // No options → previously omitted max_tokens, so DeepInfra over-defaulted the
+      // No options → previously omitted max_tokens, so the upstream over-defaulted the
       // completion and 400'd. Now it must send a positive, in-window budget.
       await provider.chatWithTools('gpt-4o', [{ role: 'user', content: 'hi' }], [])
       const sent = sentJson<OpenAIChatRequest>(fetchSpy.mock.calls)
@@ -713,13 +713,13 @@ describe('OpenAIProvider', () => {
       } catch (thrown) {
         const e = asProviderError(thrown)
         expect(e.code).toBe('rate_limit')
-        expect(e.message).toMatch(/Rate limited/)
+        expect(e.message).toBe('The server is limiting requests right now. Please wait a moment, then send your message again.')
       }
       vi.restoreAllMocks()
     })
   })
 
-  // Audit finding 10: DeepInfra (LU Cloud) reasoning models stream thinking as
+  // Audit finding 10: LU Cloud reasoning models stream thinking as
   // delta.reasoning_content / delta.reasoning — dropping it left the chat in
   // dead air for the whole reasoning phase.
   describe('native reasoning channel', () => {
@@ -814,7 +814,7 @@ describe('OpenAIProvider', () => {
   })
 
   // 2.5.8 — a model without function calling that gets a tool-augmented request
-  // makes DeepInfra / LU Cloud answer 405 (some servers 400/422 with a
+  // makes LU Cloud answer 405 (some servers 400/422 with a
   // tool/function message). parseError must tag that 'tools_unsupported' so the
   // chat layer shows a clean note instead of a raw status error / AbortError.
   describe('tools_unsupported (model without function calling)', () => {

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 
 /**
@@ -67,6 +67,15 @@ function storedContains(needle: string): boolean {
 }
 
 describe('a turn is finished when it is stored', () => {
+  // The first load of the chat store's module graph took 4.4 s on a loaded
+  // machine, inside a test that also waits 400 ms: red on the five second
+  // limit in two of eight full runs on 09.10.2026. Paid here once, outside any
+  // test; every later import is the same module and costs nothing.
+  beforeAll(async () => {
+    await import('../chatStore')
+    await import('../durability')
+  }, 120_000)
+
   beforeEach(() => {
     disk.clear()
     writeCalls = 0
@@ -340,7 +349,7 @@ describe('the turn end starts the write before it starts anything else', () => {
   // and useAgentChat after it, and neither costs the write anything — pinning
   // that difference would be pinning noise.
 
-  it('all five turn ends were found and parsed', () => {
+  it('all six turn ends were found and parsed', () => {
     // `useCodex/runInstruction` und nicht mehr `sendInstruction`: 2.6.8 hat den
     // grossen useCallback in `runInstruction` umbenannt und `sendInstruction`
     // zur duennen Huelle mit beginSend/endSend gemacht. Das Rundenende sitzt
@@ -359,6 +368,9 @@ describe('the turn end starts the write before it starts anything else', () => {
       'useChat/sendMessage',
       'useChat/sendMessage',
       'useCodex/runInstruction',
+      'useAgentChat/sendAgentMessage',
+      // CA (13.11.2026): the safety net around the Agent run setup. A setup
+      // that threw ends its turn here, through the same contract.
       'useAgentChat/sendAgentMessage',
     ])
   })

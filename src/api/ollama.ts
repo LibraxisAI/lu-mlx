@@ -1,8 +1,53 @@
 import type { OllamaModel, PullProgress } from "../types/models"
 import { ollamaUrl, localFetch, localFetchStream, isTauri } from "./backend"
-import { isRecord, prop, asString, asStringArray, asRecordArray } from "./providers/wire"
+import { isRecord, prop, asString, asNumber, asStringArray, asRecordArray } from "./providers/wire"
+import { parseOllamaShowContext } from "./providers/context-probe"
 import { log } from "../lib/logger"
+import { oneEntryPerName } from "../lib/one-entry-per-name"
 import { isLocalTransportFailure, localBackendUnreachableMessage } from "../lib/local-backend-transport"
+import { ollamaWindowFor, type WindowChoice, type WindowUse } from "../lib/context-window"
+import { useSettingsStore } from "../stores/settingsStore"
+import { ollamaKeepAlive } from "../lib/idle-unload"
+import { callLimit, CallTimeoutError, type CallLimitOptions } from "../lib/call-limit"
+import { clampContextWindow } from "../lib/number-limits"
+
+/**
+ * How long a load may take before the app stops waiting.
+ *
+ * Five minutes, because that is what the wait already was in practice: the
+ * local proxy ends a request without its own limit after 300 seconds. A large
+ * model from a slow disk can honestly take minutes, so a shorter limit would
+ * end loads that work today. What changes is that the limit is ours, covers
+ * the whole call, and can be ended earlier by the caller's signal.
+ */
+export const OLLAMA_LOAD_LIMIT_MS = 300_000
+
+/**
+ * How long an unload may take. Ollama answers `keep_alive: 0` at once, also
+ * for a model that is busy (it marks it to go when the running request ends).
+ */
+export const OLLAMA_UNLOAD_LIMIT_MS = 15_000
+
+/**
+ * How long after an unload the model may still be listed before it counts as
+ * busy. An idle model leaves /api/ps well under a second after the answer; one
+ * that is still there after this is finishing a request.
+ */
+export const OLLAMA_UNLOAD_SETTLE_MS = 3_000
+const UNLOAD_SETTLE_STEP_MS = 250
+
+/** The slack the proxy gets over our own limit, so ours is the one that ends the call. */
+const PROXY_SLACK_MS = 5_000
+
+export type OllamaCallOptions = CallLimitOptions
+
+/** A load or unload that ran into its time limit. The message is for the screen. */
+export class OllamaTimeoutError extends CallTimeoutError {
+  constructor(message: string) {
+    super(message)
+    this.name = "OllamaTimeoutError"
+  }
+}
 
 /**
  * One entry of Ollama's `/api/tags` response.
@@ -29,7 +74,7 @@ export async function listModels(): Promise<OllamaModel[]> {
   const entries: OllamaTagsEntry[] = Array.isArray(rawModels)
     ? (rawModels as OllamaTagsEntry[])
     : []
-  return entries.map((m) => ({
+  return oneEntryPerName(entries).map((m) => ({
     ...m,
     type: "text" as const,
     // /api/tags states this per model. Without the mapping the field arrives as
@@ -67,67 +112,179 @@ export async function showModel(name: string): Promise<Record<string, unknown>> 
   return isRecord(body) ? body : {}
 }
 
-export async function getModelContext(name: string): Promise<number> {
+/**
+ * What a server that speaks the Ollama API says about one model's context.
+ *
+ * `known` is false when no source named a length. `max` is then the old
+ * conservative 4096, so what Auto sends does not change; but the number is a
+ * stand in and not a fact, and the context picker must not end its list there
+ * (GH #166: a KoboldCpp started with 262144 behind its Ollama emulation got a
+ * picker that offered "Auto · 4K" and "4K · max" and nothing else).
+ */
+export interface OllamaModelContext {
+  max: number
+  known: boolean
+}
+
+/** What Auto runs with when nobody named the model's length. */
+export const UNKNOWN_MODEL_CONTEXT = 4096
+
+const positiveNumber = (v: unknown): number | null =>
+  typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : null
+
+/** One GET that answers `{ value: N }` (KoboldCpp), or null. */
+async function koboldValue(path: string): Promise<number | null> {
+  try {
+    const res = await localFetch(ollamaUrl(path), { timeoutMs: 5000 })
+    if (!res.ok) return null
+    const body: unknown = await res.json()
+    return typeof body === 'number' ? positiveNumber(body) : positiveNumber(prop(body, 'value'))
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The context window of one model, and whether anyone actually named it.
+ *
+ * Order, each only asked when the one before said nothing:
+ *   1. `/api/show` (`parseOllamaShowContext`). Ollama itself always answers here.
+ *   2. KoboldCpp's own endpoints on the same port, for its Ollama emulation,
+ *      whose `/api/show` carries an empty `model_info` (GH #166):
+ *      `/api/extra/true_max_context_length`, then the KoboldAI
+ *      `/api/v1/config/max_context_length`. Both answer `{ "value": N }`, the
+ *      context the server was started with. (`/api/v1/model` only names the
+ *      model and carries no length.)
+ *   3. `/api/ps`: the `context_length` the model is loaded with right now. Not
+ *      its maximum, but a window the server demonstrably runs.
+ *
+ * Nobody answered: `{ max: 4096, known: false }`. `answered` says whether the
+ * server could be reached at all, so a server that is down does not leave a
+ * stand in cached for the whole session.
+ */
+export async function getModelContextInfo(name: string): Promise<OllamaModelContext & { answered: boolean }> {
+  let answered = false
   try {
     const info = await showModel(name)
+    answered = true
+    const fromShow = parseOllamaShowContext(info)
+    if (fromShow) return { max: fromShow, known: true, answered }
+  } catch { /* fall through to the other sources */ }
 
-    // Try model_info fields (various architectures use different keys)
-    const modelInfo: Record<string, unknown> = isRecord(info.model_info) ? info.model_info : {}
-    const contextFromInfo =
-      modelInfo["general.context_length"] ||
-      // Architecture-specific keys (gemma2.context_length, llama.context_length, etc.)
-      Object.entries(modelInfo).find(([k]) => k.endsWith('.context_length'))?.[1]
+  const kobold =
+    (await koboldValue('/extra/true_max_context_length')) ??
+    (await koboldValue('/v1/config/max_context_length'))
+  if (kobold) return { max: kobold, known: true, answered: true }
 
-    if (contextFromInfo && Number(contextFromInfo) > 0) {
-      return Number(contextFromInfo)
-    }
+  try {
+    const loaded = (await readLoadedModels()).find((m) => m.name === name)
+    answered = true
+    if (loaded && loaded.contextLength > 0) return { max: loaded.contextLength, known: true, answered }
+  } catch { /* nothing more to ask */ }
 
-    // Try parameters (can be a string like "num_ctx 8192" or an object)
-    const params: unknown = info.parameters
-    if (params) {
-      if (isRecord(params) && params.num_ctx) {
-        return Number(params.num_ctx)
-      }
-      if (typeof params === 'string') {
-        const match = params.match(/num_ctx\s+(\d+)/)
-        if (match) return Number(match[1])
-      }
-    }
+  return { max: UNKNOWN_MODEL_CONTEXT, known: false, answered }
+}
 
-    return 4096
-  } catch {
-    return 4096
-  }
+export async function getModelContext(name: string): Promise<number> {
+  return (await getModelContextInfo(name)).max
 }
 
 // Cached model-context lookup so the chat hooks can forward a correct num_ctx
 // to Ollama on EVERY send without an /api/show round-trip each time. A model's
 // trained context length doesn't change at runtime; cache lives for the session.
-const _ctxCache = new Map<string, number>()
-export async function getModelContextCached(name: string): Promise<number> {
+const _ctxCache = new Map<string, OllamaModelContext>()
+export async function getModelContextInfoCached(name: string): Promise<OllamaModelContext> {
   const hit = _ctxCache.get(name)
   if (hit !== undefined) return hit
-  const v = await getModelContext(name)
-  _ctxCache.set(name, v)
+  const { max, known, answered } = await getModelContextInfo(name)
+  const v = { max, known }
+  if (answered) _ctxCache.set(name, v)
   return v
 }
 
+export async function getModelContextCached(name: string): Promise<number> {
+  return (await getModelContextInfoCached(name)).max
+}
+
 /**
- * Force Ollama to (re)load a model with a specific num_ctx RIGHT NOW, so a
- * context-window change from the dropdown takes effect immediately instead of
- * silently on the next chat. Ollama keys its loaded runner by num_ctx, so an
- * `/api/generate` with an empty prompt + `options.num_ctx` swaps the resident
- * KV cache to the new size; `keep_alive` keeps the reloaded model warm.
- * Best-effort — failures are swallowed (the next real chat still sends num_ctx).
+ * The window each model was last sent, by model name.
+ *
+ * Ollama keeps a model loaded for exactly one num_ctx and loads it again for
+ * a request that names another. So the window a model was last sent IS the
+ * window it is loaded with, as far as this app can know it, and it is what a
+ * call that picks no window of its own has to repeat.
  */
-export async function warmupOllamaContext(model: string, numCtx: number): Promise<void> {
-  if (!model || !numCtx || numCtx <= 0) return
+const lastSentWindow = new Map<string, number>()
+
+/**
+ * THE num_ctx of a request to an Ollama model. Every request this app sends
+ * to Ollama gets its window here and nowhere else.
+ *
+ *   - `use` named ('chat' or 'agent'): the window of that use. Only a turn a
+ *     person started names one (see `WindowUse`).
+ *   - `use` left out: the window this model was last sent, and the chat
+ *     window for a model that was sent nothing yet. This is what every call
+ *     nobody sees uses, so none of them can make Ollama load the model again.
+ *
+ * The user's own setting (Settings, or the context menu in the header) wins
+ * over both, at once, for every caller.
+ */
+export async function ollamaNumCtx(model: string, use?: WindowUse): Promise<number> {
+  // Clamped (B13): a typo of 999999999 is a KV-cache reservation of that size.
+  const override = clampContextWindow(useSettingsStore.getState().settings.contextWindowOverride)
+  let window: number
+  if (override > 0) {
+    // With an override the model's own maximum is never read, so nothing is asked.
+    window = override
+  } else if (use) {
+    window = ollamaWindowFor(use, await getModelContextCached(model))
+  } else {
+    window = lastSentWindow.get(model) ?? ollamaWindowFor('chat', await getModelContextCached(model))
+  }
+  lastSentWindow.set(model, window)
+  return window
+}
+
+/**
+ * The `options` entry that carries the window, for a request body. The one
+ * place in the app that writes `num_ctx`. `backend-default` writes nothing.
+ */
+export async function ollamaWindowOption(model: string, choice?: WindowChoice): Promise<{ num_ctx?: number }> {
+  if (choice === 'backend-default') return {}
+  return { num_ctx: await ollamaNumCtx(model, choice) }
+}
+
+/** Forget what was sent. For tests, which share this module between cases. */
+export function forgetSentWindows(): void {
+  lastSentWindow.clear()
+  _ctxCache.clear()
+}
+
+/**
+ * Make Ollama load a model with the window of `use` RIGHT NOW, so a change of
+ * the context window in the header takes effect immediately instead of
+ * silently on the next message. An `/api/generate` with an empty prompt and
+ * the new num_ctx makes Ollama load the model again at that size;
+ * `keep_alive` keeps it warm. Best-effort: a failure is logged and not thrown
+ * (the next message sends the same window). It is a load like any other, so
+ * it has the same limit.
+ */
+export async function reloadOllamaWithWindow(model: string, use: WindowUse): Promise<void> {
+  if (!model) return
+  const limit = callLimit(OLLAMA_LOAD_LIMIT_MS)
   try {
+    const window = await limit.race(ollamaWindowOption(model, use))
     await localFetch(ollamaUrl("/generate"), {
       method: "POST",
-      body: JSON.stringify({ model, prompt: "", stream: false, keep_alive: "30m", options: { num_ctx: numCtx } }),
+      body: JSON.stringify({ model, prompt: "", stream: false, keep_alive: ollamaKeepAlive("30m"), options: window }),
+      signal: limit.signal,
+      timeoutMs: OLLAMA_LOAD_LIMIT_MS + PROXY_SLACK_MS,
     })
-  } catch { /* best-effort warmup — non-fatal */ }
+  } catch (e) {
+    log.warn(`[ollama] reloading "${model}" with the new context window did not finish`, { timedOut: limit.timedOut(), err: e })
+  } finally {
+    limit.clear()
+  }
 }
 
 export async function pullModel(name: string, signal?: AbortSignal): Promise<Response> {
@@ -205,17 +362,66 @@ export async function deleteModel(name: string): Promise<void> {
   if (!res.ok) throw new Error("Failed to delete model")
 }
 
+/** One model as /api/ps reports it. */
+export interface LoadedOllamaModel {
+  name: string
+  /** Bytes the loaded model takes in total, weights and context together. 0 = not reported. */
+  size: number
+  /** How many of those bytes sit in graphics memory. */
+  sizeVram: number
+  /** The window Ollama loaded it with. 0 on a server that does not report it. */
+  contextLength: number
+}
+
+/**
+ * What /api/ps reports about every loaded model, or a throw when it cannot be
+ * read.
+ */
+export async function readLoadedModels(signal?: AbortSignal): Promise<LoadedOllamaModel[]> {
+  const res = await localFetch(ollamaUrl("/ps"), { signal, timeoutMs: 8000 })
+  if (!res.ok) throw new Error(`Ollama did not report its loaded models (HTTP ${res.status}).`)
+  const data: unknown = await res.json()
+  return asRecordArray(prop(data, 'models'))
+    .map((m) => ({
+      name: asString(m.name) || asString(m.model) || '',
+      size: asNumber(m.size) ?? 0,
+      sizeVram: asNumber(m.size_vram) ?? 0,
+      contextLength: asNumber(m.context_length) ?? 0,
+    }))
+    .filter((m) => !!m.name)
+}
+
+/**
+ * The names /api/ps lists, or a throw when it cannot be read.
+ *
+ * For a caller that is about to SAY something about the state: "nothing is
+ * loaded" and "Ollama did not answer" must not look the same to it.
+ */
+export async function readRunningModels(signal?: AbortSignal): Promise<string[]> {
+  return (await readLoadedModels(signal)).map((m) => m.name)
+}
+
+/** The same list for a caller that only shows it: an unreadable list is an empty one. */
 export async function listRunningModels(): Promise<string[]> {
   try {
-    const res = await localFetch(ollamaUrl("/ps"))
-    if (!res.ok) return []
-    const data: unknown = await res.json()
-    return asRecordArray(prop(data, 'models'))
-      .map((m) => asString(m.name) || asString(m.model))
-      .filter((n): n is string => !!n)
+    return await readRunningModels()
   } catch {
     return []
   }
+}
+
+/**
+ * The loaded models a pending load of `name` is waiting behind, or none.
+ *
+ * Ollama lists a model in /api/ps from the moment its runner starts, so while
+ * `name` itself is listed it is loading and waits for nobody. While it is not
+ * listed and others are, Ollama is making room first, and it cannot evict a
+ * model that is still answering: the load waits until that request ends.
+ * /api/ps does not say which model is busy, so all of them are returned.
+ */
+export async function modelsAheadOfLoad(name: string, signal?: AbortSignal): Promise<string[]> {
+  const running = await readRunningModels(signal)
+  return running.includes(name) ? [] : running
 }
 
 // ── Model capabilities (/api/show) ────────────────────────────────
@@ -333,56 +539,158 @@ export async function scanInstalledModels(): Promise<ModelCapabilityCheck[]> {
   return Promise.all(probeable.map(m => checkModelCapability(m.name)))
 }
 
-export async function loadModel(name: string, numCtx?: number): Promise<void> {
-  const options = typeof numCtx === 'number' && numCtx > 0 ? { num_ctx: numCtx } : undefined
-  const res = await localFetch(ollamaUrl("/generate"), {
-    method: "POST",
-    body: JSON.stringify({ model: name, prompt: "", stream: false, keep_alive: "10m", ...(options ? { options } : {}) }),
-  })
-  if (!res.ok) {
-    const { parseOllamaError, ModelLoadError } = await import("../lib/ollama-errors")
-    // Pass the active name in as fallbackModel — Bug C missing-blob errors
-    // only carry the on-disk blob hash, not the model name.
-    const parsed = await parseOllamaError(res, `HTTP ${res.status}`, name)
-    log.warn(`[ollama] failed to load model "${name}"`, { status: res.status, message: parsed.message })
-    throw new ModelLoadError(parsed, name)
-  }
-  // Consume response to ensure model is fully loaded.
-  //
-  // Reading the body IS the wait — Ollama answers /api/generate with
-  // stream:false only once the weights are resident. So a body that fails to
-  // arrive means "we stopped waiting", not "loaded". We still do not throw:
-  // every caller treats loadModel as a warm-up (Header/ModelSelector warm the
-  // picked model, vram-handoff documents its restore as explicitly non-fatal),
-  // and turning a torn read into a user-facing error would be a behaviour
-  // change none of them asked for. What was wrong was doing it in SILENCE:
-  // the one case where "loaded" is a lie left no trace anywhere.
+/**
+ * Load a model and wait until it is resident.
+ *
+ * The request carries the window this model was last sent, and the chat
+ * window for a model that was sent nothing yet (`ollamaNumCtx`). Without it
+ * Ollama loads the model at its own default and the first message loads it a
+ * second time.
+ *
+ * Ollama holds this request for as long as it cannot make room: a model that
+ * is still answering is not evicted. So the call has a limit and takes a
+ * signal. Aborted by the caller it throws an AbortError; at the limit it
+ * throws an `OllamaTimeoutError`. Either way the request is closed, and Ollama
+ * drops a load whose client has gone.
+ */
+export async function loadModel(name: string, optionsOrNumCtx?: OllamaCallOptions | number): Promise<void> {
+  const numCtx = typeof optionsOrNumCtx === 'number' && optionsOrNumCtx > 0 ? optionsOrNumCtx : undefined
+  const options = typeof optionsOrNumCtx === 'object' ? optionsOrNumCtx : undefined
+  const limitMs = options?.timeoutMs ?? OLLAMA_LOAD_LIMIT_MS
+  const limit = callLimit(limitMs, options?.signal)
   try {
-    await res.json()
+    const window = numCtx ? { num_ctx: numCtx } : await limit.race(ollamaWindowOption(name))
+    const res = await localFetch(ollamaUrl("/generate"), {
+      method: "POST",
+      body: JSON.stringify({ model: name, prompt: "", stream: false, keep_alive: ollamaKeepAlive("10m"), options: window }),
+      signal: limit.signal,
+      timeoutMs: limitMs + PROXY_SLACK_MS,
+    })
+    if (!res.ok) {
+      const { parseOllamaError, ModelLoadError } = await import("../lib/ollama-errors")
+      // Pass the active name in as fallbackModel — Bug C missing-blob errors
+      // only carry the on-disk blob hash, not the model name.
+      const parsed = await parseOllamaError(res, `HTTP ${res.status}`, name)
+      log.warn(`[ollama] failed to load model "${name}"`, { status: res.status, message: parsed.message })
+      throw new ModelLoadError(parsed, name)
+    }
+    // Consume response to ensure model is fully loaded.
+    //
+    // Reading the body IS the wait — Ollama answers /api/generate with
+    // stream:false only once the weights are resident. So a body that fails to
+    // arrive means "we stopped waiting", not "loaded". We still do not throw:
+    // every caller treats loadModel as a warm-up (Header/ModelSelector warm the
+    // picked model, vram-handoff documents its restore as explicitly non-fatal),
+    // and turning a torn read into a user-facing error would be a behaviour
+    // change none of them asked for. What was wrong was doing it in SILENCE:
+    // the one case where "loaded" is a lie left no trace anywhere.
+    try {
+      await limit.race(res.json())
+    } catch (e) {
+      if (limit.signal.aborted) throw e
+      log.warn(`[ollama] load of "${name}" returned but its body did not read back`, { err: e })
+    }
   } catch (e) {
-    log.warn(`[ollama] load of "${name}" returned but its body did not read back`, { err: e })
+    if (limit.timedOut()) {
+      log.warn(`[ollama] load of "${name}" ran into its limit of ${limitMs} ms`)
+      throw new OllamaTimeoutError(`Loading ${name} took longer than ${Math.round(limitMs / 60_000)} minutes and was stopped.`)
+    }
+    throw e
+  } finally {
+    limit.clear()
   }
 }
 
-export async function unloadModel(name: string): Promise<void> {
-  const res = await localFetch(ollamaUrl("/generate"), {
-    method: "POST",
-    body: JSON.stringify({ model: name, prompt: "", keep_alive: 0 }),
-  })
-  if (!res.ok) {
-    const { parseOllamaError, ModelLoadError } = await import("../lib/ollama-errors")
-    const parsed = await parseOllamaError(res, `HTTP ${res.status}`)
-    log.warn(`[ollama] failed to unload model "${name}"`, { status: res.status, message: parsed.message })
-    throw new ModelLoadError(parsed, name)
+/**
+ * Ask Ollama to unload a model (`keep_alive: 0`).
+ *
+ * A 200 here means "noted", not "gone": a model that is still answering stays
+ * loaded until that request ends. Whoever reports the result to a person uses
+ * `unloadModelAndLook` or `unloadAllModels`, which read /api/ps afterwards.
+ */
+export async function unloadModel(name: string, options?: OllamaCallOptions): Promise<void> {
+  const limitMs = options?.timeoutMs ?? OLLAMA_UNLOAD_LIMIT_MS
+  const limit = callLimit(limitMs, options?.signal)
+  try {
+    const res = await localFetch(ollamaUrl("/generate"), {
+      method: "POST",
+      body: JSON.stringify({ model: name, prompt: "", keep_alive: 0 }),
+      signal: limit.signal,
+      timeoutMs: limitMs + PROXY_SLACK_MS,
+    })
+    if (!res.ok) {
+      const { parseOllamaError, ModelLoadError } = await import("../lib/ollama-errors")
+      const parsed = await parseOllamaError(res, `HTTP ${res.status}`)
+      log.warn(`[ollama] failed to unload model "${name}"`, { status: res.status, message: parsed.message })
+      throw new ModelLoadError(parsed, name)
+    }
+  } catch (e) {
+    if (limit.timedOut()) {
+      log.warn(`[ollama] unload of "${name}" ran into its limit of ${limitMs} ms`)
+      throw new OllamaTimeoutError(`Ollama did not answer the unload of ${name}.`)
+    }
+    throw e
+  } finally {
+    limit.clear()
   }
 }
 
-export async function unloadAllModels(): Promise<number> {
-  const running = await listRunningModels()
+/**
+ * Which of `names` are still in /api/ps once an unload had time to land.
+ * Looks until none is left or `OLLAMA_UNLOAD_SETTLE_MS` is over.
+ */
+async function stillLoadedAfterUnload(names: string[], signal?: AbortSignal): Promise<string[]> {
+  const deadline = Date.now() + OLLAMA_UNLOAD_SETTLE_MS
+  for (;;) {
+    const running = await readRunningModels(signal)
+    const left = names.filter((name) => running.includes(name))
+    if (left.length === 0 || Date.now() >= deadline) return left
+    await new Promise((resolve) => setTimeout(resolve, UNLOAD_SETTLE_STEP_MS))
+  }
+}
+
+/**
+ * Unload one model and say what really happened: `unloaded` when it has left
+ * /api/ps, `busy` when it is still there (it goes when its running request
+ * ends). Throws when the unload or the look afterwards fails.
+ */
+export async function unloadModelAndLook(name: string, options?: OllamaCallOptions): Promise<"unloaded" | "busy"> {
+  await unloadModel(name, options)
+  return (await stillLoadedAfterUnload([name], options?.signal)).length === 0 ? "unloaded" : "busy"
+}
+
+export interface UnloadAllResult {
+  /** Loaded before, gone from /api/ps now. */
+  unloaded: string[]
+  /** Ollama accepted the unload and the model is still in /api/ps: it is answering. */
+  stillBusy: string[]
+  /** Ollama refused or did not answer the unload, and the model is still in /api/ps. */
+  failed: string[]
+}
+
+/**
+ * Unload every loaded model and report which of them are really gone. Throws
+ * when /api/ps cannot be read, before or after: then nothing true can be said.
+ */
+export async function unloadAllModels(options?: OllamaCallOptions): Promise<UnloadAllResult> {
+  const running = await readRunningModels(options?.signal)
+  const refused: string[] = []
   for (const name of running) {
-    try { await unloadModel(name) } catch (e) { log.warn(`[ollama] unloadAll: failed for "${name}"`, { err: e }) }
+    try {
+      await unloadModel(name, options)
+    } catch (e) {
+      if (options?.signal?.aborted) throw e
+      log.warn(`[ollama] unloadAll: failed for "${name}"`, { err: e })
+      refused.push(name)
+    }
   }
-  return running.length
+  if (running.length === 0) return { unloaded: [], stillBusy: [], failed: [] }
+  const stillLoaded = await stillLoadedAfterUnload(running, options?.signal)
+  return {
+    unloaded: running.filter((name) => !stillLoaded.includes(name)),
+    stillBusy: stillLoaded.filter((name) => !refused.includes(name)),
+    failed: stillLoaded.filter((name) => refused.includes(name)),
+  }
 }
 
 /**
@@ -398,8 +706,15 @@ export async function unloadAllModels(): Promise<number> {
  */
 export async function checkConnection(timeoutMs?: number): Promise<boolean> {
   try {
-    await localFetch(ollamaUrl("/tags"), timeoutMs ? { timeoutMs } : undefined)
-    return true
+    // The STATUS decides, not the absence of a throw. In the packaged app
+    // localFetch does not throw when nothing answers: the proxy fails, the
+    // direct fetch fails, and it hands back a synthetic `Response` with status
+    // 500 carrying the error text (api/backend.ts). Awaiting it and returning
+    // true therefore said "Ollama is there" on every machine without Ollama,
+    // and every caller that trusted it walked into the next error instead
+    // (Document Chat tried `ollama pull` against nothing).
+    const res = await localFetch(ollamaUrl("/tags"), timeoutMs ? { timeoutMs } : undefined)
+    return res.ok
   } catch {
     return false
   }

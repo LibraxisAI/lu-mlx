@@ -18,6 +18,15 @@ export const CODEX_CONFIRM_TOOLS: ReadonlySet<string> = new Set([
   'shell_execute',
   'code_execute',
   'shell_execute_background',
+  // The same capabilities under their typed names (bug hunt 01.10.2026, C3).
+  // Ask mode asked for `git push` typed into shell_execute and waved the
+  // git_push tool through: a test command of the model's choosing, a commit,
+  // a push and a pull request all ran without a card.
+  'run_tests',
+  'git_commit',
+  'git_push',
+  'gh_pr_create',
+  'shell_task_kill',
 ])
 
 /** True when this tool call must be confirmed: the gate is enabled AND the tool
@@ -36,7 +45,7 @@ const PREVIEW_FIELD_MAX = 8000
 
 /** Fields worth showing, in the order a reader needs them. Everything that
  *  decides WHAT runs comes before everything that decides WHERE. */
-const PREVIEW_FIELDS = ['command', 'stdin', 'code', 'script', 'args', 'shell', 'cwd', 'timeout', 'background'] as const
+const PREVIEW_FIELDS = ['command', 'stdin', 'code', 'script', 'args', 'message', 'title', 'body', 'remote', 'branch', 'base', 'runner', 'shell', 'cwd', 'timeout', 'background'] as const
 
 function renderValue(v: unknown): string {
   if (typeof v === 'string') return v
@@ -64,7 +73,12 @@ export function renderApprovalPreview(
 ): string {
   const a = args ?? {}
   const parts: string[] = []
-  for (const key of PREVIEW_FIELDS) {
+  // The known fields first, in reading order, then every other argument: a
+  // field this list does not know (git_push's setUpstream, a task id) still
+  // shapes what runs, and the card is the only place the user sees it.
+  const known: readonly string[] = PREVIEW_FIELDS
+  const keys = [...PREVIEW_FIELDS, ...Object.keys(a).filter((k) => !known.includes(k))]
+  for (const key of keys) {
     const raw = a[key]
     if (raw === undefined || raw === null || raw === '') continue
     const text = renderValue(raw)
@@ -79,8 +93,7 @@ export function renderApprovalPreview(
   // Never render an empty card: a tool call whose args we cannot describe is
   // the LAST thing to wave through silently.
   if (parts.length === 0) {
-    const keys = Object.keys(a)
-    return keys.length === 0
+    return Object.keys(a).length === 0
       ? `${toolName} (no arguments)`
       : `${toolName}\n${JSON.stringify(a, null, 2).slice(0, fieldMax)}`
   }
@@ -90,7 +103,7 @@ export function renderApprovalPreview(
 /**
  * Is the confirm gate active for THIS run?
  *
- * David 2026-08-22, replacing G15a (2026-08-07) and the 2.5.9 default:
+ * 2026-08-22, replacing G15a (2026-08-07) and the 2.5.9 default:
  * bypass means bypass, on a cloud model too. The 2.5.7 review hard-wired
  * `providerId === 'lu-cloud'` into the gate, 2.5.9 turned that into a visible
  * setting that still defaulted ON, and G15a carried it to the Agent surface.

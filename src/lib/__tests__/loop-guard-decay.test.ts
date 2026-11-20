@@ -67,14 +67,29 @@ describe('A1 loop guard: a read whose result was capped never counts', () => {
     expect(last.action === 'halt' && last.reason).toMatch(/identical arguments/)
   })
 
-  it('with the capped marker the same eight rounds never halt', () => {
+  it('with the capped marker the first re-read is forgiven, the cycle after it is not (CA)', () => {
+    // CA, cloud loops (13.11.2026): the loops now keep the newest result of a
+    // read fetched again after a cap WHOLE (context-decay keepWhole), so a
+    // second cap cannot come from age. Forgiving every lap let read, cap, read
+    // run uncounted on a 32k cloud window. Once per read, then it counts.
     const guard = new AgentLoopGuard()
     const trimmed = new Set([keyOf('src/big.ts')])
     const verdicts: string[] = []
     for (let i = 0; i < 8; i++) {
       verdicts.push(guard.recordBatch(readPlusNoise('src/big.ts', i), { trimmedReadKeys: trimmed }).action)
     }
-    expect(verdicts).toEqual(new Array(8).fill('ok'))
+    expect(verdicts.slice(0, 3)).toEqual(['ok', 'ok', 'ok'])
+    expect(verdicts).toContain('steer')
+    expect(verdicts[verdicts.length - 1]).toBe('halt')
+  })
+
+  it('a write in between forgives again: the bytes may have changed', () => {
+    const guard = new AgentLoopGuard()
+    const trimmed = new Set([keyOf('src/big.ts')])
+    for (let round = 0; round < 4; round++) {
+      expect(guard.recordBatch(readPlusNoise('src/big.ts', round), { trimmedReadKeys: trimmed }).action).toBe('ok')
+      guard.recordBatch([{ name: 'file_write', args: `{"path":"src/big.ts","n":${round}}` }])
+    }
   })
 })
 
@@ -88,7 +103,7 @@ describe('A1 loop guard: the steer text never orders work against a stub', () =>
     expect(steer.action === 'steer' && steer.message).toContain('Use the result from before')
   })
 
-  it('never emits that sentence for a read the builder capped', () => {
+  it('never emits that sentence for a read the builder capped (it points at a smaller read)', () => {
     const guard = new AgentLoopGuard()
     const trimmed = new Set([keyOf('a.ts')])
     const seen: string[] = []
@@ -97,8 +112,10 @@ describe('A1 loop guard: the steer text never orders work against a stub', () =>
       // stays out of it; that one is the deliberate backstop, tested below.
       const v = guard.recordBatch(readPlusNoise('a.ts', i), { trimmedReadKeys: trimmed })
       if (v.action === 'steer') seen.push(v.message)
+      if (v.action === 'halt') break
     }
-    expect(seen).toEqual([])
+    expect(seen.join(' ')).not.toContain('Use the result from before')
+    expect(seen.join(' ')).toMatch(/Read only the part you need/)
   })
 })
 
@@ -111,9 +128,11 @@ describe('A1 loop guard: detector 2 skips capped re-reads', () => {
     guard.recordBatch([READ('x.ts')])
     guard.recordBatch(other(2))
     const third = guard.recordBatch([READ('x.ts')])
-    // Detector 2 halts a third identical read batch inside the six-step window
-    // with no warning; that is the behaviour the decay had to be taught about.
-    expect(third.action).toBe('halt')
+    // Detector 2 warns on a third identical read batch inside the six-step
+    // window and halts the next one (C59 A5); the decay had to be taught about both.
+    expect(third.action).toBe('steer')
+    guard.recordBatch(other(3))
+    expect(guard.recordBatch([READ('x.ts')]).action).toBe('halt')
   })
 
   it('the same three batches pass when every read was capped', () => {
@@ -150,6 +169,7 @@ describe('A1 loop guard: the backstop is deliberately left in place', () => {
     guard.recordBatch([READ('y.ts')], { trimmedReadKeys: trimmed })
     guard.recordBatch([READ('y.ts')], { trimmedReadKeys: trimmed })
     const third = guard.recordBatch([READ('y.ts')], { trimmedReadKeys: trimmed })
-    expect(third.action).toBe('halt')
+    expect(third.action).toBe('steer')
+    expect(guard.recordBatch([READ('y.ts')], { trimmedReadKeys: trimmed }).action).toBe('halt')
   })
 })

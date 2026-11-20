@@ -1,4 +1,6 @@
 import { Fragment, useState, type ReactNode } from 'react'
+import { parseSettingChange } from '../../api/mcp/settings-tools'
+import { parseSelfControlAction } from '../../api/mcp/self-control-defs'
 import { AnimatePresence, motion } from 'framer-motion'
 import { AlertCircle, Check, ChevronDown, Wrench } from 'lucide-react'
 import type { AgentBlock, AgentToolCall } from '../../types/agent-mode'
@@ -13,6 +15,7 @@ import {
   groupIsLive,
   type BandNote,
 } from '../../lib/tool-call-groups'
+import { hasUnrecoveredFailure } from '../../lib/recovered-failure'
 import { MOTION_S } from '../ui/motion'
 
 interface Props {
@@ -28,7 +31,7 @@ interface Props {
 }
 
 /**
- * One row for a whole run of consecutive tool calls (David 2026-07-31).
+ * One row for a whole run of consecutive tool calls (2026-07-31).
  *
  * While the run is live the band renders only the ACTIVE call and morphs in
  * place when the agent moves to the next tool — file_read transitions into
@@ -37,7 +40,7 @@ interface Props {
  *
  * Two things must never disappear into the collapse: an approval request
  * (activeToolCall puts it in front, and ToolCallBlock opens itself for
- * pending_approval), and completed media results (konata 2026-06-07 "and no
+ * pending_approval), and completed media results (a user 2026-06-07 "and no
  * image") — those calls keep rendering below the band whatever its state.
  */
 export function ToolCallBand({ calls, notes, renderNote, pendingApprovalId, onApprove, onReject }: Props) {
@@ -45,7 +48,9 @@ export function ToolCallBand({ calls, notes, renderNote, pendingApprovalId, onAp
   const expanded = userToggled ?? false
   const live = groupIsLive(calls)
   const active = activeToolCall(calls)
-  const anyFailed = calls.some((c) => c.status === 'failed' || c.status === 'rejected')
+  // A failure the run fixed by itself does not mark the header (Gegenprobe
+  // 01.10.2026); the step keeps its own mark in the expanded list.
+  const anyFailed = hasUnrecoveredFailure(calls)
   const durationLabel = groupDurationLabel(calls)
 
   const blockFor = (tc: AgentToolCall) => {
@@ -60,11 +65,12 @@ export function ToolCallBand({ calls, notes, renderNote, pendingApprovalId, onAp
     )
   }
 
-  // Completed media calls stay visible outside the collapse/morph.
+  // Completed media calls stay visible outside the collapse/morph, and so
+  // does a settings change with its Undo (A11).
   const mediaCalls = calls.filter(
     (c) =>
       c.status === 'completed' &&
-      (comfyViewUrlFromResult(c.result) || localMediaUrlFromResult(c.result)),
+      (comfyViewUrlFromResult(c.result) || localMediaUrlFromResult(c.result) || !!parseSettingChange(c.result) || !!parseSelfControlAction(c.result)),
   )
 
   // A lone call is not spam — render it plain, exactly like before.
@@ -150,7 +156,7 @@ function BandHeader({
       className="flex items-center gap-1.5 py-0.5 text-left hover:opacity-80 transition-opacity min-w-0"
     >
       <Wrench size={10} className="text-gray-500 dark:text-gray-500 shrink-0" />
-      <span className="t-micro text-gray-600 dark:text-gray-400">
+      <span className="t-micro italic pr-0.5 text-gray-600 dark:text-gray-400">
         {calls.length} steps
       </span>
       {!live &&

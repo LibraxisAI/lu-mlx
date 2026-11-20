@@ -53,7 +53,9 @@ describe('die Stellen, an denen es stand', () => {
     for (const [datei, stelle] of [
       ['components/models/ModelTiles.tsx', 'countLabel(bundle.files.length'],
       ['components/models/DiscoverModels.tsx', 'countLabel(confirmDownload.files.length'],
-      ['components/layout/DownloadBadge.tsx', 'countLabel(files.length'],
+      // Die Zeile des Download-Streifens entsteht seit dem 03.10.2026 in
+      // lib/download-tray (bundleVerdict), dort wird auch gezaehlt.
+      ['lib/download-tray.ts', "countLabel(done, 'file')"],
     ] as const) {
       const src = lies(datei)
       expect(src).toContain(stelle)
@@ -64,7 +66,7 @@ describe('die Stellen, an denen es stand', () => {
   it('das X ueber einem einzelnen Download heisst nicht "Cancel all"', () => {
     const src = lies('components/layout/DownloadBadge.tsx')
     expect(src).toContain("files.length === 1 ? 'Cancel' : 'Cancel all'")
-    expect(src).toContain("files.length === 1 ? 'Dismiss' : 'Dismiss all'")
+    expect(src).toContain("isBundle ? 'Dismiss all' : 'Dismiss'")
     expect(src).not.toContain('title="Cancel all"')
   })
 

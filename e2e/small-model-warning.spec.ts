@@ -14,7 +14,7 @@ test('catalog warning is fully readable and retained in model details', async ({
   await seedOnboardingDone(page)
   await page.goto('/')
   await page.getByRole('button', { name: 'Models', exact: true }).click()
-  await page.getByRole('button', { name: 'Unfiltered', exact: true }).click()
+  await page.getByRole('button', { name: 'Mainstream', exact: true }).click()
   const recommendations = page.getByRole('region', { name: 'Start here', exact: true })
   await expect(recommendations).toBeVisible()
   await expect(recommendations.getByTestId('small-chat-model-warning')).toHaveCount(0)

@@ -2,7 +2,7 @@
  * @vitest-environment jsdom
  *
  * Runde 5 Nachtrag (review-lanes.md Runde 2, Grep-Audit dieser Runde,
- * David's Nachtrag danach): useChat.ts's `/compact` branch fired a genuine
+ * The owner's addendum after it): useChat.ts's `/compact` branch fired a genuine
  * inference call (`runCompactForConversation` -> `compact-run.ts`'s
  * `provider.chatStream`) entirely BEFORE `sendMessage`'s own `runInLane`
  * call for the normal turn. A local `/compact` could stream from the
@@ -75,7 +75,7 @@ beforeEach(() => {
   useGenerationStore.setState({ generating: {}, aborters: {}, runs: {} })
   useModelStore.setState({ models: [], activeModel: LOCAL_MODEL })
   useSettingsStore.setState({
-    settings: { ...DEFAULT_SETTINGS, appMode: 'local', cavemanMode: 'off', chatToolsEnabled: false },
+    settings: { ...DEFAULT_SETTINGS, appMode: 'local', cavemanMode: 'off' },
   })
   useProviderStore.setState((s) => ({
     providers: {
@@ -179,7 +179,7 @@ describe('/compact bucht die lokale Spur', () => {
 
     useModelStore.setState({ models: [], activeModel: CLOUD_MODEL })
     useSettingsStore.setState({
-      settings: { ...DEFAULT_SETTINGS, appMode: 'cloud', cavemanMode: 'off', chatToolsEnabled: false },
+      settings: { ...DEFAULT_SETTINGS, appMode: 'cloud', cavemanMode: 'off' },
     })
     seed(CLOUD_MODEL)
     const { result } = renderHook(() => useChat())

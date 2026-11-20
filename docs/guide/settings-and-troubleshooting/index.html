@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Locally Uncensored Settings and Troubleshooting: Every Tab, Log File, Engine Errors</title>
+<title>Locally Uncensored Settings and Troubleshooting Guide</title>
 <meta name="description" content="Every settings tab of Locally Uncensored in one line each, where the log file is and what to send when asking for help, the exact engine and trainer error sentences and their fixes, Linux notes, storage paths and reset.">
 <meta name="robots" content="index, follow">
 <meta name="theme-color" content="#0a0a0a">
@@ -15,15 +15,18 @@
 <meta property="og:image" content="https://locallyuncensored.com/social-preview.png">
 <meta name="twitter:card" content="summary_large_image">
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"TechArticle","headline":"Locally Uncensored Settings and Troubleshooting: Every Tab, Log File, Engine Errors","description":"Every settings tab of Locally Uncensored in one line each, where the log file is and what to send when asking for help, the exact engine and trainer error sentences and their fixes, Linux notes, storage paths and reset.","url":"https://locallyuncensored.com/guide/settings-and-troubleshooting/","dateModified":"2026-09-11","inLanguage":"en","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/guide/settings-and-troubleshooting/"},"isPartOf":{"@type":"WebPage","name":"Locally Uncensored Handbook: Install, Chat, Agent, Code, Create, Cloud","url":"https://locallyuncensored.com/guide/"},"about":{"@type":"SoftwareApplication","name":"Locally Uncensored","operatingSystem":"Windows, Linux","applicationCategory":"UtilitiesApplication"}}
+{"@context":"https://schema.org","@type":"TechArticle","headline":"Locally Uncensored Settings and Troubleshooting: Every Tab, Log File, Engine Errors","description":"Every settings tab of Locally Uncensored in one line each, where the log file is and what to send when asking for help, the exact engine and trainer error sentences and their fixes, Linux notes, storage paths and reset.","url":"https://locallyuncensored.com/guide/settings-and-troubleshooting/","dateModified":"2026-10-20","inLanguage":"en","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/guide/settings-and-troubleshooting/"},"isPartOf":{"@type":"WebPage","name":"Locally Uncensored Handbook: Install, Chat, Agent, Code, Create, Cloud","url":"https://locallyuncensored.com/guide/"},"about":{"@type":"SoftwareApplication","name":"Locally Uncensored","operatingSystem":"Windows, Linux, macOS","applicationCategory":"UtilitiesApplication"}}
 </script>
 <link rel="icon" href="/favicon.png">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://locallyuncensored.com/"},{"@type":"ListItem","position":2,"name":"Guide","item":"https://locallyuncensored.com/guide/"},{"@type":"ListItem","position":3,"name":"Settings and troubleshooting","item":"https://locallyuncensored.com/guide/settings-and-troubleshooting/"}]}
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/assets/lu.css">
 <script defer src="/assets/lu.js"></script>
-  <script data-goatcounter="https://lu-uncensored.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+  <script data-goatcounter="https://purple47.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
 </head>
 <body>
 <nav class="lu-nav">
@@ -33,15 +36,17 @@
   </a>
   <div class="lu-nav-links" id="lu-nav-links">
     <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/pricing/">Pricing</a>
     <a class="lu-nav-link" href="/blog/">Blog</a>
     <a class="lu-nav-link" href="/guide/">Guide</a>
     <a class="lu-nav-link" href="/remote-access/">Remote</a>
   </div>
   <div class="lu-nav-right">
-    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">1600+&#8202;⭐</span></a>
-    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">800+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">4200+&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">1700+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
     <span class="lu-nav-sep"></span>
     <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="he-cta" href="/pricing/" aria-label="LU Cloud plans and what they include"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>Cloud</a>
     <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
     <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
   </div>
@@ -59,6 +64,7 @@
 <a href="#comfy">ComfyUI errors the repair cannot fix</a>
 <a href="#trainer">Trainer errors</a>
 <a href="#linux">Linux notes</a>
+<a href="#v306">Known issues since 3.0.6</a>
 <a href="#reset">Reset</a>
 </nav>
 
@@ -76,7 +82,7 @@
 <tr><td>Appearance</td><td>Theme (Light or Dark, dark by default) and a profile picture.</td></tr>
 <tr><td>Generation</td><td>The defaults for new chats: Temperature 0.7, Top P 0.9, Top K 40, Max Tokens 0 (auto), "Context window (Ollama)" 0 (auto) and "Auto-compact at" as a percentage, 0 = off. Chapter 4.</td></tr>
 <tr><td>Hardware (GPU picker)</td><td>Vendor (Auto, NVIDIA, AMD, Intel) and "ComfyUI GPU (image / video)" with Auto, Force GPU and Force CPU. Leave both on Auto unless a message tells you otherwise.</td></tr>
-<tr><td>Import from other chatbots</td><td>Reads the export files of ChatGPT, Claude and Gemini into your chat list.</td></tr>
+<tr><td>Import from other chatbots</td><td>Turns the conversations of a ChatGPT export into chats in your chat list. Claude and Gemini exports are read the same way, but have not been tried with real exports.</td></tr>
 <tr><td>Chat Backup</td><td>"Export all chats" to one file and "Import chats" from it.</td></tr>
 <tr><td>Image / Video Generation Timeouts</td><td>How long a render may take before the app gives up: Image 20 minutes, Video 60 minutes, each settable from 1 to 480.</td></tr>
 <tr><td>Privacy</td><td>The app's own statement of what leaves your machine, and where its data folder is.</td></tr>
@@ -90,10 +96,10 @@
 <table>
 <tr><th>Section</th><th>What is in it</th></tr>
 <tr><td>Providers</td><td>Every engine the app can talk to, in a Local and a Cloud group, each with "Test", "Enable" or "Disable", and "Add Provider" for one that is not listed. Local presets and their default addresses: LU Engine (127.0.0.1:8127, managed by the app), Ollama (11434), LM Studio (1234), vLLM (8000), llama.cpp (8080), LiteLLM (4000), KoboldCpp (5001), text-generation-webui (5000), LocalAI (8080), Jan (1337), TabbyAPI (5000), GPT4All (4891), Aphrodite (2242), SGLang (30000), TGI (8080). Cloud presets with your own key: OpenRouter, Groq, Together, DeepSeek, Mistral, OpenAI, Anthropic, and "Custom (OpenAI-compat)" for any address. "Test" reports Connected, Failed, Not running or Reachable, no models.</td></tr>
-<tr><td>Model Storage</td><td>Three rows. "LU Engine folder" with "Browse…" and "Reset": the app downloads GGUF files here and reads every .gguf in a folder you set, up to four levels down. "LM Studio folder" (read only, shown when LM Studio is installed). "Ollama" keeps its own model store. "Scan for local models" finds files from other tools and "Import" links them into the LU Engine folder without copying.</td></tr>
+<tr><td>Model Storage</td><td>Three rows. "LU Engine folder" with "Browse…" and "Reset": the app downloads GGUF files here and reads every .gguf in a folder you set, up to four levels down. "LM Studio folder" (read only, shown when LM Studio is installed). "Ollama" keeps its own model store. "Scan for local models" finds files from other tools and "Import" links them into LU's own model folder without copying, also when you set another LU Engine folder.</td></tr>
 <tr><td>CivitAI API key, Hugging Face token</td><td>Keys for downloads those sites refuse without a login ("a gated repository refuses the download with HTTP 401. A free read token is enough").</td></tr>
 <tr><td>LU Engine (expert)</td><td>"Context length (tokens)" (0 = default 8192), "Flash attention" (auto, on, off), "KV cache" K and V types, "CPU threads" (-1 = auto), "GPU layers" ("-1 = all layers on GPU · 0 = CPU only · N = partial offload for models bigger than your VRAM."), "Lock model in RAM (mlock)", "Load fully into RAM (disable mmap)", and "Apply &amp; Restart Engine". The line under the heading shows "Port: 8127", "Port: 8130 (8127 was taken)" or "Engine not running".</td></tr>
-<tr><td>ComfyUI (Image &amp; Video)</td><td>Status (Running, Not responding, Starting, Stopped, Not Installed), Host and Path with "Connect", Port with "Set" (8188 by default; "Port saved. Restart ComfyUI to apply."), and the buttons "Start", "Stop", "Restart", "Repair environment", "Install ComfyUI" or "Re-install ComfyUI", "Update ComfyUI" and "Cancel" while a job runs. The note "Installs to your home folder by default. Set Path above (e.g. D:\ComfyUI) to install on another drive." Chapter 7.</td></tr>
+<tr><td>ComfyUI (Image &amp; Video)</td><td>Status (Running, Not responding, Starting, Stopped, Not Installed), Host and Path with "Connect", Port with "Set" (8188 by default; "Port saved. Restart ComfyUI to apply."; with no port saved, LU follows a ComfyUI Desktop that answers on 8000), the switch "Start ComfyUI when LU starts" (off unless LU installed this ComfyUI itself: at launch LU only connects to a ComfyUI that is already running and starts one only on Start or when you create something), and the buttons "Start", "Stop", "Restart", "Repair environment", "Install ComfyUI" or "Re-install ComfyUI", "Update ComfyUI" and "Cancel" while a job runs. The note "Installs to your home folder by default. Set Path above (e.g. D:\ComfyUI) to install on another drive." Chapter 7.</td></tr>
 </table>
 
 <h3>Agent</h3>
@@ -116,7 +122,7 @@
 <tr><th>Section</th><th>What is in it</th></tr>
 <tr><td>Speech</td><td>"Voice runs 100% locally, no cloud". Speech to text: faster-whisper with "Download &amp; Install". Text to speech: "Enable read-aloud", "Auto-read new responses", Engine (Piper neural, about 63 MB, or an external HTTP server) and the voice list. Chapter 4.</td></tr>
 <tr><td>Remote Access</td><td>Lets a phone or another computer drive this app. Four permission switches: "Filesystem Access", "Downloads &amp; Installs", "Process Control", "Shell &amp; Code Execution", all off until you turn them on, and a "Connected Devices" list. Pairing happens in the sidebar's "Remote" tab by QR code and passcode, over your network or through a Cloudflare tunnel; the app listens on port 11435 for it.</td></tr>
-<tr><td>Local API</td><td>"One OpenAI-compatible address for every model on this machine", on port 8129 by default, for other programs on your computer. "Reachable on the network" opens it to the LAN; off, it answers this machine only. It needs a token ("The API will not start without a token. Generate one first.") and every request must carry it.</td></tr>
+<tr><td>Local API</td><td>"One OpenAI-compatible address for every model on this machine", on port 8129 by default, for other programs on your computer. "Reachable on the network" opens it to the LAN; off, it answers this machine only. It needs a token ("The API will not start without a token. Generate one first.") and every request must carry it. "Start with LU" starts it every time the app opens, with the same settings.</td></tr>
 </table>
 
 <h2 id="help">The log file, and what to send when you ask for help</h2>
@@ -163,7 +169,7 @@
 
 <p><strong>"This model is loaded in the LU Engine right now. Stop the engine or switch to another model, then delete it."</strong> When deleting a model. Pick another model first.</p>
 
-<p><strong>"Could not link the model into the LU Engine folder ((reason)). Linking needs source and destination on the same drive. Move the models folder (Settings, Model Storage) to that drive, or copy the file there yourself."</strong> Importing a model from another tool works by a link, which cannot cross drives. Either move the LU Engine folder to that drive or copy the file.</p>
+<p><strong>"Could not link the model into the LU Engine folder ((reason)). Linking needs source and destination on the same drive. Move the models folder (Settings, Model Storage) to that drive, or copy the file there yourself."</strong> Importing a model from another tool works by a link into LU's own model folder, which cannot cross drives. In 3.0.6 moving the LU Engine folder does not help, because the link always goes to LU's own folder. Copy the file into your LU Engine folder yourself instead; the engine reads every .gguf there. See <a href="/guide/storage/">LU and your models on another drive</a>.</p>
 
 <h2 id="models">Model download and storage errors</h2>
 
@@ -236,6 +242,52 @@
 <li>Where the files live is in chapter 2.</li>
 </ul>
 
+<h2 id="v306">Known issues since 3.0.6, and what to do about them</h2>
+
+<p>3.0.6 added Voice, computer control, Create in chat and a Mac build, and the first three of those carry the word Beta in the app. These are the things people ran into most with 3.0.6. The <a href="/blog/locally-uncensored-v3-0-6-release.html">3.0.6 release notes</a>, the <a href="/blog/locally-uncensored-v3-0-7-release.html">3.0.7 release notes</a> and the <a href="/blog/locally-uncensored-v3-0-9-release.html">3.0.9 release notes</a> have the full lists of what is and is not tested.</p>
+
+<h3>Windows warns about the installer</h3>
+<p>The Windows installers of 3.0.6 to 3.0.10 are not code signed, so SmartScreen and some antivirus engines can warn about them. Chapter 2 explains the warning, and <a href="/is-locally-uncensored-safe/">Is Locally Uncensored safe?</a> says how to check a download.</p>
+
+<h3>The app stayed closed after updating to 3.0.6 (macOS, Linux)</h3>
+<p>Restart Now used to close the app on macOS and Linux without starting it again. The fix is part of 3.0.6, so it works from the next update on, and the update to 3.0.6 itself can still leave the app closed. Start it by hand once. Windows is not affected, because the installer starts the app there.</p>
+
+<h3>Voice is missing from the navigation</h3>
+<p>Voice is shown in local mode only. With the Cloud switch on it is hidden, because LU Cloud has no voice service yet. Switch Cloud off and it is back.</p>
+
+<h3>The first voice session takes a long time to start</h3>
+<p>The first session after setup or after a restart loads the speech models. In our Windows tests that took 23 to 63 seconds, against about one second later. What you say after the Start click is kept for up to a minute and answered once the session is up.</p>
+
+<h3>Voice cuts off the start of what I say, or I cannot interrupt it</h3>
+<p>Speaking while LU speaks relies on the echo cancellation of your system. With loud speakers and no headset, the first words of an interruption can be quiet or missing. For the first six seconds after Start, a voice that reaches the microphone only faintly is turned down. A headset helps with both. Voice is English only.</p>
+
+<h3>The wrong microphone is used</h3>
+<p>Settings, Voice &amp; Remote, Speech has a Microphone field with the system default and your devices by name. The names appear once the app may use the microphone, and a button under the field asks for that. If the chosen device is unplugged, LU records from the system default and keeps your choice. This field has run in automated tests and not yet with a real microphone.</p>
+
+<h3>Dictation failed with "open() got an unexpected keyword argument 'metadata_errors'"</h3>
+<p>That was a speech-to-text install on Python 3.12 or newer. 3.0.6 fixes it in the dictation server that ships with the app, so no reinstall is needed. Update and try again.</p>
+
+<h3>Computer control does nothing on Linux</h3>
+<p>Computer control needs an X11 session on Linux, and it has not been run in the app on Linux yet. On Linux and macOS every click is asked as a sensitive action, because LU cannot name what a click would press there.</p>
+
+<h3>Computer control on a Mac asks for permissions</h3>
+<p>macOS has to grant two permissions first, Accessibility and Screen Recording. LU asks above the input field under "macOS has to allow this first", with a button that opens the right page in System Settings. Computer control on a Mac is in the app but not fully tested yet.</p>
+
+<h3>A local model ignores the picture I attached</h3>
+<p>A local model of the LU Engine sees pictures only with its image part next to it. Add image input fetches the missing file, on the model's row under Models or at the top of the chat once a picture is attached. If the graphics memory has no room for the image part, the model loads without it and LU says so.</p>
+
+<h3>An Ollama model got slow</h3>
+<p>A context window that is too large for the graphics memory moves part of the model to the processor, and every answer gets slower. After a load LU now shows how much of the model sits in graphics memory, in the context window list and on the model's row in the picker. Pick a smaller context window if most of it sits on the processor.</p>
+
+<h3>Loading an LM Studio model hangs</h3>
+<p>The load switch turns into Cancel while a model loads, and a load ends after five minutes at the latest with the sentence LM Studio's own command gave.</p>
+
+<h3>"CUDA error: unknown error" in Create</h3>
+<p>That error comes from the graphics driver and not from the model or your prompt. It usually clears after restarting ComfyUI or the computer. If it keeps coming back, update the graphics driver.</p>
+
+<h3>"Could not load that gallery image: Load failed"</h3>
+<p>Picking a picture you had just made as the source in Edit failed with this sentence before 3.0.6. Update and it works, also as the start image of a video and for Download in the gallery.</p>
+
 <h2 id="reset">Reset</h2>
 
 <p>At the bottom of every settings tab sit two buttons. "Reset General to defaults" (with the tab's name) puts that tab back; "Reset all settings" resets everything. Both need a second click: the button changes to "Click again to reset General" or "Click again to reset everything" and waits four seconds. The note under them reads "Personas, memories, conversations, workflows and MCP servers are kept." There is no button that deletes your chats or models; delete models under Models, Installed, and chats from their row in the sidebar, or remove the folders from chapter 2 after uninstalling.</p>
@@ -248,6 +300,15 @@
   <div class="footer-row footer-links">
     <a href="https://locallyuncensored.com/blog/">Blog</a>
     <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/pricing/">Pricing</a>
+    <a href="https://locallyuncensored.com/cloud/">LU Cloud</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-chat-online/">Uncensored AI chat online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-image-generator-online/">Image generator online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-video-generator-online/">Video generator online</a>
+    <a href="https://locallyuncensored.com/unrestricted-ai/">Unrestricted AI</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-coding-agent/">AI coding agent</a>
+    <a href="https://locallyuncensored.com/alternatives/">Alternatives</a>
+    <a href="https://locallyuncensored.com/is-locally-uncensored-safe/">Is it safe?</a>
     <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
     <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
     <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
@@ -255,6 +316,9 @@
     <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
     <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
     <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+    <a href="https://locallyuncensored.com/privacy/">Privacy</a>
+    <a href="https://locallyuncensored.com/terms/">Terms</a>
+    <a href="https://locallyuncensored.com/impressum/">Impressum</a>
   </div>
 </footer>
 </body>

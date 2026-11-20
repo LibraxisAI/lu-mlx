@@ -15,7 +15,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { shortModelLabel } from '../model-label'
+import { shortModelLabel, modelDisplayLabel } from '../model-label'
 import { displayModelName } from '../../api/providers/model-name'
 
 describe('F3: the model header keeps everything after a colon', () => {
@@ -36,6 +36,16 @@ describe('F3: the model header keeps everything after a colon', () => {
   it('ModelSelector.tsx no longer truncates the header at the first colon', () => {
     const src = readFileSync(resolve(__dirname, '../../components/models/ModelSelector.tsx'), 'utf8')
     expect(src).not.toContain("displayModelName(gezeigtesModell).split(':')[0]")
-    expect(src).toContain('shortModelLabel(displayModelName(gezeigtesModell))')
+    expect(src).toContain('modelDisplayLabel(models, gezeigtesModell)')
+  })
+
+  it('the shared label keeps the full Ollama tag and prefers the catalogue name', () => {
+    expect(modelDisplayLabel([], 'ollama::llama3.1:8b-instruct-q4_K_M')).toBe(
+      shortModelLabel(displayModelName('ollama::llama3.1:8b-instruct-q4_K_M')),
+    )
+    expect(modelDisplayLabel([], 'ollama::llama3.1:8b-instruct-q4_K_M')).toContain('8b-instruct')
+    expect(modelDisplayLabel([{ name: 'lu-cloud::moonshotai/Kimi-K2.6', displayName: 'Kimi K2.6' }], 'lu-cloud::moonshotai/Kimi-K2.6')).toBe('Kimi K2.6')
+    // The answer bubble keeps the bare id; it still gets the catalogue name.
+    expect(modelDisplayLabel([{ name: 'lu-cloud::moonshotai/Kimi-K2.6', displayName: 'Kimi K2.6' }], 'moonshotai/Kimi-K2.6')).toBe('Kimi K2.6')
   })
 })

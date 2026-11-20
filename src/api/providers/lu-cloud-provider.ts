@@ -9,12 +9,21 @@
 
 import type {
   ProviderClient, ProviderModel, ProviderConfig, ChatMessage, ChatOptions,
-  ChatStreamChunk, ToolCall, ToolDefinition,
+  ChatStreamChunk, ToolCall, ToolDefinition, ChatBilling,
 } from './types'
 import { ProviderError } from './types'
 import { OpenAIProvider } from './openai-provider'
 import { getAccessToken } from '../cloud/supabase'
 import { CLOUD_BASE } from '../cloud/config'
+import { outageAfterFailure } from '../../lib/cloud-outage-watch'
+
+/** `err` as it reaches the chat: while LU Cloud has an outage the server
+ *  announced, a failure that may be part of it carries the server's sentence
+ *  under the code `outage` (lib/cloud-outage.ts). Anything else unchanged. */
+async function asOutage(err: unknown): Promise<unknown> {
+  const message = await outageAfterFailure(err)
+  return message ? new ProviderError(message, 'lu-cloud', 'outage', 503) : err
+}
 
 export class LuCloudProvider implements ProviderClient {
   readonly id = 'lu-cloud' as const
@@ -52,6 +61,9 @@ export class LuCloudProvider implements ProviderClient {
       baseUrl: `${CLOUD_BASE}/api/inference/v1`,
       apiKey: token,
       isLocal: false,
+      // Its reasoners continue from their own reasoning between tool calls
+      // (lib/agent-core/reasoning-replay.ts).
+      replayReasoning: true,
     })
   }
 
@@ -60,8 +72,12 @@ export class LuCloudProvider implements ProviderClient {
     messages: ChatMessage[],
     options?: ChatOptions,
   ): AsyncGenerator<ChatStreamChunk> {
-    const inner = await this.delegate()
-    yield* inner.chatStream(model, messages, options)
+    try {
+      const inner = await this.delegate()
+      yield* inner.chatStream(model, messages, options)
+    } catch (err) {
+      throw await asOutage(err)
+    }
   }
 
   async chatWithTools(
@@ -69,9 +85,13 @@ export class LuCloudProvider implements ProviderClient {
     messages: ChatMessage[],
     tools: ToolDefinition[],
     options?: ChatOptions,
-  ): Promise<{ content: string; toolCalls: ToolCall[]; promptEvalCount?: number; evalCount?: number }> {
-    const inner = await this.delegate()
-    return inner.chatWithTools(model, messages, tools, options)
+  ): Promise<{ content: string; toolCalls: ToolCall[]; promptEvalCount?: number; evalCount?: number; cachedPromptCount?: number; thinking?: string; billing?: ChatBilling }> {
+    try {
+      const inner = await this.delegate()
+      return await inner.chatWithTools(model, messages, tools, options)
+    } catch (err) {
+      throw await asOutage(err)
+    }
   }
 
   async listModels(): Promise<ProviderModel[]> {

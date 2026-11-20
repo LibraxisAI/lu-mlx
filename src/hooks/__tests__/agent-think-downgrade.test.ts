@@ -1,7 +1,7 @@
 /**
  * The thinking downgrade must have something to drop.
  *
- * All three agent branches answer a 400 (DeepInfra: 422) by resending without
+ * All three agent branches answer a 400 (the hosted backend: 422) by resending without
  * `thinking`. When the turn never asked for thinking in the first place, that
  * resend is byte for byte the request that just failed: a second refusal, a
  * second charge on the cloud path, and a second wait for the user. useChat has
@@ -99,10 +99,10 @@ describe('the call sites name why, so nobody removes them as noise', () => {
   })
 
   it('the provider branch names where its 422 comes from', () => {
-    // Die 422-Entscheidung: DeepInfra hinter dem LU-Cloud-Proxy, erreicht ueber
+    // Die 422-Entscheidung: der Upstream hinter dem LU-Cloud-Proxy, erreicht ueber
     // provider.chatStream. Ohne diesen Satz sieht die Nummer beim naechsten
     // Aufraeumen wieder wie useChat-Folklore aus.
-    expect(src).toContain('DeepInfra behind the LU Cloud proxy')
+    expect(src).toContain('the upstream behind the LU Cloud proxy')
     expect(src).toContain('422')
   })
 })

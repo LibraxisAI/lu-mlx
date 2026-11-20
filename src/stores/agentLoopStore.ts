@@ -78,3 +78,20 @@ export function useConversationLoop(conversationId: string | null | undefined): 
 export function useAnyAgentLoopActive(): boolean {
   return useAgentLoopStore((s) => Object.keys(s.loops).length > 0)
 }
+
+/**
+ * End the loop of a pass that settled without arming a next one (GH #140).
+ *
+ * A pass can end before it reaches the driver that re-arms or clears the loop:
+ * the run guard, a lane that was cancelled, no model picked, a throw before
+ * the tool loop. Such a pass left the bar saying "running" for a loop that was
+ * over, and the Code view kept the working folder locked behind it
+ * (useAnyAgentLoopActive). `rearmed` asks the caller's own timer map whether
+ * the driver scheduled the next pass meanwhile. A rejected pass still rejects
+ * the returned promise, so nothing that used to reach the console is hidden.
+ */
+export function endLoopUnlessRearmed(conversationId: string, pass: unknown, rearmed: () => boolean): Promise<unknown> {
+  return Promise.resolve(pass).finally(() => {
+    if (!rearmed()) useAgentLoopStore.getState().clear(conversationId)
+  })
+}

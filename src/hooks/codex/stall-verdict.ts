@@ -9,7 +9,7 @@
  * dokumentierte Geschichte von FEHLALARMEN hat:
  *
  *  • Die frueher umgekehrte Fassung ("anstupsen, ausser ein Abschlusswort
- *    kommt vor") drehte bei bereits beantworteten Fragen durch — David
+ *    kommt vor") drehte bei bereits beantworteten Fragen durch — der Inhaber
  *    2026-06-02: der Coding-Agent "antwortet in loops" auf eine simple Frage,
  *    weil "completed" nie auf den Abschluss-Regex passte.
  *
@@ -20,7 +20,7 @@
  *
  *  • Ein LEERER Zug stupst nur, wenn noch NICHTS geliefert wurde. Leer NACH
  *    einer echten Antwort heisst fertig; anders blieben die Schreibpunkte
- *    stehen, lange nachdem die Antwort da war (David 2026-06-12: "die punkte
+ *    stehen, lange nachdem die Antwort da war (2026-06-12: "die punkte
  *    bleiben so lange obwohl keine antwort mehr kam").
  *
  * Die Muster sind woertlich uebernommen. Das Urteil ist eine reine Funktion

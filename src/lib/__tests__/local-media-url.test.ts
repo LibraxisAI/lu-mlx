@@ -29,7 +29,7 @@ beforeEach(() => backendCall.mockReset())
 
 describe('path round-trip', () => {
   it('survives a plain path', () => {
-    const p = '/Users/purple/Library/Application Support/lu/mlx/mlx-1.png'
+    const p = '/Users/alice/Library/Application Support/lu/mlx/mlx-1.png'
     expect(fileUrlToPath(pathToFileUrl(p))).toBe(p)
   })
 

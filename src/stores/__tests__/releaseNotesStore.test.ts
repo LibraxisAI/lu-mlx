@@ -1,5 +1,5 @@
 /**
- * B4 (David 2026-08-04): "what is new" once per VERSION.
+ * B4 (2026-08-04): "what is new" once per VERSION.
  *
  * The whole feature is one decision, and it has exactly one trap: a null flag
  * means two different things. A fresh install has never stored one, and so does
@@ -150,17 +150,17 @@ describe('the notes table', () => {
       // slot of its own and never leaves the picker, so the way back is a
       // click, and sending a reader to Settings for it is a wrong instruction.
       'never leave the picker',
-      // Discord-Ticket 007 (falcon bob, 01.09.): der Startfehler schickte ihn
+      // Discord-Ticket 007 (a user, 01.09.): der Startfehler schickte ihn
       // in eine Reparatur, die den Fehler gar nicht beheben kann. Beide
       // Haelften gehoeren in die Notiz, die Ursache UND dass die Reparatur
       // hier nicht mehr von selbst anlaeuft.
       'the folder repair rebuilds',
       'a repair that cannot fix it',
-      // Discord-Ticket 003 (anglefire, 03.09.): sein Windows-Benutzername
+      // Discord-Ticket 003 (03.09.): sein Windows-Benutzername
       // steht ausserhalb des englischen Alphabets. Die Zahl bleibt mit
       // Bezugspunkt, eine von acht, sonst sagt sie nichts.
       'one step out of eight',
-      // Reddit (zenmasterdredd, 02.09.): AMD-Karte gefunden, Groesse nicht.
+      // Reddit (02.09.): AMD-Karte gefunden, Groesse nicht.
       // Der Grund gehoert dazu, sonst liest es sich wie eine Marotte.
       'without rocm installed',
       'fixed carve-out',
@@ -186,7 +186,7 @@ describe('the notes table', () => {
   it('the 2.6.9 entry names the rollback, the context menu and the Linux self-heal', () => {
     // Same blind spot, next release: the shipping note is pinned to what
     // 2.6.9 actually carries. Two Discord complaints about the wheel (the
-    // tools moved, the edge was cut off), the context menu David saw clipped
+    // tools moved, the edge was cut off), the context menu the owner saw clipped
     // himself, the AUR customer whose update asked for a password and died,
     // the teaser that names the card's own VRAM, and the per-account count of
     // the Cloud switch, which is new telemetry and therefore said out loud.
@@ -261,10 +261,8 @@ describe('the notes table', () => {
       'forgotten in the workspace dialog',
       // Der Messer hat V4.1 Flash gemessen.
       'no mark until it is measured',
-      // R6-2: niemand wird benachrichtigt. SAFETY_ALERT_WEBHOOK_URL steht auf
-      // dem Droplet nicht, `alertCsamBlock` steigt ohne Ziel sofort aus, und
-      // keine der 45 Migrationen legt eine Tabelle dafuer an. Uebrig bleibt
-      // eine Containerzeile, die niemand abonniert hat. Der Block selbst wird
+      // R6-2: die App verspricht keine Meldung, die sie nicht selbst
+      // einloest. Der Block selbst wird
       // davon nicht schwaecher: die Ablehnung steht unveraendert im Satz.
       'and reported',
     ]) {
@@ -307,17 +305,17 @@ describe('the notes table', () => {
     }
   })
 
-  it('the 3.0.2 entry names the Code tab hotfix and the new count, now that it is the shipping version', () => {
+  it('the 3.0.2 entry names the Code tab hotfix and the new count', () => {
     // Hotfix fuer Issue 138: package.json, Cargo.toml/.lock and
-    // tauri.conf.json all moved to 3.0.2 in one commit, so THIS is now the
-    // shipping entry the earlier existence guard checks. Same blind spot as
+    // tauri.conf.json all moved to 3.0.2 in one commit, so this was the
+    // shipping entry the earlier existence guard checked. Same blind spot as
     // 2.6.8/2.6.9/3.0.0/3.0.1 above: an anchor per statement, so a later edit
     // that drops one fails here instead of shipping quietly incomplete. The
     // two statements are the only two the CHANGELOG carries for 3.0.2.
-    const shipping = JSON.parse(
-      readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../package.json'), 'utf8'),
-    ).version as string
-    expect(shipping).toBe('3.0.2')
+    // 3.0.3 shipped on top of it (package.json), so this pins the 3.0.2 entry
+    // by its own version like the blocks above, and the 3.0.3 entry gets its
+    // own anchors below.
+    const shipping = '3.0.2'
     const prose = proseOf(shipping)
     for (const anchor of [
       // Der Fehler, sein Bericht und die Version, aus der er stammt.
@@ -331,6 +329,191 @@ describe('the notes table', () => {
     ]) {
       expect(prose, `${shipping}: nothing about "${anchor}"`).toContain(anchor)
     }
+  })
+
+  it('the 3.0.3 entry names every fix of the hotfix', () => {
+    // Hotfix vom 28.09.2026. 3.0.4 kam darauf (package.json), also pinnt
+    // dieser Block den 3.0.3-Eintrag ueber seine eigene Version, wie die
+    // Bloecke darueber. Ein Anker pro Fix: eine spaetere Aenderung, die einen
+    // verliert, faellt hier auf.
+    const shipping = '3.0.3'
+    const prose = proseOf(shipping)
+    for (const anchor of [
+      // Der Chat-Speicher: Ursache, Grenze, Umzug und die Rueckholung.
+      'kept inline in the saved chat history', '127 mib', 'moved over once',
+      'backup file still held',
+      'image previews load only near',
+      // Create: Familie aus dem Dateikopf, die neuen Familien, die Reparatur
+      // nach einer Frage, und was aus dem Picker faellt.
+      'value not in list', 'from the file header', 'chroma', 'hidream i1',
+      'sd 3.5', 'lumina 2', 'qwen-image-edit', 'asks once, then downloads',
+      'no longer shows up in the model picker',
+      // Edit, Galerie, Papierkorb, dunkle Kacheln.
+      'strength 1.00', 'stops at 0.95', 'edit drop zone', 'recycle bin',
+      'output folder stops growing', 'stay dark until the next start',
+      // GitHub 139 bis 143, jede Nummer beim Namen.
+      'issue 139', 'measured on a hidden copy',
+      'issue 140', 'the blue /loop bar', 'working folder locked',
+      'exceeds its context size',
+      'issue 141', 'collapsed sidebar',
+      'issue 142', 'names no size', 'upright frame',
+      'issue 143', 'model storage folder', 'comfyui path not set',
+      // Der Agent und sein Arbeitsordner (Discord 28.09.2026).
+      'the button next to agent', 'pick a folder', 'no longer says filesystem reaches files anywhere',
+      'plain chat has no tool that reads your files', 'says to turn on agent',
+    ]) {
+      expect(prose, `${shipping}: nothing about "${anchor}"`).toContain(anchor)
+    }
+  })
+
+  it('the 3.0.4 entry names every fix', () => {
+    // Kundenfall a user, 30.09.2026. 3.0.5 kam darauf (package.json),
+    // also pinnt dieser Block den 3.0.4-Eintrag ueber seine eigene Version, wie
+    // die Bloecke darueber. Ein Anker pro Fix.
+    const shipping = '3.0.4'
+    const prose = proseOf(shipping)
+    for (const anchor of [
+      // Der Abbruch mitten im Schreiben und was jetzt zaehlt.
+      'in the middle of the write', 'only when no data arrives at all',
+      // "continue" nach Stopp oder Fehler, und das Protokoll der alten Schritte.
+      'after a stop or an error', 'short list of what is already done',
+      // Plan nur auf Wunsch, dunkle Leiste.
+      'in plan mode, when you ask for a plan', 'dark instead of blue',
+      // Buendeln und file_edit.
+      'several files in one step', 'several places in a file in one call',
+      // Kontext.
+      '32k of context by default instead of 64k', 'a small triangle',
+    ]) {
+      expect(prose, `${shipping}: nothing about "${anchor}"`).toContain(anchor)
+    }
+  })
+
+  it('the 3.0.6 entry names what it ships', () => {
+    // Vorbereitet am 09.10.2026. Der Eintrag ist an seine Nummer gebunden und
+    // nicht an package.json: so steht er als Entwurf im Baum, und der Sprung
+    // der Version ist ein eigener Commit, der nur die fuenf Dateien mit der
+    // Nummer anfasst. Ein Anker pro Punkt.
+    const prose = proseOf('3.0.6')
+    for (const anchor of [
+      // Voice: die Flaeche, die Stimmen, die Schalter, die Stufen.
+      'voice is a new surface', 'english only for now', 'alba, anna, azelma', 'where it may work',
+      'workspace only is the default', 'whole computer', 'between 128 and 4096 tokens, 512 by default',
+      'five minutes after the last session', 'kept for up to a minute', 'smaller than 7b',
+      // Voice endet nur bei einem ernsten Fehler.
+      'an error it cannot recover from',
+      // Computer control: aus bis eingeschaltet, Sperrliste, Kuerzel, Grenze.
+      'settings, agent, agent permissions, computer control', 'never types into a password field',
+      'ctrl+alt+space pauses and ctrl+alt+esc stops', 'at most 25 steps or 8 minutes', 'at most 24',
+      // Heikles nie per Stimme, Pause per Maus und per Wort.
+      'a spoken yes never confirms such an action', 'pauses when you move the mouse', 'say stop or wait',
+      // Was gemessen ist, steht mit seiner Messung da.
+      '11 to 22 seconds', '1 of 3 runs', 'recommended from 16 gb',
+      // Statuszeichen, Dialoge, Freigabe, Anbieter-Vorsatz.
+      'reading, writing, searching or working on the screen', 'floats above the composer',
+      'one dark glass style', 'such as change a file', 'openai::',
+      // Cloud: zehn Direktmodelle, die zwei Marken, die Namen der Medienmodelle.
+      'ten models whose makers release them', 'are labelled no filter', 'wan 2.2 uncensored extend',
+      'fourteen video models and seven image models',
+      // Nachtrag 10.10.2026, Umfang von integ/astra-306 4b57e672.
+      // Beta: Voice, Computer control, Create im Chat und die Gruppe der neuen
+      // Modelle sagen es selbst, mit dem, was es fuer den Kunden heisst. Die
+      // Woerter folgen den Hover-Saetzen in lib/beta.ts.
+      'voice is in beta', 'computer control is in beta', 'create in chat is in beta',
+      'the group is in beta', 'marks them with the word beta',
+      'rough edges', 'not proven in every app yet', 'read the order before you start it',
+      // Der Bildteil kommt mit, mit den zwei Woertern der Oberflaeche.
+      'include image input', 'add image input', '42 image parts',
+      // Create im Chat: Schalter, Karte, Freigabe.
+      'the plugins menu has a create switch', 'nothing runs until you approve it',
+      'switched on account by account',
+      // Die Marke im Waehler, in einem Satz.
+      'limited capacity',
+      // Die Sicherheitspruefung, die Texte zur Privatsphaere, Linux.
+      'the ten findings we fixed', 'into a password field', 'eleven more languages',
+      'no analytics kit', 'each press of the cloud switch', 'not end to end',
+      'appimage, the deb and the rpm for x86_64', 'not started the packaged app',
+      // Nachtrag zum Kopf integ/astra-306 5a409bd6: die Erlaubnis je Chat, Bild
+      // oder Liste nach dem Modell, die Grenze fuer abgelehnte Aufrufe und das
+      // Lesen von Webseiten.
+      'allow computer control in this chat', 'a new chat asks again',
+      'does not ask how it should run', 'from that list alone',
+      'after six the turn ends',
+      'packed pages are now readable', '100.64.0.0/10', 'a page over 8 mb is refused',
+      // Nachzug 10.10.2026 abends: Ollama, LM Studio, LU Engine, das Senden vor
+      // dem stillen Gedaechtnislauf, der Grund beim Modellwechsel, die Funde auf
+      // allen Plattformen, die Karte in Voice und die zwei neuen Fragen.
+      'part of the model moves to the processor', 'keeps a model loaded for one context window',
+      'a load ends after five minutes at the latest', 'without the graphics card', 'waited behind it',
+      'stopped because you switched to another model', 'the details dialog names a model once',
+      'this one needs your click on the screen', 'alt with a letter', 'it stops at 16 mb',
+      'our check in the real app ran on windows',
+      // Nachzug 11.10.2026: das Feld Microphone, das Diktat mit PyAV 19, der
+      // Bildteil von Hand, die Zusammenfassung mit Codebloecken, Restart Now,
+      // der CUDA-Hinweis und die langen LoRA-Namen. Was nur in Tests lief,
+      // sagt es, und Restart Now sagt, ab wann es gilt.
+      'has a microphone field', 'not yet with a real microphone',
+      'metadata_errors', 'needs no reinstall',
+      'under its original name', 'no model gets it',
+      'inside a code block', 'pull request 154',
+      'from the next update after this one', 'not checked it on a real update',
+      'comes from the graphics driver', 'as many lines as it needs',
+    ]) {
+      expect(prose, `3.0.6: nothing about "${anchor}"`).toContain(anchor)
+    }
+    // Hausregeln fuer den Text: kein Gedankenstrich, kein Anbietername, der
+    // Arbeitsname der Funktion steht nirgends, und kein Satz verspricht eine
+    // Signatur oder einen Mac-Bau, solange beides nicht am Release haengt.
+    expect(prose).not.toMatch(/[\u2013\u2014]/)
+    expect(prose).not.toMatch(/wavespeed|deepinfra|venice|astra/)
+    // "signed in to LU Cloud" ist die Anmeldung und bleibt erlaubt.
+    expect(prose).not.toMatch(/\bsigned\b(?! in\b)|notarized|macos build|\bmac\b/)
+    // Der Knopf fuer den Bildteil steht an der Modellzeile und im Chat, nicht
+    // mehr in den Einstellungen von Computer control.
+    expect(prose).not.toContain('in the computer control settings')
+    // Und nichts vom Handy: das kommt mit 3.0.7.
+    expect(prose).not.toMatch(/android|iphone|mobile app/)
+    // Kein Preis und keine Angabe, was ein Betrag kauft.
+    expect(prose).not.toMatch(/\$|\beur\b|€|tokens? (?:per|for) /)
+    // Und die Zahl der Modelle ist die des Eintrags: zehn, kein anderes Wort.
+    expect(prose).toContain('ten more chat models')
+    // Die Cloud steht mit dem da, was die App zeigt, je in einem Satz. Wie
+    // gerechnet wird, steht in keinem.
+    expect(prose).not.toMatch(/billed|charged|refund|per minute|request limit|share of|booked/)
+  })
+
+  it('the 3.0.5 entry still names what it shipped', () => {
+    // Create-Umbau, 03.10.2026, released 05.10.2026. Bis zum Sprung auf 3.0.6
+    // las dieser Fall die Nummer aus package.json; jetzt haelt er den Eintrag
+    // bei seiner Nummer fest, wie die aelteren Faelle darueber.
+    const shipping = '3.0.5'
+    const prose = proseOf(shipping)
+    for (const anchor of [
+      // Die neuen lokalen Modelle und ihre ComfyUI-Mindestversionen.
+      'ltx 2.5 needs comfyui 0.32.0, fasth3 0.35.0 and yue2 0.36.0', 'small (gguf q4)',
+      // Qwen-Image 2.1: Schalter und Prompt Enhancer (GitHub 148).
+      'transparent background', 'rewritten by', 'comfyui 0.37.2', 'issue 148',
+      // Qwen-Image 2.1 mit dem Text-Encoder ohne Verweigerungen.
+      'qwen-image 2.1 (no refusals)', 'which one reads your prompt',
+      // Noct Q, der Community-Finetune von Qwen-Image 2.1.
+      'noct q (qwen-image 2.1, unfiltered)', 'transformer weights were modified',
+      // Shots, LoRA-Staerke, Turbo-LoRA, Marken.
+      'shots slider', 'from -10 to 10', 'ready to install', 'older models',
+      // Passt das Modell zur Grafikkarte: Model Manager, Waehler, Wartezeile.
+      'fits your 12 gb card', 'loading can be slow', 'waiting line says why',
+      // Mehrere Bilder in einem Zug, Figur aus einem Video, Prompt umschreiben.
+      'up to 50 source images', 'save character', 'improve my prompt',
+      // Cloud: neue Modelle, Anzahl, Referenzfotos, Edit ohne Maske.
+      'five additions from open model families', 'images slider from 1 to 4', 'up to five photos', 'needs no mask',
+      // Chat: Dateien und Persona je Gruppenmodell.
+      'up to 3 per message and 64 mb each', 'persona picker',
+      // Fixes: Linux-Sprache, Aufklappmenues (GitHub 149), Pruefsumme.
+      'faster-whisper and piper', 'issue 149', 'right click menu', 'sha-256',
+    ]) {
+      expect(prose, `${shipping}: nothing about "${anchor}"`).toContain(anchor)
+    }
+    // Hausregeln fuer den Text: kein Gedankenstrich, kein Anbietername.
+    expect(prose).not.toMatch(/[\u2013\u2014]/)
+    expect(prose).not.toMatch(/wavespeed|deepinfra/)
   })
 
   it('the Flash allowance on the sheet hangs on a RUNNING plan, not on money that once arrived', () => {
@@ -377,7 +560,7 @@ describe('the notes table', () => {
     // Konstanten. Vorher stand der Nenner des Katalogs darin, der Waechter
     // haette den falschen Nenner also mitgetragen statt ihn zu melden.
     const phrase = `${CLOUD_PITCH.unfilteredChatModels} of the ${CLOUD_PITCH.measuredChatModels}`
-    expect(phrase).toBe('24 of the 46')
+    expect(phrase).toBe('13 of the 36')
     // Entscheid vom 12.09.2026: EIN Satz traegt die Aussage, und er sagt
     // "in full". Vorher standen zwei Saetze mit zwei Formulierungen derselben
     // Messung auf demselben Blatt, einer im Kurztext, einer im Ausklapper.
@@ -458,7 +641,7 @@ describe('the notes table', () => {
   })
 
   /**
-   * David, 13.09.2026: das Blatt fuehrt mit dem Cloud-Block.
+   * 13.09.2026: das Blatt fuehrt mit dem Cloud-Block.
    *
    * Der Block ist die einzige Stelle, an der ein BESTEHENDER Kunde nach einer
    * Aktualisierung vom Angebot erfaehrt, also steht er vor allem anderen und
@@ -504,7 +687,7 @@ describe('the notes table', () => {
     expect(modal.indexOf('release-cloud-block'))
       .toBeLessThan(modal.indexOf('data-testid="release-intro"'))
     // Der Knopf faellt auf denselben Weg zurueck wie der Schalter im Kopf.
-    expect(modal).toContain('setCloudGateOpen(true)')
+    expect(modal).toContain("setCloudGateOpen(true, 'release-notes')")
     expect(modal).toContain("updateSettings({ appMode: 'cloud' })")
   })
 

@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 
 /**
- * Model-Picker (v2.5.3, David 2026-06-10): before the VRAM swap of an
+ * Model-Picker (v2.5.3, 2026-06-10): before the VRAM swap of an
  * image/video generation, LU itself (not the LLM) shows the installed
  * ComfyUI models inside the tool call so the user can pick one — with a
  * save icon to persist the choice for future prompts ("für nächste Prompts

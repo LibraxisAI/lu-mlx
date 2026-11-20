@@ -2,7 +2,7 @@
  * @vitest-environment jsdom
  *
  * Runde 5 Nachtrag (review-lanes.md Runde 2, Grep-Audit dieser Runde,
- * David's Nachtrag danach): `useABCompare.ts` fires two genuine
+ * The owner's addendum after it): `useABCompare.ts` fires two genuine
  * `provider.chatStream` calls per round, one per model, with NO reference
  * to `run-lanes.ts` at all. Confirmed by reading the file: both `streamA`
  * and `streamB` call `getProviderForModel(...).provider.chatStream(...)`

@@ -183,7 +183,7 @@ const DENIED_BODY: &str = "<!doctype html><html><body style=\"font-family:-apple
 ///
 /// It used to be `Content-Length: 0`, and that cost us a bug report we could
 /// not answer. A reporter wrote "GitHub does not connect, error 404"
-/// (aldrich_ironhart, Discord 2026-09-08, bug D symptom 1): the desktop app has
+/// (Discord 2026-09-08, bug D symptom 1): the desktop app has
 /// no GitHub repository integration at all, so the only 404 it can produce is
 /// THIS one, in the tab the sign-in opened, and an empty 404 renders as the
 /// browser's own error page, which names no product, no port and no flow. The

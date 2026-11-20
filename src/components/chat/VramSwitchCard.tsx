@@ -13,7 +13,7 @@
  * (`evicted`) the copy talks about freeing VRAM / the swap; when the models
  * co-exist and nothing is evicted (the common image case) it shows plain
  * "loading the image model / generating" with no false "freeing VRAM" claim
- * (David 2026-06-16). Cloud/remote/'never' generations emit no phases at all,
+ * (2026-06-16). Cloud/remote/'never' generations emit no phases at all,
  * so the card stays hidden there and the ToolCallBlock spinner conveys progress.
  */
 

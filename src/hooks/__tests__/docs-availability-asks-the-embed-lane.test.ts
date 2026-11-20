@@ -90,10 +90,10 @@ describe('the composer asks the embedding lane, not the app mode', () => {
 
   it('cloud mode on a remote Ollama names the host in the tooltip', async () => {
     cloud()
-    probe.mockResolvedValue({ lane: 'ollama-remote', endpoint: 'http://192.168.0.54:11434' })
+    probe.mockResolvedValue({ lane: 'ollama-remote', endpoint: 'http://192.168.1.54:11434' })
     render(createElement(Probe))
     await waitFor(() => expect(state().getAttribute('data-lane')).toBe('ollama-remote'))
-    expect(state().getAttribute('title')).toContain('192.168.0.54')
+    expect(state().getAttribute('title')).toContain('192.168.1.54')
   })
 
   it('a probe that throws is reported as missing, not as working', async () => {

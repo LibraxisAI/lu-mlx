@@ -1,5 +1,5 @@
 /**
- * Curated tools in PLAIN chat (David 2026-06-11: "web search web fetch file
+ * Curated tools in PLAIN chat (2026-06-11: "web search web fetch file
  * write und image und video mcp sollen auch im normalen chat funktionieren").
  *
  * Plain chat should be able to reach a small, fixed set of capabilities WITHOUT
@@ -14,11 +14,13 @@
  * explanation request, or normal Q&A must NOT match (otherwise every message
  * would route through the tool loop). It errs toward the concrete signals a
  * user gives when they actually want a web lookup, a file written, or an
- * image/video made — in both English and German.
+ * image/video made — in both English and German. A message in any other
+ * language carries the tools and the model decides (detectorReads, GH #224).
  */
 
 /** The exact tools surfaced in plain chat. Order is irrelevant. */
 export const CHAT_TOOLS = [
+  'web_research',
   'web_search',
   'web_fetch',
   'file_write',
@@ -125,6 +127,17 @@ const FILE_NOUN_RE = /\b(a\s+|an\s+|the\s+|eine?\s+|die\s+)?(file|files|datei(en
 const FILENAME_RE = /\b[\w.-]+\.(txt|md|markdown|html?|css|js|ts|json|csv|xml|yaml|yml|py|sh|rs|toml|ini|log|svg|sql)\b/i
 const SAVE_TO_FILE_RE = /\b(save|write|export|dump|speicher\w*|schreib\w*)\b[^.?!]*\b(to|into|as|in)\b[^.?!]*\b(file|datei|disk|\.\w{1,5})\b/i
 
+// A file name the user only MENTIONS as text is not a file to write. The 3.0.4
+// box run sent "Write two short sentences. Put the file name `notes.md` in
+// backticks and the word **important** in bold." with Agent off and got a
+// file_write approval card. Two shapes are text, not targets: "the file name
+// X" / "der Dateiname X", and "X in backticks / in bold / as code".
+const NAMED_AS_TEXT_RE = /\b(the\s+|der\s+|den\s+)?(file\s*name|dateiname[n]?)\s+[`'"]?[\w.-]+[`'"]?/gi
+const FORMATTED_AS_TEXT_RE = /[`'"]?[\w.-]+\.\w{1,8}[`'"]?\s+(in|as|als)\s+(backticks?|bold|italics?|quotes|(inline\s+)?code|fett|kursiv)\b/gi
+function withoutMentionedNames(t: string): string {
+  return t.replace(NAMED_AS_TEXT_RE, ' ').replace(FORMATTED_AS_TEXT_RE, ' ')
+}
+
 /**
  * Returns the capability a plain-chat message is asking for, or null if the
  * message is ordinary conversation that should stay on the plain path.
@@ -147,9 +160,10 @@ export function detectChatToolCapability(text: string, hasImages = false): ChatT
   if (INHERENT_IMAGE_VERB_RE.test(t)) return 'image'
 
   // FILE WRITE
-  if (FILENAME_RE.test(t) && FILE_VERB_RE.test(t)) return 'file'
-  if (SAVE_TO_FILE_RE.test(t)) return 'file'
-  if (FILE_VERB_RE.test(t) && FILE_NOUN_RE.test(t)) return 'file'
+  const f = withoutMentionedNames(t)
+  if (FILENAME_RE.test(f) && FILE_VERB_RE.test(f)) return 'file'
+  if (SAVE_TO_FILE_RE.test(f)) return 'file'
+  if (FILE_VERB_RE.test(f) && FILE_NOUN_RE.test(f)) return 'file'
 
   // WEB FETCH (explicit page/url) — before generic search so a URL routes to
   // fetch, not search.
@@ -174,7 +188,7 @@ export function detectChatToolIntent(text: string, hasImages = false): boolean {
   return detectChatToolCapability(text, hasImages) !== null
 }
 
-// ── Context-aware media continuation (David 2026-06-20) ────────────────
+// ── Context-aware media continuation (2026-06-20) ────────────────
 //
 // The single-message detector above is blind to conversation context: once a
 // media task is underway, the natural FOLLOW-UPS a user types carry no
@@ -229,10 +243,74 @@ export interface ChatToolRouteMsg {
 }
 
 export interface ChatToolRoute {
-  capability: ChatToolCapability
+  /** `open`: the message is in a language the detector above cannot read
+   *  (GH #224), so the tools ride along and the model decides. */
+  capability: ChatToolCapability | 'open'
   /** Present for media routes; `args` carries the prior generation's parameters
    *  (prompt, inputImage, duration…) for a faithful regenerate. */
   mediaHint?: { kind: 'image' | 'video'; args?: Record<string, unknown> }
+}
+
+// ── Languages the detector does not read (GH #224, C51) ───────────
+//
+// Every pattern above is English or German. A Japanese "猫の画像を作って", a
+// Spanish "dibuja un gato" or a Russian "найди в интернете" matched none of
+// them, and the turn went to the plain path, where no tool exists: Chat Tools
+// were, for everyone writing in another language, never on. Keyword lists for
+// every language would never be complete. So the detector says when it cannot
+// judge a message at all, and such a turn carries the tools; the model, which
+// does read the language, decides whether to call one. English and German
+// stay exactly as before.
+
+/** Short, frequent words of English and German. */
+const EN_DE_WORDS = new Set([
+  'the', 'and', 'is', 'are', 'you', 'your', 'what', 'how', 'why', 'when', 'where', 'who', 'which',
+  'please', 'can', 'could', 'would', 'should', 'this', 'that', 'with', 'for', 'my', 'it', 'of', 'to',
+  'an', 'be', 'do', 'does', 'was', 'were', 'have', 'has', 'will', 'about', 'from', 'write', 'make',
+  'tell', 'hi', 'hello', 'hey', 'thanks', 'thank', 'yes', 'i', 'me', 'a', 'in', 'on', 'one', 'name',
+  'und', 'der', 'die', 'das', 'ist', 'ich', 'du', 'nicht', 'ein', 'eine', 'einen', 'mit', 'auf',
+  'fuer', 'wie', 'bitte', 'mir', 'mich', 'kannst', 'kann', 'schreib', 'mach', 'zeig', 'es', 'sie',
+  'hallo', 'danke', 'ja', 'nein', 'sind', 'wer', 'warum', 'wo', 'wann', 'welche', 'welcher', 'da',
+])
+
+/** Function words of the neighbouring languages that English and German do
+ *  not use (Spanish, French, Italian, Portuguese, Dutch, Polish, Turkish).
+ *  Words both sides share ("de", "a", "in", "die", "da", "per") are left out:
+ *  only a positive sign of another language counts. */
+const OTHER_WORDS = new Set([
+  'el', 'la', 'los', 'las', 'un', 'una', 'unos', 'del', 'y', 'que', 'en', 'por', 'para', 'con', 'como',
+  'pero', 'haz', 'dibuja', 'quiero', 'puedes', 'hola', 'gracias', 'busca',
+  'le', 'les', 'une', 'des', 'et', 'est', 'pour', 'avec', 'dans', 'sur', 'je', 'moi', 'bonjour',
+  'merci', 'peux', 'fais', 'dessine', 'cherche',
+  'il', 'lo', 'gli', 'di', 'che', 'su', 'sono', 'ciao', 'grazie', 'fammi', 'disegna', 'puoi', 'cerca',
+  'os', 'uma', 'voce', 'obrigado', 'faca',
+  'het', 'een', 'ik', 'niet', 'maak', 'zoek',
+  'w', 'z', 'na', 'jest', 'czy', 'jak', 'prosze', 'zrob', 'narysuj',
+  'bir', 've', 'bu', 'icin',
+])
+
+/**
+ * Can the patterns above judge this message? False for a message mostly in a
+ * non-Latin script (Japanese, Chinese, Russian, Arabic, ...), and for a Latin
+ * one that plainly is another language: more of its words are function words
+ * of Spanish, French, Italian, Portuguese, Dutch, Polish or Turkish than of
+ * English and German, or it carries accents German does not use and no
+ * English or German word at all. Everything else counts as read and stays on
+ * the plain path as before, so a wrong "read" only keeps the old behaviour.
+ */
+export function detectorReads(text: string): boolean {
+  const letters = (text || '').match(/\p{L}/gu) ?? []
+  if (letters.length === 0) return true
+  const latin = letters.filter((ch) => /\p{Script=Latin}/u.test(ch)).length
+  if (latin / letters.length < 0.7) return false
+  // Umlauts and eszett are spelled out first (entumlauten), so what is left
+  // with an accent is not German.
+  const words = lower(text).match(/\p{L}+/gu) ?? []
+  const own = words.filter((w) => EN_DE_WORDS.has(w)).length
+  const other = words.filter((w) => OTHER_WORDS.has(w.normalize('NFD').replace(/\p{M}/gu, ''))).length
+  if (other > own) return false
+  const accented = words.some((w) => /[\u00c0-\u024f]/.test(w))
+  return !(own === 0 && accented)
 }
 
 /** How far back to look for the in-progress media task. */
@@ -255,7 +333,7 @@ export function resolveChatToolRoute(
       ? { capability: direct, mediaHint: { kind: direct } }
       : { capability: direct }
   }
-  if (!isMediaContinuation(text)) return null
+  if (!isMediaContinuation(text)) return detectorReads(text) ? null : { capability: 'open' }
 
   const window = recent.slice(-MEDIA_CONTEXT_WINDOW)
   for (let i = window.length - 1; i >= 0; i--) {
@@ -270,5 +348,5 @@ export function resolveChatToolRoute(
       if (cap === 'image' || cap === 'video') return { capability: cap, mediaHint: { kind: cap } }
     }
   }
-  return null
+  return detectorReads(text) ? null : { capability: 'open' }
 }

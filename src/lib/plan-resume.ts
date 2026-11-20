@@ -4,7 +4,7 @@ import { openPlanGap, type PlanGap } from './plan-reconcile'
 /**
  * The line that makes "continue" deterministic.
  *
- * Measured by David on the running build (2026-08-22): an agent run with a
+ * Measured by the owner on the running build (2026-08-22): an agent run with a
  * plan was interrupted by a side question the model could not answer, it
  * replied in prose and left the plan lying there. Sending "continue" then
  * asked the model to FIND its own plan again somewhere in the history, and

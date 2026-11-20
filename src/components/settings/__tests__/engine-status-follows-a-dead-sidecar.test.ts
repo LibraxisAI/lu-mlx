@@ -26,6 +26,7 @@ const unlisten = vi.fn()
 vi.mock('../../../api/backend', () => ({
   isTauri: () => true,
   isMacOS: () => false,
+  isWindows: () => false,
   backendCall: vi.fn(async () => null),
 }))
 vi.mock('../../../api/engine', async () => {
@@ -105,6 +106,20 @@ describe('an engine killed from outside while the panel stands open', () => {
     await fireSidecarGone()
 
     expect(document.body.textContent).toContain('Engine not running')
+  })
+
+  // C81 (3.1.0): and it says what the engine died of, from Rust's own reading
+  // of the exit status and the last stderr lines.
+  it('names the cause of the death while no engine runs', async () => {
+    await panelWithARunningEngine()
+    const why = 'The LU Engine stopped unexpectedly (signal 9, SIGKILL): it was killed from outside.'
+    bundledEngineStatus.mockResolvedValue({ ...DEAD, lastExit: why })
+    await fireSidecarGone()
+    expect(screen.getByTestId('builtin-engine-last-exit').textContent).toBe(why)
+    // Gone again once an engine runs.
+    bundledEngineStatus.mockResolvedValue({ ...RUNNING, lastExit: why })
+    await act(async () => { await vi.advanceTimersByTimeAsync(ENGINE_STATUS_POLL_MS + 100) })
+    expect(screen.queryByTestId('builtin-engine-last-exit')).toBeNull()
   })
 
   // NEGATIVE CONTROL: the panel must not simply decay to "not running". An

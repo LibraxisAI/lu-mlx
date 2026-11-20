@@ -24,7 +24,7 @@ import { describe, it, expect } from 'vitest'
 import { dropStandbyRowsServedByLuEngine, dropDuplicateLuEngineRows } from '../lu-engine-rows'
 
 /** A GGUF in the LU Engine folder, as `bundledToAIModels` stamps it. */
-const ours = (stem: string, dir = 'C:\\Users\\ddrob\\AppData\\Roaming\\Locally Uncensored\\models') => ({
+const ours = (stem: string, dir = 'C:\\Users\\alice\\AppData\\Roaming\\Locally Uncensored\\models') => ({
   name: `openai::${stem}`, model: stem, path: `${dir}\\${stem}.gguf`,
   provider: 'openai', providerName: 'LU Engine',
 })

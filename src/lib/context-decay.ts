@@ -37,9 +37,10 @@ import {
   compactMessages,
   estimateMessageTokens,
   COMPACT_DROP_BLOCK,
-  COMPACT_TARGET_RATIO,
   COMPACT_TRIGGER_RATIO,
   KEEP_RECENT,
+  stableCutIndex,
+  stableDropBlock,
 } from './context-compaction'
 
 /** Head+tail budget for a result that has aged out, in characters. */
@@ -200,6 +201,15 @@ export interface DecayOptions<T> {
    * legitimate and the guard must not count it (plan A1, LOOP-GUARD).
    */
   keyOf?: (msg: T) => string | undefined
+  /**
+   * Reads the model fetched AGAIN after their result had been capped (CA,
+   * cloud loops, 13.11.2026). The newest result of such a read stays whole:
+   * the model has shown it needs those bytes, and capping them again only
+   * starts the next read, cap, read cycle, each lap a full paid request. Needs
+   * `keyOf`. The window trim (trimWorkingHistory) still applies, so a pinned
+   * result can never push a request past its budget.
+   */
+  keepWhole?: ReadonlySet<string>
 }
 
 export interface DecayReport<T> {
@@ -243,9 +253,22 @@ export function applyToolResultDecay<T extends DecayMessage>(
   let trimmedCount = 0
   let savedChars = 0
   const trimmedKeys: string[] = []
+  // The newest result of every read that must stay whole.
+  const pinned = new Set<number>()
+  if (opts.keepWhole?.size && opts.keyOf) {
+    const seen = new Set<string>()
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (!isToolResult(messages[i])) continue
+      const key = opts.keyOf(messages[i])
+      if (!key || seen.has(key)) continue
+      seen.add(key)
+      if (opts.keepWhole.has(key)) pinned.add(i)
+    }
+  }
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i]
     if (!isToolResult(m)) continue
+    if (pinned.has(i)) continue
     // The request under construction is iteration newest + 1.
     const age = newest + 1 - iters[i]
     if (age < afterIterations) continue
@@ -337,6 +360,53 @@ export function pruneSupersededPlans<T extends DecayMessage>(
   return { messages: out, prunedCount: drop.size + blank.size }
 }
 
+/** Looks at the screen that stay complete: the newest ones. */
+export const KEEP_SCREEN_LOOKS = 2
+
+/** What stands in for the rest of an older result of computer control. */
+export const OLD_SCREEN_LOOK_NOTE = '[older look at the screen left out]'
+
+/**
+ * Shorten every result of computer control but the newest ones to its first
+ * line.
+ *
+ * A step on the screen answers with what it did and with a new look: the
+ * window in front, the pointer, the list of windows or of every button. Only
+ * the newest look says what the screen is like. The older ones are stale by
+ * definition, and a model that reads twenty of them works at a full context
+ * for nothing (box, 09.10.2026: 267 tokens per step, forever). The first line
+ * stays, because it is the record of what was done or why it was not.
+ *
+ * Final like the age decay: a shortened result is never shortened again, and
+ * per step at most one more result crosses the line.
+ */
+export function pruneOldScreenLooks<T extends DecayMessage>(
+  messages: T[],
+  keep: number = KEEP_SCREEN_LOOKS,
+): { messages: T[]; prunedCount: number; savedChars: number } {
+  const out = messages.slice()
+  const results = pairToolCalls(messages)
+    .filter((p) => p.name === 'computer_use' && p.resultIndex >= 0)
+    .map((p) => p.resultIndex)
+  let prunedCount = 0
+  let savedChars = 0
+  for (const index of results.slice(0, Math.max(0, results.length - keep))) {
+    const content = messages[index].content
+    if (typeof content !== 'string' || content.includes(OLD_SCREEN_LOOK_NOTE)) continue
+    // Hermes carries the result inside a tag on a user message: the tag stays.
+    const wrapped = /^([\s\S]*?<tool_response>\s*)([\s\S]*?)(\s*<\/tool_response>[\s\S]*)$/.exec(content)
+    const body = wrapped ? wrapped[2] : content
+    const lines = body.split('\n')
+    if (lines.length < 2) continue
+    const short = `${lines[0]}\n${OLD_SCREEN_LOOK_NOTE}`
+    if (short.length >= body.length) continue
+    out[index] = { ...messages[index], content: wrapped ? `${wrapped[1]}${short}${wrapped[3]}` : short } as T
+    prunedCount += 1
+    savedChars += body.length - short.length
+  }
+  return { messages: out, prunedCount, savedChars }
+}
+
 /**
  * Bound the WORKING history the loop carries from step to step.
  *
@@ -366,6 +436,104 @@ export function pruneSupersededPlans<T extends DecayMessage>(
  * the contextDecay notaus wants: a support case that flips the switch should
  * land on the 2.6.5 window, not on a third behaviour nobody has ever seen.
  */
+/** How many ledger lines the pinned task carries at most. */
+export const LEDGER_MAX_LINES = 40
+
+/** The argument that names what a call worked on, in the order tools use them. */
+const LEDGER_ARG_KEYS = ['path', 'file_path', 'filePath', 'command', 'query', 'pattern', 'url', 'name'] as const
+
+function ledgerArg(args: unknown): string {
+  let obj: unknown = args
+  if (typeof args === 'string') {
+    try { obj = JSON.parse(args) } catch { return '' }
+  }
+  if (!obj || typeof obj !== 'object') return ''
+  const rec = obj as Record<string, unknown>
+  for (const key of LEDGER_ARG_KEYS) {
+    const v = rec[key]
+    if (typeof v === 'string' && v.trim()) {
+      const one = v.replace(/\s+/g, ' ').trim()
+      return one.length > 80 ? one.slice(0, 77) + '...' : one
+    }
+  }
+  return ''
+}
+
+/**
+ * The run ledger (customer case 30.09.2026, "always starting with the
+ * beginning"). trimWorkingHistory drops the oldest steps whole once a run
+ * outgrows its send window. The task stayed pinned, but nothing said what had
+ * already been done, so the model read the same files and redid the same
+ * edits, and every repeat paid the full context again.
+ *
+ * One line per call in the dropped part, oldest first, duplicates folded. It
+ * is derived from the dropped messages alone, so it only changes when the
+ * drop point moves: between trims every request keeps the same prefix and the
+ * upstream cache keeps hitting.
+ */
+const LEDGER_HEAD = '[Run ledger] Earlier steps of this run were removed from the context to save cost. They were already done, do not repeat them unless something changed:'
+const LEDGER_TAIL = 'Continue from where the run stands now.'
+
+/**
+ * Splits a ledger the task already carries off its text. A second trim in
+ * the same run drops the pinned task with the old ledger on it; its lines
+ * have to go into the new ledger, or the steps of the first trim are gone
+ * (box run d307-l: a run trimmed twice lost files 0 to 14 from its ledger).
+ */
+export function splitLedger(content: string): { task: string; lines: string[]; skipped: number } {
+  const at = content.indexOf(LEDGER_HEAD)
+  if (at === -1) return { task: content, lines: [], skipped: 0 }
+  const task = content.slice(0, at).replace(/\n+$/, '')
+  const lines: string[] = []
+  let skipped = 0
+  for (const raw of content.slice(at + LEDGER_HEAD.length).split('\n')) {
+    if (!raw.startsWith('- ')) continue
+    const older = /^- \((\d+) older steps\)$/.exec(raw)
+    if (older) { skipped += Number(older[1]); continue }
+    lines.push(raw.slice(2))
+  }
+  return { task, lines, skipped }
+}
+
+export function runLedger(dropped: DecayMessage[], earlier: { lines: string[]; skipped: number } = { lines: [], skipped: 0 }): string | null {
+  const lines: string[] = [...earlier.lines]
+  const seen = new Set<string>(lines)
+  let skippedBefore = earlier.skipped
+  for (const m of dropped) {
+    // A dropped message can carry a ledger of its own: the persisted chain
+    // puts the ledger of its cut on its first kept message
+    // (codex/hidden-history.ts). Its lines come first, in their order.
+    if (typeof m.content === 'string' && m.content.includes(LEDGER_HEAD)) {
+      const inner = splitLedger(m.content)
+      skippedBefore += inner.skipped
+      for (const line of inner.lines) {
+        if (seen.has(line)) continue
+        seen.add(line)
+        lines.push(line)
+      }
+    }
+    if (m.role !== 'assistant') continue
+    for (const tc of toolCallsIn(m)) {
+      const name = callName(tc)
+      if (!name || name === 'todo_write') continue
+      const arg = ledgerArg(tc.function?.arguments)
+      const line = arg ? `${name}: ${arg}` : name
+      if (seen.has(line)) continue
+      seen.add(line)
+      lines.push(line)
+    }
+  }
+  if (lines.length === 0) return null
+  const kept = lines.length > LEDGER_MAX_LINES ? lines.slice(-LEDGER_MAX_LINES) : lines
+  const skipped = lines.length - kept.length + skippedBefore
+  return [
+    LEDGER_HEAD,
+    ...(skipped > 0 ? [`- (${skipped} older steps)`] : []),
+    ...kept.map((l) => `- ${l}`),
+    LEDGER_TAIL,
+  ].join('\n')
+}
+
 export function trimWorkingHistory<T extends DecayMessage>(
   messages: T[],
   budgetTokens: number,
@@ -377,7 +545,6 @@ export function trimWorkingHistory<T extends DecayMessage>(
     )
   const banded = opts.hysteresis !== false
   const trigger = banded ? Math.floor(budgetTokens * COMPACT_TRIGGER_RATIO) : budgetTokens
-  const target = banded ? Math.floor(budgetTokens * COMPACT_TARGET_RATIO) : budgetTokens
   if (budgetTokens <= 0 || sizeOf(messages) <= trigger) return { messages, dropped: 0 }
 
   const systemMsg = messages[0]?.role === 'system' ? messages[0] : null
@@ -394,18 +561,43 @@ export function trimWorkingHistory<T extends DecayMessage>(
     while (tail.length > 0 && isToolResult(tail[0])) tail = tail.slice(1)
     const out: T[] = []
     if (systemMsg) out.push(systemMsg)
-    if (firstUser && !tail.includes(firstUser)) out.push(firstUser)
+    if (firstUser && !tail.includes(firstUser)) {
+      // The ledger rides on the pinned task instead of being a message of its
+      // own: two user messages in a row break strict chat templates.
+      if (typeof firstUser.content === 'string') {
+        const { task, ...earlier } = splitLedger(firstUser.content)
+        const ledger = runLedger(rest.slice(0, drop), earlier)
+        out.push(ledger ? { ...firstUser, content: `${task}\n\n${ledger}` } : firstUser)
+      } else {
+        out.push(firstUser)
+      }
+    }
     out.push(...tail)
     return out
   }
 
   const maxDrop = Math.max(0, rest.length - KEEP_RECENT)
+  if (banded) {
+    // 3.1.1 (support case E8b): the cut sits on a fixed mark counted from the
+    // start of the history, see stableCutIndex. The loops hand this function
+    // the whole run on every step and keep nothing of its answer, so the same
+    // history always gets the same cut, in this step, in the next one and in
+    // the next turn, which starts from the stored conversation again. The
+    // marks are placed by the sizes the messages are sent at, after decay,
+    // the same sizes the budget is measured in. Decay only ever touches the
+    // newest two steps' results later on, far behind any mark that matters.
+    const sizes = applyToolResultDecay(rest, opts).messages.map((m) =>
+      estimateMessageTokens([m] as unknown as Parameters<typeof estimateMessageTokens>[0]),
+    )
+    const drop = stableCutIndex(sizes, stableDropBlock(budgetTokens), maxDrop, (at) => sizeOf(assemble(at)) <= budgetTokens)
+    return drop > 0 ? { messages: assemble(drop), dropped: drop } : { messages, dropped: 0 }
+  }
   let drop = 0
   let candidate = messages
   while (drop < maxDrop) {
     drop = Math.min(drop + COMPACT_DROP_BLOCK, maxDrop)
     candidate = assemble(drop)
-    if (sizeOf(candidate) <= target) break
+    if (sizeOf(candidate) <= budgetTokens) break
   }
   return { messages: candidate, dropped: drop }
 }
@@ -421,11 +613,15 @@ export interface BuildRequestOptions<T> extends DecayOptions<T> {
   ageImages?: boolean
   /** How many of the newest user turns keep their attachments (plan A4). */
   keepImages?: number
+  /** Shorten older results of computer control to one line. Off with decay off. */
+  pruneScreenLooks?: boolean
 }
 
 export interface BuiltRequest<T> extends DecayReport<T> {
   /** Superseded plan messages dropped or blanked. */
   prunedPlans: number
+  /** Older looks at the screen shortened to one line. */
+  prunedScreenLooks: number
   /** Attachments left behind by the image rule (plan A4). */
   droppedImages: number
   /** Base64 characters the image rule kept off the wire. */
@@ -466,6 +662,12 @@ export function buildRequestMessages<T extends DecayMessage>(
     working = pruned.messages
     prunedPlans = pruned.prunedCount
   }
+  let prunedScreenLooks = 0
+  if (opts.enabled !== false && opts.pruneScreenLooks !== false) {
+    const pruned = pruneOldScreenLooks(working)
+    working = pruned.messages
+    prunedScreenLooks = pruned.prunedCount
+  }
   const compacted = compactMessages(
     working as unknown as Parameters<typeof compactMessages>[0],
     opts.budgetTokens,
@@ -477,6 +679,7 @@ export function buildRequestMessages<T extends DecayMessage>(
     savedChars: decayed.savedChars,
     trimmedKeys: decayed.trimmedKeys,
     prunedPlans,
+    prunedScreenLooks,
     droppedImages: aged.strippedImages,
     savedImageChars: aged.savedChars,
     promptTokens: estimateMessageTokens(

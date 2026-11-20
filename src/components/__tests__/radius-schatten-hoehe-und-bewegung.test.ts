@@ -271,21 +271,33 @@ describe('transition-all darf nur schrumpfen', () => {
   // Ausdruecklich NICHT migriert: Stellen mit ring-Wechsel (box-shadow),
   // mit Randbreite 0→1 und `.lu-primary`, dessen :disabled-Zustand
   // `filter` und `opacity` animiert. In chat/ models/ ui/ agents/ import/
-  // bleibt genau EINE stehen: models/ModelCard.tsx wechselt `ring-1`.
-  const SCHRANKE = 33
+  // bleibt KEINE stehen. Die letzte war die installierte Zeile des Model
+  // Managers in der klassischen Fassung (Windows, Linux), die `ring-1`
+  // wechselte. Seit dem 10.10.2026 traegt auch sie die Farben des Mac und
+  // steht auf `.lu-tile`, das seine Uebergaenge als benannte Liste mitbringt.
+  const SCHRANKE = 32
 
   it(`hoechstens ${SCHRANKE} Fundstellen`, () => {
     const n = (ALL.match(/(?<![\w-])transition-all(?![\w-])/g) ?? []).length
     expect(n).toBeLessThanOrEqual(SCHRANKE)
   })
 
-  it('in den Verzeichnissen dieses Pakets ist genau eine uebrig, und sie ist benannt', () => {
+  it('in den Verzeichnissen dieses Pakets ist keine mehr uebrig', () => {
     const rest: string[] = []
     for (const [name, src] of DATEIEN) {
       if (!MEIN(name)) continue
       for (const _ of src.matchAll(/(?<![\w-])transition-all(?![\w-])/g)) rest.push(name)
     }
-    expect(rest).toEqual(['components/models/ModelCard.tsx'])
+    expect(rest).toEqual([])
+  })
+
+  it('die Mac-Fassung des Model Managers traegt keine', () => {
+    const mac = DATEIEN.filter(([name]) =>
+      /^components\/models\/(skin\/mac|ModelCard|ModelTiles|MacMediaTile|MacMediaLane|LoraManager|ModelPageParts)\.tsx$/.test(name))
+    expect(mac.length).toBe(7)
+    for (const [name, src] of mac) {
+      expect(src, name).not.toMatch(/(?<![\w-])transition-all(?![\w-])/)
+    }
   })
 
   it('die Motion-Leiter ist da, an die die naechste Stelle gehen kann', () => {
@@ -450,7 +462,8 @@ describe('das Schwebeblatt kommt aus einem Rezept, nicht aus einer Kette', () =>
   })()
 
   it('die App schreibt hoechstens vier der sieben Tailwind-Stufen', () => {
-    expect([...STUFEN.keys()].sort()).toEqual(['2xl', 'lg', 'sm', 'xl'])
+    // `2xl` went with its last call sites in the pop-up redesign.
+    expect([...STUFEN.keys()].sort()).toEqual(['lg', 'sm', 'xl'])
   })
 
   it('und keine Stufe, die dem Haus nicht gehoert', () => {
@@ -473,7 +486,7 @@ describe('das Schwebeblatt kommt aus einem Rezept, nicht aus einer Kette', () =>
   it('`.lu-elevated` ist wirklich in Gebrauch und bringt Flaeche, Kante UND Schatten mit', () => {
     const regel = CSS_CODE.match(/\.lu-elevated\s*\{([^}]*)\}/)?.[1] ?? ''
     expect(regel, 'es gibt keine .lu-elevated-Regel').not.toBe('')
-    expect(regel).toContain('var(--color-lu-overlay)')
+    expect(regel).toContain('var(--color-lu-sheet)')
     expect(regel).toContain('border:')
     expect(regel).toContain('var(--shadow-xl)')
     expect(CSS_CODE).toMatch(/\.light\s+\.lu-elevated/)

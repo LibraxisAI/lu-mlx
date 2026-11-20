@@ -89,7 +89,7 @@ describe('toolStrategyFor — the run gets the shape the UI promised', () => {
 // ── The unrestricted models, 2026-07-29 ───────────────────────────────
 //
 // LU Cloud used to declare supports_tools:false for the roleplay fine-tunes
-// because DeepInfra 405s on a `tools` payload for them. The proxy translates
+// because the upstream 405s on a `tools` payload for them. The proxy translates
 // into the Hermes prompt convention now and declares true, and the point of
 // these cases is that NOTHING in the app had to change for that to land: the
 // shipped 2.5.10 build reads the same flag, so a server deploy reaches every

@@ -8,7 +8,7 @@
  * (`activeAgentRuns.has(convId)` in useAgentChat.ts) protects against a
  * real, priced incident: one prompt sent twice (two Enters before React
  * repaints Send into Stop) ran `video_generate` four times
- * (gemma4:e4b + SVD-XT, David 2026-06-16). The B2 refactor changed the
+ * (gemma4:e4b + SVD-XT, 2026-06-16). The B2 refactor changed the
  * guard's key from a hook-instance ref to a per-conversation Map; this
  * test is the proof that the thing the key protects against is still
  * caught after that change, not just that a DIFFERENT conversation is no

@@ -1,5 +1,5 @@
 /**
- * Multi-LoRA chaining (konata 2026-06-09: "agent cannot load multiple loras").
+ * Multi-LoRA chaining (a user 2026-06-09: "agent cannot load multiple loras").
  *
  * Before: buildDynamicWorkflow created exactly ONE LoraLoader from a single
  * string param — an LLM passing "a.safetensors, b.safetensors" sent the
@@ -140,7 +140,7 @@ describe('buildDynamicWorkflow — LoRA chaining', () => {
     for (const enc of encoders) expect(enc.inputs.clip).toEqual([secondId, 1])
   })
 
-  it('a comma-joined string from the LLM chains too (konata repro)', async () => {
+  it('a comma-joined string from the LLM chains too (a user repro)', async () => {
     const wf = await buildDynamicWorkflow({
       ...baseParams,
       lora: 'pixel-art-xl, detail-tweaker',

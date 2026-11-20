@@ -42,6 +42,7 @@ vi.mock('../../../api/backend', () => ({
   secretDelete: vi.fn(),
 }))
 vi.mock('../../../api/discover', () => ({
+  lookupFileMeta: () => null,
   detectProviderModelPath: vi.fn(async () => ''),
   startModelDownloadToPath: (url: string, dir: string, filename: string, bytes?: number, sha?: string) =>
     startModelDownloadToPath(url, dir, filename, bytes, sha),
@@ -98,10 +99,10 @@ describe('zwei gewaehlte Modelle: das staerkere gewinnt, nicht das zuletzt gekli
     // Die alte Regel (letzter Klick gewinnt) wuerde damit den 7B-Starter
     // aktiv lassen.
     await act(async () => {
-      screen.getByText('Qwen 3.5 9B').closest('button')!.click()
+      screen.getByText('Qwen 3.5 9B Abliterated').closest('button')!.click()
     })
     await act(async () => {
-      screen.getByText('Qwen 2.5 7B (Starter)').closest('button')!.click()
+      screen.getByText('Qwen 2.5 7B Abliterated (Starter)').closest('button')!.click()
     })
 
     const installBtn = await screen.findByRole('button', { name: /Install 2 models/i })

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({ backendCall: vi.fn() }))
 
 vi.mock('../backend', () => ({
+  isTauri: () => true,
   backendCall: (...args: unknown[]) => mocks.backendCall(...args),
 }))
 

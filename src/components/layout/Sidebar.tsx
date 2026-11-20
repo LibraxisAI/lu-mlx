@@ -1,20 +1,42 @@
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
+import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Plus, Search, Trash2, Edit3, Check, X, MessageSquare, Code, Radio, Copy, RefreshCw, Square, Wifi, Globe, QrCode, PanelLeftOpen, PanelLeftClose } from 'lucide-react'
+import { Plus, Search, Trash2, Edit3, Check, X, MessageSquare, Code, Radio, Copy, RefreshCw, Square, Wifi, Globe, QrCode, PanelLeftOpen, PanelLeftClose, Smartphone } from 'lucide-react'
 import { useChatStore } from '../../stores/chatStore'
-import { useUIStore } from '../../stores/uiStore'
+import { HowItWorks } from '../ui/HowItWorks'
+import { HOWTO } from '../../lib/howto'
+import { latestConversationOfMode } from '../../lib/conversation-mode'
+import { useUIStore, clampSidebarWidth, isNarrowViewport } from '../../stores/uiStore'
 import { useCompareStore } from '../../stores/compareStore'
 import { useModelStore } from '../../stores/modelStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useCodexStore } from '../../stores/codexStore'
-import { useRemoteStore, REMOTE_DEV_MODE_ERROR } from '../../stores/remoteStore'
+import { useRemoteStore, REMOTE_DEV_MODE_ERROR, remoteAddressView } from '../../stores/remoteStore'
+import { RemoteFirewallNotice } from '../remote/RemoteFirewallNotice'
 import { workspaceRejectedMessage } from '../../lib/workspace-rejected'
 import { CHAT_BASE_SYSTEM_PROMPT } from '../../lib/system-prompt'
 import { backendCall, isTauri } from '../../api/backend'
 import { useDismissOnEscape } from '../../hooks/useDismissOnEscape'
+import { openNewCodeSession } from '../../lib/code-session'
 import {
   conversationMatches, sameSidebarRows, toSidebarRow, type SidebarRow,
 } from './sidebar-rows'
+
+/**
+ * Rahmen der aufgeklappten Liste. Im breiten Fenster nichts, die Spalte steht
+ * im Fluss neben dem Verlauf. Im schmalen Fenster (NARROW_VIEWPORT_WIDTH,
+ * Issue 309 T1) hat sie dort keinen Platz: ein Rahmen ohne eigene Breite
+ * traegt sie dann als Ueberlagerung, und der Verlauf darunter behaelt das
+ * ganze Fenster. `-mr-2` nimmt den `gap-2` der Zeile in AppShell zurueck, den
+ * ein Rahmen ohne Breite sonst als leeren Streifen hinterliesse.
+ */
+function SidebarFrame({ overlay, children }: { overlay: boolean; children: ReactNode }) {
+  if (!overlay) return <>{children}</>
+  return (
+    <div data-testid="sidebar-overlay" className="relative shrink-0 w-0 -mr-2 h-full z-30">
+      {children}
+    </div>
+  )
+}
 
 export function Sidebar() {
   // Gezielte Selektoren, durchgehend. Ein Abo auf den ganzen Store hat die
@@ -28,13 +50,19 @@ export function Sidebar() {
   const setActiveConversation = useChatStore((s) => s.setActiveConversation)
   const sidebarOpen = useUIStore((s) => s.sidebarOpen)
   const setSidebarOpen = useUIStore((s) => s.setSidebarOpen)
-  const sidebarWidth = useUIStore((s) => s.sidebarWidth)
+  const storedSidebarWidth = useUIStore((s) => s.sidebarWidth)
+  // Issue 309 T1: die gespeicherte Breite gegen das AKTUELLE Fenster, nicht
+  // nur beim Ziehen. Geschrieben wird nichts, die Vorliebe fuer ein breites
+  // Fenster bleibt, wie sie war.
+  const viewportWidth = useUIStore((s) => s.viewportWidth)
+  const sidebarWidth = clampSidebarWidth(storedSidebarWidth, viewportWidth)
+  const overlay = isNarrowViewport(viewportWidth)
   const setSidebarWidth = useUIStore((s) => s.setSidebarWidth)
   const setView = useUIStore((s) => s.setView)
   const currentView = useUIStore((s) => s.currentView)
   // A/B Compare takes the whole chat area, so neither rail nor panel belongs
   // on screen while it runs. AppShell already unmounts us there; this keeps
-  // the rule readable in one place, the way apps/web does it.
+  // the rule readable in one place, the way the web app does it.
   const isComparing = useCompareStore((s) => s.isComparing)
   const activeModel = useModelStore((s) => s.activeModel)
   const getActivePersona = useSettingsStore((s) => s.getActivePersona)
@@ -46,11 +74,15 @@ export function Sidebar() {
   const passcodeExpiresAt = useRemoteStore((s) => s.passcodeExpiresAt)
   const lanUrl = useRemoteStore((s) => s.lanUrl)
   const mobileUrl = useRemoteStore((s) => s.mobileUrl)
-  const qrPngBase64 = useRemoteStore((s) => s.qrPngBase64)
+  const browserQrPngBase64 = useRemoteStore((s) => s.qrPngBase64)
+  const appQrPngBase64 = useRemoteStore((s) => s.appQrPngBase64)
+  const appQrExpiresAt = useRemoteStore((s) => s.appQrExpiresAt)
+  const fetchAppQr = useRemoteStore((s) => s.fetchAppQr)
   const remoteLoading = useRemoteStore((s) => s.loading)
   const remoteError = useRemoteStore((s) => s.error)
   const tunnelActive = useRemoteStore((s) => s.tunnelActive)
   const tunnelUrl = useRemoteStore((s) => s.tunnelUrl)
+  const internetAppOnly = useRemoteStore((s) => s.internetAppOnly)
   const tunnelLoading = useRemoteStore((s) => s.tunnelLoading)
   const awaitingTunnel = useRemoteStore((s) => s.awaitingTunnel)
   const qrVisible = useRemoteStore((s) => s.qrVisible)
@@ -82,12 +114,16 @@ export function Sidebar() {
   const [countdown, setCountdown] = useState('')
   const [dispatchPicker, setDispatchPicker] = useState(false)
   const [qrModalOpen, setQrModalOpen] = useState(false)
+  // Which QR the panel shows: the LU app's (sealed channel, QR v2 with a
+  // ticket) or the browser page's. Over the tunnel only the app's exists:
+  // the browser page is not reachable from the internet any more (E3).
+  const [qrKind, setQrKind] = useState<'app' | 'browser'>('app')
   // Dieselbe Luecke wie in ChatView: das Zeilenmenue weiter unten hatte seinen
   // Escape-Pfad, diese beiden Flaechen nie. Eine Datei mit drei Flaechen kam
   // durch, weil EINE davon gepflegt war.
   useDismissOnEscape(dispatchPicker, () => setDispatchPicker(false))
   useDismissOnEscape(qrModalOpen, () => setQrModalOpen(false))
-  // Right-click menu on a conversation row. sweenscapehub searched the whole
+  // Right-click menu on a conversation row. A user searched the whole
   // app and right-clicked the chats before asking in Discord how to delete one
   // (2026-07-30): the buttons existed, but at 10 px and only on hover, and the
   // gesture everyone tries first did nothing at all.
@@ -115,6 +151,12 @@ export function Sidebar() {
 
   const isCodingMode = chatMode === 'codex'
   const isRemoteMode = chatMode === 'remote'
+
+  // GH #174: a full, independent copy that opens at once. Not in Remote: a
+  // copy of a dispatched chat would be a chat no phone is connected to.
+  const dupliziereChat = (id: string) => {
+    if (useChatStore.getState().duplicateConversation(id)) setView('chat')
+  }
 
   // Filter conversations by current mode
   const modeConversations = useMemo(
@@ -150,23 +192,34 @@ export function Sidebar() {
   const handleNewChat = () => {
     if (!activeModel) {
       // No model is active — clicking New Chat used to silently do nothing
-      // (mylogz, Discord 2026-06-17: "cant make a new chat"). That happens
+      // (Discord 2026-06-17: "cant make a new chat"). That happens
       // when no model is installed/selected, or the model list hasn't
       // populated yet. Send the user to the Models page where they can
       // install or pick one, instead of a dead click with no feedback.
-      // Cloud mode hides that local-hardware view entirely (the hosted
-      // catalog is just still loading/failed) — stay in chat there.
-      if (useSettingsStore.getState().settings.appMode === 'cloud') return
+      // Cloud mode hides that local-hardware view entirely, so the click
+      // lands on the chat landing page there: its composer holds the model
+      // picker, and in Cloud the user names the model himself (the app picks
+      // none, lib/active-model-mode).
+      if (useSettingsStore.getState().settings.appMode === 'cloud') {
+        setActiveConversation(null)
+        setView('chat')
+        return
+      }
       setView('models')
       return
     }
-    // David's request: persona starts OFF on every new chat. We still
+    // The owner's request: persona starts OFF on every new chat. We still
     // store the globally-selected persona's prompt as the conv's
     // systemPrompt (so toggling personaEnabled later "just works"
     // without re-reading global state), but useChat / useAgentChat
     // only apply it when personaEnabled === true.
+    if (chatMode === 'codex') {
+      openNewCodeSession(activeModel)
+      setView('chat')
+      return
+    }
     const persona = personasEnabled ? getActivePersona() : null
-    createConversation(activeModel, persona?.systemPrompt || '', chatMode)
+    createConversation(activeModel, persona?.systemPrompt || '', chatMode, { persona })
     setView('chat')
   }
 
@@ -174,7 +227,7 @@ export function Sidebar() {
     setDispatchPicker(false)
     if (!activeModel) return
 
-    // Reported by @phantomderp on v2.4.2: clicking LAN/Internet from
+    // Reported by a user on v2.4.2: clicking LAN/Internet from
     // `npm run dev` produced an HTTP 404 + cryptic JSON.parse error
     // because the dev server can't host the Rust HTTP server / JWT auth /
     // Cloudflare tunnel that Remote needs. Bail early with a clear,
@@ -268,7 +321,7 @@ export function Sidebar() {
     const convId = createConversation(activeModel, persona?.systemPrompt || '', 'remote')
     setView('chat')
     // For internet mode, suppress the QR until the Cloudflare tunnel is
-    // verified up (David 2026-06-15). Set this BEFORE dispatch() so the LAN
+    // verified up (2026-06-15). Set this BEFORE dispatch() so the LAN
     // QR fetched during startServer never flashes. LAN mode shows the QR
     // immediately (no tunnel to wait for).
     useRemoteStore.setState({ awaitingTunnel: mode === 'internet' })
@@ -291,6 +344,18 @@ export function Sidebar() {
       useRemoteStore.getState().startTunnel()
     }
   }
+
+  // C60: the chat agent asked to start the remote and the user said yes on
+  // the strong card. Same door as the Dispatch button: folder picker, the
+  // dispatch, the QR code here. Home network only, never 'internet'.
+  const chatDispatch = useRemoteStore((s) => s.chatDispatchRequest)
+  useEffect(() => {
+    if (!chatDispatch) return
+    useRemoteStore.getState().clearChatDispatch()
+    void handleDispatch('lan')
+    // handleDispatch is a fresh closure each render; the request is the trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatDispatch])
 
   const handleRename = (id: string) => {
     if (editTitle.trim()) {
@@ -354,6 +419,32 @@ export function Sidebar() {
     return () => clearInterval(t)
   }, [remoteEnabled, qrVisible, refreshDevices])
 
+  const showAppQr = !!appQrPngBase64 && (tunnelActive || qrKind === 'app')
+  const qrPngBase64 = showAppQr ? appQrPngBase64 : (tunnelActive ? '' : browserQrPngBase64)
+  // The tunnel has no page to open (#232): the address shown and copied is
+  // always the browser page in the same Wi-Fi, and the internet way gets a
+  // hint that it takes the LU app.
+  const { address: shownAddress, appOnlyHint } = remoteAddressView({ tunnelActive, internetAppOnly, mobileUrl, lanUrl })
+
+  // A code (and the app's ticket) exists only while the QR panel or the
+  // large QR shows: opening makes one, closing ends it on the server.
+  const setPairingWindow = useRemoteStore((s) => s.setPairingWindow)
+  const pairingWindowOpen = remoteEnabled && (qrVisible || qrModalOpen)
+  const pairingWindowSent = useRef(false)
+  useEffect(() => {
+    if (!pairingWindowOpen && !pairingWindowSent.current) return
+    pairingWindowSent.current = pairingWindowOpen
+    void setPairingWindow(pairingWindowOpen)
+  }, [pairingWindowOpen, setPairingWindow])
+
+  // The ticket in the app's QR lasts five minutes: renew it while it shows.
+  useEffect(() => {
+    if (!remoteEnabled || !appQrExpiresAt || !(qrVisible || qrModalOpen)) return
+    const wait = Math.max(5, appQrExpiresAt - Math.floor(Date.now() / 1000) - 30) * 1000
+    const t = setTimeout(() => { void fetchAppQr() }, wait)
+    return () => clearTimeout(t)
+  }, [remoteEnabled, appQrExpiresAt, qrVisible, qrModalOpen, fetchAppQr])
+
   // Passcode countdown
   useEffect(() => {
     if (!passcodeExpiresAt || !remoteEnabled) {
@@ -383,7 +474,7 @@ export function Sidebar() {
     // also weiterhin nur bei neuem Ablaufzeitpunkt oder Remote-Umschaltung neu.
   }, [passcodeExpiresAt, regenerateToken, remoteEnabled])
 
-  // Web parity (apps/web/components/layout/Sidebar.tsx:217): the conversation
+  // Web parity (the web app): the conversation
   // list belongs to Chat and nowhere else. This used to be a side effect of
   // setView, which also tore the user's collapse open on every trip through
   // Models or Settings.
@@ -432,7 +523,7 @@ export function Sidebar() {
           </button>
           <div className="w-6 h-px bg-gray-200 dark:bg-white/10 my-1" />
           <button
-            onClick={() => { setChatMode('lu'); setActiveConversation(null); setView('chat'); setDispatchPicker(false) }}
+            onClick={() => { setChatMode('lu'); setActiveConversation(latestConversationOfMode(useChatStore.getState().conversations, 'lu')); setView('chat'); setDispatchPicker(false) }}
             title="Chat"
             aria-label="Chat"
             className={railBtn(!isCodingMode && !isRemoteMode)}
@@ -440,7 +531,7 @@ export function Sidebar() {
             <MessageSquare size={15} />
           </button>
           <button
-            onClick={() => { setChatMode('codex'); setActiveConversation(null); setView('chat'); setDispatchPicker(false) }}
+            onClick={() => { setChatMode('codex'); setActiveConversation(latestConversationOfMode(useChatStore.getState().conversations, 'codex')); setView('chat'); setDispatchPicker(false) }}
             title="Code"
             aria-label="Code"
             className={railBtn(isCodingMode)}
@@ -474,16 +565,16 @@ export function Sidebar() {
           zoom 1.25 ist weg, die Spalte haengt jetzt am Ziehgriff weiter unten
           (sidebarWidth). `relative` traegt diesen Griff. */}
       {showSidebar && sidebarOpen && (
+        <SidebarFrame key="full" overlay={overlay}>
         <motion.aside
-          key="full"
           data-testid="sidebar-panel"
-          className="relative h-full rounded-[10px] bg-white dark:bg-[#1e1e1e] ring-1 ring-black/[0.04] dark:ring-white/[0.05] flex flex-col z-20 overflow-hidden"
+          className={`${overlay ? 'absolute left-0 top-0 shadow-lg' : 'relative'} h-full rounded-[10px] bg-white dark:bg-[#1e1e1e] ring-1 ring-black/[0.04] dark:ring-white/[0.05] flex flex-col z-20 overflow-hidden`}
           initial={{ width: 0, opacity: 0 }}
           animate={{ width: sidebarWidth, opacity: 1 }}
           exit={{ width: 0, opacity: 0 }}
           transition={{ duration: ziehend ? 0 : 0.15 }}
         >
-          {/* Ziehgriff — D1, zweite Haelfte (David, 02.09.2026: "bzw dynamisch
+          {/* Ziehgriff — D1, zweite Haelfte (02.09.2026: "bzw dynamisch
               mit vergroesserung anpassend").
 
               Die Spalte war auf 250 px festgenagelt, es gab also gar keine
@@ -517,7 +608,7 @@ export function Sidebar() {
             data-testid="sidebar-resize-handle"
             className="absolute right-0 top-0 h-full w-1 -mr-0.5 z-10 cursor-col-resize hover:bg-blue-500/40 active:bg-blue-500/60 transition-colors"
           />
-          {/* Mode Tabs (Chat | Code | Remote) — icon-only, like uselu.
+          {/* Mode Tabs (Chat | Code | Remote) — icon-only, like the web app.
               Labels live in title/aria-label for accessibility.
 
               D-S17 — die Hoehen kommen jetzt aus der Leiter, nicht aus dem
@@ -588,7 +679,7 @@ export function Sidebar() {
             </button>
             {/* Chat tab */}
             <button
-              onClick={() => { setChatMode('lu'); setActiveConversation(null); setView('chat'); setDispatchPicker(false) }}
+              onClick={() => { setChatMode('lu'); setActiveConversation(latestConversationOfMode(useChatStore.getState().conversations, 'lu')); setView('chat'); setDispatchPicker(false) }}
               title="Chat"
               aria-label="Chat"
               className={`flex items-center gap-1.25 justify-center px-2.5 h-[var(--control-h-md)] rounded-[5px] font-medium transition-all flex-1 min-w-0 ${
@@ -604,7 +695,7 @@ export function Sidebar() {
             {/* Code tab — direct switch to the coding agent (no dropdown).
                 Internal mode value 'codex' is kept for storage back-compat. */}
             <button
-              onClick={() => { setChatMode('codex'); setActiveConversation(null); setView('chat'); setDispatchPicker(false) }}
+              onClick={() => { setChatMode('codex'); setActiveConversation(latestConversationOfMode(useChatStore.getState().conversations, 'codex')); setView('chat'); setDispatchPicker(false) }}
               title="Code"
               aria-label="Code"
               className={`flex items-center gap-1.25 justify-center px-2.5 h-[var(--control-h-md)] rounded-[5px] font-medium transition-all flex-1 min-w-0 ${
@@ -727,17 +818,35 @@ export function Sidebar() {
                 </div>
               </div>
 
+              {/* Windows can drop the Wi-Fi way for LU (win_firewall.rs). */}
+              <RemoteFirewallNotice />
+
               {/* QR Code — hidden until Cloudflare is verified up (internet
-                  mode); shown immediately for LAN. David 2026-06-15: never
+                  mode); shown immediately for LAN. 2026-06-15: never
                   flash a QR that points at the LAN IP while the tunnel is
                   still coming up. */}
               {awaitingTunnel ? (
                 <div className="w-full flex flex-col items-center justify-center gap-1.25 py-5 text-center">
-                  <RefreshCw size={20} className="animate-spin text-emerald-400/70" />
+                  <RefreshCw size={20} className="animate-spin text-emerald-600/70 dark:text-emerald-400/70" />
                   <span className="text-[11px] text-emerald-400/80">Connecting to Cloudflare…</span>
                   <span className="text-[9px] text-gray-500 leading-snug px-2.5">The QR appears once the tunnel is live</span>
                 </div>
               ) : qrPngBase64 ? (
+                <>
+                {appQrPngBase64 && !tunnelActive && (
+                  <div className="flex justify-center gap-1.25" role="group" aria-label="QR code for">
+                    {(['app', 'browser'] as const).map((kind) => (
+                      <button
+                        key={kind}
+                        onClick={() => setQrKind(kind)}
+                        aria-pressed={qrKind === kind}
+                        className={`t-micro px-[7.5px] py-[2.5px] rounded border transition-colors ${qrKind === kind ? 'border-green-500/40 text-green-400' : 'border-transparent text-gray-500 hover:text-gray-300'}`}
+                      >
+                        {kind === 'app' ? 'LU app' : 'Browser'}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <button
                   onClick={() => setQrModalOpen(true)}
                   title="Show large QR code"
@@ -747,6 +856,12 @@ export function Sidebar() {
                     <img src={`data:image/png;base64,${qrPngBase64}`} alt="QR" className="w-[90px] h-[90px]" />
                   </div>
                 </button>
+                {showAppQr && (
+                  <p className="t-micro text-gray-500 text-center leading-snug">
+                    Scan with the LU app. You confirm the phone here.
+                  </p>
+                )}
+                </>
               ) : null}
 
               {/* Passcode. Bis zum 04.09.2026 stand er in einem mittleren Gelb,
@@ -783,17 +898,17 @@ export function Sidebar() {
                 </div>
               </div>
 
-              {/* URL — prefer tunnel URL when tunnel is active */}
+              {/* Browser address, same Wi-Fi only, also in internet mode (#232). */}
               <div className="flex items-center gap-1.25">
                 {tunnelLoading ? (
                   <code className="text-[10px] text-emerald-400/70 truncate flex-1 animate-pulse">Starting Cloudflare tunnel…</code>
                 ) : (
                   <>
-                    <code className={`text-[10px] truncate flex-1 ${tunnelActive ? 'text-emerald-400' : 'text-blue-400'}`}>
-                      {tunnelActive && tunnelUrl ? `${tunnelUrl}/mobile` : (mobileUrl || lanUrl)}
+                    <code className="text-[10px] truncate flex-1 text-blue-400">
+                      {shownAddress}
                     </code>
                     <button
-                      onClick={() => copyToClipboard(tunnelActive && tunnelUrl ? `${tunnelUrl}/mobile` : (mobileUrl || lanUrl), 'panel-url')}
+                      onClick={() => copyToClipboard(shownAddress, 'panel-url')}
                       className="p-[2.5px] hover:bg-white/10 rounded-[5px] shrink-0"
                       aria-label={copied === 'panel-url' ? 'Address copied' : 'Copy address'}
                       title={copied === 'panel-url' ? 'Copied' : 'Copy address'}
@@ -811,9 +926,12 @@ export function Sidebar() {
                   not available" on first scan, panic, and click
                   Restart. The note is small + auto-disappears once a
                   device authenticates (qrVisible flips false). */}
+              {appOnlyHint && (
+                <p className="t-micro text-gray-500 leading-snug">{appOnlyHint}</p>
+              )}
               {tunnelActive && tunnelUrl && (
                 <p className="text-[10px] text-gray-500/70 leading-snug">
-                  First connection may take 5 to 10 s while DNS propagates. If you see a DNS error, wait a moment and reload.
+                  First connection may take 5 to 10 s while DNS propagates. If the app shows a DNS error, wait a moment and try again.
                 </p>
               )}
 
@@ -973,6 +1091,11 @@ export function Sidebar() {
                           Dokument stehen, deshalb kann `title=` hier jetzt das
                           Ganze zeigen. */}
                       <p className="text-[13px] truncate flex-1 min-w-0" title={conv.title}>{conv.title}</p>
+                      {conv.shared && (
+                        <span title="Shared with your phone" aria-label="Shared with your phone" className="shrink-0 text-gray-500 dark:text-gray-400">
+                          <Smartphone size={12} />
+                        </span>
+                      )}
                       {/* Already formatted in the projection — see SidebarRow.
                           Das Datum weicht, wenn die Aktionsleiste kommt: die
                           Leiste liegt seit D-S15 UEBER diesem Slot (62,66 von
@@ -1089,6 +1212,16 @@ export function Sidebar() {
                       >
                         <Edit3 size={16} />
                       </button>
+                      {!isRemoteMode && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); dupliziereChat(conv.id) }}
+                          title="Duplicate chat"
+                          aria-label="Duplicate chat"
+                          className="p-1.25 rounded-md hover:bg-white/10 text-gray-500 hover:text-gray-300"
+                        >
+                          <Copy size={16} />
+                        </button>
+                      )}
                       <button
                         onClick={(e) => { e.stopPropagation(); loescheChatMitAnsage(conv.id, conv.title) }}
                         title="Delete chat"
@@ -1133,6 +1266,9 @@ export function Sidebar() {
                 </button>
               </div>
             )}
+            {isRemoteMode && HOWTO.remote && (
+              <div className="flex justify-center pb-1"><HowItWorks topic="remote" variant="line" placement="above-start" /></div>
+            )}
             {isRemoteMode ? (
               <AnimatePresence mode="wait">
                 {!dispatchPicker ? (
@@ -1162,14 +1298,14 @@ export function Sidebar() {
                     >
                       <button
                         onClick={() => handleDispatch('lan')}
-                        className="flex-1 flex items-center justify-center gap-1.25 h-[var(--control-h-lg)] rounded-[8px] text-[11px] font-medium text-gray-400 border border-zinc-300/40 dark:border-zinc-500/40 hover:bg-white/[0.05] hover:text-zinc-100 hover:border-zinc-300/60 dark:hover:border-zinc-400/60 transition-all cursor-pointer"
+                        className="flex-1 flex items-center justify-center gap-1.25 h-[var(--control-h-lg)] rounded-[8px] text-[11px] font-medium text-gray-400 border border-zinc-300/40 dark:border-zinc-500/40 hover:bg-white/[0.05] hover:text-gray-900 dark:hover:text-zinc-100 hover:border-zinc-300/60 dark:hover:border-zinc-400/60 transition-all cursor-pointer"
                       >
                         <Wifi size={12} className="text-zinc-400" />
                         LAN
                       </button>
                       <button
                         onClick={() => handleDispatch('internet')}
-                        className="flex-1 flex items-center justify-center gap-1.25 h-[var(--control-h-lg)] rounded-[8px] text-[11px] font-medium text-gray-400 border border-zinc-300/40 dark:border-zinc-500/40 hover:bg-white/[0.05] hover:text-zinc-100 hover:border-zinc-300/60 dark:hover:border-zinc-400/60 transition-all cursor-pointer"
+                        className="flex-1 flex items-center justify-center gap-1.25 h-[var(--control-h-lg)] rounded-[8px] text-[11px] font-medium text-gray-400 border border-zinc-300/40 dark:border-zinc-500/40 hover:bg-white/[0.05] hover:text-gray-900 dark:hover:text-zinc-100 hover:border-zinc-300/60 dark:hover:border-zinc-400/60 transition-all cursor-pointer"
                       >
                         <Globe size={12} className="text-zinc-400" />
                         Internet
@@ -1211,6 +1347,7 @@ export function Sidebar() {
             )}
           </div>
         </motion.aside>
+        </SidebarFrame>
       )}
     </AnimatePresence>
 
@@ -1227,8 +1364,8 @@ export function Sidebar() {
           <div
             role="menu"
             aria-label="Chat actions"
-            className="absolute min-w-[180px] py-1.25 rounded-[8px] bg-white dark:bg-[#141414] border border-gray-200 dark:border-white/10 shadow-lg text-[14px]"
-            style={{ left: Math.min(rowMenu.x, window.innerWidth - 160), top: Math.min(rowMenu.y, window.innerHeight - 80) }}
+            className="absolute min-w-[180px] py-1.25 rounded-[8px] lu-elevated text-[14px]"
+            style={{ left: Math.min(rowMenu.x, window.innerWidth - 160), top: Math.min(rowMenu.y, window.innerHeight - 120) }}
             onClick={(e) => e.stopPropagation()}
           >
             <button
@@ -1244,6 +1381,35 @@ export function Sidebar() {
               <Edit3 size={15} />
               <span>Rename</span>
             </button>
+            {!isRemoteMode && (() => {
+              const shared = rows.find((r) => r.id === rowMenu.id)?.shared ?? false
+              return (
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    useChatStore.getState().setRemoteShared(rowMenu.id, !shared)
+                    setRowMenu(null)
+                  }}
+                  className="w-full flex items-center gap-2.5 px-3.75 py-[7.5px] text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/[0.06]"
+                >
+                  <Smartphone size={15} />
+                  <span>{shared ? 'Stop sharing with phone' : 'Continue on phone'}</span>
+                </button>
+              )
+            })()}
+            {!isRemoteMode && (
+              <button
+                role="menuitem"
+                onClick={() => {
+                  dupliziereChat(rowMenu.id)
+                  setRowMenu(null)
+                }}
+                className="w-full flex items-center gap-2.5 px-3.75 py-[7.5px] text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/[0.06]"
+              >
+                <Copy size={15} />
+                <span>Duplicate chat</span>
+              </button>
+            )}
             <button
               role="menuitem"
               onClick={() => {
@@ -1267,7 +1433,7 @@ export function Sidebar() {
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.12 }}
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 backdrop-blur-sm p-7.5"
+          className="fixed inset-0 z-[100] flex items-center justify-center lu-dialog-scrim p-7.5"
           onClick={() => setQrModalOpen(false)}
         >
           <motion.div
@@ -1290,7 +1456,7 @@ export function Sidebar() {
                man abtippt, braucht Kontrast und keinen Farbton. Die
                QR-Kachel ist selbst weiss und verschwaende sonst im weissen
                Dialog, daher die Kante. */
-            className="bg-white dark:bg-lu-base border border-gray-200 dark:border-white/10 rounded-[10px] p-6.25 max-w-[450px] w-full flex flex-col items-center gap-3.75 shadow-2xl"
+            className="lu-dialog rounded-[10px] p-6.25 max-w-[450px] w-full flex flex-col items-center gap-3.75"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between w-full">
@@ -1346,11 +1512,11 @@ export function Sidebar() {
             )}
 
             <div className="w-full flex items-center gap-2.5 px-3.75 py-2.5 rounded-[5px] bg-white/[0.04] border border-white/5">
-              <code className={`text-[13px] truncate flex-1 ${tunnelActive ? 'text-emerald-700 dark:text-emerald-400' : 'text-blue-700 dark:text-blue-400'}`}>
-                {tunnelActive && tunnelUrl ? `${tunnelUrl}/mobile` : (mobileUrl || lanUrl)}
+              <code className="text-[13px] truncate flex-1 text-blue-700 dark:text-blue-400">
+                {shownAddress}
               </code>
               <button
-                onClick={() => copyToClipboard(tunnelActive && tunnelUrl ? `${tunnelUrl}/mobile` : (mobileUrl || lanUrl), 'modal-url')}
+                onClick={() => copyToClipboard(shownAddress, 'modal-url')}
                 className="p-1.25 rounded-[5px] hover:bg-white/10 text-gray-400 hover:text-white transition-colors shrink-0"
                 aria-label={copied === 'modal-url' ? 'Address copied' : 'Copy address'}
                 title={copied === 'modal-url' ? 'Copied' : 'Copy address'}
@@ -1360,7 +1526,10 @@ export function Sidebar() {
             </div>
 
             <p className="text-[12px] text-gray-500 text-center">
-              Scan the QR or enter the 6-digit code on your phone.
+              {appOnlyHint && <span className="block mb-1.25">{appOnlyHint}</span>}
+              {showAppQr
+                ? 'Scan the QR with the LU app, then allow the phone here. At home the app can also pair with the 6-digit code.'
+                : 'Scan the QR or enter the 6-digit code on your phone.'}
             </p>
           </motion.div>
         </motion.div>

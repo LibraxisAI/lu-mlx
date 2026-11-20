@@ -1,5 +1,5 @@
 /**
- * GitHub #115 (graysoncooper): browser voice recording always failed because
+ * GitHub #115: browser voice recording always failed because
  * the /local-api security middleware enforced application/json on EVERY POST
  * body, and /local-api/transcribe is the one endpoint whose body IS the raw
  * recorded audio (audio/webm from Chrome's MediaRecorder, audio/mp4 from

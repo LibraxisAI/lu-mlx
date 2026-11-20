@@ -3,10 +3,10 @@
  * Web is authoritative for "Enhance" (the upscale intent); Desktop keeps its
  * own longer "Edit / Image to Image" label for 'edit' on purpose (GH D#86,
  * see the comment on that entry), that one is NOT supposed to match Web.
- * Web's separate 'video_upscale' intent is a feature decision for David, not
+ * Web's separate 'video_upscale' intent is a feature decision for the owner, not
  * a label fix, and stays out of both this test and this repo's INTENTS.
  *
- * Reads apps/web/components/create/experimental/intents.ts as source text
+ * Reads the web app as source text
  * (a sibling checkout, same pattern as the R5-9 and R5-4 parity tests) rather
  * than importing it, since it is a Next.js file this bundle cannot import.
  *
@@ -14,32 +14,21 @@
  * fixed seven-`..` `__dirname` path, which only resolves from
  * `lu-301-wt/<name>/`. Outside that (the main checkout, Windows, CI) the
  * `readFileSync` at module scope threw and took the whole file down. Same
- * fix as `katalog-paritaet-web.test.ts`: LU_WEB_REPO from the environment,
- * then a couple of `process.cwd()`-relative candidates, and a clean skip
- * with a message when none exist, instead of a false green or a hard crash.
+ * fix as `katalog-paritaet-web.test.ts`: only LU_WEB_REPO says where the web
+ * checkout is (web-checkout.ts). Not set, the guard is skipped with a line on
+ * stderr. Set to something that is not a web checkout, it fails.
  *
  * Run: LU_WEB_REPO=/path/to/web npx vitest run \
  *   src/components/create/experimental/__tests__/intent-label-parity.test.ts
  */
 import { describe, it, expect } from 'vitest'
-import { existsSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { webCheckout } from '../../../../lib/__tests__/web-checkout'
 import { INTENT_MAP } from '../intents'
 
 const REL_PATH = 'apps/web/components/create/experimental/intents.ts'
-const KANDIDATEN = [
-  ...(process.env.LU_WEB_REPO?.trim() ? [resolve(process.env.LU_WEB_REPO.trim())] : []),
-  resolve(process.cwd(), '../lu-300-web'),
-  resolve(process.cwd(), '../lu-300-web-katalog'),
-]
-const WEB = KANDIDATEN.find((p) => existsSync(resolve(p, REL_PATH)))
-if (!WEB) {
-  process.stderr.write(
-    '[intent-label-parity] uebersprungen: kein Web-Checkout gefunden. Gesucht in: ' +
-      KANDIDATEN.join(' | ') +
-      '. Setze LU_WEB_REPO, damit der Paritaetswaechter laeuft.\n',
-  )
-}
+const WEB = webCheckout('intent-label-parity', [REL_PATH])
 const WEB_SRC = WEB ? readFileSync(resolve(WEB, REL_PATH), 'utf8') : ''
 
 /** Pulls label/short for one intent id out of Web's source, without importing it. */

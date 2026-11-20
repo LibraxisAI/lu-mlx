@@ -98,12 +98,13 @@ describe('verdrahtet', () => {
 
   it('die Models-Kachel auch, denn dort standen dieselben Kennungen', () => {
     const src = lies('components/models/ModelCard.tsx')
-    expect(src).toContain('splitForMiddleEllipsis(displayModelName(model.name))')
+    // W33: a ComfyUI file with a name of its own shows that name, cut the same way.
+    expect(src).toContain('splitForMiddleEllipsis(ownName || displayModelName(model.name))')
     expect(src).toContain('<span className="truncate">{nameKopf}</span>')
   })
 
   it('und der Knopf im Eingabefeld traegt keinen Pfad mehr', () => {
     expect(lies('components/models/ModelSelector.tsx'))
-      .toContain('shortModelLabel(displayModelName(gezeigtesModell)')
+      .toContain('modelDisplayLabel(models, gezeigtesModell)')
   })
 })

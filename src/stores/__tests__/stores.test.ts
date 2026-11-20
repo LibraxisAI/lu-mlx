@@ -402,7 +402,7 @@ describe('memoryStore', () => {
     })
   })
 
-  // konata-session 2026-06-07 (Aldrich Ironhart "memory import issue"): the
+  // A user-session 2026-06-07 (a user "memory import issue"): the
   // single Import button only opened the .md picker, so JSON import was dead;
   // importFromJSON also accepted ONLY {entries:[...]} and reported nothing.
   describe('import (tolerant shapes + count)', () => {
@@ -440,7 +440,7 @@ describe('memoryStore', () => {
     })
   })
 
-  // David 2026-06-07: manual memory-limit override instead of "32k ctx = 15".
+  // 2026-06-07: manual memory-limit override instead of "32k ctx = 15".
   describe('effectiveMemoryBudget (manual limit override)', () => {
     it('returns the context-tier budget when override is null/0/undefined', () => {
       expect(effectiveMemoryBudget(32768, null).maxMemories).toBe(15)
@@ -752,7 +752,7 @@ describe('memoryStore', () => {
       // R2-48 und R5-40: der Typkommentar in types/agent-mode.ts sagte
       // "default false", ausgeliefert wird true. Der Kommentar ist
       // nachgezogen, diese Zeile haelt ihn und den Zustand zusammen.
-      // Ob die Vorbelegung selbst richtig ist, ist Entscheid David; dieser
+      // Ob die Vorbelegung selbst richtig ist, ist Entscheid des Inhabers; dieser
       // Fall behauptet nur, was heute ausgeliefert wird.
       //
       // getInitialState(), nicht getState(): der Fall eine Zeile darueber

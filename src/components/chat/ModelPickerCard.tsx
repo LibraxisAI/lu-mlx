@@ -8,7 +8,7 @@ import type { ToolArgs } from '../../api/mcp/types'
 import { Hinweis } from '../ui/Hinweis'
 
 /**
- * Model-Picker UI (v2.5.3, David 2026-06-10). Two faces of one feature:
+ * Model-Picker UI (v2.5.3, 2026-06-10). Two faces of one feature:
  *
  *   <ModelPickerCard/>   — the BLOCKING pick rendered inside a running
  *     image_generate / video_generate tool call BEFORE the VRAM swap. LU

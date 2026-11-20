@@ -30,21 +30,26 @@
  */
 import { useState, useEffect } from 'react'
 import { Check, Download, ChevronRight } from 'lucide-react'
-import { ONBOARDING_MODELS, recommendedOnboardingModelName, strongestOnboardingModelName } from '../../lib/constants'
+import { ONBOARDING_MODELS, onboardingModelCopy, recommendedOnboardingModelName, strongestOnboardingModelName, type OnboardingModel } from '../../lib/constants'
+import { recommendedOnSharedMemory, sharedMemoryAdvisory, sharedMemoryBudgetGb } from '../../lib/onboarding-shared-memory'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useProviderStore } from '../../stores/providerStore'
 import { useDownloadStore } from '../../stores/downloadStore'
 import { useModelStore } from '../../stores/modelStore'
-import { detectProviderModelPath, startModelDownloadToPath, luEngineDownloadDir } from '../../api/discover'
+import { detectProviderModelPath, luEngineDownloadDir, type PlannedDownload } from '../../api/discover'
+import { startPlannedDownload } from '../../api/model-download'
+import { gbOf, imagePartFileName } from '../../lib/image-part'
 import { hfUrlToOllamaRef, hfUrlToLmStudioSubdir } from '../../lib/hf-to-provider'
 import { pullModelTauri, checkConnection as checkOllama } from '../../api/ollama'
-import { activateBuiltinModel } from '../../api/engine'
+import { activateBuiltinModel, bundledToAIModels, isEmbeddingGgufName, listBundledModels } from '../../api/engine'
+import { LU_ENGINE_NAME } from '../../lib/engine-name'
 import { builtinModelNameFromPath } from '../../lib/builtin-model-identity'
 import { mayEnableFromWizard } from '../../lib/onboarding-provider-gate'
+import { syncOllamaBaseFromRust } from '../../lib/ollama-host-sync'
 import { bundledPickerIdForFile } from '../../lib/bundled-download-activation'
-import { backendCall } from '../../api/backend'
+import { backendCall, isMacOS } from '../../api/backend'
 import { getSystemVRAM } from '../../api/comfyui'
-import { getMaxVramGb } from '../../lib/hardware'
+import { getMaxVramGb, getSharedMemoryGb } from '../../lib/hardware'
 import { classifyOnboardingBackend, resolveOnboardingBackend } from '../../lib/onboarding-backend'
 import { ProgressBar } from '../ui/ProgressBar'
 import { formatBytes } from '../../lib/formatters'
@@ -65,6 +70,29 @@ interface ModelsStepProps {
   /** Ueberlebt diesen Schritt: der Schlussbildschirm zaehlt sie. */
   pulledModels: string[]
   setPulledModels: (update: (prev: string[]) => string[]) => void
+}
+
+/**
+ * The files of one onboarding pick: the model, and its image part when it has
+ * one. Same rule as the Models page (planModelDownload): the part lands next
+ * to the model under the name the engine looks for, with its own size and
+ * digest, and both are filed as one download.
+ */
+/** One row of "Models you already have": the id the picker uses, the raw
+ *  name the composer shows, and the engine that serves it. */
+interface InstalledChoice {
+  id: string
+  label: string
+  engine: 'ollama' | 'lu-engine'
+}
+
+export function onboardingPlan(model: OnboardingModel): PlannedDownload[] {
+  const expectedBytes = model.expectedBytes ?? (model.sizeGB ? Math.round(model.sizeGB * 1_073_741_824) : undefined)
+  const plan: PlannedDownload[] = [{ url: model.downloadUrl, filename: model.filename, expectedBytes, sha256: model.sha256 }]
+  if (model.mmprojUrl) {
+    plan.push({ url: model.mmprojUrl, filename: imagePartFileName(model.filename), expectedBytes: model.mmprojBytes, sha256: model.mmprojSha256 })
+  }
+  return plan
 }
 
 export function ModelsStep({ skin, scan, fleet, step, setStep, pulledModels, setPulledModels }: ModelsStepProps) {
@@ -224,11 +252,20 @@ export function ModelsStep({ skin, scan, fleet, step, setStep, pulledModels, set
           // there's no <user>/<repo> nesting — list_bundled_models scans the
           // dir directly. We await completion here (not fire-and-forget) so the
           // engine starts on a fully-downloaded file and the first chat works.
-          dlStore.getState().setMeta(model.filename, model.downloadUrl, 'gguf', destDir!)
-          const expectedBytes = model.expectedBytes ?? (model.sizeGB ? Math.round(model.sizeGB * 1_073_741_824) : undefined)
-          await startModelDownloadToPath(model.downloadUrl, destDir!, model.filename, expectedBytes, model.sha256)
-          dlStore.getState().startPolling()
+          const plan = onboardingPlan(model)
+          await startPlannedDownload(plan, destDir!, model.label)
           await awaitDownloadComplete(model.filename)
+          // The image part is awaited too: an engine started before it lands
+          // would bring the model up without image input. A part that fails
+          // is not a failed model: the chat works, and the part can be added
+          // from the installed model with one click.
+          if (plan[1]) {
+            try {
+              await awaitDownloadComplete(plan[1].filename)
+            } catch {
+              setDownloadError(`${model.label} is installed, but its image part did not download. You can add it later under Models, Installed.`)
+            }
+          }
           // Same door as the Models page (lib/bundled-download-activation):
           // the engine path comes from the model list, not from a string glued
           // together here, and the downloaded model is the one the chat uses.
@@ -245,10 +282,7 @@ export function ModelsStep({ skin, scan, fleet, step, setStep, pulledModels, set
           // Studio's library — the second half of the same Discord bug.
           const subdir = hfUrlToLmStudioSubdir(model.downloadUrl)
           const targetDir = subdir ? `${destDir}/${subdir}` : destDir!
-          dlStore.getState().setMeta(model.filename, model.downloadUrl, 'gguf', targetDir)
-          const expectedBytes = model.expectedBytes ?? (model.sizeGB ? Math.round(model.sizeGB * 1_073_741_824) : undefined)
-          await startModelDownloadToPath(model.downloadUrl, targetDir, model.filename, expectedBytes, model.sha256)
-          dlStore.getState().startPolling()
+          await startPlannedDownload(onboardingPlan(model), targetDir, model.label)
         }
         setPulledModels(prev => [...prev, name])
       } catch (e) {
@@ -291,7 +325,25 @@ export function ModelsStep({ skin, scan, fleet, step, setStep, pulledModels, set
   // none of those tools name (0 from getMaxVramGb reads as "unknown", not as
   // "no VRAM"), so a machine ComfyUI can already see is not made to look
   // worse than it is.
+  //
+  // A Mac is asked differently. It has no card and ComfyUI never runs there,
+  // so both probes above answer nothing and the step used to know nothing:
+  // the 7B starter on every Mac, no advisory on any. What a model can take
+  // on a Mac is a share of the one memory pool, the same budget the Model
+  // Manager compares its chat tiles with (lib/onboarding-shared-memory.ts).
+  // The pool is `shared_memory_mib` on the Apple entry of `detect_gpus`, with
+  // `system_info` as the fallback. On a Mac `systemVRAM` therefore holds
+  // that budget, not a card: one piece of state, read two ways (AS-09 counts
+  // the `useState` of this folder).
+  const sharedMemory = isMacOS()
   useEffect(() => {
+    if (isMacOS()) {
+      let alive = true
+      getSharedMemoryGb()
+        .then((pool) => { if (alive) setSystemVRAM(sharedMemoryBudgetGb(pool)) })
+        .catch(() => {})
+      return () => { alive = false }
+    }
     getMaxVramGb().then((v) => {
       if (v > 0) { setSystemVRAM(v); return }
       getSystemVRAM().then((v2) => setSystemVRAM(v2)).catch(() => {})
@@ -313,30 +365,48 @@ export function ModelsStep({ skin, scan, fleet, step, setStep, pulledModels, set
   // `> 0` sofort auf den Einbettungsschritt sprang. Die Namen sind der
   // Unterschied zwischen „wir wissen, dass er welche hat" und „er kann eins
   // davon waehlen": ohne sie liesse sich der Schritt gar nicht zeigen.
-  const [installedModels, setInstalledModels] = useState<string[] | null>(null)
-  // Die Liste ist eine OLLAMA-Liste (`/api/tags`), und deshalb haengt sie an
-  // Ollamas Schalter. Wer den Anbieter in Settings ausgeschaltet hat, bekommt
-  // hier nichts angeboten, was der Assistent nicht einschalten darf: sonst
-  // waehlt ein Klick ein Modell, dessen Maschine dunkel bleibt. Erstlauf und
-  // frische Ablage tragen die Marke nicht, dort bleibt alles wie vorher.
+  const [installedModels, setInstalledModels] = useState<InstalledChoice[] | null>(null)
+  // Ollamas Teil der Liste haengt an Ollamas Schalter. Wer den Anbieter in
+  // Settings ausgeschaltet hat, bekommt hier nichts angeboten, was der
+  // Assistent nicht einschalten darf: sonst waehlt ein Klick ein Modell, dessen
+  // Maschine dunkel bleibt. Erstlauf und frische Ablage tragen die Marke
+  // nicht, dort bleibt alles wie vorher.
+  //
+  // Die GGUFs der LU Engine stehen seit 3.0.9 mit in der Liste, aus derselben
+  // Quelle wie Model Manager und Waehler (`list_bundled_models`, App-Ordner
+  // plus der eigene Ordner aus Storage). Befund I1 auf der Box, r2 6545eac24:
+  // wer nur LU-Engine-Modelle hatte, sah hier nichts davon und bekam den
+  // Starter angeboten, als haette er keins.
   const ollamaOffenbarUnerwuenscht = !mayEnableFromWizard(
     useProviderStore(s => s.providers.ollama),
   )
   useEffect(() => {
     if (step !== 'models') return
-    if (ollamaOffenbarUnerwuenscht) { setInstalledModels([]); return }
     let cancelled = false
-    import('../../api/ollama').then(({ listModels }) =>
-      listModels()
-        .then(models => {
-          const chatCapable = models.filter(m => {
+    // Erst Rusts Ollama-Adresse holen: im eigenen Assistentenfenster stand
+    // sonst der Default 11434 in backend.ts (lib/ollama-host-sync.ts).
+    const ollamaRows: Promise<InstalledChoice[]> = ollamaOffenbarUnerwuenscht
+      ? Promise.resolve([])
+      : syncOllamaBaseFromRust()
+        .then(() => import('../../api/ollama'))
+        .then(({ listModels }) => listModels())
+        .then(models => models
+          .filter(m => {
             const lower = (m.name || '').toLowerCase()
             return !lower.includes('embed') && !lower.includes('bge-') && !lower.includes('nomic')
           })
-          if (!cancelled) setInstalledModels(chatCapable.map(m => m.name))
-        })
-        .catch(() => { if (!cancelled) setInstalledModels([]) })
-    )
+          .map(m => ({ id: m.name, label: m.name, engine: 'ollama' as const })))
+        .catch(() => [])
+    // Eine Antwort ohne Sidecar (Web, Bruecke) ist ein Fehler und heisst hier
+    // schlicht: keine eigenen GGUFs.
+    const engineRows: Promise<InstalledChoice[]> = Promise.resolve()
+      .then(() => listBundledModels())
+      .then(models => bundledToAIModels(models.filter(m => !isEmbeddingGgufName(m.name)))
+        .map(m => ({ id: m.name, label: m.model, engine: 'lu-engine' as const })))
+      .catch(() => [])
+    Promise.all([ollamaRows, engineRows]).then(([ollama, engine]) => {
+      if (!cancelled) setInstalledModels([...ollama, ...engine])
+    })
     return () => { cancelled = true }
   }, [step, ollamaOffenbarUnerwuenscht])
 
@@ -350,7 +420,7 @@ export function ModelsStep({ skin, scan, fleet, step, setStep, pulledModels, set
   // der eigentliche Befund: `modelStore.setModels` setzt, wenn keine Wahl
   // vorliegt, den ERSTEN chatfaehigen Eintrag der Liste. Wer uebersprungen
   // wurde, hat also nie gewaehlt und landete trotzdem auf einem Modell: eine
-  // Persona auf einem Qwen3-4B, das sie nie angefasst hatte. David
+  // Persona auf einem Qwen3-4B, das sie nie angefasst hatte. Der Inhaber
   // 04.09.2026: „modellauswahl muss noch da sein oder nicht? ich denke ja."
   //
   // Was BLEIBT, ist P4 („Nur wenn der User noch gar kein Modell installiert
@@ -363,7 +433,10 @@ export function ModelsStep({ skin, scan, fleet, step, setStep, pulledModels, set
   // Which entry the badge sits on: the hardware-aware pick, or the static
   // fallback when VRAM is unknown / fits nothing. See
   // `recommendedOnboardingModelName` for the reused threshold.
-  const recommendedModelName = recommendedOnboardingModelName(ONBOARDING_MODELS, systemVRAM)
+  // On a Mac the pick is the strongest model that fits its memory budget.
+  const recommendedModelName = sharedMemory
+    ? recommendedOnSharedMemory(ONBOARDING_MODELS, systemVRAM)
+    : recommendedOnboardingModelName(ONBOARDING_MODELS, systemVRAM)
 
   // Die Wahl steht NICHT hier. Sie steht dort, wo der Chat sie liest, in
   // `modelStore.activeModel`, derselben Stelle, die der Modellknopf des
@@ -376,7 +449,7 @@ export function ModelsStep({ skin, scan, fleet, step, setStep, pulledModels, set
   const activeModel = useModelStore(s => s.activeModel)
   const setActiveModel = useModelStore(s => s.setActiveModel)
   const setProviderConfig = useProviderStore(s => s.setProviderConfig)
-  const eigenesGewaehlt = !!activeModel && (installedModels ?? []).includes(activeModel)
+  const eigenesGewaehlt = !!activeModel && (installedModels ?? []).some(m => m.id === activeModel)
 
   /**
    * Ein installiertes Modell waehlen, und zwar so, dass die Wahl im Chat
@@ -402,13 +475,17 @@ export function ModelsStep({ skin, scan, fleet, step, setStep, pulledModels, set
    * Backend-Schritt macht es bei einer bewussten Ollama-Wahl anders, weil
    * dort die PRIMAERE Maschine bestimmt wird, hier ein einzelnes Modell).
    */
-  const waehleInstalliertes = (name: string) => {
+  const waehleInstalliertes = (choice: InstalledChoice) => {
+    // Eine GGUF der LU Engine: die Wahl im Store reicht, denn
+    // `modelStore.setActiveModel` startet die Engine auf `openai::<name>`
+    // selbst um (derselbe Weg wie der Use-Knopf im Model Manager).
+    if (choice.engine === 'lu-engine') { setActiveModel(choice.id); return }
     // Der Guertel zum Hosentraeger oben: einschalten nur, wenn der Nutzer den
     // Anbieter nicht selbst ausgeschaltet hat. Beides zusammen ist EINE Regel,
     // gefragt an der Stelle, die anbietet, und an der, die schreibt.
     if (!mayEnableFromWizard(useProviderStore.getState().providers.ollama)) return
     setProviderConfig('ollama', { enabled: true })
-    setActiveModel(name)
+    setActiveModel(choice.id)
   }
 
   // GGUF download progress from downloadStore
@@ -448,21 +525,24 @@ export function ModelsStep({ skin, scan, fleet, step, setStep, pulledModels, set
         <div className="space-y-1.5">
           <p className={`t-micro ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>Models you already have</p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-[30vh] overflow-y-auto scrollbar-thin pr-1">
-            {(installedModels ?? []).map((name) => {
-              const gewaehlt = activeModel === name
+            {(installedModels ?? []).map((choice) => {
+              const gewaehlt = activeModel === choice.id
               return (
                 <button
-                  key={name}
-                  onClick={() => waehleInstalliertes(name)}
+                  key={choice.id}
+                  onClick={() => waehleInstalliertes(choice)}
                   className={`flex items-center justify-between gap-2 text-left p-2.5 rounded-lg border transition-colors ${
                     gewaehlt
                       ? isDark ? 'bg-white/10 border-white/30' : 'bg-gray-100 border-gray-900'
                       : isDark ? 'border-white/10 hover:border-white/20' : 'border-gray-200 hover:border-gray-400'
                   }`}
                 >
-                  <span className="t-mono truncate">{name}</span>
+                  <span className="min-w-0 flex flex-col">
+                    <span className="t-mono truncate">{choice.label}</span>
+                    <span className={`t-micro ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>{choice.engine === 'lu-engine' ? LU_ENGINE_NAME : 'Ollama'}</span>
+                  </span>
                   {gewaehlt ? (
-                    <Check size={14} className="text-green-400 shrink-0" />
+                    <Check size={14} className="text-green-600 dark:text-green-400 shrink-0" />
                   ) : (
                     <div className={`w-4 h-4 rounded-full border shrink-0 ${isDark ? 'border-white/20' : 'border-gray-300'}`} />
                   )}
@@ -529,6 +609,14 @@ export function ModelsStep({ skin, scan, fleet, step, setStep, pulledModels, set
         }).map((model) => {
           const selected = selectedModels.includes(model.name)
           const pulled = pulledModels.includes(model.name) || (model.filename ? downloads[model.filename]?.status === 'complete' : false)
+          // What the card says in words: the PC text as written, or the same
+          // facts as a Mac reads them (memory, no card, no VRAM).
+          const copy = onboardingModelCopy(model, sharedMemory)
+          const advisory = sharedMemory
+            ? sharedMemoryAdvisory(model, systemVRAM)
+            : systemVRAM !== null && systemVRAM < model.vramGB
+              ? 'Full GPU offload may not fit. Use CPU/offload settings or skip local setup.'
+              : ''
           return (
             <button
               key={model.name}
@@ -563,19 +651,19 @@ export function ModelsStep({ skin, scan, fleet, step, setStep, pulledModels, set
                       </span>
                     )}
                   </div>
-                  <p className={`text-[0.6rem] mt-0.5 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{model.description}</p>
-                  {systemVRAM !== null && systemVRAM < model.vramGB && (
-                    <p className="text-xs mt-1 text-gray-500 dark:text-gray-400">Full GPU offload may not fit. Use CPU/offload settings or skip local setup.</p>
+                  <p className={`text-[0.6rem] mt-0.5 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{copy.description}</p>
+                  {advisory && (
+                    <p className="text-xs mt-1 text-gray-500 dark:text-gray-400" data-testid="onboarding-model-advisory">{advisory}</p>
                   )}
                   <p className={`text-[0.55rem] mt-0.5 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
-                    {model.size} · VRAM: {model.vram}
+                    {model.size}{model.mmprojBytes ? ` + ${gbOf(model.mmprojBytes)} GiB image input` : ''} · {copy.memory}
                   </p>
                 </div>
                 {pulled ? (
-                  <Check size={14} className="text-green-400 shrink-0 mt-0.5" />
+                  <Check size={14} className="text-green-600 dark:text-green-400 shrink-0 mt-0.5" />
                 ) : selected ? (
                   <div className={`w-4 h-4 rounded flex items-center justify-center shrink-0 mt-0.5 ${isDark ? 'bg-white' : 'bg-gray-900'}`}>
-                    <Check size={10} className={isDark ? 'text-black' : 'text-white'} />
+                    <Check size={10} className={isDark ? 'text-black' : '!text-white'} />
                   </div>
                 ) : (
                   <div className={`w-4 h-4 rounded border shrink-0 mt-0.5 ${isDark ? 'border-white/20' : 'border-gray-300'}`} />

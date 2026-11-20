@@ -64,6 +64,14 @@ describe('toolCallCapMs, Fix 1: wer bekommt keinen erreichbaren Deckel', () => {
     expect(toolCallCapMs('shell_execute', { timeout: 5_000 }, settings)).toBe(5_000 + 15_000)
   })
 
+  it('computer_use and computer_task wait for a person and get no reachable cap', () => {
+    // A question (allow this app, confirm this action) that nobody answered
+    // within a minute used to fail the call at the generic 60 s default, and
+    // a screen task could never reach its own 8 minute limit.
+    expect(toolCallCapMs('computer_use', { action: 'type', text: 'x' }, settings)).toBe(NO_PRACTICAL_CAP_MS)
+    expect(toolCallCapMs('computer_task', { goal: 'x' }, settings)).toBe(NO_PRACTICAL_CAP_MS)
+  })
+
   it('NO_PRACTICAL_CAP_MS bleibt unter dem 32-Bit-setTimeout-Ueberlauf (sonst feuert der Deckel sofort statt nie)', () => {
     expect(NO_PRACTICAL_CAP_MS).toBeLessThan(2 ** 31)
     expect(NO_PRACTICAL_CAP_MS).toBeGreaterThan(SHELL_EXECUTE_DEFAULT_TIMEOUT_MS)

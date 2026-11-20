@@ -14,7 +14,9 @@
 use crate::state::AppState;
 use serde::Serialize;
 use std::time::Duration;
-use sysinfo::{Disks, System};
+#[cfg(desktop)]
+use sysinfo::Disks;
+use sysinfo::System;
 use tauri::State;
 
 #[cfg(target_os = "windows")]
@@ -310,6 +312,14 @@ fn collect_host_facts() -> HostFacts {
     // Free space on the drive that holds $HOME (or the closest mount
     // point sysinfo reports for it). Covers the "is the model dir
     // running out?" question without needing a separate probe.
+    //
+    // A phone has neither a HOME nor a disk list it may read (crate::disk),
+    // so there the app's own folder is measured through statvfs.
+    #[cfg(mobile)]
+    let disk_free_gb = crate::disk::available_bytes(&crate::os_paths::data_dir())
+        .map(|bytes| (bytes as f64) / 1_073_741_824.0)
+        .unwrap_or(0.0);
+    #[cfg(desktop)]
     let disk_free_gb = {
         let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
         let disks = Disks::new_with_refreshed_list();
@@ -458,7 +468,8 @@ pub async fn system_health(
         .map_err(|e| format!("host facts probe failed: {}", e))?;
 
     Ok(SystemHealthReport {
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        // The phone reports the version of its package, a desktop the version of the crate (app_identity::APP_VERSION).
+        version: crate::app_identity::APP_VERSION.to_string(),
         host,
         ollama,
         comfyui,
@@ -593,11 +604,19 @@ mod tests {
     fn a_live_but_slow_server_reads_as_timeout_not_unreachable() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let port = hang_stub(Duration::from_secs(5)).await;
+            // The stub stays silent far longer than any stall of the test
+            // machine, so "gave up on its own" and "waited for the server"
+            // stay apart without a tight stopwatch. The bound used to be one
+            // second for a 600 ms probe, and a loaded machine missed it
+            // (Linux, 08.10.2026, a full run that took 27 s instead of 8).
+            let hold = Duration::from_secs(60);
+            let port = hang_stub(hold).await;
             // Short enough to prove the probe respects its own window, long
-            // enough that the connect window derived from it (a third, so
-            // 200 ms) cannot be missed by a loaded machine's `accept`.
-            let short = Duration::from_millis(600);
+            // enough that a slow machine makes the connect window derived
+            // from it (a third, so one second). At 600 ms that window was
+            // 200 ms, and a first connection under x86_64 emulation took
+            // longer and read as Unreachable (09.10.2026).
+            let short = Duration::from_secs(3);
             let start = std::time::Instant::now();
             let probe = probe_http(&format!("http://127.0.0.1:{}/api/tags", port), short).await;
             let elapsed = start.elapsed();
@@ -608,7 +627,7 @@ mod tests {
                 probe.status
             );
             assert!(
-                elapsed < Duration::from_secs(1),
+                elapsed < hold / 4,
                 "the probe must respect its own timeout instead of waiting for the server: {elapsed:?}"
             );
         });
@@ -696,21 +715,19 @@ mod tests {
     fn nothing_listening_still_reads_as_unreachable() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let dead_port = {
-                let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let p = l.local_addr().unwrap().port();
-                drop(l); // freed immediately: nobody is listening on it now
-                p
-            };
+            // Taken but not listening, and held until the probe is back.
+            let (dead_port, held) = crate::test_support::refusing_port();
             let probe = probe_http(
                 &format!("http://127.0.0.1:{}/api/tags", dead_port),
                 Duration::from_millis(500),
             )
             .await;
+            drop(held);
             assert!(
                 matches!(probe.status, ProbeStatus::Unreachable),
-                "a refused connection must stay Unreachable, got {:?}",
-                probe.status
+                "a refused connection must stay Unreachable, got {:?} ({})",
+                probe.status,
+                probe.detail
             );
         });
     }

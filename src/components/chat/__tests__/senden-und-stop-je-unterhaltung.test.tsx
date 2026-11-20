@@ -88,7 +88,7 @@ describe('the composer of a chat that is NOT the one answering', () => {
   it('does fire a send while another chat is answering, no lock left to stop it', () => {
     let sent = 0
     render(
-      <ChatInput onSend={() => { sent += 1 }} onStop={() => {}} isGenerating={asSeenFromA.thisChat} />,
+      <ChatInput onSend={() => { sent += 1 }} onStop={() => {}} isGenerating={asSeenFromA.thisChat} modelReady={() => true} />,
     )
     const box = screen.getByRole('textbox')
     fireEvent.change(box, { target: { value: 'hello' } })

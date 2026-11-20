@@ -2,15 +2,48 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Hardened Runtime entitlements (referenced via bundle.macOS.entitlements in
-  tauri.conf.json; derived from the proven LU-Labs bridge set).
+  tauri.conf.json; derived from the proven LU-Labs bridge set). The bundler
+  applies this one file to the main binary AND to every externalBin, so
+  lu-llama-server runs with the same set.
 
-  - allow-jit + allow-unsigned-executable-memory: WKWebView JavaScriptCore JIT.
-  - disable-library-validation: whisper/voice sidecar loads Python dylibs not
-    signed with our identity.
-  - network.client: Ollama/LM-Studio probes, Hugging Face + Civitai downloads.
-  - network.server: remote-access bridge listens on port 19191.
-  - device.audio-input: microphone for dictation/voice — required in a
-    notarized Hardened Runtime build even with NSMicrophoneUsageDescription.
+  The app is signed with the Hardened Runtime (tauri's default), ad hoc in a
+  local build and with a Developer ID in the release lane. The first three
+  keys are exceptions to it, and each one switches a protection off. Which of
+  the three a notarized build still needs has not been measured;
+  Entitlements.minimal.plist is the candidate to test before any of them is
+  dropped.
+
+  Checked on 2026-10-08 against what the app does, for the Developer ID and
+  notarized build (release.yml, build-tauri-macos):
+
+  - allow-jit + allow-unsigned-executable-memory: kept from the bridge set.
+    WKWebView runs its JavaScript JIT in Apple's own web content process, so
+    the app itself is not known to need them. They do not stand in the way of
+    notarization; removing them needs a hand test on a signed build first.
+  - disable-library-validation: lets the app process load libraries that are
+    not signed by our team. The Python sidecars (Voice, the MLX image and
+    video engines) do NOT depend on it: they are separate processes started
+    from a venv in the app data folder, they do not inherit the Hardened
+    Runtime, and their own interpreter and wheels are ad hoc signed.
+    The same holds for the Python the app downloads for itself when the Mac
+    has none (private_python.rs): its binaries are ad hoc signed by the
+    linker, the app writes them without a quarantine attribute, and they run
+    as child processes. No entitlement was added for it.
+  - network.client / network.server: App Sandbox keys. LU is not sandboxed,
+    so they change nothing today; they document that the app talks to local
+    engines, Hugging Face and Civitai, and that Remote Access listens.
+  - device.audio-input: microphone for dictation and Voice. Required under
+    the Hardened Runtime even with NSMicrophoneUsageDescription (Info.plist).
+    macOS charges a child process's microphone use to the app that started
+    it, so this one entry also covers the voice sidecar.
+
+  Deliberately absent:
+  - automation.apple-events: the app sends no Apple events (no osascript).
+  - device.camera: no camera use.
+  - Computer control needs Accessibility and Screen Recording. Both are
+    privacy permissions the user grants in System Settings; neither has an
+    entitlement or a usage string.
+  - get-task-allow: the notary service rejects it.
 -->
 <plist version="1.0">
 <dict>

@@ -26,7 +26,10 @@ const hook = read('../../../hooks/useAutoScroll.ts')
 
 describe('every message stays mounted — no window, no slice', () => {
   it('the whole filtered list is still mapped', () => {
-    expect(list).toMatch(/visibleMessages\s*\n?\s*\.map\(\(message, index\) =>/)
+    // 3.0.9: the list maps the items of the compact layer on screen (a line
+    // per compaction, then its messages). Choosing the layer is the one cut,
+    // made in lib/compact-layers.ts; inside a layer nothing is windowed.
+    expect(list).toMatch(/items\s*\n?\s*\.map\(\(item, index\) =>/)
   })
 
   it('nothing slices, windows or paginates the message array', () => {
@@ -54,7 +57,7 @@ describe('every message stays mounted — no window, no slice', () => {
   it('the column cap is still there, and it is the derived one', () => {
     // W1 introduced a cap here; a virtualisation rewrite is exactly the kind
     // of change that quietly drops it. Since 05.09.2026 the cap is no longer
-    // `--lu-measure`: David asked for a transcript that overhangs the prompt
+    // `--lu-measure`: the owner asked for a transcript that overhangs the prompt
     // box by about 20 percent on each side, and that number is derived from
     // the composer width in composer-width.ts instead of standing next to it.
     expect(list).toContain('TRANSCRIPT_MAX_PX')
@@ -82,7 +85,7 @@ describe('off-screen messages skip layout and paint', () => {
     // The bottom edge is what the auto-scroll pin measures against; an
     // estimated height there is the one place a wrong guess shows.
     expect(list).toContain('const ALWAYS_RENDERED_TAIL = 3')
-    expect(list).toContain('const tailStart = visibleMessages.length - ALWAYS_RENDERED_TAIL')
+    expect(list).toContain('const tailStart = items.length - ALWAYS_RENDERED_TAIL')
     expect(list).toContain('index < tailStart')
   })
 })

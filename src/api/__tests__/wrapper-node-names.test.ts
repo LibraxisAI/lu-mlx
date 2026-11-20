@@ -12,7 +12,7 @@
  * PyramidFlowTransformerLoader and PyramidFlowVAEDecode. Allegro followed the
  * same invented shape. Every submit came back a ComfyUI 400, and because the
  * install gate looked for the invented sampler too, users with a perfect
- * install were told to go install what they already had (bob80817-dev, D#88).
+ * install were told to go install what they already had (D#88).
  *
  * Nothing caught it because the unit tests asserted our own mock node lists,
  * which were built from the same invented names. So the mocks agreed with the
@@ -49,14 +49,30 @@ const CORE_NODES = new Set([
   // Comfy-Org templates for Qwen-Image 2.1. It arrived in 0.37.0, which is
   // younger than most of this list, so determineStrategy gates the lane on
   // its presence and says which version adds it.
+  // Checked against ComfyUI master on 2026-09-28 for the header-sniffed
+  // families: QuadrupleCLIPLoader (nodes_hidream), TripleCLIPLoader
+  // (nodes_sd3), TextEncodeQwenImageEditPlus (nodes_qwen), CFGNorm
+  // (nodes_cfg), FluxKontextImageScale (nodes_flux).
+  'QuadrupleCLIPLoader', 'TripleCLIPLoader', 'TextEncodeQwenImageEditPlus', 'CFGNorm', 'FluxKontextImageScale',
   'CLIPTextEncode', 'TextEncodeQwenImage21', 'CLIPSetLastLayer', 'CLIPVisionEncode', 'ConditioningZeroOut',
   'InpaintModelConditioning', 'AudioEncoderEncode', 'ModelSamplingSD3', 'ModelSamplingAuraFlow',
   'SVD_img2vid_Conditioning', 'VideoLinearCFGGuidance',
+  // Local 3D (3.1.0, buildThreeDWorkflow), schema node_id of each read in
+  // ComfyUI at tag v0.42.4 on 2026-11-13: nodes_trellis2.py (the eight
+  // Trellis2 nodes), nodes_bg_removal.py (LoadBackgroundRemovalModel,
+  // RemoveBackground), nodes_images.py (ImageCropToMask),
+  // nodes_custom_sampler.py (CFGOverride), nodes_model_advanced.py
+  // (RescaleCFG), nodes_mesh_postprocess.py (the mesh and bake nodes),
+  // nodes_save_3d.py (SaveGLB).
+  'EmptyTrellis2LatentStructure', 'Trellis2Conditioning', 'Trellis2ShapeStage', 'Trellis2UpsampleStage',
+  'Trellis2TextureStage', 'VaeDecodeStructureTrellis2', 'VaeDecodeShapeTrellis', 'VaeDecodeTextureTrellis',
+  'LoadBackgroundRemovalModel', 'RemoveBackground', 'ImageCropToMask', 'CFGOverride', 'RescaleCFG',
+  'RemeshMesh', 'DecimateMesh', 'MeshSmoothNormals', 'UnwrapMesh', 'BakeTextureFromVoxel',
+  'BakeNormalMapFromMesh', 'BakeAmbientOcclusion', 'ApplyTextureToMesh', 'SaveGLB',
   // latents
   'EmptyLatentImage', 'EmptyLTXVLatentVideo', 'Wan22ImageToVideoLatent', 'TrimVideoLatent',
   'WanSoundImageToVideo', 'WanAnimateToVideo', 'WanVaceToVideo',
   // sampling
-  'KSampler',
   // LTX-2 / 2.3 lane (buildLtx2Workflow): all core. Read off /object_info of a
   // ComfyUI v0.37.0-15-gb5cc883 on 2026-09-24, python_module per node:
   // comfy_extras.nodes_lt (LTXVConditioning, LTXVConcatAVLatent,
@@ -65,10 +81,53 @@ const CORE_NODES = new Set([
   // LTXVAudioVAELoader, LTXAVTextEncoderLoader), comfy_extras.nodes_custom_sampler
   // (RandomNoise, KSamplerSelect, CFGGuider, ManualSigmas, SamplerCustomAdvanced).
   // The same nodes make up Comfy-Org's own video_ltx2_3_i2v template.
-  'LTXVConditioning', 'LTXVConcatAVLatent', 'LTXVSeparateAVLatent', 'LTXVImgToVideoInplace',
-  'LTXVPreprocess', 'LTXVScheduler', 'LTXVEmptyLatentAudio', 'LTXVAudioVAEDecode',
-  'LTXVAudioVAELoader', 'LTXAVTextEncoderLoader',
-  'RandomNoise', 'KSamplerSelect', 'CFGGuider', 'ManualSigmas', 'SamplerCustomAdvanced',
+  'LTXVScheduler', 'LTXVAudioVAELoader', 'LTXAVTextEncoderLoader',
+  // BasicGuider, BasicScheduler, KSamplerSelect, RandomNoise and
+  // SamplerCustomAdvanced: comfy_extras/nodes_custom_sampler.py; the two
+  // MiniMax H3 encode nodes: comfy_extras/nodes_minimax_h3.py, listed in
+  // nodes.py's extras. Both read in ComfyUI master on 2026-10-01.
+  // KSamplerAdvanced: core, nodes.py of ComfyUI 0.38.0 on the test box
+  // (class at line 1634, "KSamplerAdvanced": KSamplerAdvanced in
+  // NODE_CLASS_MAPPINGS at 2109, read 26.10.2026). The Wan 2.2 A14B pair runs
+  // two of them, high noise then low noise (GH #193).
+  'KSamplerAdvanced',
+  'KSampler', 'BasicGuider', 'BasicScheduler', 'KSamplerSelect', 'RandomNoise', 'SamplerCustomAdvanced',
+  'MiniMaxH3ImageToVideo', 'MiniMaxH3ReferenceToVideo',
+  // Read in Comfy-Org/ComfyUI at tag v0.38.0 on 2026-10-02 (schema node_id of
+  // each, the file in brackets, the first release that has it):
+  //   LTX 2.5, all in comfy_extras/nodes_lt.py unless noted:
+  //     LTXVConditioning, LTXVDualCFGGuider (0.32.0, the version marker),
+  //     LTXVImgToVideoInplace, LTXVPreprocess, LTXVConcatAVLatent,
+  //     LTXVSeparateAVLatent; LTXVEmptyLatentAudio and LTXVAudioVAEDecode
+  //     [nodes_lt_audio.py]; LTXVLatentUpsampler [nodes_lt_upsampler.py];
+  //     LatentUpscaleModelLoader [nodes_hunyuan.py]; ManualSigmas
+  //     [nodes_custom_sampler.py].
+  //   FastH3: MiniMaxH3SigmaShift [nodes_minimax_h3.py], BlockSparseAttention
+  //     [nodes_sparse_attention.py, 0.35.0].
+  //   YuE2: YuE2GenerateMusic, EmptyYuE2LatentAudio [nodes_yue2.py, 0.36.0].
+  'LTXVConditioning', 'LTXVDualCFGGuider', 'LTXVImgToVideoInplace', 'LTXVPreprocess', 'LTXVConcatAVLatent',
+  'LTXVSeparateAVLatent', 'LTXVEmptyLatentAudio', 'LTXVAudioVAEDecode', 'LTXVLatentUpsampler',
+  'LatentUpscaleModelLoader', 'ManualSigmas',
+  'MiniMaxH3SigmaShift', 'BlockSparseAttention',
+  // Qwen-Image 2.1 Turbo, read in ComfyUI v0.42.4 on 28.10.2026: CFGGuider
+  // [nodes_custom_sampler.py 823, registered at 1219] and QwenImage21Cache
+  // [nodes_qwen.py 185, in the QwenExtension list at 244]. The builder adds
+  // either only when /object_info lists it.
+  'CFGGuider', 'QwenImage21Cache',
+  // B38/B45, read in ComfyUI master b5a43215 on 30.10.2026 (schema node_id or
+  // NODE_CLASS_MAPPINGS key, the file in brackets) and used by the official
+  // Comfy-Org templates named in lib/frame-refs.ts: WanFirstLastFrameToVideo
+  // [nodes_wan.py 188], FluxKontextMultiReferenceLatentMethod [nodes_flux.py
+  // 158], ModelSamplingFlux [nodes_model_advanced.py 166], ReferenceLatent
+  // [nodes_edit_model.py], ImageScaleToTotalPixels [nodes_post_processing.py 234].
+  'WanFirstLastFrameToVideo', 'FluxKontextMultiReferenceLatentMethod', 'ModelSamplingFlux', 'ReferenceLatent',
+  'ImageScaleToTotalPixels',
+  // B46 / D8 (Qwen edit strength at a CFG above 1), read in ComfyUI master
+  // on 08.11.2026: DualCFGGuider [nodes_custom_sampler.py: model, cond1,
+  // cond2, negative, cfg_conds, cfg_cond2_negative, style regular|nested;
+  // nested = negative + cfg2 x (cond2 + cfg1 x (cond1 - cond2) - negative)].
+  'DualCFGGuider',
+  'YuE2GenerateMusic', 'EmptyYuE2LatentAudio',
   // lora
   'LoraLoader', 'LoraLoaderModelOnly',
   // decode + image ops
@@ -76,6 +135,11 @@ const CORE_NODES = new Set([
   // on the 2026-08-02 e2e box (full tile/overlap/temporal signature).
   'VAEDecode', 'VAEDecodeTiled', 'VAEDecodeAudio', 'VAEEncode', 'VAEEncodeForInpaint', 'ImageScale',
   'GetVideoComponents', 'CreateVideo',
+  // Enhance Image (3.0.7), read in Comfy-Org/ComfyUI master on 2026-10-14:
+  // UpscaleModelLoader (model_name) and ImageUpscaleWithModel (upscale_model,
+  // image) [comfy_extras/nodes_upscale_model.py]; ImageScaleBy (image,
+  // upscale_method, scale_by) [nodes.py].
+  'UpscaleModelLoader', 'ImageUpscaleWithModel', 'ImageScaleBy',
   // output
   'SaveImage', 'SaveAnimatedWEBP', 'SaveVideo', 'SaveAudioMP3',
 ])
@@ -118,6 +182,8 @@ function emittedClassTypes(): string[] {
   const src = readFileSync(BUILDER_SRC, 'utf8')
   const out = new Set<string>()
   for (const m of src.matchAll(/class_type:\s*'([A-Za-z0-9_]+)'/g)) out.add(m[1])
+  // The LTX 2.5 builder adds nodes through a local add('Class', {...}) helper.
+  for (const m of src.matchAll(/\badd\('([A-Za-z0-9_]+)',/g)) out.add(m[1])
   return [...out].sort()
 }
 

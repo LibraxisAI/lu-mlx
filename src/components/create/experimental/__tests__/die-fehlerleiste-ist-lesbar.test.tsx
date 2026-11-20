@@ -2,7 +2,7 @@
 /**
  * Die rote Leiste der Create-Oberflaeche zeigt die GANZE Meldung.
  *
- * GitHub #121 und kuroyami (04.09.2026): der Trainer starb mit
+ * GitHub #121 und (04.09.2026): der Trainer starb mit
  * "RuntimeError: use_libuv was requested but PyTorch was build without libuv
  * support", und die Leiste schnitt den Satz ab, auch im breiten Fenster. Der
  * Melder konnte den Fehler weder lesen noch kopieren. d5f5b32 hat die Notiz

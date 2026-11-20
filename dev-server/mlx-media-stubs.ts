@@ -2,7 +2,7 @@ import type { Connect } from 'vite'
 import type { RouteMount } from './routes'
 
 /**
- * K7 (GH #135, eloieloie, `npm run dev` without Tauri): "Unknown backend
+ * K7 (GH #135, `npm run dev` without Tauri): "Unknown backend
  * command: install_mlx_diffusion". The MLX image/video pipeline
  * (`src-tauri/src/commands/media_cmds.rs`) is an in-process Mac-only Rust
  * module, a Python sidecar Rust spawns directly, with no dev-server
@@ -45,9 +45,18 @@ export function registerMlxMediaStubs(routes: RouteMount): void {
     '/local-api/mlx-start',
     '/local-api/mlx-unload',
     '/local-api/mlx-generate',
+    '/local-api/mlx-enhance-prompt',
+    '/local-api/mlx-loras',
+    '/local-api/mlx-loras-open-folder',
+    '/local-api/mlx-lora-delete',
+    '/local-api/mlx-output-trash',
+    '/local-api/scan-comfy-output',
+    '/local-api/mlx-cutout',
+    '/local-api/mlx-upscale',
     '/local-api/mlx-image-models',
     '/local-api/mlx-image-install-model',
     '/local-api/mlx-image-install-status',
+    '/local-api/mlx-image-cancel-install',
     '/local-api/mlx-image-delete-model',
     '/local-api/install-mlx-diffusion',
     '/local-api/set-hf-token',
@@ -57,11 +66,37 @@ export function registerMlxMediaStubs(routes: RouteMount): void {
     '/local-api/video-install-mlx',
     '/local-api/video-install-model',
     '/local-api/video-install-model-status',
+    '/local-api/video-cancel-model-install',
     '/local-api/video-delete-model',
+    '/local-api/video-stage-start-image',
+    '/local-api/video-stage-motion-video',
     '/local-api/video-generate',
     '/local-api/video-progress',
     '/local-api/video-cancel',
+    '/local-api/video-color-settle',
     '/local-api/read-media-file',
+    '/local-api/mlx-music-status',
+    '/local-api/mlx-music-install',
+    '/local-api/mlx-music-install-status',
+    '/local-api/mlx-music-cancel-install',
+    '/local-api/mlx-music-delete',
+    '/local-api/mlx-music-generate',
+    '/local-api/mlx-music-progress',
+    '/local-api/mlx-music-cancel',
+    '/local-api/mlx-mesh3d-status',
+    '/local-api/mlx-mesh3d-install',
+    '/local-api/mlx-mesh3d-install-status',
+    '/local-api/mlx-mesh3d-cancel-install',
+    '/local-api/mlx-mesh3d-delete',
+    '/local-api/mlx-mesh3d-generate',
+    '/local-api/mlx-mesh3d-progress',
+    '/local-api/mlx-mesh3d-cancel',
+    '/local-api/mlx-train-status',
+    '/local-api/mlx-train-stage',
+    '/local-api/mlx-train-clear',
+    '/local-api/mlx-train-start',
+    '/local-api/mlx-train-progress',
+    '/local-api/mlx-train-cancel',
   ]
   const mlxDevModeStub: Connect.SimpleHandleFunction = (_req, res) => {
     res.writeHead(501, { 'Content-Type': 'application/json' })

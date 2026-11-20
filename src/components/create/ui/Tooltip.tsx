@@ -4,6 +4,8 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from './cn'
 import { tooltipPosition, type TooltipPlacement } from './tooltip-position'
+import { massstab } from '../../../hooks/usePopoverPlatz'
+import { lokaleMasse } from '../../../lib/popover-placement'
 
 interface Props {
   content: React.ReactNode
@@ -11,6 +13,17 @@ interface Props {
   side?: 'top' | 'bottom'
   delay?: number
   className?: string
+}
+
+// Whether the focus that just arrived was walked there with Tab. Focus also
+// arrives without the user going to the control: a drawer that closes hands
+// the focus back to the button that opened it, and after Escape the browser
+// counts that as keyboard focus (`:focus-visible`). The bubble then opened
+// over the composer and stayed, because nothing ever blurred the button.
+let cameByTab = false
+if (typeof window !== 'undefined') {
+  window.addEventListener('keydown', (e) => { cameByTab = e.key === 'Tab' }, true)
+  window.addEventListener('pointerdown', () => { cameByTab = false }, true)
 }
 
 export function Tooltip({ content, children, side = 'top', delay = 400, className }: Props) {
@@ -50,8 +63,9 @@ const handleFocus = (
   const target = event.target as HTMLElement
 
   // Show focus tooltips for keyboard navigation, but not when a mouse
-  // click leaves the wrapped button focused.
-  if (target.matches(':focus-visible')) {
+  // click leaves the wrapped button focused, and not when the focus was
+  // handed back by something that closed.
+  if (cameByTab && target.matches(':focus-visible')) {
     open()
   }
 }
@@ -62,13 +76,20 @@ const handleFocus = (
   useLayoutEffect(() => {
     if (!show) return
     const measure = () => {
-      const a = anchor.current?.getBoundingClientRect()
-      const b = bubble.current?.getBoundingClientRect()
-      if (!a || !b) return
+      const el = anchor.current
+      const b = bubble.current
+      if (!el || !b) return
+      // One unit for everything: the bubble's own CSS pixels. The app sits
+      // under a zoom, and depending on the engine a rect comes back in
+      // visible or in zoomed pixels while `top` and `left` always count in
+      // the latter (GitHub #149).
+      const { kasten, fenster } = lokaleMasse(massstab(el))
+      const a = kasten(el.getBoundingClientRect())
       setPlace(tooltipPosition(
-        { top: a.top, left: a.left, width: a.width, height: a.height },
-        { width: b.width, height: b.height },
-        { width: window.innerWidth, height: window.innerHeight },
+        { top: a.top, left: a.left, width: a.right - a.left, height: a.bottom - a.top },
+        // offsetWidth/Height, not the rect: untouched by the fade-in transform.
+        { width: b.offsetWidth, height: b.offsetHeight },
+        { width: fenster.right, height: fenster.bottom },
         side,
       ))
     }
@@ -111,7 +132,7 @@ const handleFocus = (
               <span
                 style={{ left: place?.arrowLeft ?? 0 }}
                 className={cn(
-                  'absolute -translate-x-1/2 w-2 h-2 rotate-45 bg-lu-overlay border-white/[0.08]',
+                  'absolute -translate-x-1/2 w-2 h-2 rotate-45 bg-white dark:bg-lu-sheet border-white/[0.1]',
                   (place?.side ?? side) === 'top' ? 'top-full -mt-1 border-b border-r' : 'bottom-full -mb-1 border-t border-l',
                 )}
               />

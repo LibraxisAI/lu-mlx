@@ -3,7 +3,7 @@ import type { ComfyApiGraph } from '../types/comfy-graph'
 /**
  * Local upscale graph: LoadImage → ImageScale → SaveImage.
  *
- * The cloud upscale lane used to be WaveSpeed-only. ImageScale is a core
+ * The cloud upscale lane used to be hosted-only. ImageScale is a core
  * ComfyUI node (lanczos, crop disabled), so a connected ComfyUI — including
  * the user's already-running instance on this Mac — can do the same job
  * without a checkpoint. Width/height come from the Create size knobs.

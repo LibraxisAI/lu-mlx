@@ -1,12 +1,13 @@
 import { test, expect, type Page } from '@playwright/test'
 import { tauriMockInit, DEFAULT_ASSISTANT_REPLY, DEFAULT_MODEL_NAME } from './support/tauri-mock'
 import { routeCloud, seedOnboardingDone, signInViaGate, cloudSwitch } from './support/cloud-mock'
+import { pickChatModel } from './support/ui'
 
 /**
  * A9 in the shipped UI: the Docs button exists in Cloud mode.
  *
  * "There's no document tab in cloud chat to add documents and audio clips"
- * (aldrich_ironhart, Discord #general, 2026-09-01). It was hidden on
+ * (Discord #general, 2026-09-01). It was hidden on
  * `appMode === 'cloud'`, on the belief that Document Chat needs a local chat
  * backend. It needs a local EMBEDDING backend, a different sidecar, one the app
  * runs in Cloud mode too.
@@ -49,8 +50,10 @@ async function silenceReleaseNotes(page: Page) {
   }
 }
 
-/** The composer only exists inside a conversation. */
-async function openChat(page: Page) {
+/** The Docs panel belongs to a conversation, and in Cloud a conversation
+ *  needs a model the user named: the app picks none by itself. */
+async function openChat(page: Page, cloudModel?: RegExp) {
+  if (cloudModel) await pickChatModel(page, cloudModel)
   await page.getByRole('button', { name: /New Chat/i }).first().click()
   await expect(page.getByTestId('composer-send-slot')).toBeVisible({ timeout: 20_000 })
 }
@@ -59,7 +62,7 @@ const docsButton = (page: Page) => page.getByTestId('docs-toggle')
 
 test('cloud chat offers Docs, and the panel says where the text goes', async ({ page }) => {
   await bootIntoCloud(page)
-  await openChat(page)
+  await openChat(page, /Qwen3 30B A3B/)
 
   // The report, answered: the button is on the composer row in Cloud mode.
   await expect(docsButton(page)).toBeVisible({ timeout: 20_000 })

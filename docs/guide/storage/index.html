@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LU and Models on Another Drive: Model Folder, ComfyUI, Trainer</title>
+<meta name="description" content="Where Locally Uncensored keeps its files on Windows, Linux and Mac, how to put chat models, ComfyUI and the character trainer on another drive, what cannot be moved, and how to move models without downloading them again.">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="canonical" href="https://locallyuncensored.com/guide/storage/">
+<meta property="og:title" content="LU and Models on Another Drive: Model Folder, ComfyUI Path, Trainer, What Stays">
+<meta property="og:description" content="Where Locally Uncensored keeps its files on Windows, Linux and Mac, how to put chat models, ComfyUI and the character trainer on another drive, what cannot be moved, and how to move models without downloading them again.">
+<meta property="og:url" content="https://locallyuncensored.com/guide/storage/">
+<meta property="og:type" content="article">
+<meta property="og:image" content="https://locallyuncensored.com/social-preview.png">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"TechArticle","headline":"LU and Models on Another Drive: Model Folder, ComfyUI Path, Trainer, What Stays","description":"Where Locally Uncensored keeps its files on Windows, Linux and Mac, how to put chat models, ComfyUI and the character trainer on another drive, what cannot be moved, and how to move models without downloading them again.","url":"https://locallyuncensored.com/guide/storage/","dateModified":"2026-10-14","inLanguage":"en","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/guide/storage/"},"isPartOf":{"@type":"WebPage","name":"Locally Uncensored Handbook: Install, Chat, Agent, Code, Create, Cloud","url":"https://locallyuncensored.com/guide/"},"about":{"@type":"SoftwareApplication","name":"Locally Uncensored","operatingSystem":"Windows, Linux, macOS","applicationCategory":"UtilitiesApplication"}}
+</script>
+<link rel="icon" href="/favicon.png">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://locallyuncensored.com/"},{"@type":"ListItem","position":2,"name":"Guide","item":"https://locallyuncensored.com/guide/"},{"@type":"ListItem","position":3,"name":"Storage","item":"https://locallyuncensored.com/guide/storage/"}]}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/lu.css">
+<script defer src="/assets/lu.js"></script>
+  <script data-goatcounter="https://purple47.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</head>
+<body>
+<nav class="lu-nav">
+  <a class="lu-nav-brand" href="/" aria-label="Locally Uncensored">
+    <span class="lu-mono" data-mono="nav" data-size="40" aria-hidden="true"></span>
+    <span class="lu-nav-word">Locally <span class="accent">Uncensored</span></span>
+  </a>
+  <div class="lu-nav-links" id="lu-nav-links">
+    <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/pricing/">Pricing</a>
+    <a class="lu-nav-link" href="/blog/">Blog</a>
+    <a class="lu-nav-link" href="/guide/">Guide</a>
+    <a class="lu-nav-link" href="/remote-access/">Remote</a>
+  </div>
+  <div class="lu-nav-right">
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">4200+&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">1700+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <span class="lu-nav-sep"></span>
+    <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="he-cta" href="/pricing/" aria-label="LU Cloud plans and what they include"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>Cloud</a>
+    <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
+    <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </div>
+</nav>
+<article class="lu-doc" data-handbook-guide="storage">
+<div class="breadcrumb"><a href="/">Home</a> &rsaquo; <a href="/guide/">Handbook</a> &rsaquo; Storage</div>
+<h1>LU and your models on another drive</h1>
+<p class="subtitle">Models are the big files: one chat model is several gigabytes, ComfyUI with PyTorch and image models easily passes 20. This guide says where LU puts things on Windows, Linux and Mac, what you can move to a second drive and how, what you cannot move, and how to move models you already have without downloading them again.</p>
+<nav class="toc">
+<div class="toc-title">In this guide</div>
+<a href="#where">Where LU puts things</a>
+<a href="#overview">What you can move, and what not</a>
+<a href="#chat-models">Chat models: the LU Engine folder</a>
+<a href="#move-chat">Move chat models you already have</a>
+<a href="#other-apps">Models from Ollama and LM Studio</a>
+<a href="#comfyui">Image and video models: ComfyUI</a>
+<a href="#mac">On a Mac</a>
+<a href="#trainer">The character trainer</a>
+<a href="#caches">Caches</a>
+<a href="#wrong">When it goes wrong</a>
+</nav>
+
+<h2 id="where">Where LU puts things</h2>
+
+<p><strong>The program itself.</strong> On Windows the installer puts it in the program folder for the choice you made (current user or all users). The .deb and .rpm packages install into the system folders under <code>/usr</code>. The AppImage is one file that runs from wherever you saved it, a second drive included. On a Mac you drag LU into Applications. The program folder holds the app and the LU Engine and none of your files, so moving it saves very little. Details are in <a href="/guide/install/">Install and update</a>.</p>
+
+<p><strong>Your data and the downloads</strong> live under your user profile:</p>
+
+<table>
+<tr><th>What</th><th>Windows</th><th>Linux</th><th>Mac</th></tr>
+<tr><td>App data and logs</td><td><code>%LOCALAPPDATA%\lu-labs</code></td><td><code>~/.local/share/lu-labs</code></td><td><code>~/Library/Application Support/lu-labs</code></td></tr>
+<tr><td>Chat models of the LU Engine (LU's own folder)</td><td><code>%APPDATA%\Locally Uncensored\models</code></td><td><code>~/.local/share/Locally Uncensored/models</code></td><td><code>~/Library/Application Support/Locally Uncensored/models</code></td></tr>
+<tr><td>Settings file with the ComfyUI path and the trainer folder</td><td><code>%APPDATA%\locally-uncensored\config.json</code></td><td><code>~/.config/locally-uncensored/config.json</code></td><td><code>~/Library/Application Support/locally-uncensored/config.json</code></td></tr>
+<tr><td>ComfyUI that LU installs, with its image and video models</td><td><code>%USERPROFILE%\ComfyUI</code> unless you set another path</td><td><code>~/ComfyUI</code> unless you set another path</td><td>No ComfyUI on a Mac, see <a href="#mac">below</a></td></tr>
+<tr><td>Agent sandbox folders</td><td><code>%USERPROFILE%\agent-workspace</code></td><td><code>~/agent-workspace</code></td><td><code>~/agent-workspace</code></td></tr>
+</table>
+
+<p>Your conversations themselves are kept in the app's browser storage, as the install chapter explains. To take them to another machine, use "Export all chats" and "Import chats" under Settings, General, Chat Backup.</p>
+
+<h2 id="overview">What you can move, and what not</h2>
+
+<table>
+<tr><th>Item</th><th>Movable?</th><th>How</th></tr>
+<tr><td>Chat models (GGUF files) for the LU Engine</td><td>Yes</td><td>Settings, AI Backends, Model Storage, "LU Engine folder"</td></tr>
+<tr><td>ComfyUI and its image and video models</td><td>Yes (Windows and Linux)</td><td>The "Path" field under Settings, AI Backends, ComfyUI (Image &amp; Video), before "Install ComfyUI", or by pointing it at a moved folder</td></tr>
+<tr><td>Extra image models (LoRAs, checkpoints and so on)</td><td>Yes (Windows and Linux)</td><td>ComfyUI style subfolders in the "LU Engine folder"</td></tr>
+<tr><td>The character trainer</td><td>Yes, at the first setup only</td><td>The path field under "Set up trainer" in Character Studio</td></tr>
+<tr><td>Ollama models</td><td>Not from LU</td><td>Ollama keeps its own store; change it in Ollama</td></tr>
+<tr><td>LM Studio models</td><td>Not from LU</td><td>LM Studio manages its folder; change it in LM Studio</td></tr>
+<tr><td>App data, logs, settings file</td><td>No</td><td>The app has no setting for this</td></tr>
+<tr><td>LU's own chat model folder</td><td>No</td><td>It stays where it is; you point LU at a second folder instead</td></tr>
+<tr><td>Image and video models on a Mac</td><td>No</td><td>They stay in the app data folder</td></tr>
+<tr><td>Agent sandbox</td><td>No</td><td>For a real project, pick a folder on any drive when the agent asks where to work (<a href="/guide/agent/">Agent mode</a>)</td></tr>
+</table>
+
+<h2 id="chat-models">Chat models: the LU Engine folder</h2>
+
+<p>Under Settings, AI Backends, Model Storage the first row is "LU Engine folder". The app's own sentence explains it: "LU downloads GGUFs here and reads every .gguf in a folder you set, up to four levels down. Models here run on the LU Engine. Leave it empty and LU uses its own folder, which it reads two levels down." While the field is empty, it shows the folder it uses, as "LU's own folder:" followed by the path.</p>
+
+<div class="step">
+<span class="step-num">1</span>
+<span class="step-title">Make a folder on the other drive</span>
+<div class="step-body">
+<p>For example <code>D:\AI\Models</code> on Windows or <code>/mnt/data/models</code> on Linux. A folder just for models is best: a very large folder, such as a whole drive, takes too long to scan.</p>
+</div>
+</div>
+
+<div class="step">
+<span class="step-num">2</span>
+<span class="step-title">Set it as the LU Engine folder</span>
+<div class="step-body">
+<p>Click "Browse…" and pick the folder, or type the full path into the field. A typed path is saved when you press Enter or leave the field. "Reset" empties the field and goes back to LU's own folder; it deletes no files.</p>
+</div>
+</div>
+
+<div class="step">
+<span class="step-num">3</span>
+<span class="step-title">Download as usual</span>
+<div class="step-body">
+<p>From now on, new chat models for the LU Engine download into this folder. Before a download starts, LU checks the free space on the drive that holds the folder.</p>
+</div>
+</div>
+
+<p>LU keeps reading its own folder as well. Models that are still there stay usable, so you do not have to move everything at once.</p>
+
+<h2 id="move-chat">Move chat models you already have</h2>
+
+<p>You can move GGUF files you already downloaded instead of downloading them again.</p>
+
+<div class="step">
+<span class="step-num">1</span>
+<span class="step-title">Quit LU</span>
+<div class="step-body">
+<p>Use "Quit" in the tray menu. Clicking the X only hides the window, and a loaded model keeps its file open.</p>
+</div>
+</div>
+
+<div class="step">
+<span class="step-num">2</span>
+<span class="step-title">Move the files</span>
+<div class="step-body">
+<p>Open LU's own folder (see the table above) and move the <code>.gguf</code> files into your new folder. Keep files that belong together side by side: a model split into parts (names ending in <code>-00001-of-00003.gguf</code> and so on) stays in one folder, and a model that can see pictures has a second file next to it, <code>(model name).mmproj.gguf</code>, which has to move with it.</p>
+</div>
+</div>
+
+<div class="step">
+<span class="step-num">3</span>
+<span class="step-title">Start LU and set the folder</span>
+<div class="step-body">
+<p>Set the new folder as "LU Engine folder" as described above, if you have not yet. The models show up under Models, Installed again. If a chat still points at the old file and says "Model file not found", pick the model again in the model picker.</p>
+</div>
+</div>
+
+<h2 id="other-apps">Models from Ollama and LM Studio</h2>
+
+<p>The same panel has two more rows. "LM Studio folder" shows LM Studio's own folder, read only: "LM Studio manages this folder. LU reads it through LM Studio when LM Studio is your chat provider." The "Ollama" row says: "Ollama keeps its own model store. LU pulls Ollama models with ollama pull; a folder cannot be set here." To put those models on another drive, change the location in LM Studio or in Ollama itself. LU has no switch for it.</p>
+
+<p>"Scan for local models" finds models that are already in Ollama or LM Studio, and "Import" makes them usable for the LU Engine "without downloading or copying anything. The file stays where it is; both apps keep working." Two limits are worth knowing:</p>
+
+<ul>
+<li>The scan looks only in the usual places in your home folder: Ollama's <code>.ollama/models</code> and LM Studio's <code>.lmstudio/models</code> (or <code>.cache/lm-studio/models</code>). Models you moved elsewhere in those apps are not found. When nothing turns up, it says "No importable models found. Looked in the Ollama store and the LM Studio models folder."</li>
+<li>Import works with a file link, and such a link cannot cross from one drive to another. The link goes into LU's own folder, which is on the drive that holds your user profile. A model on any other drive fails with the message under <a href="#wrong">When it goes wrong</a>. For LM Studio models, an alternative is to set the "LU Engine folder" to the LM Studio models folder, because LU reads every .gguf in that folder. Ollama's files have no .gguf names, so for those the way is to copy the file yourself.</li>
+</ul>
+
+<h2 id="comfyui">Image and video models: ComfyUI</h2>
+
+<p>On Windows and Linux, local pictures and videos run through ComfyUI, and its models live inside the ComfyUI folder under <code>models</code>. That folder is the one that grows. The settings are under Settings, AI Backends, ComfyUI (Image &amp; Video).</p>
+
+<h3>Install ComfyUI on another drive from the start</h3>
+
+<div class="step">
+<span class="step-num">1</span>
+<span class="step-title">Type the target into "Path"</span>
+<div class="step-body">
+<p>The note under the buttons reads: "Installs to your home folder by default. Set Path above (e.g. D:\ComfyUI) to install on another drive." Type a folder that does not exist yet, or an empty one, such as <code>D:\ComfyUI</code>. Do not press "Connect" for this: "Connect" is for a ComfyUI that is already there.</p>
+</div>
+</div>
+
+<div class="step">
+<span class="step-num">2</span>
+<span class="step-title">Press "Install ComfyUI"</span>
+<div class="step-body">
+<p>LU installs into that folder. It needs Git on the computer, and about 5 GB of free space for ComfyUI and PyTorch; on a fuller drive it warns first. Image and video models you download later through LU land inside this ComfyUI.</p>
+</div>
+</div>
+
+<h3>Move a ComfyUI you already have</h3>
+
+<div class="step">
+<span class="step-num">1</span>
+<span class="step-title">Stop ComfyUI and move the folder</span>
+<div class="step-body">
+<p>Press "Stop" in the ComfyUI section, quit LU from the tray, and move the whole ComfyUI folder to the other drive.</p>
+</div>
+</div>
+
+<div class="step">
+<span class="step-num">2</span>
+<span class="step-title">Point LU at the new place</span>
+<div class="step-body">
+<p>Start LU, type the new folder into "Path" and press "Connect". "Path set successfully" confirms it. The folder must be the one that contains <code>main.py</code>.</p>
+</div>
+</div>
+
+<div class="step">
+<span class="step-num">3</span>
+<span class="step-title">If it does not start, repair it</span>
+<div class="step-body">
+<p>Press "Start". If ComfyUI does not come up after the move, press "Repair environment": it "rebuilds the Python environment in an isolated venv (~2 GB). Models, outputs and custom nodes are left alone."</p>
+</div>
+</div>
+
+<h3>Keep ComfyUI where it is and add a model folder elsewhere</h3>
+
+<p>The "LU Engine folder" also works for image models. If it contains subfolders named the way ComfyUI names them (<code>checkpoints</code>, <code>loras</code>, <code>vae</code>, <code>diffusion_models</code>, <code>text_encoders</code>, <code>clip</code>, <code>unet</code>, <code>upscale_models</code>, <code>embeddings</code>, <code>controlnet</code> and a few more), LU hands those to ComfyUI. The panel then says "Image and video: LU passes (folders) from this folder to ComfyUI." Three things to know:</p>
+<ul>
+<li>"Only a ComfyUI that LU starts gets them." A ComfyUI you start yourself does not see them.</li>
+<li>LU reads the subfolders each time it starts ComfyUI, so a new subfolder arrives with the next start.</li>
+<li>LU's own downloads for image and video still go into ComfyUI's own models folder. This way is for files you put there yourself.</li>
+</ul>
+<p>A <code>extra_model_paths.yaml</code> you wrote yourself in your ComfyUI folder is never touched; LU writes its own file for this.</p>
+
+<h2 id="mac">On a Mac</h2>
+
+<p>A Mac does not use ComfyUI: local pictures and videos run on Apple MLX, and the "ComfyUI (Image &amp; Video)" section is replaced by "Local Media (Apple MLX)". Those image and video models live in the app data folder, <code>~/Library/Application Support/lu-labs</code>, and the app has no setting to move them. Since 3.0.6 they are kept there instead of in the system's cache folder, which macOS may empty when the disk runs short.</p>
+
+<p>The "LU Engine folder" works on a Mac for chat models. For image models it says so plainly: "Chat models in this folder are read. Image and video on the Mac run on Apple MLX, not ComfyUI, so image models in this folder are not picked up. Install those in the Model Manager, under Image."</p>
+
+<p>If you pick a folder inside Desktop, Documents or Downloads, the panel warns "macOS will ask once for access to this folder." That question comes from macOS; allow it, or LU cannot read the folder.</p>
+
+<h2 id="trainer">The character trainer</h2>
+
+<p>Training a character locally in Character Studio needs its own Python environment, about 3 GB of downloads, and about 10 GB of free space on its drive. Where it goes can be chosen only at the first setup: the path field appears under "Set up trainer" until the trainer is installed, and then it is gone.</p>
+
+<ul>
+<li>Leave the field empty and the trainer goes into the app's data folder: "Installs to your app data folder by default. Set a path above to use another drive."</li>
+<li>If your ComfyUI is already on another drive, the field is filled with a folder named <code>LU-Trainer</code> next to it, with the note "Your model folder is on another drive, so we suggest this folder too."</li>
+<li>Use a full path. A path that starts with <code>~</code> or is not absolute is refused.</li>
+<li>The trainer's own caches go into the same folder. The base files for training (about 19 GB) do not: "Base model downloads always go to your configured model folder (Settings, ComfyUI), not here."</li>
+<li>"Reinstall the trainer?" later sets up the environment again in the same folder. "Your training photos and downloaded base models are not touched."</li>
+</ul>
+
+<h2 id="caches">Caches</h2>
+
+<p>The app has no setting for a cache folder. What there is:</p>
+<ul>
+<li>On a Mac, <code>~/Library/Caches/lu-labs</code> holds leftovers from downloads of image and video models. They can be fetched again, and nothing reads them once a model is installed.</li>
+<li>The character trainer keeps its download caches inside the trainer folder, so they follow the place you chose at setup.</li>
+<li>The helper program for remote access over the internet sits in a small folder of its own under the app data (<code>locally-uncensored\bin</code> under <code>%LOCALAPPDATA%</code> on Windows).</li>
+</ul>
+
+<h2 id="wrong">When it goes wrong</h2>
+
+<p><strong>"This folder cannot be reached right now (drive disconnected or path missing). Models in it are hidden until it is back."</strong> The drive is unplugged, or the path has a typo. Plug the drive in; the models come back with it. A second line may say "LU cannot read that folder. Check that the drive is connected and the path is spelled the way the system spells it."</p>
+
+<p><strong>"This folder is too big to scan completely. Only the first files were read; pick a folder that holds just your models."</strong> You picked a whole drive or a big folder. Make a folder just for models and pick that.</p>
+
+<p><strong>"LU is not allowed to read that folder."</strong> The folder exists, but your user account has no access to it. "Pick a folder your own account owns, or grant this app access to that one."</p>
+
+<p><strong>"That is not a full path, so nothing can be read from it."</strong> The path starts with <code>~</code> or is relative. Use a complete path such as <code>C:\AI\Models</code> or <code>/mnt/models</code>.</p>
+
+<p><strong>"Image and video models in this folder stay invisible: ComfyUI lists only its own folders."</strong> The LU Engine folder has no ComfyUI style subfolders. Name them like ComfyUI does (<code>checkpoints</code>, <code>loras</code>, <code>vae</code> and so on).</p>
+
+<p><strong>"Could not link the model into the LU Engine folder ((reason)). Linking needs source and destination on the same drive. Move the models folder (Settings, Model Storage) to that drive, or copy the file there yourself."</strong> The model you wanted to import is on a different drive from LU's own folder. Changing the "LU Engine folder" does not change where Import puts its link, so copy the file into your LU Engine folder yourself, or for LM Studio models point the "LU Engine folder" at the LM Studio folder.</p>
+
+<p><strong>"A model named (name) already exists in the LU Engine models folder"</strong> A file of that name is already there. Nothing to do; the model is already usable.</p>
+
+<p><strong>"Not enough free space: (amount) short."</strong> The drive of the target folder is too full for the download. Free space there, or set a folder on a bigger drive as "LU Engine folder" and start the download again.</p>
+
+<p><strong>"Model file not found: (path)"</strong> The model was moved or the folder changed. Pick the model again in the picker, or check that the drive with the folder is connected.</p>
+
+<p><strong>"main.py not found in (path)"</strong> after "Connect". The path is not the ComfyUI folder itself. Point it at the folder that contains <code>main.py</code>. To install a new ComfyUI there, press "Install ComfyUI" instead of "Connect".</p>
+
+<p><strong>"(folder) already exists and is not a ComfyUI checkout."</strong> You chose an install target that already holds other files. "Pick an empty folder, or move this one aside and retry."</p>
+
+<p><strong>"Low disk space on (drive)"</strong> at the start of a ComfyUI install. "ComfyUI + PyTorch need about 5 GB." Free space or choose another drive in "Path".</p>
+
+<p><strong>"The drive holding the trainer folder ((path)) has (N) GB free and the trainer setup needs about 10 GB before anything is downloaded"</strong> Free space on that drive, or type a folder on another drive before you press "Set up trainer".</p>
+
+<p><strong>"(path) starts with ~, and this field never expands it"</strong> or <strong>"(path) is not an absolute path."</strong> In the trainer field. Type the full path, starting from the drive letter or from <code>/</code>.</p>
+
+<hr>
+<p class="small">Related chapters: <a href="/guide/install/">Install and update</a>, <a href="/guide/settings-and-troubleshooting/">Settings and troubleshooting</a>, <a href="/guide/create/">Create</a>. Back to the <a href="/guide/">handbook overview</a>.</p>
+</article>
+<footer>
+  <div class="footer-row footer-meta"><span>&copy; 2026 &middot; Locally Uncensored &middot; AGPL-3.0</span></div>
+  <div class="footer-row footer-links">
+    <a href="https://locallyuncensored.com/blog/">Blog</a>
+    <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/pricing/">Pricing</a>
+    <a href="https://locallyuncensored.com/cloud/">LU Cloud</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-chat-online/">Uncensored AI chat online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-image-generator-online/">Image generator online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-video-generator-online/">Video generator online</a>
+    <a href="https://locallyuncensored.com/unrestricted-ai/">Unrestricted AI</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-coding-agent/">AI coding agent</a>
+    <a href="https://locallyuncensored.com/alternatives/">Alternatives</a>
+    <a href="https://locallyuncensored.com/is-locally-uncensored-safe/">Is it safe?</a>
+    <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
+    <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/discussions">Discussions</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
+    <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
+    <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+    <a href="https://locallyuncensored.com/privacy/">Privacy</a>
+    <a href="https://locallyuncensored.com/terms/">Terms</a>
+    <a href="https://locallyuncensored.com/impressum/">Impressum</a>
+  </div>
+</footer>
+</body>
+</html>

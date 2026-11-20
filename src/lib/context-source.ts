@@ -1,7 +1,7 @@
 /**
  * Woher die Zahl kommt, die als Kontextfenster angezeigt und verrechnet wird.
  *
- * GH #129 (nicolasoliver1jclj1, 2026-09-11): ein eigener
+ * GH #129 (2026-09-11): ein eigener
  * OpenAI-kompatibler Server mit einem 256k-Modell. LU zeigte 6.4K, ohne
  * Waehler, und nach dem Umbenennen des Modells auf etwas mit "qwen" im Namen
  * 25.6K. Beide Zahlen sind nachgerechnet: `guessContextFromName` liefert 8192
@@ -100,7 +100,7 @@ export function windowIsKnown(source: ContextSource): boolean {
  * Bekannt: ja, das ist die Regel. Dazu die eine Ausnahme, die es vor #129
  * schon gab und die weiter gebraucht wird: die gepflegte Liste benannter
  * Modelle. Sie hat einen eigenen Grund, naemlich Bug 5 vom 2026-07-11
- * (DeepInfra deckelt sonst selbst fast das ganze Fenster und antwortet auf
+ * (the upstream deckelt sonst selbst fast das ganze Fenster und antwortet auf
  * den echten Prompt mit 400), und sie ist etwas anderes als die
  * Namensheuristik: dort steht eine exakte Id, hier eine Teilzeichenkette.
  * Das Modell des Melders stand in keiner Liste; es hiess nur zufaellig

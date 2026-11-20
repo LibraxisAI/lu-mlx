@@ -3,7 +3,7 @@
  *
  * The CivitAI API key field, rendered for real.
  *
- * goonerforporn's report (Discord #bug-reports, 2026-08-28) is precisely the
+ * a user's report (Discord #bug-reports, 2026-08-28) is precisely the
  * kind a source-text test cannot answer: the store had the value and the setter,
  * the changelog named the key, and the field was not in the interface. So this
  * one mounts the component, types a key, and reads the store back.
@@ -100,7 +100,7 @@ describe('the field exists and writes to the store', () => {
 
 // ── A14 review 8: a key field that cannot be mistaken for a folder field ────
 //
-// From the Windows follow-up: the Model Storage folder field and this one sat
+// From the Windows follow-up: the Storage folder field and this one sat
 // directly under each other, two bare text boxes in a row, and a tester saved
 // a filesystem path as his API key. Nothing said no, the path went into the OS
 // credential store, every CivitAI download kept failing with a bare 400, and
@@ -121,7 +121,7 @@ describe('the field says what belongs in it', () => {
     expect(screen.getByTestId('civitai-key-looks-wrong').textContent)
       .toContain('That looks like a folder, not a key')
     // And it names where that value actually belongs.
-    expect(screen.getByTestId('civitai-key-looks-wrong').textContent).toContain('Model Storage')
+    expect(screen.getByTestId('civitai-key-looks-wrong').textContent).toContain('Storage')
   })
 
   it('a pasted Unix path too', () => {

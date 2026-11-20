@@ -1,5 +1,5 @@
 /**
- * G33 (David 2026-08-07): "wenn ein Text abgeschickt wird, soll der Chat nach
+ * G33 (2026-08-07): "wenn ein Text abgeschickt wird, soll der Chat nach
  * ganz unten springen, wo Working dann zu sehen ist; momentan springt er
  * runter, aber nie ganz."
  *

@@ -1,5 +1,5 @@
 /**
- * Local Edit = mask inpaint (David 2026-07-12): with inputImage + maskImage on
+ * Local Edit = mask inpaint (2026-07-12): with inputImage + maskImage on
  * the checkpoint path, buildDynamicWorkflow must emit the inpaint pipeline —
  * Path A (core VAEEncodeForInpaint) or Path B (InpaintModelConditioning) —
  * instead of silently dropping the mask and repainting the whole image as

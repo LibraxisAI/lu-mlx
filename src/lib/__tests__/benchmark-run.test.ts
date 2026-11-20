@@ -6,7 +6,7 @@ import type { ChatStreamChunk } from '../../api/providers/types'
 /**
  * measureRun is the accounting the benchmark hook used to bury inside a React
  * callback, where nothing could reach it. Lifted out, it can be run against a
- * scripted stream, which is the only way to reproduce the one case David cared
+ * scripted stream, which is the only way to reproduce the one case the owner cared
  * about without a live model: a reasoning model that works out the right answer
  * and then hits its token budget before printing it.
  */
@@ -28,7 +28,7 @@ function steppedClock(...values: number[]): () => number {
 const check = (id: string) => BENCHMARK_PROMPTS.find((p) => p.id === id)!.check
 
 describe('measureRun', () => {
-  it("catches David's case: reasoning reaches the answer but the budget cuts it off", async () => {
+  it("catches the owner's case: reasoning reaches the answer but the budget cuts it off", async () => {
     // The model thinks its way to 9 (visible in `thinking`), then the stream
     // ends on 'length' before any answer content. A speed-only benchmark sees
     // 50 tok/s and calls it a healthy run. The truth is a wrong, truncated one.

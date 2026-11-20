@@ -1,5 +1,5 @@
 /**
- * GH #85 (I-Am-LongXi): der VRAM-Handoff wirft das Textmodell fuer einen
+ * GH #85: der VRAM-Handoff wirft das Textmodell fuer einen
  * Render aus dem Speicher und laedt es danach neu. Fuer die Built-in-Engine
  * hiess Neuladen bisher: die komplette Gespraechshistorie wird beim naechsten
  * Turn neu verarbeitet. llama-server kann den KV-Cache als Slot auf Platte

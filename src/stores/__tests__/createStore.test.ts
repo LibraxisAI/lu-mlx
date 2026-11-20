@@ -144,8 +144,8 @@ describe('createStore', () => {
 
     // Regression: CreateTopControls (header dropdown) reads these fields
     // directly. If they're undefined, `activeList.length` / `.map()` crash
-    // the whole app. Reported on Discord by @diimmortalis (v2.3.9) and
-    // @phantomderp (v2.4.0). Defensive `?? []` lives in CreateTopControls,
+    // the whole app. Reported on Discord by a user (v2.3.9) and
+    // A user (v2.4.0). Defensive `?? []` lives in CreateTopControls,
     // but the store itself must also hand out safe defaults.
     it('initializes imageModelList, videoModelList, comfyRunning', () => {
       // Force a clean construction so we bypass the INITIAL_STATE merge that
@@ -183,7 +183,7 @@ describe('createStore', () => {
       expect(useCreateStore.getState().comfyRunning).toBe(false)
     })
 
-    // Pathological-state regression: reproduce @phantomderp's crash from
+    // Pathological-state regression: reproduce a user's crash from
     // multiple angles. The defensive `Array.isArray` guard in
     // CreateTopControls is the real fix, but the store APIs must keep
     // returning *something* when setState is called with garbage. These
@@ -389,9 +389,11 @@ describe('createStore', () => {
       expect(useCreateStore.getState().frames).toBe(1)
     })
 
-    it('clamps to maximum of 120', () => {
-      useCreateStore.getState().setFrames(200)
-      expect(useCreateStore.getState().frames).toBe(120)
+    // D4: the bound is the longest local family now (MiniMax H3, 362), the
+    // slider of each family keeps its own range (lib/video-length).
+    it('clamps to the longest local clip, 362 frames', () => {
+      useCreateStore.getState().setFrames(500)
+      expect(useCreateStore.getState().frames).toBe(362)
     })
 
     it('floors fractional values', () => {
@@ -637,7 +639,7 @@ describe('createStore', () => {
 
   // ── removeFromPromptHistory / clearPromptHistory (A10) ─────
   //
-  // Bug A10 (pardy22, Discord #general + #help-18): the prompt history could
+  // Bug A10 (Discord #general + #help-18): the prompt history could
   // not be deleted. The store had no action for it at all, so no button could
   // have worked. These four claims pin the two new actions plus the persisted
   // copy, which is what made the entries come back after a restart.
@@ -861,22 +863,25 @@ describe('createStore', () => {
     })
   })
 
-  // Flipping the backend to local must clear hosted-only intents that have
-  // no local lane. Upscale/eraser now keep on a ComfyUI host.
+  // 2026-07-10: edit/animate/upscale/eraser are cloud-only — flipping
+  // the backend to local must clear every cloud-only intent (the IntentBar no
+  // longer shows them) so the surface never strands on a hidden op.
   describe('setBackend local-flip clears cloud-only intents', () => {
     const ref = { filename: 'src.png', url: 'data:image/png;base64,x', width: 8, height: 8 }
 
-    it('drops a utility op (upscale) on a Windows/Linux ComfyUI host — LU Cloud tool there', () => {
-      // Local upscale / eraser are Mac-fork only (`localLaneMacOnly`); the Mac
-      // case lives in der-mac-strandet-nicht-auf-einem-werkzeug.test.ts.
+    // Until 3.0.7 this case was upscale. Enhance runs on local ComfyUI now
+    // (local-upscale-store.test.ts), so Erase is the hosted-only tool.
+    it('clears a utility op (eraser) with its mask', () => {
       const s = useCreateStore.getState()
       s.setBackend('cloud')
-      s.setIntent('upscale')
+      s.setIntent('eraser')
       s.setSource(ref)
+      s.setMask(ref)
       useCreateStore.getState().setBackend('local')
       const after = useCreateStore.getState()
       expect(after.utilityOp).toBeNull()
-      expect(after.intent()).not.toBe('upscale')
+      expect(after.mask).toBeNull()
+      expect(after.intent()).not.toBe('eraser')
     })
 
     it('keeps edit — it has a local lane via checkpoint inpaint (2.5.7)', () => {
@@ -914,6 +919,18 @@ describe('createStore', () => {
       const after = useCreateStore.getState()
       expect(after.intent()).toBe('removebg')
       expect(after.source).not.toBeNull()
+    })
+
+    it('keeps music on a ComfyUI host: the Mac rule for these lanes does not reach it', () => {
+      // der-mac-strandet-nicht-auf-einem-werkzeug.test.ts holds the Mac side,
+      // where the same flip lets Music go because it is a locked teaser there.
+      const s = useCreateStore.getState()
+      s.setBackend('cloud')
+      s.setIntent('music')
+      useCreateStore.getState().setBackend('local')
+      const after = useCreateStore.getState()
+      expect(after.cloudOp).toBe('music')
+      expect(after.intent()).toBe('music')
     })
 
     it('keeps character since 2.6.0 ships the local musubi trainer lane', () => {

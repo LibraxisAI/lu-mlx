@@ -1,7 +1,7 @@
 /**
  * Die Unterkategorien von Create schicken ein Studio-Modell richtig ab.
  *
- * Port aus uselu (apps/web/hooks/__tests__/useCloudCreate-studio-unterkategorien.test.ts,
+ * Port aus the web app (the web app,
  * 19.09.2026): bis dahin war der Studio-Pfad allein im Preset-Fenster zu
  * Hause. Jetzt faehrt ihn auch der normale Composer/useCloudCreate, und daran
  * haengen vier Dinge, die still falsch sein koennen: der Op, die
@@ -108,7 +108,7 @@ vi.mock('../../api/cloud/studio', () => ({
 import { useCloudCreate } from '../useCloudCreate'
 import { useCreateStore } from '../../stores/createStore'
 import { useCloudCatalogStore } from '../../stores/cloudCatalogStore'
-import { CLOUD_MODEL_SEED } from '../../lib/render/cloud-models'
+import { neuerServer } from '../../lib/render/__tests__/fixtures/test-catalogs'
 
 const BILD = { filename: 'portrait.png', url: 'data:image/png;base64,AA', width: 512, height: 512 }
 const TON = { name: 'voice.mp3', url: 'blob:voice', blob: new Blob(['x']) }
@@ -139,7 +139,7 @@ beforeEach(() => {
   // on the live catalog, `resolveIntentPick` would fall back to a CLASSIC
   // member for every one of these role intents (create-studio.test.ts has
   // the dedicated fallback coverage for the opposite state).
-  useCloudCatalogStore.setState({ models: [...CLOUD_MODEL_SEED, { id: 'test-studio-marker', label: 'x', kind: 'image', quote_required: true }] })
+  useCloudCatalogStore.setState({ models: neuerServer() })
 })
 
 describe('Studio-Modelle in den Create-Unterkategorien', () => {
@@ -210,9 +210,11 @@ describe('Studio-Modelle in den Create-Unterkategorien', () => {
   it('laesst eine klassische Wahl unveraendert ihren alten Weg gehen', async () => {
     const s = useCreateStore.getState()
     s.setIntent('music')
-    s.setCloudOpModel('ace-step')
+    // ACE-Step (fast) hat das Web am 24.10.2026 zurueckgezogen
+    // (retired-models.ts); ACE-Step 1.5 ist die klassische Musikwahl seither.
+    s.setCloudOpModel('ace-step-1.5')
     await useCloudCreate().generate()
-    expect(submitted[0].model).toBe('ace-step')
+    expect(submitted[0].model).toBe('ace-step-1.5')
     expect(submitted[0].params.op).toBe('music')
     expect(submitted[0].params.duration).toBeDefined()
     expect(submitted[0].params.studio_options).toBeUndefined()

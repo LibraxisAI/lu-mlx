@@ -83,3 +83,30 @@ describe('exportAsJSON', () => {
     expect(parsed.messages[3].sources).toHaveLength(1)
   })
 })
+
+// 3.0.5: a chat that has no model names none in its export.
+describe('a chat without a model', () => {
+  const bare: Conversation = {
+    ...mockConversation,
+    model: '',
+    messages: [{ id: 'm1', role: 'user', content: 'Hello!', timestamp: 1712160001000 }],
+  }
+
+  it('Markdown: the header keeps the date and drops the model', () => {
+    const header = exportAsMarkdown(bare).split('\n')[1]
+    expect(header).not.toContain('Model')
+    expect(header).toBe(`_${new Date(bare.createdAt).toLocaleString()}_`)
+  })
+
+  it('JSON: no model field, everything else as it was', () => {
+    const parsed = JSON.parse(exportAsJSON(bare))
+    expect('model' in parsed).toBe(false)
+    expect(parsed.id).toBe('test-123')
+    expect(parsed.messages).toHaveLength(1)
+  })
+
+  it('NEGATIVE CONTROL: a chat with a model still names it in both', () => {
+    expect(exportAsMarkdown(mockConversation).split('\n')[1]).toContain('_Model: hermes3:8b | ')
+    expect(JSON.parse(exportAsJSON(mockConversation)).model).toBe('hermes3:8b')
+  })
+})

@@ -7,20 +7,36 @@
 # file when MLX-native SD pipelines become available; we'd swap
 # `torch` + `diffusers` for `mlx-stable-diffusion` at that point.
 
+# Exact versions, not lower bounds: these are the ones the catalogue was run
+# on (owner's M5 Pro, 08.10.2026). An open bound hands a new customer whatever
+# was released that morning, and torch on MPS has shipped releases that
+# compute silently wrong. Move a pin only together with a real run.
+#
 # torch 2.4+ has stable MPS bfloat16 (Z-Image/Qwen-Image run in bf16);
-# diffusers 0.36+ ships ZImagePipeline + QwenImagePipeline.
-torch>=2.4.0
-diffusers>=0.36.0
-transformers>=4.51.0
-accelerate>=0.30.0
-safetensors>=0.4.0
-huggingface_hub>=0.26.0
-sentencepiece>=0.2.0
+# diffusers 0.38+ ships every pipeline the catalogue names: ZImage, QwenImage,
+# Flux2Klein and Chroma. An engine set up from an older copy of
+# this file is updated before the next model install (commands/mlx.rs,
+# `bring_engine_up_to_date`).
+torch==2.12.1
+diffusers==0.38.0
+transformers==5.12.1
+accelerate==1.14.0
+safetensors==0.8.0
+huggingface_hub==1.21.0
+sentencepiece==0.2.1
+# Chroma1-HD ships its T5 tokenizer as spiece.model only, no tokenizer.json.
+# transformers 5 converts it on load and needs protobuf for that; without it
+# the load falls through to the tiktoken reader and fails with "`tiktoken` is
+# required to read a `tiktoken` file" (Discord, M1 Max, 3.0.10). Same version
+# as the video engine's pins (commands/video.rs).
+protobuf==7.35.1
+tokenizers==0.22.2
+numpy==2.4.6
 
 # HTTP server hosting /generate. uvicorn is the production-quality
 # choice; fastapi gives us a typed request schema for free.
-fastapi>=0.110.0
-uvicorn[standard]>=0.29.0
+fastapi==0.139.0
+uvicorn[standard]==0.49.0
 
 # Image post-processing + return-as-PNG path.
-pillow>=10.0.0
+pillow==12.3.0

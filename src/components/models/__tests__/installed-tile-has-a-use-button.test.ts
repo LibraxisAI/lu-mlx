@@ -24,6 +24,13 @@ const activateBuiltinModel = vi.fn(async () => true)
  *  Prozess weiter unten. */
 const engineStatus = vi.fn(async () => ({ running: true, healthy: true, port: 8127 }))
 
+// Die Seite hat seit dem 08.10.2026 zwei Fassungen: die klassische auf
+// Windows und Linux, das Redesign auf dem Mac (skin/which.ts entscheidet).
+// Die Regeln, die diese Datei bewacht, gelten fuer beide, also laeuft jeder
+// Fall einmal je Fassung.
+const face = vi.hoisted(() => ({ name: 'classic' as 'classic' | 'mac' }))
+vi.mock('../skin/which', () => ({ modelSkinName: () => face.name }))
+
 vi.mock('../../../api/backend', () => ({
   isTauri: () => true,
   isMacOS: () => false,
@@ -123,9 +130,15 @@ function nameRow(name: string): HTMLElement {
   return el as HTMLElement
 }
 
+/** How a row is recognised in each face. */
+const ROW = { classic: 'div[class*="rounded-lg"]', mac: '.lu-tile' } as const
+
 /** The Use button on the row for `name`, or null when the row has none. */
 function useButtonFor(name: string): HTMLElement | null {
-  const row = nameRow(name).closest('div[class*="rounded-lg"]')
+  // The row is found by its surface: the corner radius it spells out in the
+  // classic face, the house surface `.lu-tile` in the Mac face.
+  const row = nameRow(name).closest(ROW[face.name])
+  if (!row) throw new Error(`no row surface for ${name} in the ${face.name} face`)
   return row?.querySelector('[data-testid="model-card-use"]') as HTMLElement | null
 }
 
@@ -143,93 +156,97 @@ beforeEach(() => {
 })
 afterEach(() => { cleanup(); __resetLuEngineSwapLockForTests() })
 
-describe('the Use button the 2.6.8 notes promise on the Installed tile', () => {
-  it('is on every LU Engine row that is not the active one', async () => {
-    await openInstalled()
-    expect(useButtonFor(OTHER), 'the notes promise this button twice').not.toBeNull()
-    expect(useButtonFor(OTHER)!.textContent).toContain('Use')
-  })
+describe.each(['classic', 'mac'] as const)('Fassung %s', (fassung) => {
+  beforeEach(() => { face.name = fassung })
 
-  it('starts the engine on that model, the same way the tile click does', async () => {
-    await openInstalled()
-    await act(async () => { fireEvent.click(useButtonFor(OTHER)!) })
-    expect(activateBuiltinModel).toHaveBeenCalledWith(OTHER)
-    expect(useModelStore.getState().activeModel).toBe(OTHER)
-  })
+  describe('the Use button the 2.6.8 notes promise on the Installed tile', () => {
+    it('is on every LU Engine row that is not the active one', async () => {
+      await openInstalled()
+      expect(useButtonFor(OTHER), 'the notes promise this button twice').not.toBeNull()
+      expect(useButtonFor(OTHER)!.textContent).toContain('Use')
+    })
 
-  it('says Loading while the swap runs and stops saying it afterwards', async () => {
-    let release: (v: boolean) => void = () => {}
-    activateBuiltinModel.mockImplementation(() => new Promise<boolean>((r) => { release = r }))
-    await openInstalled()
-    await act(async () => { fireEvent.click(useButtonFor(OTHER)!) })
+    it('starts the engine on that model, the same way the tile click does', async () => {
+      await openInstalled()
+      await act(async () => { fireEvent.click(useButtonFor(OTHER)!) })
+      expect(activateBuiltinModel).toHaveBeenCalledWith(OTHER)
+      expect(useModelStore.getState().activeModel).toBe(OTHER)
+    })
 
-    // The row is the active one now, so the busy state is read off the button
-    // the click left behind rather than off a fresh lookup.
-    expect(document.body.textContent, 'a cold GGUF takes seconds and the button looked idle').toContain('Loading…')
+    it('says Loading while the swap runs and stops saying it afterwards', async () => {
+      let release: (v: boolean) => void = () => {}
+      activateBuiltinModel.mockImplementation(() => new Promise<boolean>((r) => { release = r }))
+      await openInstalled()
+      await act(async () => { fireEvent.click(useButtonFor(OTHER)!) })
 
-    await act(async () => { release(true); await Promise.resolve(); await Promise.resolve() })
-    expect(document.body.textContent).not.toContain('Loading…')
-  })
+      // The row is the active one now, so the busy state is read off the button
+      // the click left behind rather than off a fresh lookup.
+      expect(document.body.textContent, 'a cold GGUF takes seconds and the button looked idle').toContain('Loading…')
 
-  // NEGATIVE CONTROL: the active row says Active and offers nothing to press.
-  it('is absent on the model that is already active', async () => {
-    await openInstalled()
-    expect(useButtonFor(ACTIVE), 'Use on the model already in use is noise').toBeNull()
-    expect(document.body.textContent).toContain('Active')
-  })
+      await act(async () => { release(true); await Promise.resolve(); await Promise.resolve() })
+      expect(document.body.textContent).not.toContain('Loading…')
+    })
 
-  // NEGATIVE CONTROL: an Ollama row is served by another backend. A Use button
-  // there would promise something the LU Engine cannot do for that row.
-  it('is absent on a row that is not ours', async () => {
-    await openInstalled()
-    expect(useButtonFor(OLLAMA)).toBeNull()
-  })
+    // NEGATIVE CONTROL: the active row says Active and offers nothing to press.
+    it('is absent on the model that is already active', async () => {
+      await openInstalled()
+      expect(useButtonFor(ACTIVE), 'Use on the model already in use is noise').toBeNull()
+      expect(document.body.textContent).toContain('Active')
+    })
 
-  // Persona P5, 03./04.09.2026: "openai:: steht vor jedem lokalen
-  // Modellnamen. Fuer einen Kunden, der LU Engine benutzt und mit OpenAI
-  // nichts zu tun hat, ist das verwirrend." Es ist unser Steckplatzname,
-  // nicht seiner.
-  // Persona P2, 04.09.2026: nach `Stop-Process` auf den Engine-Prozess behielt
-  // genau das Modell, das lief, sein ACTIVE und verlor seinen Use-Knopf, 40
-  // bzw. 90 s lang unveraendert, waehrend das Einstellungsfenster den Tod
-  // schon nach 2 s meldete. Nach einem Absturz war ausgerechnet das zuletzt
-  // benutzte Modell das einzige, das man von hier aus nicht neu starten
-  // konnte.
-  it('gibt der aktiven Zeile ihren Use-Knopf zurueck, wenn die Engine steht', async () => {
-    engineStatus.mockResolvedValue({ running: false, healthy: false, port: 8127 })
-    await openInstalled()
-    expect(useButtonFor(ACTIVE)).not.toBeNull()
-  })
+    // NEGATIVE CONTROL: an Ollama row is served by another backend. A Use button
+    // there would promise something the LU Engine cannot do for that row.
+    it('is absent on a row that is not ours', async () => {
+      await openInstalled()
+      expect(useButtonFor(OLLAMA)).toBeNull()
+    })
 
-  // NEGATIVKONTROLLE: laeuft die Engine, bleibt es beim alten Verhalten. Der
-  // Knopf auf der Zeile, die gerade bedient wird, waere sonst ein Angebot,
-  // etwas zu starten, das laeuft.
-  it('und nimmt ihn wieder weg, solange die Engine laeuft', async () => {
-    await openInstalled()
-    expect(useButtonFor(ACTIVE)).toBeNull()
-  })
+    // Persona P5, 03./04.09.2026: "openai:: steht vor jedem lokalen
+    // Modellnamen. Fuer einen Kunden, der LU Engine benutzt und mit OpenAI
+    // nichts zu tun hat, ist das verwirrend." Es ist unser Steckplatzname,
+    // nicht seiner.
+    // Persona P2, 04.09.2026: nach `Stop-Process` auf den Engine-Prozess behielt
+    // genau das Modell, das lief, sein ACTIVE und verlor seinen Use-Knopf, 40
+    // bzw. 90 s lang unveraendert, waehrend das Einstellungsfenster den Tod
+    // schon nach 2 s meldete. Nach einem Absturz war ausgerechnet das zuletzt
+    // benutzte Modell das einzige, das man von hier aus nicht neu starten
+    // konnte.
+    it('gibt der aktiven Zeile ihren Use-Knopf zurueck, wenn die Engine steht', async () => {
+      engineStatus.mockResolvedValue({ running: false, healthy: false, port: 8127 })
+      await openInstalled()
+      expect(useButtonFor(ACTIVE)).not.toBeNull()
+    })
 
-  it('nennt kein Modell mit dem Steckplatz-Praefix', async () => {
-    await openInstalled()
-    expect(document.body.textContent).not.toContain('openai::')
-    // Gegenprobe zur Gegenprobe: der Name ist wirklich da, nur ohne Praefix.
-    expect(document.body.textContent).toContain('Phi-4-mini-instruct-Q4_K_M')
-    // Auch nicht unter dem Mauszeiger: das title-Feld traegt denselben Namen
-    // wie der sichtbare Text (Nachpruefung G3, 04.09.2026).
-    expect(nameRow(ACTIVE).textContent).toBe(displayModelName(ACTIVE))
-    const titel = Array.from(document.querySelectorAll('[title]'))
-      .map((e) => e.getAttribute('title') ?? '')
-    expect(titel.filter((t) => t.includes('openai::'))).toEqual([])
-  })
+    // NEGATIVKONTROLLE: laeuft die Engine, bleibt es beim alten Verhalten. Der
+    // Knopf auf der Zeile, die gerade bedient wird, waere sonst ein Angebot,
+    // etwas zu starten, das laeuft.
+    it('und nimmt ihn wieder weg, solange die Engine laeuft', async () => {
+      await openInstalled()
+      expect(useButtonFor(ACTIVE)).toBeNull()
+    })
 
-  // NEGATIVE CONTROL: the button is a door into the same house, so it obeys
-  // the shared bolt. A press while another swap is running must not send a
-  // second swap_bundled_model at one llama-server.
-  it('is blocked by the shared swap bolt like every other door', async () => {
-    const { tryAcquireLuEngineSwap } = await import('../../../api/lu-engine-swap-lock')
-    await openInstalled()
-    expect(tryAcquireLuEngineSwap(), 'someone else is mid swap').toBe(true)
-    await act(async () => { fireEvent.click(useButtonFor(OTHER)!) })
-    expect(activateBuiltinModel).not.toHaveBeenCalled()
+    it('nennt kein Modell mit dem Steckplatz-Praefix', async () => {
+      await openInstalled()
+      expect(document.body.textContent).not.toContain('openai::')
+      // Gegenprobe zur Gegenprobe: der Name ist wirklich da, nur ohne Praefix.
+      expect(document.body.textContent).toContain('Phi-4-mini-instruct-Q4_K_M')
+      // Auch nicht unter dem Mauszeiger: das title-Feld traegt denselben Namen
+      // wie der sichtbare Text (Nachpruefung G3, 04.09.2026).
+      expect(nameRow(ACTIVE).textContent).toBe(displayModelName(ACTIVE))
+      const titel = Array.from(document.querySelectorAll('[title]'))
+        .map((e) => e.getAttribute('title') ?? '')
+      expect(titel.filter((t) => t.includes('openai::'))).toEqual([])
+    })
+
+    // NEGATIVE CONTROL: the button is a door into the same house, so it obeys
+    // the shared bolt. A press while another swap is running must not send a
+    // second swap_bundled_model at one llama-server.
+    it('is blocked by the shared swap bolt like every other door', async () => {
+      const { tryAcquireLuEngineSwap } = await import('../../../api/lu-engine-swap-lock')
+      await openInstalled()
+      expect(tryAcquireLuEngineSwap(), 'someone else is mid swap').toBe(true)
+      await act(async () => { fireEvent.click(useButtonFor(OTHER)!) })
+      expect(activateBuiltinModel).not.toHaveBeenCalled()
+    })
   })
 })

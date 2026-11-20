@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Locally Uncensored v3.0.1: Qwen-Image 2.1 Locally, a LoRAs Tab, and a Calmer Linux</title>
+<title>Locally Uncensored v3.0.1: Qwen-Image 2.1 Locally, a LoRAs Tab</title>
 <meta name="description" content="v3.0.1 release notes: Qwen-Image 2.1 generates and edits locally on Windows and Linux, LoRAs get their own tab in Models, a card with no free memory reading is planned carefully, and the AppImage stops leaking its runtime.">
 <meta name="keywords" content="locally uncensored 3.0.1, qwen-image 2.1 local, local image editing comfyui, lora manager local ai, appimage ld_library_path fix, vram planning local llm">
 <meta property="og:title" content="Locally Uncensored v3.0.1: Qwen-Image 2.1 Locally, a LoRAs Tab, and a Calmer Linux">
@@ -30,14 +30,17 @@
 {"@context":"https://schema.org","@type":"BlogPosting","headline":"Locally Uncensored v3.0.1: Qwen-Image 2.1 Locally, a LoRAs Tab, and a Calmer Linux","description":"Locally Uncensored 3.0.1 adds Qwen-Image 2.1 as a local model that both generates and edits, gives LoRAs their own tab in Models, plans a card whose free memory cannot be measured more carefully, and stops the Linux AppImage from handing its own runtime to every program the app starts.","image":"https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png","datePublished":"2026-09-18","dateModified":"2026-09-18","inLanguage":"en","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/blog/locally-uncensored-v3-0-1-release.html"},"keywords":"locally uncensored 3.0.1, qwen-image 2.1 local, local image editing comfyui, lora manager local ai, appimage ld_library_path fix, vram planning local llm"}
 </script>
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"What changed in Locally Uncensored 3.0.1?","acceptedAnswer":{"@type":"Answer","text":"Qwen-Image 2.1 is downloadable in the Model Manager and runs locally on Windows and Linux, generating from a prompt and editing from a reference image. Models has a LoRAs tab of its own with CivitAI search, an installed list and deletion. A GPU whose free memory could not be measured is planned with a bigger safety margin instead of as an empty card. The Linux AppImage no longer hands its own runtime to the programs LU starts. The local model answers one conversation at a time and says how many are waiting."}},{"@type":"Question","name":"What does Qwen-Image 2.1 need?","acceptedAnswer":{"@type":"Answer","text":"About 16 GB across three files, and ComfyUI 0.37.0 or newer for the encode node it runs on. An older ComfyUI is told which version to update to before anything is built. It takes one reference image at a time and no painted masks, because that encode node accepts neither. The weights carry the Qwen Research License, which allows research and evaluation but not commercial use, and the bundle says so with a link before the download starts."}},{"@type":"Question","name":"Why did a Linux install break a working Python before 3.0.1?","acceptedAnswer":{"@type":"Answer","text":"The AppImage runtime exports its own LD_LIBRARY_PATH, PYTHONHOME and related variables, and every program LU started inherited them: git, a system Python, pip, ffmpeg, nvidia-smi, the coding agent shell and the Character Trainer. A perfectly healthy system Python then failed to import ssl or find its standard library, and the error pointed at the Python install rather than at the inheritance. From 3.0.1 those variables stop at the AppImage boundary."}},{"@type":"Question","name":"Is there a macOS build of 3.0.1?","acceptedAnswer":{"@type":"Answer","text":"No. Every release builds Windows and Linux only. On a Mac, LU Cloud runs in the browser at lu-labs.ai."}},{"@type":"Question","name":"Why does a chat sometimes wait its turn now?","acceptedAnswer":{"@type":"Answer","text":"The local model runs one conversation at a time. Before 3.0.1 a second chat sent while the first was still streaming could mix the two answers together. A chat that has to wait now says so, with a line showing how many are ahead of it, and Stop works while it waits and takes it out of the line."}}]}
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"What changed in Locally Uncensored 3.0.1?","acceptedAnswer":{"@type":"Answer","text":"Qwen-Image 2.1 is downloadable in the Model Manager and runs locally on Windows and Linux, generating from a prompt and editing from a reference image. Models has a LoRAs tab of its own with CivitAI search, an installed list and deletion. A GPU whose free memory could not be measured is planned with a bigger safety margin instead of as an empty card. The Linux AppImage no longer hands its own runtime to the programs LU starts. The local model answers one conversation at a time and says how many are waiting."}},{"@type":"Question","name":"What does Qwen-Image 2.1 need?","acceptedAnswer":{"@type":"Answer","text":"About 16 GB across three files, and ComfyUI 0.37.0 or newer for the encode node it runs on. An older ComfyUI is told which version to update to before anything is built. It takes one reference image at a time and no painted masks, because that encode node accepts neither. The weights carry the Qwen Research License, which allows research and evaluation but not commercial use, and the bundle says so with a link before the download starts."}},{"@type":"Question","name":"Why did a Linux install break a working Python before 3.0.1?","acceptedAnswer":{"@type":"Answer","text":"The AppImage runtime exports its own LD_LIBRARY_PATH, PYTHONHOME and related variables, and every program LU started inherited them: git, a system Python, pip, ffmpeg, nvidia-smi, the coding agent shell and the Character Trainer. A perfectly healthy system Python then failed to import ssl or find its standard library, and the error pointed at the Python install rather than at the inheritance. From 3.0.1 those variables stop at the AppImage boundary."}},{"@type":"Question","name":"Is there a macOS build of 3.0.1?","acceptedAnswer":{"@type":"Answer","text":"No. 3.0.1 was built for Windows and Linux only. On a Mac, LU Cloud runs in the browser at lu-labs.ai."}},{"@type":"Question","name":"Why does a chat sometimes wait its turn now?","acceptedAnswer":{"@type":"Answer","text":"The local model runs one conversation at a time. Before 3.0.1 a second chat sent while the first was still streaming could mix the two answers together. A chat that has to wait now says so, with a line showing how many are ahead of it, and Stop works while it waits and takes it out of the line."}}]}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://locallyuncensored.com/"},{"@type":"ListItem","position":2,"name":"Blog","item":"https://locallyuncensored.com/blog/"},{"@type":"ListItem","position":3,"name":"v3.0.1: One Local Model That Draws and Edits, and a Calmer Linux","item":"https://locallyuncensored.com/blog/locally-uncensored-v3-0-1-release.html"}]}
 </script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/assets/lu.css">
 <script defer src="/assets/lu.js"></script>
-  <script data-goatcounter="https://lu-uncensored.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+  <script data-goatcounter="https://purple47.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
 </head>
 <body>
 <nav class="lu-nav">
@@ -47,15 +50,17 @@
   </a>
   <div class="lu-nav-links" id="lu-nav-links">
     <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/pricing/">Pricing</a>
     <a class="lu-nav-link" href="/blog/">Blog</a>
     <a class="lu-nav-link" href="/guide/">Guide</a>
     <a class="lu-nav-link" href="/remote-access/">Remote</a>
   </div>
   <div class="lu-nav-right">
-    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">1600+&#8202;⭐</span></a>
-    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">800+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">4200+&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">1700+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
     <span class="lu-nav-sep"></span>
     <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="he-cta" href="/pricing/" aria-label="LU Cloud plans and what they include"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>Cloud</a>
     <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
     <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
   </div>
@@ -72,6 +77,8 @@
 
   <article>
     <h1>v3.0.1: One Local Model That Draws and Edits, and a Calmer Linux</h1>
+
+    <p><em>This post covers an older release. The current release is <a href="locally-uncensored-v3-0-7-release.html">3.0.7</a>, and the <a href="/guide/install/">handbook</a> explains how updates arrive.</em></p>
 
     <p><a href="https://github.com/PurpleDoubleD/locally-uncensored">Locally Uncensored</a> 3.0.1 follows 3.0.0 with two additions and a long list of corrections. The additions are a local image model that generates and edits with the same weights, and a place in Models where your LoRAs finally live. The corrections are mostly about machines that were fine and were treated as if they were not: a graphics card that cannot report its free memory, a system Python that a Linux install made look broken, a processor without AVX2.</p>
 
@@ -144,7 +151,7 @@
 
     <h2>Download</h2>
 
-    <p>3.0.1 is on <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest">GitHub Releases</a>, with one installer for Windows and three packages for Linux. The signed auto update channel picks it up on next launch if you are already on 3.0.x. There is no macOS build; on a Mac, LU Cloud runs in the browser. New here? The <a href="/guide/">handbook</a> takes you from installer to first generation, and the <a href="/guide/install/">install chapter</a> lists the file names.</p>
+    <p>3.0.1 is on <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest">GitHub Releases</a>, with one installer for Windows and three packages for Linux. The signed auto update channel picks it up on next launch if you are already on 3.0.x. This release has no macOS build; on a Mac, LU Cloud runs in the browser. New here? The <a href="/guide/">handbook</a> takes you from installer to first generation, and the <a href="/guide/install/">install chapter</a> lists the file names.</p>
 
     <h2>Related</h2>
 
@@ -158,6 +165,13 @@
     <hr>
 
     <p><em>Locally Uncensored 3.0.1. AGPL-3.0 licensed. Built by <a href="https://github.com/PurpleDoubleD">PurpleDoubleD</a>. Bug reports and feature requests on <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">GitHub Issues</a> or in the <a href="https://locallyuncensored.com/discord">Discord</a>.</em></p>
+    <h2>In the handbook</h2>
+
+    <ul>
+      <li><a href="/guide/install/">Install and update</a>, the SmartScreen warning and how updates arrive</li>
+      <li><a href="/guide/settings-and-troubleshooting/">Settings and troubleshooting</a>, every settings tab in one line each and where the log file is</li>
+    </ul>
+
   </article>
 
   <div class="post-footer">
@@ -165,6 +179,7 @@
     <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest" class="cta-btn" target="_blank">
       Download 3.0.1
     </a>
+    <p style="margin-top:14px;margin-bottom:0">No GPU? LU Cloud runs in a browser, paid from credit packs that start at 15 EUR and need no subscription. <a href="/pricing/">See what it costs</a>.</p>
   </div>
 </div>
 
@@ -173,6 +188,15 @@
   <div class="footer-row footer-links">
     <a href="https://locallyuncensored.com/blog/">Blog</a>
     <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/pricing/">Pricing</a>
+    <a href="https://locallyuncensored.com/cloud/">LU Cloud</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-chat-online/">Uncensored AI chat online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-image-generator-online/">Image generator online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-video-generator-online/">Video generator online</a>
+    <a href="https://locallyuncensored.com/unrestricted-ai/">Unrestricted AI</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-coding-agent/">AI coding agent</a>
+    <a href="https://locallyuncensored.com/alternatives/">Alternatives</a>
+    <a href="https://locallyuncensored.com/is-locally-uncensored-safe/">Is it safe?</a>
     <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
     <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
     <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
@@ -180,6 +204,9 @@
     <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
     <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
     <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+    <a href="https://locallyuncensored.com/privacy/">Privacy</a>
+    <a href="https://locallyuncensored.com/terms/">Terms</a>
+    <a href="https://locallyuncensored.com/impressum/">Impressum</a>
   </div>
 </footer>
 </body>

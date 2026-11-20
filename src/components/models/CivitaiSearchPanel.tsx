@@ -7,9 +7,13 @@
  * mirror toggle, one key hint, one download path, and the folder a hit lands in
  * is decided once, in `searchCivitaiModels`, from that same type.
  */
-import { useEffect, useState } from 'react'
-import { Search, Loader2, ExternalLink, Download, CheckCircle } from 'lucide-react'
-import { searchCivitaiModels, startModelDownload, type CivitAIModelResult } from '../../api/discover'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Search, Loader2, ExternalLink, Download, CheckCircle, Info } from 'lucide-react'
+import { useModelSourceStore } from '../../stores/modelSourceStore'
+import { folderIsAGuess } from '../../lib/model-folder-guess'
+import { checkCivitaiInstalled, civitaiHitWithFile, civitaiInstalledInFolder, searchCivitaiModels, startCivitaiDownload, startModelDownloadToPath, type CivitAIModelResult } from '../../api/discover'
+import { CivitaiHitDetails } from './CivitaiHitDetails'
+import { usePageMemoryStore } from '../../stores/pageMemoryStore'
 import { openExternal } from '../../api/backend'
 import { useDownloadStore } from '../../stores/downloadStore'
 import { useWorkflowStore } from '../../stores/workflowStore'
@@ -35,26 +39,78 @@ interface Props {
    *  token the user landed on an empty field, no hits and no message, which is
    *  exactly the silent gap the empty state below exists to close. */
   searchSubmitToken?: number
+  /** The Mac's LoRA lane: narrow the search to one base model, by CivitAI's
+   *  own name for it. Absent on Windows and Linux. */
+  baseModel?: string
+  /** The Mac's LoRA lane: the folder a hit is written into, in place of a
+   *  ComfyUI models folder. Absent on Windows and Linux. */
+  destDir?: string
+  /** The Mac's LoRA lane: the files it has listed in `destDir`. A hit whose
+   *  file is among them says Installed without asking the disk again. Absent
+   *  on Windows and Linux, where the hits are checked in their ComfyUI folder. */
+  installed?: readonly { name: string; sizeBytes: number }[]
 }
 
-export function CivitaiSearchPanel({ modelType, title, placeholder, search = '', searchSubmitToken = 0 }: Props) {
-  const [results, setResults] = useState<CivitAIModelResult[]>([])
+export function CivitaiSearchPanel({ modelType, title, placeholder, search = '', searchSubmitToken = 0, baseModel, destDir, installed }: Props) {
+  // C22: the last search of this panel and its hits stay for the session.
+  // Keyed by what the panel searches and where it writes (the Mac's LoRA
+  // folder is its own panel).
+  const memoryKey = `${modelType}|${baseModel ?? ''}|${destDir ?? ''}`
+  const remembered = usePageMemoryStore.getState().civitai[memoryKey]
+  const [hits, setHits] = useState<CivitAIModelResult[]>(() => remembered?.results ?? [])
+  // C21: a hit whose file the user picked in Details downloads, shows its
+  // progress and says Installed as that file.
+  const [picked, setPicked] = useState<Record<number, CivitAIModelResult>>({})
+  const results = useMemo(() => hits.map((h) => picked[h.id] ?? h), [hits, picked])
+  const setResults = (next: CivitAIModelResult[], forQuery: string) => {
+    setHits(next)
+    setPicked({})
+    usePageMemoryStore.getState().setCivitai(memoryKey, { query: forQuery, results: next })
+  }
+  const [details, setDetails] = useState<CivitAIModelResult | null>(null)
   const [searching, setSearching] = useState(false)
-  const [query, setQuery] = useState(search)
+  const [query, setQuery] = useState(search || remembered?.query || '')
   // Track whether the *latest* CivitAI search has been issued at least once,
   // so an empty-state hint can render between "before-first-search" and
   // "search returned 0 hits". Without this we fall through to the silent gap
-  // diimmortalis described: empty list, no console output, looks like the
+  // A user described: empty list, no console output, looks like the
   // button did nothing.
-  const [searched, setSearched] = useState(false)
+  const [searched, setSearched] = useState(() => !!remembered)
   // CivitAI mirror host (#53), civitai.red for regions where .com is blocked.
   const civitaiHost = useWorkflowStore((s) => s.civitaiHost)
   const setCivitaiHost = useWorkflowStore((s) => s.setCivitaiHost)
   const downloads = useDownloadStore((s) => s.downloads)
   const dlStore = useDownloadStore
+  // The hits already on disk, by id (Discord #feature-requests, 3.0.7: an
+  // installed model offered Download and fetched itself a second time).
+  const [onDisk, setOnDisk] = useState<Set<number>>(() => new Set())
+
+  // Windows and Linux: each new list of hits, and every finished download, is
+  // checked in the folder the download would write to.
+  useEffect(() => {
+    if (installed || results.length === 0) return
+    let live = true
+    const check = () => { void checkCivitaiInstalled(results).then((ids) => { if (live) setOnDisk(ids) }) }
+    check()
+    window.addEventListener('comfyui-model-downloaded', check)
+    return () => { live = false; window.removeEventListener('comfyui-model-downloaded', check) }
+  }, [results, installed])
+
+  // The Mac: the lane's listing is current already, it reads itself again
+  // when a download lands.
+  const installedIds = useMemo(
+    () => (installed ? civitaiInstalledInFolder(results, installed) : onDisk),
+    [installed, results, onDisk],
+  )
+
+  // Each search is numbered. Only the newest one may write the hits and end
+  // the spinner: a slow answer to an older query arriving late used to
+  // replace the hits of the query now in the field.
+  const searchSeq = useRef(0)
 
   const runSearch = async (text: string = query) => {
     if (!text.trim()) return
+    const mine = ++searchSeq.current
     setSearching(true)
     setSearched(true)
     // The CivitAI API key the user configured in Settings, AI Backends,
@@ -62,8 +118,11 @@ export function CivitaiSearchPanel({ modelType, title, placeholder, search = '',
     // credential, so there is no second input here.
     const apiKey = useWorkflowStore.getState().civitaiApiKey || undefined
     const host = useWorkflowStore.getState().civitaiHost
-    const hits = await searchCivitaiModels(text, modelType, apiKey, host)
-    setResults(hits)
+    const hits = baseModel || destDir
+      ? await searchCivitaiModels(text, modelType, apiKey, host, { baseModel, safetensorsOnly: !!destDir })
+      : await searchCivitaiModels(text, modelType, apiKey, host)
+    if (mine !== searchSeq.current) return
+    setResults(hits, text)
     setSearching(false)
   }
 
@@ -80,8 +139,20 @@ export function CivitaiSearchPanel({ modelType, title, placeholder, search = '',
 
   const download = async (model: CivitAIModelResult) => {
     if (!model.downloadUrl || !model.filename || !model.subfolder) return
-    dlStore.getState().setMeta(model.filename, model.downloadUrl, model.subfolder)
-    await startModelDownload(model.downloadUrl, model.subfolder, model.filename)
+    // D1: the CivitAI page of the hit, for Details in Models.
+    useModelSourceStore.getState().record(model.filename, model.sourceUrl)
+    if (destDir) {
+      // The folder goes into the record with the file, so Retry and Resume
+      // write to the same place and never look for a ComfyUI.
+      dlStore.getState().setMeta(model.filename, model.downloadUrl, model.subfolder, destDir)
+      await startModelDownloadToPath(model.downloadUrl, destDir, model.filename)
+      dlStore.getState().startPolling()
+      return
+    }
+    // A27: kept for a resume, so the header still decides the folder after a restart.
+    if (folderIsAGuess(model.subfolder)) dlStore.getState().setMeta(model.filename, model.downloadUrl, model.subfolder, undefined, { sniffFolder: true })
+    else dlStore.getState().setMeta(model.filename, model.downloadUrl, model.subfolder)
+    await startCivitaiDownload(model)
     dlStore.getState().startPolling()
   }
 
@@ -136,9 +207,10 @@ export function CivitaiSearchPanel({ modelType, title, placeholder, search = '',
             const dlState = model.filename ? downloads[model.filename] : null
             const isDl = dlState?.status === 'downloading' || dlState?.status === 'connecting'
             const isDone = dlState?.status === 'complete'
+            const isInstalled = installedIds.has(model.id)
 
             return (
-              <div key={model.id} className="flex gap-3 p-3 rounded-lg bg-gray-50 dark:bg-white/5 border border-gray-200 dark:border-white/10">
+              <div key={model.id} data-testid="civitai-hit" className="flex gap-3 p-3 rounded-lg bg-gray-50 dark:bg-white/5 border border-gray-200 dark:border-white/10">
                 {model.thumbnailUrl && (
                   <img src={proxyImageUrl(model.thumbnailUrl)} alt="" className="w-14 h-14 rounded-lg object-cover flex-shrink-0" loading="lazy" />
                 )}
@@ -146,6 +218,7 @@ export function CivitaiSearchPanel({ modelType, title, placeholder, search = '',
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium text-gray-900 dark:text-white truncate">{model.name}</span>
                     {model.sizeGB && <span className="t-micro text-gray-400 flex-shrink-0">{model.sizeGB} GB</span>}
+                    {picked[model.id] && <span className="t-micro text-gray-500 dark:text-gray-400 font-mono truncate" title="The file you picked in Details">{model.filename}</span>}
                   </div>
                   {model.description && <p className="t-micro text-gray-500 line-clamp-1 mt-0.5">{model.description}</p>}
                   {isDl && dlState && dlState.total > 0 && (
@@ -156,7 +229,12 @@ export function CivitaiSearchPanel({ modelType, title, placeholder, search = '',
                   )}
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
-                  {isDone ? (
+                  {isInstalled ? (
+                    <span className="flex items-center gap-1 px-2 t-micro text-green-700 dark:text-green-400" title="This file is already in the model folder">
+                      <CheckCircle size={14} />
+                      Installed
+                    </span>
+                  ) : isDone ? (
                     <CheckCircle size={16} className="text-green-500" />
                   ) : isDl ? (
                     <Loader2 size={16} className="animate-spin text-gray-400" />
@@ -165,6 +243,21 @@ export function CivitaiSearchPanel({ modelType, title, placeholder, search = '',
                       <Download size={14} />
                     </button>
                   ) : null}
+                  <button
+                    onClick={() => {
+                      const hit = hits.find((h) => h.id === model.id) ?? model
+                      // The Mac's LoRA folder lists .safetensors only.
+                      setDetails(destDir
+                        ? { ...hit, versions: hit.versions?.map((v) => ({ ...v, files: v.files.filter((f) => /\.safetensors$/i.test(f.name)) })).filter((v) => v.files.length > 0) }
+                        : hit)
+                    }}
+                    className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-white/10 text-gray-500 transition-colors"
+                    title="Details: full description, versions and files"
+                    aria-label={`Details of ${model.name}`}
+                    data-testid="civitai-details-open"
+                  >
+                    <Info size={14} />
+                  </button>
                   <button onClick={() => openExternal(model.sourceUrl)} className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-white/10 text-gray-500 transition-colors" title="View on CivitAI" aria-label="View on CivitAI">
                     <ExternalLink size={14} />
                   </button>
@@ -174,6 +267,17 @@ export function CivitaiSearchPanel({ modelType, title, placeholder, search = '',
           })}
         </div>
       )}
+
+      <CivitaiHitDetails
+        hit={details}
+        onClose={() => setDetails(null)}
+        onDownload={(version, file) => {
+          if (!details) return
+          const chosen = civitaiHitWithFile(details, version, file)
+          setPicked((p) => ({ ...p, [details.id]: chosen }))
+          void download(chosen)
+        }}
+      />
 
       {/* Listen-Ladezustand 2 von 4: dieselbe Begruendung eine Karte weiter
           oben, nur mit der Zeilengeometrie der Trefferliste. */}

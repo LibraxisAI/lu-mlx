@@ -18,7 +18,6 @@ import { MUTATING_TOOLS } from '../mutating-tools'
 const SETTINGS = {
   codexConfirmShell: false,
   codexCloudConfirmOptIn: false,
-  codexStageMode: false,
   codexReviewMode: false,
 }
 
@@ -63,14 +62,14 @@ describe('switch point 1: the exec confirm gate', () => {
 })
 
 describe('switch point 2: Stage-and-Approve for file_write / file_edit', () => {
-  it('Ask stages even when the setting is off', () => {
-    expect(knobs('ask', { codexStageMode: false }).stageWrites).toBe(true)
+  it('Ask stages', () => {
+    expect(knobs('ask', {}).stageWrites).toBe(true)
   })
-  it('Bypass does not stage even when the setting is on', () => {
-    expect(knobs('bypass', { codexStageMode: true }).stageWrites).toBe(false)
+  it('Bypass does not stage', () => {
+    expect(knobs('bypass', {}).stageWrites).toBe(false)
   })
   it('Plan does not stage, it has no writes to stage', () => {
-    expect(knobs('plan', { codexStageMode: true }).stageWrites).toBe(false)
+    expect(knobs('plan', {}).stageWrites).toBe(false)
   })
 })
 
@@ -100,7 +99,7 @@ describe('switch point 3: the read-only chain', () => {
   })
 })
 
-// David 2026-08-22, replacing G15a: the cloud arm is the user's opt-in, not a
+// 2026-08-22, replacing G15a: the cloud arm is the user's opt-in, not a
 // fourth mode. Off by default, so lu-cloud goes through the same three modes a
 // local provider does.
 describe('the cloud shell gate is an opt-in, not a fourth mode', () => {
@@ -129,7 +128,7 @@ describe('the cloud shell gate is an opt-in, not a fourth mode', () => {
 
 describe('the preset never writes anything', () => {
   it('leaves the settings object it was handed byte-identical', () => {
-    const settings = { ...SETTINGS, codexConfirmShell: true, codexStageMode: true }
+    const settings = { ...SETTINGS, codexConfirmShell: true, codexReviewMode: false }
     const before = JSON.stringify(settings)
     for (const mode of CODEX_MODES) {
       codexModeKnobs({ mode, settings, providerId: 'lu-cloud', readOnlyTurn: false })
@@ -140,8 +139,7 @@ describe('the preset never writes anything', () => {
     const settings = { ...SETTINGS }
     const before = JSON.stringify(settings)
     // This is the shape the plan forbids: the preset pushed into the settings.
-    ;(settings as { codexConfirmShell: boolean }).codexConfirmShell = false
-    ;(settings as { codexStageMode: boolean }).codexStageMode = true
+    ;(settings as { codexConfirmShell: boolean }).codexConfirmShell = !settings.codexConfirmShell
     expect(JSON.stringify(settings)).not.toBe(before)
   })
 })

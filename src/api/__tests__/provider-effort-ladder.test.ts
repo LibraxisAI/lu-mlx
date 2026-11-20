@@ -8,7 +8,7 @@
  * refuses a rung anyway.
  *
  * Two live measurements from 2026-09-02 stand behind it
- * (ops/wissen/deepinfra-modellmatrix-2026-09-02.md):
+ * ():
  *
  *  - Qwen/Qwen3.8-27B answers 400 to 'high' and to 'max', naming 'low' and
  *    'medium'. That is why the ladder is per model and why the wish is clamped

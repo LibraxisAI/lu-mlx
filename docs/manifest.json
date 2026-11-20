@@ -1,7 +1,7 @@
 {
   "name": "Locally Uncensored",
   "short_name": "Locally Uncensored",
-  "description": "Open-source desktop AI for Windows and Linux. Run Qwen, DeepSeek, Llama locally; generate FLUX images and Wan videos via ComfyUI. One-click install, no cloud, no telemetry. AGPL-3.0.",
+  "description": "Open-source desktop AI for Windows, Linux and Mac. Run Qwen, DeepSeek, Llama locally; generate FLUX images and Wan videos on your own machine. One-click install, local by default, no analytics kit. AGPL-3.0.",
   "start_url": "/",
   "scope": "/",
   "display": "browser",

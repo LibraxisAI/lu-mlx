@@ -10,10 +10,12 @@
 
 import { useState } from 'react'
 import { Modal } from '../ui/Modal'
+import { ModalActions, ModalButton } from '../ui/ModalActions'
 import { useProviderStore } from '../../stores/providerStore'
 import { useUIStore } from '../../stores/uiStore'
 import { PROVIDER_PRESETS } from '../../api/providers/types'
 import { selectedBackendId, type DetectedBackend } from '../../lib/backend-detector'
+import { addDetectedSideBySide } from '../../lib/detected-backends-side-by-side'
 
 interface Props {
   open: boolean
@@ -93,27 +95,31 @@ export function BackendSelector({ open, backends, onClose }: Props) {
     dismiss()
   }
 
+  // GitHub #173: keep every detected backend instead of choosing one. Each
+  // gets its own entry with its own models (lib/detected-backends-side-by-side).
+  const handleAddAll = () => {
+    addDetectedSideBySide(backends)
+    dismiss()
+  }
+
   const openSettings = () => {
     useUIStore.getState().setView('settings')
     dismiss()
   }
 
   return (
-    <Modal open={open} onClose={dismiss} title="">
+    <Modal open={open} onClose={dismiss} title={`${backends.length} local backend${backends.length > 1 ? 's' : ''} detected`}>
       <div className="space-y-4">
-        <h3 className="text-base font-semibold text-white text-center">
-          {backends.length} local backend{backends.length > 1 ? 's' : ''} detected
-        </h3>
-        <p className="text-[12px] text-gray-400 text-center leading-relaxed">
+        <p className="text-[12px] text-gray-400 leading-relaxed">
           {backends.length === 1
             ? `${backends[0].name} is running on your system.`
-            : 'Multiple backends running. Select your primary backend.'}
+            : 'Multiple backends running. Select your primary backend, or add all of them side by side, each with its own models.'}
         </p>
 
         {/* 2.5.7: reassure that these are optional alternatives — the built-in
             engine already works out of the box and stays active if skipped. */}
         {builtinActive && (
-          <p className="text-[0.65rem] text-gray-500 text-center leading-relaxed">
+          <p className="text-[0.65rem] text-gray-500 leading-relaxed">
             You're already set up with the LU Engine. Switching is optional.
           </p>
         )}
@@ -140,7 +146,7 @@ export function BackendSelector({ open, backends, onClose }: Props) {
           ))}
         </div>
 
-        <p className="text-[0.65rem] text-gray-500 text-center leading-relaxed">
+        <p className="text-[0.65rem] text-gray-500 leading-relaxed">
           You can add, remove, or switch backends anytime in{' '}
           <button
             onClick={openSettings}
@@ -151,7 +157,7 @@ export function BackendSelector({ open, backends, onClose }: Props) {
           .
         </p>
 
-        <label className="flex items-center justify-center gap-2 text-[0.65rem] text-gray-400 cursor-pointer select-none pt-1">
+        <label className="flex items-center gap-2 text-[0.65rem] text-gray-400 cursor-pointer select-none pt-1">
           <input
             type="checkbox"
             checked={dontShowAgain}
@@ -161,20 +167,19 @@ export function BackendSelector({ open, backends, onClose }: Props) {
           Don't show this again
         </label>
 
-        <div className="flex items-center justify-center gap-3 pt-1">
-          <button
-            onClick={dismiss}
-            className="px-4 py-1.5 rounded-lg text-[0.7rem] text-gray-400 hover:text-white hover:bg-white/10 transition-colors"
-          >
+        <ModalActions>
+          <ModalButton variant="quiet" onClick={dismiss}>
             {builtinActive ? 'Keep LU Engine' : 'Skip'}
-          </button>
-          <button
-            onClick={handleConfirm}
-            className="px-4 py-1.5 rounded-lg text-[0.7rem] font-medium bg-white/5 border border-white/10 text-gray-300 hover:bg-white/10 transition-colors"
-          >
+          </ModalButton>
+          {backends.length > 1 && (
+            <ModalButton variant="quiet" onClick={handleAddAll}>
+              Add all side by side
+            </ModalButton>
+          )}
+          <ModalButton variant="primary" onClick={handleConfirm}>
             Use selected
-          </button>
-        </div>
+          </ModalButton>
+        </ModalActions>
       </div>
     </Modal>
   )

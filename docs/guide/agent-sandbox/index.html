@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Agent Sandbox in Locally Uncensored: What It Protects</title>
+<meta name="description" content="What the agent sandbox in Locally Uncensored is: a folder path jail for the file tools, not a container. What it protects, what it does not, the default approvals, and how to use the agent safely.">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="canonical" href="https://locallyuncensored.com/guide/agent-sandbox/">
+<meta property="og:title" content="The Agent Sandbox in Locally Uncensored: What It Protects and What It Does Not">
+<meta property="og:description" content="What the agent sandbox in Locally Uncensored is: a folder path jail for the file tools, not a container. What it protects, what it does not, the default approvals, and how to use the agent safely.">
+<meta property="og:url" content="https://locallyuncensored.com/guide/agent-sandbox/">
+<meta property="og:type" content="article">
+<meta property="og:image" content="https://locallyuncensored.com/social-preview.png">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"TechArticle","headline":"The Agent Sandbox in Locally Uncensored: What It Protects and What It Does Not","description":"What the agent sandbox in Locally Uncensored is: a folder path jail for the file tools, not a container. What it protects, what it does not, the default approvals, and how to use the agent safely.","url":"https://locallyuncensored.com/guide/agent-sandbox/","dateModified":"2026-10-14","inLanguage":"en","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/guide/agent-sandbox/"},"isPartOf":{"@type":"WebPage","name":"Locally Uncensored Handbook: Install, Chat, Agent, Code, Create, Cloud","url":"https://locallyuncensored.com/guide/"},"about":{"@type":"SoftwareApplication","name":"Locally Uncensored","operatingSystem":"Windows, Linux, macOS","applicationCategory":"UtilitiesApplication"}}
+</script>
+<link rel="icon" href="/favicon.png">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://locallyuncensored.com/"},{"@type":"ListItem","position":2,"name":"Guide","item":"https://locallyuncensored.com/guide/"},{"@type":"ListItem","position":3,"name":"Agent sandbox","item":"https://locallyuncensored.com/guide/agent-sandbox/"}]}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/lu.css">
+<script defer src="/assets/lu.js"></script>
+  <script data-goatcounter="https://purple47.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</head>
+<body>
+<nav class="lu-nav">
+  <a class="lu-nav-brand" href="/" aria-label="Locally Uncensored">
+    <span class="lu-mono" data-mono="nav" data-size="40" aria-hidden="true"></span>
+    <span class="lu-nav-word">Locally <span class="accent">Uncensored</span></span>
+  </a>
+  <div class="lu-nav-links" id="lu-nav-links">
+    <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/pricing/">Pricing</a>
+    <a class="lu-nav-link" href="/blog/">Blog</a>
+    <a class="lu-nav-link" href="/guide/">Guide</a>
+    <a class="lu-nav-link" href="/remote-access/">Remote</a>
+  </div>
+  <div class="lu-nav-right">
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">4200+&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">1700+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <span class="lu-nav-sep"></span>
+    <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="he-cta" href="/pricing/" aria-label="LU Cloud plans and what they include"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>Cloud</a>
+    <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
+    <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </div>
+</nav>
+<article class="lu-doc" data-handbook-guide="agent-sandbox">
+<div class="breadcrumb"><a href="/">Home</a> &rsaquo; <a href="/guide/">Handbook</a> &rsaquo; Agent sandbox</div>
+<h1>The agent sandbox, explained</h1>
+<p class="subtitle">What "Sandbox" means in Locally Uncensored, what it protects you from, what it does not, and how to use the agent safely on your own files. Written for version 3.0.6 from the app's source.</p>
+<nav class="toc">
+<div class="toc-title">On this page</div>
+<a href="#short">The short answer</a>
+<a href="#where">Where you meet the sandbox</a>
+<a href="#does">What it does</a>
+<a href="#doesnt">What it does not do</a>
+<a href="#asks">What the agent asks before it acts</a>
+<a href="#safe">Working safely, step by step</a>
+<a href="#code">The Code tab</a>
+<a href="#wrong">Common questions</a>
+</nav>
+
+<h2 id="short">The short answer</h2>
+<p>The sandbox is a folder, not a separate computer. When you start an agent chat and choose "Sandbox", the agent gets an empty folder of its own under <code>~/agent-workspace</code>. Its file tools can only read and write inside that folder. Its shell commands, once you approve them, run on your real computer as your own user. The app says this itself in the folder dialog: "Workspace protection is a folder path jail, not a container or virtual machine. Commands run on this computer. Review tool requests before allowing them."</p>
+<p>So the sandbox protects your files from the agent's file tools wandering off by mistake. It does not protect your computer from a command you approved. The approval is the real safety step.</p>
+
+<h2 id="where">Where you meet the sandbox</h2>
+<div class="step">
+<span class="step-num">1</span>
+<span class="step-title">When you switch Agent on</span>
+<div class="step-body">
+<p>In a new chat, click "Agent" in the strip above the message box. The dialog "Where should the agent work?" offers "Sandbox" ("Separate folder under ~/agent-workspace/, protected by the file tool path jail."), "Pick a folder…" ("Choose a real directory. The agent edits files in there directly, like the Coding Agent.") and, if you used one before, "Use last folder".</p>
+</div>
+</div>
+<div class="step">
+<span class="step-num">2</span>
+<span class="step-title">In the strip above the message box</span>
+<div class="step-body">
+<p>While Agent is on, a small badge next to the Agent button names where the agent works: "Sandbox", or the name of the folder you picked. Hover it and it says "Agent working in its own sandbox folder, not in your files. Click to pick a folder." Click it to change the folder. If you close the folder dialog without choosing, the agent works in its sandbox.</p>
+</div>
+</div>
+<p>Each chat gets its own sandbox folder under <code>~/agent-workspace</code> (on Windows that is <code>C:\Users\(you)\agent-workspace</code>). It starts empty. Files the agent creates there stay there after the chat; you can open the folder and take them out.</p>
+
+<h2 id="does">What it does</h2>
+<ul>
+<li><strong>The file tools stay in the folder.</strong> file_read, file_write, file_edit, file_list and file_search only reach the chat's folder and what is under it. A path that leads outside, with <code>..</code> or through a symbolic link, is refused. When the agent tries, it gets the answer "The agent can only work with files in this chat's folder. To let it use another place, click the Sandbox or folder button next to Agent, choose "Pick a folder…" and select that folder, then ask again."</li>
+<li><strong>Only a folder you clicked on counts.</strong> A model can make up a path. The app takes a folder as a workspace only if you chose it in its own folder picker, otherwise: "Not an allowed workspace folder (only a folder you chose in LU's folder picker can be a workspace, pick it again to allow it)".</li>
+<li><strong>Some folders are never allowed.</strong> A drive root such as <code>C:\</code> or <code>/</code>, your home folder itself, <code>/Users</code>, <code>/home</code>, <code>/Volumes</code>, <code>/mnt</code>, <code>/media</code> and system or credential folders cannot be a workspace, even if you pick them. Pick a project folder instead.</li>
+<li><strong>Commands start in the folder.</strong> A shell command runs in the chat's folder unless the command names another place, so a relative command such as <code>npm install</code> does not scatter files into your Documents.</li>
+<li><strong>A command cannot run forever.</strong> A shell command that is still running after two minutes is stopped, together with the programs it started, unless the agent asked for a longer limit.</li>
+</ul>
+
+<h2 id="doesnt">What it does not do</h2>
+<ul>
+<li><strong>No container, no virtual machine.</strong> A shell command the agent runs is a real command on your computer, with your user's rights. It can read, change or delete anything your user account can, including files outside the sandbox, if the command says so. The folder rule applies to the file tools, not to the shell.</li>
+<li><strong>No network filter.</strong> Commands and the web tools can reach the internet. Nothing between the agent and the network blocks a download or an upload.</li>
+<li><strong>No undo.</strong> The sandbox does not keep copies. A file the agent overwrote or deleted is gone unless you have a backup or the folder is under version control such as git.</li>
+<li><strong>Not an isolated environment.</strong> The voice settings put it plainly next to their own greyed out "Sandbox" choice: "Not available yet. LU cannot run commands in an isolated environment, so it does not offer one."</li>
+</ul>
+
+<h2 id="asks">What the agent asks before it acts</h2>
+<p>Every tool belongs to a category with one of three levels under Settings, Agent, Agent Permissions: "Blocked", "Ask First" or "Auto". Out of the box:</p>
+<table>
+<tr><th>Category</th><th>Default</th><th>Meaning</th></tr>
+<tr><td>Terminal / Shell</td><td>Ask First</td><td>Every command waits for you.</td></tr>
+<tr><td>Filesystem</td><td>Ask First</td><td>Writing and editing wait for you. Reading, listing and searching inside the chat's own folder do not ask, because they cannot leave it and change nothing.</td></tr>
+<tr><td>Image Generation, Video Generation, Workflows</td><td>Ask First</td><td>Wait for you.</td></tr>
+<tr><td>Desktop Control</td><td>Ask First</td><td>Screenshots of your screen.</td></tr>
+<tr><td>Web Access, System Info</td><td>Auto</td><td>Run without asking.</td></tr>
+</table>
+<p>When a tool waits, its card in the chat shows the tool and its input with "Approve" and "Reject". Read the input before you approve, above all for shell_execute: that line is exactly what will run on your computer.</p>
+<p>Two things to know:</p>
+<ul>
+<li><strong>Background agents do not ask again.</strong> When the agent hands part of a task to a sub-agent, the sub-agent follows the same permissions as the chat it came from. It gets nothing you did not allow, and a "Blocked" category stays blocked for it too.</li>
+<li><strong>Auto means auto.</strong> The "Tools" button above the message box sets a category to Auto for one chat. With Shell on Auto, commands run without a card. Use that only in a sandbox chat or a folder you can restore.</li>
+</ul>
+<p>Computer control, the Beta feature that lets a model click and type in other apps, has its own stricter approval per app and per action and is off by default. On the Mac it is not fully tested yet. It is not part of the sandbox.</p>
+
+<h2 id="safe">Working safely, step by step</h2>
+<div class="step">
+<span class="step-num">1</span>
+<span class="step-title">Start in the sandbox</span>
+<div class="step-body">
+<p>For a first task, or anything you are unsure about, choose "Sandbox". Copy the files the agent should work on into that folder rather than giving it your real folder.</p>
+</div>
+</div>
+<div class="step">
+<span class="step-num">2</span>
+<span class="step-title">Give it a real folder only with a backup</span>
+<div class="step-body">
+<p>When you choose "Pick a folder…", the agent edits the files in there directly. Pick the project folder, not a parent folder that holds everything else. A folder under git is ideal: you can see every change and roll it back.</p>
+</div>
+</div>
+<div class="step">
+<span class="step-num">3</span>
+<span class="step-title">Keep Shell on Ask First</span>
+<div class="step-body">
+<p>Leave Terminal / Shell on "Ask First" and read each command. Reject anything you do not understand, and ask the agent in the chat what the command does. Reject is always safe: the agent gets told and tries another way.</p>
+</div>
+</div>
+<div class="step">
+<span class="step-num">4</span>
+<span class="step-title">Stop when it goes off course</span>
+<div class="step-body">
+<p>The stop button on the send button ends the current turn. Sub-agents that already started keep running by design; the "Agents" panel at the side of the chat lists them and stops them. In Cloud mode a running sub-agent keeps using credits, so check that panel after a stop.</p>
+</div>
+</div>
+
+<h2 id="code">The Code tab</h2>
+<p>The coding agent in the Code tab follows the same folder rule. With no folder picked it works in its own folder under <code>~/agent-workspace</code>, and its header says "No folder picked. The agent works in (folder)." Its mode menu decides what it asks: "Ask permissions" confirms commands and lets you review edits before they land, "Bypass permissions" runs without asking, and "Plan mode" is read only and writes a plan first. Code-Review Mode, under Settings, Agent, Coding Agent, keeps it read only altogether. See <a href="/guide/code/">the Code tab chapter</a>.</p>
+
+<h2 id="wrong">Common questions</h2>
+<p><strong>Is the sandbox safe for code I do not trust?</strong> No. A command from untrusted code runs on your computer with your rights. The sandbox keeps the file tools in one folder; it is not a place to run something you would not run yourself. For that you need a separate machine or a virtual machine, which the app does not provide.</p>
+<p><strong>Can the agent see my documents?</strong> Not through its file tools, unless you picked that folder. A shell command could read them if you approve one that names them, so read the command before you approve it.</p>
+<p><strong>Where are the files the agent made?</strong> In the chat's sandbox folder under <code>~/agent-workspace</code>, or in the folder you picked. The badge next to "Agent" shows which.</p>
+<p><strong>The agent says it cannot open a file I gave it.</strong> The file lies outside the chat's folder. Click the badge next to "Agent", choose "Pick a folder…" and select the folder that holds the file, or copy the file into the sandbox.</p>
+<p><strong>Does Cloud mode change any of this?</strong> No. In Cloud mode the model runs on LU Cloud, but the tools still run on your computer, with the same folder rule and the same approvals.</p>
+<hr>
+<p class="small">More on the agent: <a href="/guide/agent/">Agent mode</a>. Back to the <a href="/guide/">handbook overview</a>.</p>
+</article>
+<footer>
+  <div class="footer-row footer-meta"><span>&copy; 2026 &middot; Locally Uncensored &middot; AGPL-3.0</span></div>
+  <div class="footer-row footer-links">
+    <a href="https://locallyuncensored.com/blog/">Blog</a>
+    <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/pricing/">Pricing</a>
+    <a href="https://locallyuncensored.com/cloud/">LU Cloud</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-chat-online/">Uncensored AI chat online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-image-generator-online/">Image generator online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-video-generator-online/">Video generator online</a>
+    <a href="https://locallyuncensored.com/unrestricted-ai/">Unrestricted AI</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-coding-agent/">AI coding agent</a>
+    <a href="https://locallyuncensored.com/alternatives/">Alternatives</a>
+    <a href="https://locallyuncensored.com/is-locally-uncensored-safe/">Is it safe?</a>
+    <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
+    <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/discussions">Discussions</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
+    <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
+    <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+    <a href="https://locallyuncensored.com/privacy/">Privacy</a>
+    <a href="https://locallyuncensored.com/terms/">Terms</a>
+    <a href="https://locallyuncensored.com/impressum/">Impressum</a>
+  </div>
+</footer>
+</body>
+</html>

@@ -1,5 +1,5 @@
 import { computeUnifiedDiff } from '../../lib/diff'
-import { applyUniqueEdit } from '../../lib/surgical-edit'
+import { applyEdits, editsFromArgs } from '../../lib/surgical-edit'
 import type { ToolArgs } from '../../api/mcp/types'
 
 /**
@@ -54,10 +54,9 @@ export function codexToolDiff({ toolName, path, oldText, args }: ToolDiffInput):
     // reconstruct the new content from the pre-read + the unique
     // replacement to attach a real diff. If the edit did not apply
     // uniquely the executor already returned an error; skip the diff.
-    const applied = applyUniqueEdit(
+    const applied = applyEdits(
       oldText,
-      typeof args.old_string === 'string' ? args.old_string : '',
-      typeof args.new_string === 'string' ? args.new_string : '',
+      editsFromArgs(args).map((e) => ({ ...e, new_string: e.new_string ?? '' })),
     )
     return applied.ok
       ? computeUnifiedDiff(path ?? '', oldText, applied.content ?? '') || undefined

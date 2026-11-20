@@ -37,7 +37,7 @@ export function workspaceRejectedMessage(pfad: string, fehler: unknown): string 
 /**
  * Derselbe Fall eine Stufe frueher: der NATIVE DIALOG hat einen Ordner
  * geliefert, den die Rust-Seite nicht als Arbeitsordner annimmt, und
- * `pick_folder` meldet das seit Fehler D (aldrich_ironhart, 08.09.2026) mit
+ * `pick_folder` meldet das seit Fehler D (08.09.2026) mit
  * `asWorkspace`, statt den Pfad auszuliefern, als waere nichts gewesen.
  *
  * Eigener Satz und nicht `workspaceRejectedMessage`: dort steht "no folder is

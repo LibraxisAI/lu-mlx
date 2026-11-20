@@ -1,9 +1,9 @@
 /**
  * @vitest-environment jsdom
  *
- * A14 (2.6.8), David, measured on his Mac: Ollama is the chat backend, the LU
+ * A14 (2.6.8), the owner, measured on his Mac: Ollama is the chat backend, the LU
  * Engine folder is ~/lu-e2e-models and holds Qwen2.5-0.5B-Instruct-Q8_0.gguf,
- * and the model appears nowhere in the app. Model Storage says in writing that
+ * and the model appears nowhere in the app. Storage says in writing that
  * the folder is read; useModels asked `list_bundled_models` only while the LU
  * Engine held the chat slot, so the promise was true about the disk and false
  * about the screen.
@@ -66,7 +66,7 @@ const { useProviderStore } = await import('../../stores/providerStore')
 
 const GGUF = { name: 'Qwen2.5-0.5B-Instruct-Q8_0', path: '/Users/d/lu-e2e-models/Qwen2.5-0.5B-Instruct-Q8_0.gguf', size: 531_000_000, loaded: false }
 
-/** An Ollama backend with one model, the shape David's Mac was in. */
+/** An Ollama backend with one model, the shape the owner's Mac was in. */
 function ollamaHolds(...names: string[]) {
   providerRows = [{
     id: 'ollama',
@@ -102,7 +102,7 @@ describe('the GGUF in the LU Engine folder is listed whoever holds the chat', ()
     ollamaHolds('llama3.2:3b')
     const models = await refresh()
     const row = models.find((m) => m.name === 'openai::Qwen2.5-0.5B-Instruct-Q8_0')
-    expect(row, 'the GGUF David can see on his disk').toBeTruthy()
+    expect(row, 'the GGUF the owner can see on his disk').toBeTruthy()
     expect((row as { providerName?: string }).providerName).toBe('LU Engine')
     // The Ollama model it stands beside is untouched.
     expect(models.some((m) => m.name === 'llama3.2:3b')).toBe(true)

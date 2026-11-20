@@ -6,7 +6,7 @@ import type { RunLane } from '../lib/run-lanes'
  * persisted — a crash mid-stream must never leave a stale "running" marker that
  * survives a restart.
  *
- * Why this exists (David 2026-06-12): the chat / agent / codex hooks each held a
+ * Why this exists (2026-06-12): the chat / agent / codex hooks each held a
  * single GLOBAL `isGenerating` boolean. The typing indicator (the 3 dots) and
  * the realtime counter were gated on that global, so generating in ONE chat lit
  * the dots in EVERY other chat you switched to ("die drei ladepunkte kommen in
@@ -103,7 +103,7 @@ interface GenerationState {
   /**
    * Abort the in-flight turn for a conversation and clear its flags. Called
    * when a chat is deleted/closed so its activity stops completely instead of
-   * running on in the background (David 2026-06-15).
+   * running on in the background (2026-06-15).
    */
   abortConversation: (conversationId: string | null | undefined) => void
   /**

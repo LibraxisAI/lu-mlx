@@ -30,7 +30,9 @@
  */
 
 import { useUIStore } from '../stores/uiStore'
+import { platformText } from './platform-text'
 import { useLuEngineSwitchStore } from '../stores/luEngineSwitchStore'
+import { fitActionsOf, type FitAction } from './engine-fit'
 
 /** What a `bundled_engine_status` answer says about offload. */
 export interface EngineOffloadStatus {
@@ -50,11 +52,25 @@ export interface EngineOffloadStatus {
    *  flash attention rung keeps the card, so this can be set with `cpuOnly`
    *  false and a real layer count. */
   sanityNote?: string | null
+  /** Why this model came up WITHOUT its image part although one is
+   *  installed: the graphics memory had no room for it next to the model, or
+   *  the engine refused the part (engine.rs IMAGE_PART_NO_ROOM_NOTE and
+   *  IMAGE_PART_REFUSED_NOTE). Written in Rust, shown as it is. Null on every
+   *  start that loaded the part, and on a model that has none. */
+  imageNote?: string | null
+  /** How the model fits (3.0.8, A25, Rust vram_plan.rs): how many layers the
+   *  card holds and what a shorter context or KV q8_0 would buy, and whether
+   *  the model leaves the computer little RAM ("Tight fit: ..."). Written in
+   *  Rust, shown as it is. Null when everything fits with room. */
+  memoryNote?: string | null
+  /** The buttons under `memoryNote` ("Context 16K", "KV q8_0"). */
+  fitActions?: FitAction[] | null
+  /** MoE layers whose experts stay on the processor (`--n-cpu-moe`). */
+  cpuMoe?: number | null
 }
 
 /** The sentence the standing line carries after a fallback. */
-export const ENGINE_CPU_ONLY_NOTE =
-  'Running on the CPU. The GPU start failed; see the log file in Settings > Troubleshoot.'
+export const ENGINE_CPU_ONLY_NOTE = platformText('engineCpuOnly')
 
 /**
  * The clause the engine-details line adds, or null when there is nothing to
@@ -74,6 +90,10 @@ export function engineOffloadLine(status: EngineOffloadStatus | null | undefined
     return status.sanityNote ? 'GPU layers: 0, the GPU answered unreadably' : 'GPU layers: 0, the GPU start failed'
   }
   const layers = status.gpuLayers
+  const moe = typeof status.cpuMoe === 'number' && Number.isInteger(status.cpuMoe) && status.cpuMoe > 0 ? status.cpuMoe : 0
+  // An MoE model that does not fit keeps every layer on the card and the
+  // experts of its first layers on the processor (3.0.8, A25).
+  if (moe > 0 && (layers === null || layers === undefined)) return `GPU layers: all, experts of ${moe} on the CPU`
   if (typeof layers !== 'number' || !Number.isInteger(layers) || layers < 0) return null
   return `GPU layers: ${layers}`
 }
@@ -87,18 +107,26 @@ export function engineOffloadLine(status: EngineOffloadStatus | null | undefined
  */
 export function engineCpuFallbackKey(status: EngineOffloadStatus | null | undefined): string | null {
   if (!status?.running) return null
-  if (!status.cpuOnly && !status.sanityNote) return null
+  if (!status.cpuOnly && !status.sanityNote && !status.imageNote && !status.memoryNote) return null
   // The sentence is part of the key: an engine that was first healed without
   // Flash Attention and then, on the next pass, moved to the processor has
   // something new to say about the same port and model.
-  return `${status.port ?? '?'}|${status.model_path ?? '?'}|${status.sanityNote ?? ''}`
+  return `${status.port ?? '?'}|${status.model_path ?? '?'}|${status.sanityNote ?? ''}|${status.imageNote ?? ''}|${status.memoryNote ?? ''}`
 }
 
 /** The sentence the standing line carries for this status. */
 export function engineStandingNote(status: EngineOffloadStatus): string {
   // Rust wrote the sanity sentence with the cause in it, so it wins over the
-  // generic fallback line whenever it is there.
-  return status.sanityNote || ENGINE_CPU_ONLY_NOTE
+  // generic fallback line whenever it is there. The image note is about
+  // something else (what the model can see, not where it computes), so it
+  // stands beside whichever of the two applies and alone when neither does.
+  // The fallback sentence is asked when it is needed, not when this module
+  // was loaded: a phone learns what it is a moment after the first import, and
+  // the constant above then still held the desktop sentence with "Settings >
+  // Troubleshoot", a place a phone does not have (mobile round 5).
+  const where = status.sanityNote || (status.cpuOnly ? platformText('engineCpuOnly') : null)
+  // The memory note is about the rest of the computer, so it comes last.
+  return [where, status.imageNote, status.memoryNote].filter(Boolean).join(' ')
 }
 
 /**
@@ -142,9 +170,29 @@ export const ENGINE_NOTE_UNSEEN_HOLD_MS = 5 * 60_000
 /** The last engine a fallback was announced for, so a poll cannot repeat it. */
 let angesagt: string | null = null
 
+/** The image note of the last status, so a change can be told to the lists. */
+let lastImageNote: string | null = null
+
 /** Test-only: forget what was said. */
 export function __resetEngineCpuFallbackNote(): void {
   angesagt = null
+  lastImageNote = null
+}
+
+/**
+ * Keep "can see" true in every model list.
+ *
+ * Whether the loaded model sees is decided at its start (with or without the
+ * image part), and the lists learned it when they were last fetched. A start
+ * that left the part out, or a later one that took it again, changes the
+ * answer under the same model name, so the lists are asked to fetch again.
+ * Only on a change: the status is polled every few seconds.
+ */
+function noteWhatTheModelSees(status: EngineOffloadStatus | null | undefined): void {
+  const now = status?.running ? status.imageNote ?? null : null
+  if (now === lastImageNote) return
+  lastImageNote = now
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('lu-models-refresh'))
 }
 
 /**
@@ -155,6 +203,7 @@ export function __resetEngineCpuFallbackNote(): void {
  * when there is nothing to say, which is almost always.
  */
 export function announceEngineCpuFallback(status: EngineOffloadStatus | null | undefined): void {
+  noteWhatTheModelSees(status)
   const key = engineCpuFallbackKey(status)
   if (key === null) {
     // The engine came back on the card, or stopped. The next fallback is a new
@@ -165,9 +214,13 @@ export function announceEngineCpuFallback(status: EngineOffloadStatus | null | u
   if (angesagt === key) return
   angesagt = key
   const ende = Date.now() + ENGINE_NOTE_UNSEEN_HOLD_MS
+  // The buttons belong to the memory sentence, so they come along only
+  // when that sentence is in the line.
+  const actions = status?.memoryNote ? fitActionsOf(status.fitActions) : []
   useLuEngineSwitchStore.getState().announce(
     engineStandingNote(status as EngineOffloadStatus),
     'info',
     () => Date.now() < ende && !dieZeileIstZuSehen(),
+    actions.length > 0 ? { list: actions, model: status?.model_path ?? null } : undefined,
   )
 }

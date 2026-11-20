@@ -97,9 +97,6 @@ vi.mock('../../api/providers', () => ({
   getProviderForModel: () => ({ provider: { chatStream }, modelId: 'qwen3:8b' }),
   getProviderIdFromModel: () => 'ollama',
 }))
-vi.mock('../../lib/agent-num-ctx', () => ({
-  resolveAgentNumCtx: vi.fn(async () => 8192),
-}))
 vi.mock('../../api/rag', () => ({
   generateEmbeddings: vi.fn(async () => [[]]),
   cosineSimilarity: vi.fn(() => 0),
@@ -109,6 +106,8 @@ vi.mock('../../lib/memoryEmbedDB', () => ({
 }))
 
 const { extractMemoriesFromPair } = await import('../useMemory')
+/** The visible turn sent no context window; this file is about the lane. */
+const NO_WINDOW = {}
 
 /** A stream that hangs until the test resolves it by hand, mid-extraction,
  *  or until its `signal` aborts, mirroring the shape a real provider stream
@@ -145,12 +144,12 @@ describe('extractMemoriesFromPair bucht die lokale Spur', () => {
   it('eine zweite lokale Unterhaltung wartet, waehrend die Extraktion mitten im Strom haengt', async () => {
     // Turns 1 and 2 are rate-limited away (every 3rd turn extracts); the
     // 3rd actually fires the call and hangs on `haengenderStream`.
-    await extractMemoriesFromPair('frage 1', 'x'.repeat(200), 'conv-a')
-    await extractMemoriesFromPair('frage 2', 'x'.repeat(200), 'conv-a')
-    const dritte = extractMemoriesFromPair('frage 3', 'x'.repeat(200), 'conv-a')
+    await extractMemoriesFromPair('frage 1', 'x'.repeat(200), 'conv-a', NO_WINDOW)
+    await extractMemoriesFromPair('frage 2', 'x'.repeat(200), 'conv-a', NO_WINDOW)
+    const dritte = extractMemoriesFromPair('frage 3', 'x'.repeat(200), 'conv-a', NO_WINDOW)
 
     // Give the extraction's async prologue (guards, resolveSilentCall, the
-    // runInLane admission, the mocked resolveAgentNumCtx await) room to run
+    // runInLane admission) room to run
     // and reach the stream.
     for (let i = 0; i < 10; i++) await Promise.resolve()
 
@@ -178,9 +177,9 @@ describe('extractMemoriesFromPair bucht die lokale Spur', () => {
   // QUEUED extraction but let a RUNNING one bill to completion after the
   // user believed they had left.
   it('stopAllBackgroundWork bricht eine LAUFENDE Extraktion wirklich ab', async () => {
-    await extractMemoriesFromPair('frage 1', 'x'.repeat(200), 'conv-a')
-    await extractMemoriesFromPair('frage 2', 'x'.repeat(200), 'conv-a')
-    const dritte = extractMemoriesFromPair('frage 3', 'x'.repeat(200), 'conv-a')
+    await extractMemoriesFromPair('frage 1', 'x'.repeat(200), 'conv-a', NO_WINDOW)
+    await extractMemoriesFromPair('frage 2', 'x'.repeat(200), 'conv-a', NO_WINDOW)
+    const dritte = extractMemoriesFromPair('frage 3', 'x'.repeat(200), 'conv-a', NO_WINDOW)
     for (let i = 0; i < 10; i++) await Promise.resolve()
 
     expect(chatStream).toHaveBeenCalledTimes(1)
@@ -199,9 +198,9 @@ describe('extractMemoriesFromPair bucht die lokale Spur', () => {
   })
 
   it('GEGENPROBE: eine cloud-Unterhaltung braucht auf eine lokale Extraktion nicht zu warten', async () => {
-    await extractMemoriesFromPair('frage 1', 'x'.repeat(200), 'conv-a')
-    await extractMemoriesFromPair('frage 2', 'x'.repeat(200), 'conv-a')
-    const dritte = extractMemoriesFromPair('frage 3', 'x'.repeat(200), 'conv-a')
+    await extractMemoriesFromPair('frage 1', 'x'.repeat(200), 'conv-a', NO_WINDOW)
+    await extractMemoriesFromPair('frage 2', 'x'.repeat(200), 'conv-a', NO_WINDOW)
+    const dritte = extractMemoriesFromPair('frage 3', 'x'.repeat(200), 'conv-a', NO_WINDOW)
     for (let i = 0; i < 10; i++) await Promise.resolve()
 
     expect(admit('cloud', 'conv-cloud', () => {})).toBe('started')

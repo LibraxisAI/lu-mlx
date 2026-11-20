@@ -31,7 +31,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use tauri::{Manager, State};
-use tracing::info;
+use tracing::{info, warn};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -78,12 +78,152 @@ const TRAINER_VRAM_FLOOR_MIB_FP8: u64 = 11 * 1024;
 /// box. Read honestly as an upper estimate rather than invented precision.
 const TRAINER_VRAM_FLOOR_MIB_NO_FP8: u64 = 24 * 1024;
 
+/// 3.0.8 D20, the Low VRAM recipe's floor with fp8 weights on. NOT measured
+/// on a card yet (the box has 12 GB); derived from the pinned trainer's own
+/// numbers, so it is an estimate and the report says so:
+/// - the DiT is `z_image_bf16` at 12.3 GB in bf16, about 6.2 GB stored as fp8
+///   (`--fp8_base --fp8_scaled`), and the run keeps 2 of its 30 transformer
+///   blocks on the card with `--blocks_to_swap 28` (the maximum: zimage_model.py
+///   `enable_block_swap` asserts `blocks_to_swap <= num_blocks - 2`,
+///   `n_layers=30`; docs/zimage.md "The maximum number of blocks that can be
+///   offloaded is 28");
+/// - `--gradient_checkpointing_cpu_offload` moves the kept activations to
+///   system memory too (parser_common.py, wired for Z-Image in
+///   trainer_base.py `enable_gradient_checkpointing(args.gradient_checkpointing_cpu_offload)`);
+/// - the text encoder cache step holds `qwen_3_4b` (8.0 GB in bf16) as fp8
+///   via `--fp8_llm`, about 4 GB, the largest single resident in the run.
+///
+/// 7.5 GB lets an 8 GB card in (they report a little under 8192 MiB) and
+/// keeps a 6 GB card out, where the text encoder alone would leave no room.
+const TRAINER_VRAM_FLOOR_MIB_LOW_VRAM_FP8: u64 = 7 * 1024 + 512;
+
+/// 3.0.8 D20: the two local recipes. `Standard` is the 12 GB recipe the box
+/// proved; `LowVram` trades time and fine detail for memory, for cards under
+/// the standard floor. Every argument it changes is one musubi-tuner v0.3.4
+/// declares (see `TRAINER_VRAM_FLOOR_MIB_LOW_VRAM_FP8` for where).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrainPreset {
+    Standard,
+    LowVram,
+}
+
+impl TrainPreset {
+    /// The frontend sends `"low-vram"` for the Low VRAM recipe; anything else,
+    /// a missing value from an older frontend included, is the standard one.
+    pub(crate) fn from_arg(arg: Option<&str>) -> Self {
+        match arg.map(str::trim) {
+            Some("low-vram") => TrainPreset::LowVram,
+            _ => TrainPreset::Standard,
+        }
+    }
+
+    /// The dataset's `resolution` (dataset_config.md, `[general]`).
+    pub(crate) fn resolution(self) -> u32 {
+        match self {
+            TrainPreset::Standard => 768,
+            TrainPreset::LowVram => 512,
+        }
+    }
+
+    /// `--blocks_to_swap`: 28 is Z-Image's maximum (see the floor above).
+    pub(crate) fn blocks_to_swap(self) -> &'static str {
+        match self {
+            TrainPreset::Standard => "16",
+            TrainPreset::LowVram => "28",
+        }
+    }
+
+    /// `--network_dim`, the LoRA rank.
+    pub(crate) fn network_dim(self) -> &'static str {
+        match self {
+            TrainPreset::Standard => "32",
+            TrainPreset::LowVram => "16",
+        }
+    }
+
+    /// `--network_alpha`, the same as the rank. musubi's default is 1, which
+    /// scales the LoRA by 1/rank: at 1e-4 a 600-step style run on the 3060
+    /// drew no style at strength 1.0 (3.0.9 P8 box run).
+    pub(crate) fn network_alpha(self) -> &'static str {
+        self.network_dim()
+    }
+
+    /// `--gradient_checkpointing_cpu_offload` (needs `--gradient_checkpointing`,
+    /// which every recipe sets).
+    pub(crate) fn offloads_activations(self) -> bool {
+        self == TrainPreset::LowVram
+    }
+
+    /// `--batch_size` of the text encoder cache step.
+    pub(crate) fn text_encoder_batch(self) -> &'static str {
+        match self {
+            TrainPreset::Standard => "8",
+            TrainPreset::LowVram => "1",
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            TrainPreset::Standard => "Normal",
+            TrainPreset::LowVram => "Low VRAM",
+        }
+    }
+}
+
+/// 3.0.9 P8: what a run learns. Both kinds run the same recipe on the same
+/// bases; the frontend writes the captions (`lib/train-kind.ts`), so the
+/// kind only decides the file name, the closing line and whether the set's
+/// photos become a character's reference images.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrainKind {
+    Character,
+    Style,
+}
+
+impl TrainKind {
+    /// `"style"` from the frontend; anything else, a missing value from an
+    /// older frontend included, is a character.
+    pub(crate) fn from_arg(arg: Option<&str>) -> Self {
+        match arg.map(str::trim) {
+            Some("style") => TrainKind::Style,
+            _ => TrainKind::Character,
+        }
+    }
+
+    /// The trained file's stem. `char_<name>_zimage` is what the Use shelf
+    /// reads (`parseLocalCharacterLora`); a style must not land there.
+    pub(crate) fn output_name(self, name: &str) -> String {
+        match self {
+            TrainKind::Character => format!("char_{name}_zimage"),
+            TrainKind::Style => format!("style_{name}_zimage"),
+        }
+    }
+
+    pub(crate) fn finished_line(self, file: &str, at: &Path, trigger: &str) -> String {
+        match self {
+            TrainKind::Character => format!(
+                "Character ready: {file} is saved at {} and already in the LoRA picker on the Image tab. Put '{trigger}' in a prompt with the LoRA active.",
+                at.display(),
+            ),
+            TrainKind::Style => format!(
+                "Style ready: {file} is saved at {} and switched on in the LoRA picker on the Image tab. Set its strength there.",
+                at.display(),
+            ),
+        }
+    }
+}
+
 /// The floor `vram_verdict` checks against, coupled to the precision that
 /// will actually run: a card refused for lacking fp8-recipe memory when fp8
 /// storage is in fact on (or the reverse) was praezisionsblind, exactly the
-/// Runde-2 review's finding.
-fn vram_floor_mib(precision: &TrainPrecision) -> u64 {
-    if precision.fp8 { TRAINER_VRAM_FLOOR_MIB_FP8 } else { TRAINER_VRAM_FLOOR_MIB_NO_FP8 }
+/// Runde-2 review's finding. Without fp8 storage the Low VRAM recipe has no
+/// evidence of its own either, so it keeps the conservative floor.
+fn vram_floor_mib(precision: &TrainPrecision, preset: TrainPreset) -> u64 {
+    match (precision.fp8, preset) {
+        (false, _) => TRAINER_VRAM_FLOOR_MIB_NO_FP8,
+        (true, TrainPreset::Standard) => TRAINER_VRAM_FLOOR_MIB_FP8,
+        (true, TrainPreset::LowVram) => TRAINER_VRAM_FLOOR_MIB_LOW_VRAM_FP8,
+    }
 }
 
 /// Known Z-Image training-base files, resolved by exact filename from the
@@ -97,7 +237,31 @@ const DIT_CANDIDATES: &[&str] = &["z_image_bf16.safetensors", "z_image_de_turbo_
 const TE_CANDIDATES: &[&str] = &["qwen_3_4b.safetensors"];
 const VAE_CANDIDATES: &[&str] = &["ae.safetensors"];
 
-fn sanitize_component(s: &str) -> String {
+/// The file the Character Studio downloads for each base slot, its models
+/// subfolder and its size in bytes (HuggingFace x-linked-size of
+/// Comfy-Org/z_image, 2026-10-14). The panel used to say "about 19 GB" even
+/// when only one file was missing (box run: only z_image_bf16, 11.46 GB, was
+/// absent), so the status now names the missing ones with their size.
+const BASE_DOWNLOADS: [(&str, &str, u64); 3] = [
+    ("z_image_bf16.safetensors", "diffusion_models", 12_309_866_400),
+    ("qwen_3_4b.safetensors", "text_encoders", 8_044_982_048),
+    ("ae.safetensors", "vae", 335_304_388),
+];
+
+/// The base downloads still missing, in the order of `BASE_DOWNLOADS`, given
+/// which of the three slots (diffusion model, text encoder, VAE) resolved.
+fn missing_bases(present: [bool; 3]) -> Vec<serde_json::Value> {
+    BASE_DOWNLOADS
+        .iter()
+        .zip(present)
+        .filter(|(_, found)| !found)
+        .map(|((filename, subfolder, bytes), _)| {
+            serde_json::json!({ "filename": filename, "subfolder": subfolder, "bytes": bytes })
+        })
+        .collect()
+}
+
+pub(crate) fn sanitize_component(s: &str) -> String {
     let cleaned: String = s
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
@@ -192,6 +356,16 @@ fn example_trainer_path() -> &'static str {
 /// (no directory has to exist yet for a mount-point lookup), before anything
 /// is created, so a rejection on space leaves no empty folder behind.
 fn validate_trainer_root_candidate(p: &str) -> Result<PathBuf, String> {
+    validate_trainer_root_candidate_with(p, crate::commands::download::available_space_for)
+}
+
+/// The check itself, with the free-room lookup handed in. The tests give it a
+/// fixed answer: asked of the real drive, the result depended on how full the
+/// machine running the tests happened to be.
+fn validate_trainer_root_candidate_with(
+    p: &str,
+    free_room: impl Fn(&Path) -> Option<u64>,
+) -> Result<PathBuf, String> {
     if starts_with_tilde(p) {
         return Err(format!(
             "\"{p}\" starts with ~, and this field never expands it: the path is used exactly as typed, so ~ would become a literal folder named ~, not your home folder. Use a full path instead, for example {}.",
@@ -205,7 +379,7 @@ fn validate_trainer_root_candidate(p: &str) -> Result<PathBuf, String> {
             example_trainer_path()
         ));
     }
-    if let Some(free) = crate::commands::download::available_space_for(&path) {
+    if let Some(free) = free_room(&path) {
         if let Some(msg) = disk_room_message(&path, free, TRAINER_SETUP_NEEDS_GIB) {
             return Err(msg);
         }
@@ -295,7 +469,7 @@ fn suggested_trainer_root_with(
 /// Trainer root: persisted override (config `trainer_root`) else
 /// `<app_data>/musubi`. Layout: `<root>/venv`, `<root>/musubi-tuner`,
 /// `<root>/models`, `<root>/train/<set_id>/...`.
-fn trainer_root(app: &tauri::AppHandle) -> PathBuf {
+pub(crate) fn trainer_root(app: &tauri::AppHandle) -> PathBuf {
     if let Some(p) = read_config_value("trainer_root") {
         if !p.is_empty() {
             return PathBuf::from(p);
@@ -380,7 +554,18 @@ fn repo_dir(root: &Path) -> PathBuf {
     root.join("musubi-tuner")
 }
 
+/// A line LU itself says about the setup or a run. It also goes to the log
+/// file: C31 (Discord, 03.11.2026) sent a log that ended at "character
+/// trainer install start", because every later step, the Python LU picked
+/// and the final error lived only in this in-memory list.
 fn push_log(state: &Arc<Mutex<crate::state::InstallState>>, msg: &str) {
+    info!("trainer: {msg}");
+    push_child_line(state, msg);
+}
+
+/// A line a child process printed (pip, musubi, tqdm). Only the panel shows
+/// these; in the log file a training run would be thousands of progress lines.
+fn push_child_line(state: &Arc<Mutex<crate::state::InstallState>>, msg: &str) {
     if let Ok(mut s) = state.lock() {
         s.logs.push(msg.to_string());
         if s.logs.len() > 400 {
@@ -391,6 +576,13 @@ fn push_log(state: &Arc<Mutex<crate::state::InstallState>>, msg: &str) {
 }
 
 fn set_status(state: &Arc<Mutex<crate::state::InstallState>>, status: &str, msg: &str) {
+    // The headline, the error with its "Last steps" tail included, goes to
+    // the log file too (C31, see push_log).
+    if status == "error" {
+        warn!("trainer {status}: {msg}");
+    } else {
+        info!("trainer {status}: {msg}");
+    }
     if let Ok(mut s) = state.lock() {
         s.status = status.to_string();
         s.phase = msg.to_string();
@@ -400,7 +592,29 @@ fn set_status(state: &Arc<Mutex<crate::state::InstallState>>, status: &str, msg:
 
 /// Resolve a base-model file by exact name: `<root>/models` first, then the
 /// active ComfyUI models tree (so files pulled via the Model Manager count).
-fn resolve_base_file(root: &Path, comfy_dir: Option<&Path>, names: &[&str], sub: &str) -> Option<PathBuf> {
+///
+/// GH #183: and the folders configured for ComfyUI itself, because the Model
+/// Manager downloads into those now.
+///
+/// Discord 25.10.2026 (Comfy Desktop, "charcter isnt working"): and every
+/// folder the running ComfyUI reports for `sub` (`engine`, its
+/// `/internal/folder_paths` answer). `download_model` writes there first and
+/// answers "exists" for a file it finds there, so the panel said all three
+/// base files were missing while the Z-Image model was already in the picker,
+/// and "Download base files" started nothing.
+fn resolve_base_file(
+    root: &Path,
+    comfy_dir: Option<&Path>,
+    engine: Option<&crate::commands::comfy_folders::ComfyFolders>,
+    names: &[&str],
+    sub: &str,
+) -> Option<PathBuf> {
+    let mut configured: Vec<PathBuf> = comfy_dir
+        .map(|c| crate::commands::comfy_user_paths::UserComfyPaths::discover(c).dirs_for(sub))
+        .unwrap_or_default();
+    if let Some(e) = engine {
+        configured.extend(e.dirs_for(sub));
+    }
     for n in names {
         let local = root.join("models").join(n);
         if local.exists() {
@@ -412,11 +626,22 @@ fn resolve_base_file(root: &Path, comfy_dir: Option<&Path>, names: &[&str], sub:
                 return Some(in_comfy);
             }
         }
+        if let Some(hit) = configured.iter().map(|d| d.join(n)).find(|p| p.exists()) {
+            return Some(hit);
+        }
     }
     None
 }
 
-fn active_comfy_dir(state: &AppState) -> Option<PathBuf> {
+/// Where a LoRA for ComfyUI goes: the folder configured for ComfyUI's
+/// `loras` key when there is one (GH #183), else `<ComfyUI>/models/loras`.
+pub(crate) fn comfy_loras_dir(comfy_dir: &Path) -> PathBuf {
+    crate::commands::comfy_user_paths::UserComfyPaths::discover(comfy_dir)
+        .write_dir("loras")
+        .unwrap_or_else(|| comfy_dir.join("models").join("loras"))
+}
+
+pub(crate) fn active_comfy_dir(state: &AppState) -> Option<PathBuf> {
     let p = state.comfy_path.lock().ok()?.clone();
     p.map(PathBuf::from)
         .or_else(|| crate::commands::process::find_comfyui_path().map(PathBuf::from))
@@ -429,8 +654,8 @@ fn active_comfy_dir(state: &AppState) -> Option<PathBuf> {
 /// exactly when the train step finally has a step total. Force UTF-8 stdio
 /// on every trainer child instead.
 ///
-/// The same hook carries the second environment fix. GitHub #121 (Z0mbieK,
-/// two GPUs, 2026-08-29) and Discord (sdrairsoft, 2026-09-09): the run died at
+/// The same hook carries the second environment fix. GitHub #121 (a user,
+/// two GPUs, 2026-08-29) and Discord (2026-09-09): the run died at
 /// start with "use_libuv was requested but PyTorch was build without libuv
 /// support". torch 2.4+ asks for libuv when torch.distributed sets up its
 /// store, and the Windows wheels are built without it. USE_LIBUV=0 is the knob
@@ -467,8 +692,8 @@ fn active_comfy_dir(state: &AppState) -> Option<PathBuf> {
 /// `CUDA_VISIBLE_DEVICES` pinned to one card (`pin_trainer_gpu`, resolved by
 /// `resolve_trainer_gpu`) keeps `device_count() > 1` from ever being true, so
 /// the handler is never built and `self.backend` stays `None`. This closes
-/// the door for Z0mbieK (two visible cards, confirmed). It does NOT explain
-/// sdrairsoft: a single visible card never builds the handler in the first
+/// the door for a user (two visible cards, confirmed). It does NOT explain
+/// A user: a single visible card never builds the handler in the first
 /// place, `device_count() == 1` cannot reach this branch, and nobody has
 /// measured `torch.cuda.device_count()` or `nvidia-smi -L` from his machine.
 /// A second, unused NVIDIA card the driver still enumerates would fit
@@ -476,10 +701,87 @@ fn active_comfy_dir(state: &AppState) -> Option<PathBuf> {
 /// commonly has a second card for the screen), but that is a plausible read
 /// of the report, not a measurement; see the question drafted in
 /// `lu-301/bau/trainer.md`.
+///
+/// C31 (Discord, 03.11.2026, Windows): `PYTHONHOME` and `PYTHONPATH` are
+/// dropped on Windows, the way LU's own Python (`private_python`) already
+/// does. A `PYTHONHOME` left on a removed Python, or one LU still carries
+/// from before the user changed it, makes every Python LU starts die with
+/// "init_fs_encoding" and exit code 1, while the same Python runs fine in a
+/// new cmd window. The trainer then found "none that starts" on a machine
+/// with 3.11 and 3.12. Trainer children only: ComfyUI keeps its own rules.
 fn trainer_child_env(cmd: &mut Command) {
     cmd.env("PYTHONIOENCODING", "utf-8");
     cmd.env("PYTHONUTF8", "1");
     cmd.env("USE_LIBUV", "0");
+    #[cfg(target_os = "windows")]
+    cmd.env_remove("PYTHONHOME").env_remove("PYTHONPATH");
+}
+
+/// Version and architecture of an interpreter as the trainer starts it, or
+/// why it did not answer. Until C31 this was `python::python_version_and_arch`
+/// (and `python_version` off Windows); now it is asked with `trainer_child_env`, and a failure keeps its exit code and
+/// stderr: before C31 a Python that did not start was dropped without a
+/// line, so "this machine has none that starts" never said which Pythons LU
+/// had tried or why they failed. `arch_ok` is always true off Windows, where
+/// the trainer does not check the architecture.
+fn trainer_python_probe(exe: &str) -> Result<(String, bool), String> {
+    let mut cmd = crate::python::python_command(exe);
+    trainer_child_env(&mut cmd);
+    cmd.args([
+        "-c",
+        "import struct,platform,sys;print('%d.%d.%d'%sys.version_info[:3]);print(struct.calcsize('P')*8);print(platform.machine())",
+    ]);
+    let out = cmd.output().map_err(|e| format!("it could not be started: {}", os_error::english(&e)))?;
+    if !out.status.success() {
+        return Err(probe_failure_detail(out.status.code(), &String::from_utf8_lossy(&out.stderr)));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines();
+    let version = lines.next().unwrap_or("").trim().to_string();
+    if version.is_empty() {
+        return Err("it printed no version".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    let arch_ok = {
+        let bits: u32 = lines.next().and_then(|l| l.trim().parse().ok()).unwrap_or(0);
+        crate::python::is_trainer_arch(bits, lines.next().unwrap_or("").trim())
+    };
+    #[cfg(not(target_os = "windows"))]
+    let arch_ok = true;
+    Ok((version, arch_ok))
+}
+
+/// "exit code 1: Fatal Python error: init_fs_encoding: ..." from a probe
+/// that failed. The line that names the failure, not simply the last one:
+/// a Python that dies during start-up ends its stderr with
+/// "Current thread ... <no Python frame>", which says nothing.
+pub(crate) fn probe_failure_detail(code: Option<i32>, stderr: &str) -> String {
+    let lines: Vec<&str> = stderr.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let line = lines
+        .iter()
+        .find(|l| l.starts_with("Fatal Python error"))
+        .or_else(|| lines.iter().rev().find(|l| l.contains("Error")))
+        .or_else(|| lines.last())
+        .map(|l| l.chars().take(200).collect::<String>());
+    let code = code.map_or("no exit code".to_string(), |c| format!("exit code {c}"));
+    match line {
+        Some(l) => format!("{code}: {l}"),
+        None => code,
+    }
+}
+
+/// One line when LU itself carries `PYTHONHOME` or `PYTHONPATH`, which
+/// `trainer_child_env` drops for the trainer's Pythons: the log then says
+/// what was set, and that a Python failing elsewhere may be this.
+#[cfg(target_os = "windows")]
+fn python_env_note() -> Option<String> {
+    let set: Vec<String> = ["PYTHONHOME", "PYTHONPATH"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok().filter(|v| !v.trim().is_empty()).map(|v| format!("{k}={v}")))
+        .collect();
+    (!set.is_empty()).then(|| {
+        format!("LU's environment sets {}. The trainer starts its Pythons without it.", set.join(" and "))
+    })
 }
 
 /// The Pythons the trainer can be built with. musubi-tuner v0.3.4 declares
@@ -487,7 +789,7 @@ fn trainer_child_env(cmd: &mut Command) {
 /// as well, so anything newer fails at step 3 (cu121) or step 4 (cu128, where
 /// torch itself installs fine and musubi then refuses the interpreter).
 ///
-/// Ticket 0004 (sockenmonster, 2026-09-05, after the same wall in August):
+/// Ticket 0004 (2026-09-05, after the same wall in August):
 /// LU built the venv from the newest Python on the machine, 3.14.6, because
 /// nothing between "which Python does LU use" and "which Python can the
 /// trainer use" existed. The setup now chooses its own interpreter from this
@@ -566,8 +868,8 @@ pub(crate) enum TorchPlan {
 /// decision is testable on any host.
 ///
 /// The old rule was `torch_index_for_cap(detect_nvidia_compute_cap_major())`
-/// and nothing else, so it only ever asked nvidia-smi. On numbrain's and
-/// lapbo's AMD boxes that probe is silent, silence was read as "no GPU", and
+/// and nothing else, so it only ever asked nvidia-smi. On a user's and
+/// a user's AMD boxes that probe is silent, silence was read as "no GPU", and
 /// the trainer installed the same CUDA wheels a machine with no card at all
 /// gets. Those wheels import fine and see no device, so the environment
 /// passed every check and the run died in step 1 with a raw CUDA traceback.
@@ -721,7 +1023,7 @@ pub(crate) struct TrainerGpuChoice {
 /// Nachbesserung after the Opus review of `0e826c22`: that commit pinned
 /// every trainer child to `CUDA_VISIBLE_DEVICES=0` unconditionally, which
 /// (a) is not necessarily the strong card -- CUDA without
-/// `CUDA_DEVICE_ORDER=PCI_BUS_ID` sorts fastest-first, and Z0mbieK's RTX
+/// `CUDA_DEVICE_ORDER=PCI_BUS_ID` sorts fastest-first, and a user's RTX
 /// 3090 Ti and RTX 3050 share compute capability 8.6, so the heuristic
 /// tie-breaks on something neither promised nor measured -- and (b) silently
 /// overrides both LU's own Hardware-tab GPU picker (`gpu.rs::GpuSelection`,
@@ -863,7 +1165,7 @@ fn torch_installed(root: &Path) -> bool {
 }
 
 /// The trainer package itself, which "venv + repo + torch" never covered:
-/// sockenmonster's install died after torch and before `pip install -e .`, so
+/// a user's install died after torch and before `pip install -e .`, so
 /// the studio called the environment ready and every run hit
 /// `No module named musubi_tuner`. Installed editable, so the marker is a
 /// dist-info directory or the `__editable__` .pth pip drops next to it. File
@@ -1016,7 +1318,7 @@ pub(crate) fn useful_tail(text: &str) -> String {
 
 /// The dead ends that are neither the network nor the disk, and that the one
 /// generic step sent people to look in the wrong place for. A2 stage one
-/// (aikabatzu, aldrich_ironhart, Z0mbieK, Discord and GH #121, 2026-08-27 and
+/// (Discord and GH #121, 2026-08-27 and
 /// 2026-08-29): "Setting up the trainer environment failed. Check that you are
 /// online" while online, with the firewall off, confirmed by a second user.
 ///
@@ -1035,16 +1337,16 @@ const WHEEL_NEXT_STEP: &str = "The PyTorch that was installed carries no support
 const PERMISSION_NEXT_STEP: &str = "The installer was not allowed to write into the Python folder. Close every open Python, Jupyter or IDE debugger, and if that changes nothing, install Python for your own user instead of for all users, then press Set up trainer in Character Studio.";
 const PEP668_NEXT_STEP: &str = "This Python refuses installs outside a virtual environment and the venv module is missing. Install it from your package manager (python3-venv on Debian and Ubuntu, python-virtualenv on Arch, python3-virtualenv on Fedora), then press Set up trainer in Character Studio.";
 
-/// The message gekiritz actually saw (Discord, 2026-09-16), built fresh at
+/// The message a user actually saw (Discord, 2026-09-16), built fresh at
 /// the point of failure instead of a static sentence. The review found the
 /// gap: `no_trainer_python_message` learned to name path and version, but
 /// this is the DIFFERENT message pip's own `NoMatchingWheel` /
 /// `UnsupportedPython` failure reaches, through `next_step_for_log`, and it
 /// still only said "needs 3.10, 3.11 or 3.12" with nothing about what was
 /// actually found. On Windows each interpreter's architecture is added too
-/// (`python_version_and_arch`): a 32-bit or ARM64 Python 3.11 answers the
+/// (`trainer_python_probe`): a 32-bit or ARM64 Python 3.11 answers the
 /// plain version check exactly like a real one and is why "rebuild the venv"
-/// alone never broke gekiritz's loop -- see `venv_action`.
+/// alone never broke a user's loop -- see `venv_action`.
 fn python_version_next_step() -> String {
     let mut seen: Vec<String> = Vec::new();
     let mut found: Vec<String> = Vec::new();
@@ -1053,18 +1355,15 @@ fn python_version_next_step() -> String {
             continue;
         }
         seen.push(p.clone());
-        #[cfg(target_os = "windows")]
-        {
-            if let Some((v, arch_ok)) = crate::python::python_version_and_arch(&p) {
+        // C31: one that does not start is listed with the reason instead of
+        // being left out, so "This machine has" matches what the user sees.
+        match trainer_python_probe(&p) {
+            Ok((v, _)) if !cfg!(target_os = "windows") => found.push(format!("Python {v} at {p}")),
+            Ok((v, arch_ok)) => {
                 let arch = if arch_ok { "64-bit x86" } else { "not 64-bit x86, no PyTorch wheel exists for it" };
                 found.push(format!("Python {v} at {p} ({arch})"));
             }
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            if let Some(v) = crate::python::python_version(&p) {
-                found.push(format!("Python {v} at {p}"));
-            }
+            Err(why) => found.push(format!("Python at {p} (does not start from LU: {why})")),
         }
     }
     let have = if found.is_empty() {
@@ -1073,7 +1372,7 @@ fn python_version_next_step() -> String {
         found.join(", ")
     };
     format!(
-        "The Python in the trainer environment is one the trainer cannot use (it needs {TRAINER_PYTHON_RANGE}). This machine has: {have}. Press Set up trainer in Character Studio: the setup looks for a matching Python on this machine on its own, installs 3.12 on Windows when there is none, and rebuilds the environment with it."
+        "The Python in the trainer environment is one the trainer cannot use (it needs {TRAINER_PYTHON_RANGE}). This machine has: {have}. Press Set up trainer in Character Studio: the setup looks for a matching Python on this machine on its own, sets up LU's own Python 3.12 when there is none, and rebuilds the environment with it."
     )
 }
 
@@ -1175,7 +1474,7 @@ pub(crate) fn install_failed_message(err: &str) -> String {
 /// `gpu` is the card a run would use ("NVIDIA" / "AMD"), or None when the
 /// machine really has none. Without it a torch that sees no device is
 /// indistinguishable from a legitimate processor only environment, which is
-/// the hole numbrain's and lapbo's AMD boxes fell through.
+/// the hole a user's and a user's AMD boxes fell through.
 fn preflight_verdict(exit_ok: bool, stdout: &str, stderr: &str, gpu: Option<&str>) -> Preflight {
     if !exit_ok || !stdout.contains("TORCH_OK") {
         let tail = stderr
@@ -1379,7 +1678,7 @@ fn pip_with_retry(
 /// ends at a newline OR a carriage return. Progress bars (tqdm) redraw their
 /// line with \r and never send \n until the bar is done, so `BufRead::lines`
 /// delivers a whole epoch of updates as one line, long after they happened.
-fn for_each_progress_line<R: Read>(mut stream: R, mut on_line: impl FnMut(String)) {
+pub(crate) fn for_each_progress_line<R: Read>(mut stream: R, mut on_line: impl FnMut(String)) {
     let mut pending: Vec<u8> = Vec::new();
     let mut buf = [0u8; 4096];
     loop {
@@ -1480,7 +1779,7 @@ fn run_child(
                         s.download_total = total;
                     }
                 }
-                push_log(&run, trimmed);
+                push_child_line(&run, trimmed);
             });
         }));
     }
@@ -1657,8 +1956,8 @@ pub fn install_character_trainer(
 
     let root = trainer_root(&app);
     // An empty or unusable default Python is no longer a reason to stop here:
-    // trainer_base_python surveys the machine and, on Windows, installs 3.12
-    // itself. The old guard sent the customer to Settings for the one case
+    // trainer_base_python surveys the machine and, when nothing fits, sets up
+    // LU's own Python 3.12 itself. The old guard sent the customer to Settings for the one case
     // the setup can now handle on its own.
     let python_bin = state.python_bin.lock().unwrap().clone();
 
@@ -1722,15 +2021,15 @@ pub(crate) enum VenvAction {
 /// 0004 also WHICH one it is: `python_version` is None for a venv that does
 /// not start and the version for one that does, and a venv built from a
 /// Python outside the trainer's range is exactly as unusable as a dead one.
-/// It ran fine on sockenmonster's machine, its pip just refused musubi.
+/// It ran fine on a user's machine, its pip just refused musubi.
 ///
 /// `arch_ok` is the Opus review's finding on this exact function: a venv
 /// built from a 32-bit or ARM64 Python 3.11/3.12 reports a version
 /// `trainer_supports_python` accepts, so before this it always read `Keep`
-/// -- gekiritz's "3.11-Umgebung loeschen half nicht" (Rebuild only ever fired
+/// -- a user's "3.11-Umgebung loeschen half nicht" (Rebuild only ever fired
 /// on the FIRST build; a Keep venv was never re-examined the same way) is
 /// exactly the gap this closes. `true` on a platform where architecture is
-/// not checked (see `python_version_and_arch`, Windows only) so this stays a
+/// not checked (see `trainer_python_probe`, Windows only) so this stays a
 /// no-op everywhere else.
 pub(crate) fn venv_action(python_exists: bool, python_version: Option<&str>, arch_ok: bool) -> VenvAction {
     match (python_exists, python_version) {
@@ -1753,19 +2052,22 @@ pub(crate) fn venv_create_args(action: VenvAction) -> &'static [&'static str] {
 }
 
 /// Why we are stopping when no Python on this machine can build the trainer
-/// venv. `found` is every version that runs here, so the sentence can say what
-/// IS installed instead of asking the customer to guess. Settings > Install
-/// Python is deliberately not the pointer: it short-circuits as soon as any
-/// Python exists, which on a 3.14 machine is exactly the one that cannot help.
-/// The last sentence is the marker `already_explained` looks for.
+/// venv and LU has no Python of its own for this system either (an Intel
+/// Mac, an ARM machine; everywhere else LU sets up its own 3.12 instead, see
+/// `trainer_base_python`). `found` is every version that runs here, so the
+/// sentence can say what IS installed instead of asking the customer to
+/// guess. Settings > Install Python is deliberately not the pointer: it
+/// short-circuits as soon as any Python exists, which on a 3.14 machine is
+/// exactly the one that cannot help. The last sentence is the marker
+/// `already_explained` looks for.
 ///
 /// K4, 2026-09-18: `found` used to be versions alone, so the message named
 /// what version was on the machine but not where LU looked or which install
-/// it was reading. gekiritz's rebuild loop (see `python_version_and_arch`)
+/// it was reading. a user's rebuild loop (see `trainer_python_probe`)
 /// is exactly the case where two Pythons report the same version and only
 /// one of them is real; the path is what lets the customer, or us reading a
 /// Discord paste, tell which is which.
-pub(crate) fn no_trainer_python_message(found: &[(String, String)], os: &str, winget_tried: bool) -> String {
+pub(crate) fn no_trainer_python_message(found: &[(String, String)], os: &str) -> String {
     let have = if found.is_empty() {
         "no Python that starts".to_string()
     } else {
@@ -1776,9 +2078,6 @@ pub(crate) fn no_trainer_python_message(found: &[(String, String)], os: &str, wi
             .join(" and ")
     };
     let get = match os {
-        "windows" if winget_tried => {
-            "LU tried to install Python 3.12 with winget and that did not work. Install Python 3.12 from https://www.python.org/downloads/windows/ (any install option, it does not need to be on PATH)"
-        }
         "windows" => "Install Python 3.12 from https://www.python.org/downloads/windows/ (any install option, it does not need to be on PATH)",
         "macos" => "Install it with 'brew install python@3.12' or from https://www.python.org/downloads/macos/",
         _ => "Install it with your package manager (python3.12 on Debian, Ubuntu and Fedora, python312 from the AUR on Arch)",
@@ -1788,17 +2087,23 @@ pub(crate) fn no_trainer_python_message(found: &[(String, String)], os: &str, wi
     )
 }
 
+/// `(3, 12)` as the trainer's rule reads it.
+fn trainer_accepts(version: (u32, u32)) -> bool {
+    trainer_supports_python(&format!("{}.{}", version.0, version.1))
+}
+
 /// The interpreter that builds `<root>/venv`, decided before a clone and 2.5
 /// GB of wheels. LU's default first, then every other Python on the machine,
-/// each asked for its version; on Windows, when none fits, the same winget
-/// install Settings runs, and the machine is asked again. The winget run is
-/// streamed like every other step so it can be cancelled and read.
+/// each asked for its version. When none fits, LU's own Python 3.12, the
+/// same one ComfyUI falls back to, through the same function
+/// (`base_python::machine_or_own`): downloaded once into LU's data folder,
+/// on every system the pin carries, without administrator rights. Until
+/// 3.0.7 this was a winget install of Python.Python.3.12, on Windows only.
 fn trainer_base_python(
     python_bin: &str,
     state: &Arc<Mutex<crate::state::InstallState>>,
     status_kind: &str,
     cancel: &Arc<std::sync::atomic::AtomicBool>,
-    pid_slot: &Arc<Mutex<Option<u32>>>,
 ) -> Result<(String, String), String> {
     let versioned = |paths: Vec<String>| -> Vec<(String, String)> {
         let mut seen: Vec<(String, String)> = Vec::new();
@@ -1812,47 +2117,53 @@ fn trainer_base_python(
             // Python-version message and sends the customer back to the same
             // interpreter. Excluding it here, before the venv is ever built,
             // is what makes the retry pick a different one instead of
-            // looping (gekiritz, Discord 2026-09-16).
-            #[cfg(target_os = "windows")]
-            match crate::python::python_version_and_arch(&p) {
-                Some((v, true)) => seen.push((p, v)),
-                Some((v, false)) => push_log(
+            // looping (Discord 2026-09-16).
+            // C31: a Python that does not start says why, with its exit code
+            // and the stderr line that names the failure; it used to vanish
+            // from the list without a trace.
+            match trainer_python_probe(&p) {
+                Ok((v, true)) => seen.push((p, v)),
+                Ok((v, false)) => push_log(
                     state,
                     &format!("Skipping {p} (Python {v}): not a 64-bit x86 build, the trainer's PyTorch wheels do not exist for it."),
                 ),
-                None => {}
-            }
-            #[cfg(not(target_os = "windows"))]
-            if let Some(v) = crate::python::python_version(&p) {
-                seen.push((p, v));
+                Err(why) => push_log(state, &format!("Skipping {p}: it did not start from LU ({why}).")),
             }
         }
         seen
     };
-    let survey = || {
-        let mut paths = vec![python_bin.to_string()];
-        paths.extend(crate::python::python_interpreters());
-        versioned(paths)
-    };
-    let mut found = survey();
-    let mut winget_tried = false;
-    if choose_trainer_python(&found).is_none() && std::env::consts::OS == "windows" {
-        set_status(state, status_kind, &format!(
-            "Installing Python 3.12 for the trainer (this machine has {}, the trainer needs {TRAINER_PYTHON_RANGE})...",
-            found.iter().map(|(_, v)| v.as_str()).collect::<Vec<_>>().join(" and ")
-        ));
-        winget_tried = true;
-        match winget_install("Python.Python.3.12", true, state, cancel, pid_slot) {
-            Ok(()) => push_log(state, "Python 3.12 is installed."),
-            Err(e) if e == "cancelled" => return Err(e),
-            Err(e) => push_log(state, &format!("winget could not install Python 3.12: {}", useful_tail(&e))),
-        }
-        // Asked again whatever winget said: its exit code is not the fact
-        // that matters, the interpreter on disk is.
-        found = survey();
+    #[cfg(target_os = "windows")]
+    if let Some(note) = python_env_note() {
+        push_log(state, &note);
     }
-    let (path, version) = choose_trainer_python(&found)
-        .ok_or_else(|| no_trainer_python_message(&found, std::env::consts::OS, winget_tried))?;
+    let mut paths = vec![python_bin.to_string()];
+    paths.extend(crate::python::python_interpreters());
+    let found = versioned(paths);
+    let machine = choose_trainer_python(&found);
+    if machine.is_none() && crate::private_python::version_here().is_some_and(trainer_accepts) {
+        set_status(state, status_kind, &format!(
+            "Setting up LU's own Python 3.12 for the trainer (this machine has {}, the trainer needs {TRAINER_PYTHON_RANGE}). The Pythons already installed stay as they are...",
+            if found.is_empty() {
+                "none that starts".to_string()
+            } else {
+                found.iter().map(|(_, v)| v.as_str()).collect::<Vec<_>>().join(" and ")
+            }
+        ));
+    }
+    let progress = crate::private_python::StatusProgress { status: state, cancel };
+    let path = crate::commands::install::machine_or_own(
+        machine.as_ref().map(|(p, _)| p.clone()),
+        trainer_accepts,
+        &progress,
+        crate::commands::install::FOR_TRAINER,
+    )?
+    .ok_or_else(|| no_trainer_python_message(&found, std::env::consts::OS))?;
+    let own_version = |p: &str| trainer_python_probe(p).ok().map(|(v, _)| v);
+    let version = match machine {
+        Some((_, v)) => v,
+        None => own_version(&path)
+            .ok_or_else(|| format!("LU's own Python at {path} did not start. A security program may be blocking it: allow LU's folder, then press Set up trainer in Character Studio."))?,
+    };
     if path != python_bin {
         let default = found
             .first()
@@ -1946,7 +2257,7 @@ fn download_musubi_archive(
     let zip_path = root.join(format!("musubi-tuner-{MUSUBI_TAG}.zip"));
     let unpack_dir = root.join(".musubi-unpack");
     let client = reqwest::blocking::Client::builder()
-        .user_agent("LocallyUncensored/2.6")
+        .user_agent(crate::app_identity::outgoing_agent!("2.6"))
         .connect_timeout(std::time::Duration::from_secs(30))
         .timeout(std::time::Duration::from_secs(1800))
         .build()
@@ -2022,7 +2333,7 @@ pub(crate) fn disk_room_message(root: &Path, free: u64, needed_gib: u64) -> Opti
 
 /// A torch that will not load because a Windows runtime library is missing or
 /// its native libraries fail to initialise: the class the Visual C++ runtime
-/// install fixes (ticket 007, falcon bob, on the ComfyUI side).
+/// install fixes (ticket 007, a user, on the ComfyUI side).
 pub(crate) fn runtime_library_missing(tail: &str) -> bool {
     use crate::commands::install::pip::PipFailureKind as K;
     matches!(
@@ -2034,21 +2345,28 @@ pub(crate) fn runtime_library_missing(tail: &str) -> bool {
 /// The card's memory as the probe reports it, against the floor the CHOSEN
 /// precision actually needs (Nachbesserung Runde 2: a fixed floor was
 /// precision-blind, see `vram_floor_mib`).
-pub(crate) fn vram_verdict(vram_mib: Option<u64>, precision: &TrainPrecision) -> Option<String> {
+pub(crate) fn vram_verdict(vram_mib: Option<u64>, precision: &TrainPrecision, preset: TrainPreset) -> Option<String> {
     let mib = vram_mib?;
-    let floor = vram_floor_mib(precision);
+    let floor = vram_floor_mib(precision, preset);
     if mib >= floor {
         return None;
     }
-    let recipe = if precision.fp8 {
-        "it was proven on a 12 GB card with fp8 weights and block swapping"
-    } else {
-        "without fp8 weight storage this needs noticeably more headroom"
+    let card = mib as f64 / 1024.0;
+    let need = floor as f64 / 1024.0;
+    // A card the Low VRAM recipe would take: say so, that is the way out on
+    // the same machine (D20).
+    if preset == TrainPreset::Standard && mib >= vram_floor_mib(precision, TrainPreset::LowVram) {
+        return Some(format!(
+            "This card has {card:.0} GB of memory and the Normal training recipe needs {need:.0} GB: it was proven on a 12 GB card with fp8 weights and block swapping. Switch the trainer to Low VRAM in the Train tab and press Create again, or train the same character in Cloud mode.",
+        ));
+    }
+    let recipe = match (precision.fp8, preset) {
+        (true, TrainPreset::Standard) => "it was proven on a 12 GB card with fp8 weights and block swapping",
+        (true, TrainPreset::LowVram) => "even with the Low VRAM recipe the text encoder and the model's working set need that much",
+        (false, _) => "without fp8 weight storage this needs noticeably more headroom",
     };
     Some(format!(
-        "This card has {:.0} GB of memory and the local training recipe needs {:.0} GB: {recipe}, and below that the first training step runs out of memory after both cache steps. Character Studio in Cloud mode trains the same character without this limit.",
-        mib as f64 / 1024.0,
-        floor as f64 / 1024.0,
+        "This card has {card:.0} GB of memory and the local training recipe needs {need:.0} GB: {recipe}, and below that the first training step runs out of memory after both cache steps. Character Studio in Cloud mode trains the same character without this limit.",
     ))
 }
 
@@ -2094,7 +2412,7 @@ pub(crate) fn training_failure_message(err: &str, vram_mib: Option<u64>) -> Stri
             .map(|m| format!(" This card has {:.0} GB.", m as f64 / 1024.0))
             .unwrap_or_default();
         return format!(
-            "Training ran out of memory on the card.{card} The recipe needs 12 GB free on the card while it runs: close other apps that use it (a browser playing video, a game, ComfyUI with a model loaded), then press Create again. If the card has less than 12 GB, Character Studio in Cloud mode trains the same character without this limit. Last steps: {}",
+            "Training ran out of memory on the card.{card} Normal training needs 12 GB free on the card while it runs, Low VRAM about 8 GB: close other apps that use it (a browser playing video, a game, ComfyUI with a model loaded), then press Create again. If the card has less than 12 GB, switch the trainer to Low VRAM in the Train tab, or train the same character in Cloud mode without this limit. Last steps: {}",
             useful_tail(err)
         );
     }
@@ -2239,7 +2557,7 @@ fn provision_trainer_env(
     // Decided first, before a clone, a venv and 2.5 GB of wheels: a machine
     // whose card has no PyTorch build should not have to pay for all of that
     // to find out. The probe is the vendor list, not nvidia-smi alone, which
-    // is what left numbrain and lapbo indistinguishable from a machine with
+    // is what left a user indistinguishable from a machine with
     // no GPU at all.
     // The card NAMES come along now, because the wheel question is no longer
     // "AMD yes or no": on Linux the answer depends on the family, and the name
@@ -2265,7 +2583,7 @@ fn provision_trainer_env(
     // Decided second, for the same reason: the interpreter the venv is built
     // from must be one the wheels and musubi accept, and LU's default Python
     // is whatever is newest on the machine.
-    let (python_bin, base_version) = trainer_base_python(python_bin, state, status_kind, cancel, pid_slot)?;
+    let (python_bin, base_version) = trainer_base_python(python_bin, state, status_kind, cancel)?;
     let python_bin = python_bin.as_str();
 
     let _ = fs::create_dir_all(root.join("models"));
@@ -2306,16 +2624,11 @@ fn provision_trainer_env(
     let (venv_version, venv_arch_ok) = if !exists {
         (None, true)
     } else {
-        #[cfg(target_os = "windows")]
-        {
-            match crate::python::python_version_and_arch(&vpy_path.to_string_lossy()) {
-                Some((v, ok)) => (Some(v), ok),
-                None => (None, true),
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            (crate::python::python_version(&vpy_path.to_string_lossy()), true)
+        // Asked the way the trainer starts it (C31): a venv that only fails
+        // under LU's PYTHONHOME is not dead and must not be rebuilt for it.
+        match trainer_python_probe(&vpy_path.to_string_lossy()) {
+            Ok((v, ok)) => (Some(v), ok),
+            Err(_) => (None, true),
         }
     };
     let action = venv_action(exists, venv_version.as_deref(), venv_arch_ok);
@@ -2339,6 +2652,20 @@ fn provision_trainer_env(
         run_streamed(venv, "venv create", state, cancel, pid_slot)?;
     }
     let vpy = venv_python(root).to_string_lossy().to_string();
+
+    // C31 (Discord, 03.11.2026, Windows, Python 3.11.4): `python -m venv`
+    // puts the pip its Python shipped with into the venv, 23.1.2 for 3.11.4.
+    // A pip below 24 drops the jinja2 and typing_extensions wheels on the
+    // PyTorch index ("inconsistent Name"), falls back to their sources and
+    // dies on flit_core, which that index does not carry; the trainer then
+    // said its Python was one it cannot use, and every retry kept the venv
+    // and its pip. The same lift as the ComfyUI install (GH #211).
+    if let Some(line) = crate::commands::install::lift_old_pip_before_torch(&vpy, state, Some(cancel)) {
+        push_log(state, &line);
+    }
+    if cancel_requested(cancel) {
+        return Err("cancelled".to_string());
+    }
 
     // 3) torch, from the channel the plan above picked: Blackwell gets cu128,
     // every other NVIDIA card keeps cu121, an AMD card on Linux gets ROCm.
@@ -2430,9 +2757,10 @@ pub fn character_trainer_status(
         && torch_installed(&root)
         && musubi_installed(&root)
         && !state.trainer_env_broken.load(Ordering::SeqCst);
-    let dit = resolve_base_file(&root, comfy.as_deref(), DIT_CANDIDATES, "diffusion_models");
-    let te = resolve_base_file(&root, comfy.as_deref(), TE_CANDIDATES, "text_encoders");
-    let vae = resolve_base_file(&root, comfy.as_deref(), VAE_CANDIDATES, "vae");
+    let engine = crate::commands::comfy_folders::cached();
+    let dit = resolve_base_file(&root, comfy.as_deref(), engine.as_ref(), DIT_CANDIDATES, "diffusion_models");
+    let te = resolve_base_file(&root, comfy.as_deref(), engine.as_ref(), TE_CANDIDATES, "text_encoders");
+    let vae = resolve_base_file(&root, comfy.as_deref(), engine.as_ref(), VAE_CANDIDATES, "vae");
     let install = state.trainer_install.lock().unwrap();
     // K5 point 3/5: `customized` lets the frontend say the truth about where
     // this install target actually is instead of assuming the default, and
@@ -2446,6 +2774,7 @@ pub fn character_trainer_status(
     Ok(serde_json::json!({
         "envReady": env_ready,
         "basesReady": dit.is_some() && te.is_some() && vae.is_some(),
+        "missingBases": missing_bases([dit.is_some(), te.is_some(), vae.is_some()]),
         "dit": dit.map(|p| p.to_string_lossy().to_string()),
         "textEncoder": te.map(|p| p.to_string_lossy().to_string()),
         "vae": vae.map(|p| p.to_string_lossy().to_string()),
@@ -2468,11 +2797,32 @@ pub fn stage_training_image(
     caption: String,
 ) -> Result<serde_json::Value, String> {
     let set = sanitize_component(&setId);
-    let name = sanitize_component(filename.trim_end_matches(|c: char| c.is_ascii_alphanumeric()).trim_end_matches('.'));
     if set.is_empty() {
         return Err("invalid set id".to_string());
     }
-    let ext = Path::new(&filename)
+    let img_dir = trainer_root(&app).join("train").join(&set).join("img");
+    let staged = stage_image_into(&img_dir, &filename, &fileBytes, &caption)?;
+    Ok(serde_json::json!({"staged": staged}))
+}
+
+/// The caption as it goes into the sidecar: one line, runs of whitespace
+/// (line breaks a pasted description brings along) folded to one space, and
+/// capped. musubi reads the whole file and only strips its ends
+/// (dataset/datasources.py `get_caption`: `f.read().strip()`), so a line
+/// break would land inside the prompt the text encoder sees.
+pub(crate) fn caption_file_text(caption: &str) -> String {
+    const MAX_CHARS: usize = 600;
+    let folded = caption.split_whitespace().collect::<Vec<_>>().join(" ");
+    folded.chars().take(MAX_CHARS).collect::<String>().trim_end().to_string()
+}
+
+/// Write one photo and its caption into the set's image folder, the layout
+/// musubi expects with `caption_extension = ".txt"`: `name.png` next to
+/// `name.txt` (docs/dataset_config.md, "the captions are stored in text files
+/// with the same filename as the image"). Returns the photo's file name.
+pub(crate) fn stage_image_into(img_dir: &Path, filename: &str, bytes: &[u8], caption: &str) -> Result<String, String> {
+    let name = sanitize_component(filename.trim_end_matches(|c: char| c.is_ascii_alphanumeric()).trim_end_matches('.'));
+    let ext = Path::new(filename)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("png")
@@ -2480,20 +2830,21 @@ pub fn stage_training_image(
     if !["png", "jpg", "jpeg", "webp"].contains(&ext.as_str()) {
         return Err("unsupported image type (png, jpg, webp)".to_string());
     }
-    if fileBytes.is_empty() || fileBytes.len() > 40 * 1024 * 1024 {
+    if bytes.is_empty() || bytes.len() > 40 * 1024 * 1024 {
         return Err("image is empty or larger than 40 MB".to_string());
     }
-    let img_dir = trainer_root(&app).join("train").join(&set).join("img");
-    fs::create_dir_all(&img_dir).map_err(|e| format!("could not create the set dir: {}", os_error::english(&e)))?;
-    let base = if name.is_empty() { format!("photo_{}", fileBytes.len() % 100000) } else { name };
-    let stem = free_stem(&img_dir, &base, &ext, &fileBytes);
-    fs::write(img_dir.join(format!("{stem}.{ext}")), &fileBytes)
+    fs::create_dir_all(img_dir).map_err(|e| format!("could not create the set dir: {}", os_error::english(&e)))?;
+    let base = if name.is_empty() { format!("photo_{}", bytes.len() % 100000) } else { name };
+    let stem = free_stem(img_dir, &base, &ext, bytes);
+    fs::write(img_dir.join(format!("{stem}.{ext}")), bytes)
         .map_err(|e| format!("could not write the photo: {}", os_error::english(&e)))?;
-    // Caption sidecar: trigger word comes first — musubi has no trigger
-    // mechanism of its own, the token must live in every caption.
-    fs::write(img_dir.join(format!("{stem}.txt")), caption.trim())
+    // Caption sidecar: trigger word comes first (the frontend builds it,
+    // lib/train-captions.ts) because musubi has no trigger mechanism of its
+    // own, the token must live in every caption. Since 3.0.8 (D28) a photo's
+    // own description of what changes (clothes, hair, place) follows it.
+    fs::write(img_dir.join(format!("{stem}.txt")), caption_file_text(caption))
         .map_err(|e| format!("could not write the caption: {}", os_error::english(&e)))?;
-    Ok(serde_json::json!({"staged": format!("{stem}.{ext}")}))
+    Ok(format!("{stem}.{ext}"))
 }
 
 #[allow(non_snake_case)]
@@ -2567,6 +2918,18 @@ pub(crate) fn train_precision_for_capability(cap: Option<(u32, u32)>) -> TrainPr
     TrainPrecision { mixed_precision: "bf16", save_precision: "bf16", fp8: true, optimizer_type: "adamw8bit" }
 }
 
+/// The dataset config every step of the run reads (docs/dataset_config.md):
+/// the preset's square resolution, `.txt` captions next to the photos, batch 1.
+pub(crate) fn dataset_toml(img_dir: &Path, cache_dir: &Path, repeats: usize, preset: TrainPreset) -> String {
+    let res = preset.resolution();
+    format!(
+        "[general]\nresolution = [{res}, {res}]\ncaption_extension = \".txt\"\nbatch_size = 1\nenable_bucket = true\nbucket_no_upscale = false\n\n[[datasets]]\nimage_directory = '{}'\ncache_directory = '{}'\nnum_repeats = {}\n",
+        img_dir.to_string_lossy().replace('\\', "/"),
+        cache_dir.to_string_lossy().replace('\\', "/"),
+        repeats,
+    )
+}
+
 /// The files and numbers one run of step 3 is made of.
 struct TrainStep<'a> {
     dit: &'a str,
@@ -2577,14 +2940,15 @@ struct TrainStep<'a> {
     out_dir: &'a str,
     out_name: &'a str,
     precision: TrainPrecision,
+    preset: TrainPreset,
 }
 
 /// Step 3, the train itself: the venv's own python runs musubi's trainer, the
 /// same way steps 1, 2 and 4 do.
 ///
 /// It used to be `accelerate launch <script>`, which is what musubi's README
-/// writes, and that is what GitHub #121 (Z0mbieK, two cards) and the Discord
-/// report (sdrairsoft, 2026-09-09) died on:
+/// writes, and that is what GitHub #121 (two cards) and the Discord
+/// report (2026-09-09) died on:
 ///
 ///   RuntimeError: use_libuv was requested but PyTorch was build without
 ///   libuv support
@@ -2620,11 +2984,17 @@ fn training_command(vpy: &str, repo: &Path, step: &TrainStep<'_>) -> Command {
         cmd.args(["--fp8_base", "--fp8_scaled"]);
     }
     cmd.args([
-        "--blocks_to_swap", "16",
+        "--blocks_to_swap", step.preset.blocks_to_swap(),
         "--timestep_sampling", "shift", "--weighting_scheme", "none", "--discrete_flow_shift", "2.0",
         "--optimizer_type", step.precision.optimizer_type, "--learning_rate", "1e-4", "--gradient_checkpointing",
+    ]);
+    if step.preset.offloads_activations() {
+        cmd.arg("--gradient_checkpointing_cpu_offload");
+    }
+    cmd.args([
         "--max_data_loader_n_workers", "2", "--persistent_data_loader_workers",
-        "--network_module", "networks.lora_zimage", "--network_dim", "32",
+        "--network_module", "networks.lora_zimage", "--network_dim", step.preset.network_dim(),
+        "--network_alpha", step.preset.network_alpha(),
         "--max_train_steps", step.steps,
         "--save_precision", step.precision.save_precision,
         "--seed", "42",
@@ -2635,6 +3005,8 @@ fn training_command(vpy: &str, repo: &Path, step: &TrainStep<'_>) -> Command {
 }
 
 #[allow(non_snake_case)]
+// The arguments are the fields of the IPC call (api/trainer.ts), one each.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn start_character_training(
     app: tauri::AppHandle,
@@ -2643,7 +3015,11 @@ pub fn start_character_training(
     name: String,
     triggerWord: String,
     steps: Option<u32>,
+    preset: Option<String>,
+    kind: Option<String>,
 ) -> Result<serde_json::Value, String> {
+    let preset = TrainPreset::from_arg(preset.as_deref());
+    let kind = TrainKind::from_arg(kind.as_deref());
     {
         let mut run = state.trainer_run.lock().unwrap();
         if run.status == "running" {
@@ -2665,6 +3041,7 @@ pub fn start_character_training(
         return Err("invalid arguments".to_string());
     }
     let steps = steps.unwrap_or(1200).clamp(100, 4000);
+    push_log(&state.trainer_run, &format!("Trainer setting: {}.", preset.label()));
 
     let root = trainer_root(&app);
     let comfy = active_comfy_dir(state.inner());
@@ -2676,10 +3053,11 @@ pub fn start_character_training(
     // Held for the run's own repair path below: rebuilding the venv needs the
     // system python, not the venv one that may be the broken part.
     let python_bin = state.python_bin.lock().unwrap().clone();
+    let engine = crate::commands::comfy_folders::cached();
     let (Some(dit), Some(te), Some(vae)) = (
-        resolve_base_file(&root, comfy.as_deref(), DIT_CANDIDATES, "diffusion_models"),
-        resolve_base_file(&root, comfy.as_deref(), TE_CANDIDATES, "text_encoders"),
-        resolve_base_file(&root, comfy.as_deref(), VAE_CANDIDATES, "vae"),
+        resolve_base_file(&root, comfy.as_deref(), engine.as_ref(), DIT_CANDIDATES, "diffusion_models"),
+        resolve_base_file(&root, comfy.as_deref(), engine.as_ref(), TE_CANDIDATES, "text_encoders"),
+        resolve_base_file(&root, comfy.as_deref(), engine.as_ref(), VAE_CANDIDATES, "vae"),
     ) else {
         set_status(
             &state.trainer_run,
@@ -2705,7 +3083,7 @@ pub fn start_character_training(
     // chain picks it up. Fall back to the trainer root when ComfyUI is absent.
     let loras_dir = comfy
         .as_deref()
-        .map(|c| c.join("models").join("loras"))
+        .map(comfy_loras_dir)
         .unwrap_or_else(|| root.join("out"));
 
     let run = state.trainer_run.clone();
@@ -2732,12 +3110,7 @@ pub fn start_character_training(
         // Repeats sized so photos x repeats x epochs lands near the step goal
         // with batch 1 (steps/epoch = photos x repeats).
         let repeats = (steps as usize / photo_count / 8).clamp(2, 40);
-        let toml = format!(
-            "[general]\nresolution = [768, 768]\ncaption_extension = \".txt\"\nbatch_size = 1\nenable_bucket = true\nbucket_no_upscale = false\n\n[[datasets]]\nimage_directory = '{}'\ncache_directory = '{}'\nnum_repeats = {}\n",
-            img_dir.to_string_lossy().replace('\\', "/"),
-            cache_dir.to_string_lossy().replace('\\', "/"),
-            repeats,
-        );
+        let toml = dataset_toml(&img_dir, &cache_dir, repeats, preset);
         let toml_path = set_dir.join("dataset.toml");
         if let Err(e) = fs::write(&toml_path, toml) {
             set_status(
@@ -2759,7 +3132,7 @@ pub fn start_character_training(
         // classes used to pass every disk check and die mid-run as a raw error
         // the UI could not explain, and the only cure we offered was a Set up
         // button that did not render once the environment counted as ready
-        // (bob80817 D#102 with a stale cu121 torch, sockenmonster with an
+        // (a user D#102 with a stale cu121 torch with an
         // install that stopped before the trainer package). The customer
         // should not need install instructions, so the run fixes its own
         // environment and carries on.
@@ -2860,7 +3233,7 @@ pub fn start_character_training(
 
         // The card's memory, before ten minutes of caching: below the
         // recipe's own floor the run dies in the first training step.
-        if let Some(msg) = vram_verdict(vram_mib, &precision) {
+        if let Some(msg) = vram_verdict(vram_mib, &precision, preset) {
             set_status(&run, "error", &msg);
             return;
         }
@@ -2909,7 +3282,7 @@ pub fn start_character_training(
             "src/musubi_tuner/zimage_cache_text_encoder_outputs.py",
             "--dataset_config", &toml_s,
             "--text_encoder", &te_s,
-            "--batch_size", "8",
+            "--batch_size", preset.text_encoder_batch(),
             "--fp8_llm",
         ]);
         apply_trainer_cache_env(&mut c2, &root, cache_customized);
@@ -2949,7 +3322,7 @@ pub fn start_character_training(
         }
         set_status(&run, "running", &format!("Step 3/4: Training ({steps} steps). This runs for a while, the counter follows every step."));
         let steps_s = steps.to_string();
-        let out_name = format!("char_{lora_name}_zimage");
+        let out_name = kind.output_name(&lora_name);
         let out_dir_s = out_dir.to_string_lossy().to_string();
         let mut c3 = training_command(&vpy_s, &repo, &TrainStep {
             dit: &dit_s,
@@ -2960,6 +3333,7 @@ pub fn start_character_training(
             out_dir: &out_dir_s,
             out_name: &out_name,
             precision,
+            preset,
         });
         apply_trainer_cache_env(&mut c3, &root, cache_customized);
         if let Some(d) = &device {
@@ -2999,15 +3373,14 @@ pub fn start_character_training(
             end_failed_run(&run, &e, vram_mib);
             return;
         }
+        // The set's photos now belong to this file: Edit hands them out as
+        // reference images of the character (character_files.rs). A style's
+        // pictures are no one's likeness, so they stay out of that.
+        if kind == TrainKind::Character {
+            crate::commands::character_files::write_training_marker(&set_dir, &final_path);
+        }
 
-        set_status(
-            &run,
-            "complete",
-            &format!(
-                "Character ready: {out_name}.safetensors is saved at {} and already in the LoRA picker on the Image tab. Put '{trigger}' in a prompt with the LoRA active.",
-                final_path.display(),
-            ),
-        );
+        set_status(&run, "complete", &kind.finished_line(&format!("{out_name}.safetensors"), &final_path, &trigger));
         info!("character training complete");
     });
 
@@ -3080,6 +3453,62 @@ mod tests {
     const RX_6700: &str = "AMD Radeon RX 6700 XT";
     const RX_5700: &str = "AMD Radeon RX 5700 XT";
     const AMD_APU: &str = "AMD Radeon(TM) Graphics";
+
+    /// GH #183: a trained LoRA goes into the configured shared `loras`
+    /// folder, and a base model downloaded there is found for the next run.
+    #[test]
+    fn training_reads_and_writes_the_configured_folders() {
+        let root = std::env::temp_dir().join(format!("lu-train-183-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let comfy = root.join("ComfyUI");
+        let shared = root.join("shared");
+        std::fs::create_dir_all(&comfy).unwrap();
+        std::fs::create_dir_all(shared.join("vae")).unwrap();
+        std::fs::write(shared.join("vae").join("ae.safetensors"), b"x").unwrap();
+        // Without a config: the instance folder, as before.
+        assert_eq!(super::comfy_loras_dir(&comfy), comfy.join("models").join("loras"));
+        std::fs::write(
+            comfy.join("extra_model_paths.yaml"),
+            format!("s:\n  base_path: '{}'\n  loras: loras\n  vae: vae\n", shared.display()),
+        )
+        .unwrap();
+        assert_eq!(super::comfy_loras_dir(&comfy), shared.join("loras"));
+        let trainer_root = root.join("trainer");
+        assert_eq!(
+            super::resolve_base_file(&trainer_root, Some(&comfy), None, &["ae.safetensors"], "vae"),
+            Some(shared.join("vae").join("ae.safetensors")),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Discord 25.10.2026 (Comfy Desktop): the base files sat in a folder the
+    /// running ComfyUI scans and the downloader writes to, outside
+    /// `<ComfyUI>/models` and outside any config LU reads. The panel called all
+    /// three missing and the download answered "exists" for each.
+    #[test]
+    fn base_files_in_a_folder_the_running_comfyui_reports_are_found() {
+        let root = std::env::temp_dir().join(format!("lu-train-engine-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let comfy = root.join("ComfyUI-Installs").join("ComfyUI").join("ComfyUI");
+        let shared = root.join("shared-models");
+        std::fs::create_dir_all(comfy.join("models").join("text_encoders")).unwrap();
+        std::fs::create_dir_all(shared.join("text_encoders")).unwrap();
+        std::fs::write(shared.join("text_encoders").join("qwen_3_4b.safetensors"), b"x").unwrap();
+        let trainer_root = root.join("trainer");
+        // What LU knew before: nothing in the instance folder, no config.
+        assert_eq!(super::resolve_base_file(&trainer_root, Some(&comfy), None, super::TE_CANDIDATES, "text_encoders"), None);
+        let engine = crate::commands::comfy_folders::ComfyFolders::parse(&serde_json::json!({
+            "text_encoders": [
+                comfy.join("models").join("text_encoders").to_string_lossy(),
+                shared.join("text_encoders").to_string_lossy(),
+            ],
+        }));
+        assert_eq!(
+            super::resolve_base_file(&trainer_root, Some(&comfy), Some(&engine), super::TE_CANDIDATES, "text_encoders"),
+            Some(shared.join("text_encoders").join("qwen_3_4b.safetensors")),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// Cancelling a training run has to reach the process that actually holds
     /// the card, not just the launcher.
@@ -3171,7 +3600,7 @@ mod tests {
     #[test]
     fn an_amd_box_gets_the_rocm_wheels_on_linux_and_an_honest_no_on_windows() {
         use super::{trainer_torch_plan, TorchPlan};
-        // numbrain and lapbo: no NVIDIA card, so the old probe answered None
+        // A user: no NVIDIA card, so the old probe answered None
         // and the plan was the same cu121 a machine with no GPU at all gets.
         match trainer_torch_plan(false, None, true, &[RX_7900], "linux") {
             TorchPlan::Wheels { candidates, note } => {
@@ -3328,7 +3757,7 @@ mod tests {
     #[test]
     fn preflight_names_a_torch_that_cannot_reach_the_amd_card() {
         use super::{preflight_verdict, Preflight};
-        // The CUDA wheels the old plan put on numbrain's box: torch imports,
+        // The CUDA wheels the old plan put on a user's box: torch imports,
         // reports no device, and every check passed. The run then walked into
         // step 1 and died there with the training script's own traceback.
         let out = "TORCH_OK 2.3.1+cu121\nCUDA 0\nMUSUBI_OK\n";
@@ -3346,7 +3775,7 @@ mod tests {
     #[test]
     fn a_rocm_arch_list_is_not_read_as_cuda_kernel_numbers() {
         use super::{preflight_verdict, Preflight};
-        // A ROCm build lists gfx names, not sm names, and numbrain's RX 9070
+        // A ROCm build lists gfx names, not sm names, and a user's RX 9070
         // XT is gfx1201. This is the environment the Linux branch of the plan
         // now creates, so the check has to survive it.
         let rocm = "TORCH_OK 2.9.1+rocm6.4\nCUDA 1\nCAP 12 0\nARCHS gfx1030 gfx1100 gfx1201\nMUSUBI_OK\n";
@@ -3457,7 +3886,7 @@ mod tests {
         assert!(msg.contains("Cloud mode"), "names the way out: {msg}");
     }
 
-    /// Tesla P100, sdrairsoft's card: compute capability 6.0. Runde 2 left
+    /// Tesla P100, a user's card: compute capability 6.0. Runde 2 left
     /// this card unrefused (bitsandbytes' own SM60 floor); Runde 3's review
     /// found that wrong, since bf16 is hardcoded in the text encoder cache
     /// step regardless of the optimizer. This is the concrete melder case
@@ -3484,7 +3913,7 @@ mod tests {
     #[test]
     fn preflight_catches_the_trainer_package_a_healthy_torch_hides() {
         use super::{preflight_verdict, Preflight};
-        // sockenmonster: the install died between torch and `pip install -e .`.
+        // A user: the install died between torch and `pip install -e .`.
         // torch imports, CUDA is fine, and the run still cannot start.
         let out = "TORCH_OK 2.7.0+cu128\nCAP 8 6\nARCHS sm_80 sm_86 sm_90\n";
         let v = preflight_verdict(true, out, "", Some("NVIDIA"));
@@ -3508,7 +3937,7 @@ mod tests {
     fn negative_control_the_old_verdict_called_the_package_gap_healthy() {
         use super::{preflight_verdict, Preflight};
         // The old rule was "torch imports and the kernels fit, therefore ready".
-        // Replayed on sockenmonster's environment it says ready; the new one
+        // Replayed on a user's environment it says ready; the new one
         // does not. This is the whole of the bug in two lines.
         let out = "TORCH_OK 2.7.0+cu128\nCAP 8 6\nARCHS sm_80 sm_86 sm_90\n";
         let old_rule_says_ready = out.contains("TORCH_OK");
@@ -3568,7 +3997,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("lu-trainer-torch-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
 
-        // venv exists, torch does not: the Sockenmonster case.
+        // venv exists, torch does not: the case.
         fs::create_dir_all(root.join("venv").join("lib").join("python3.11").join("site-packages")).unwrap();
         assert!(!torch_installed(&root));
 
@@ -3851,7 +4280,7 @@ mod tests {
     fn a_leading_tilde_is_never_accepted() {
         assert!(super::starts_with_tilde("~/LU-Trainer"));
         assert!(super::starts_with_tilde("~"));
-        assert!(!super::starts_with_tilde("/home/dave/LU-Trainer"), "an absolute path must not be flagged");
+        assert!(!super::starts_with_tilde("/home/alex/LU-Trainer"), "an absolute path must not be flagged");
         assert!(!super::starts_with_tilde("D:\\LU-Trainer"), "a drive path must not be flagged");
     }
 
@@ -3887,11 +4316,28 @@ mod tests {
     fn validate_trainer_root_candidate_accepts_a_real_absolute_folder() {
         let root = std::env::temp_dir().join(format!("lu-trainer-validate-ok-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        let accepted = super::validate_trainer_root_candidate(&root.to_string_lossy()).expect("a real, writable folder must be accepted");
+        // Room is given, not measured: a build machine with a nearly full
+        // drive refused this folder for a reason the test is not about.
+        let roomy = |_: &Path| Some(u64::MAX);
+        let accepted = super::validate_trainer_root_candidate_with(&root.to_string_lossy(), roomy)
+            .expect("a real, writable folder must be accepted");
         assert_eq!(accepted, root);
         assert!(root.is_dir(), "the folder must exist after validation");
         assert!(!root.join(".lu-write-check").exists(), "the write probe must be cleaned up, not left behind");
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A drive without room is refused before anything is created, so the
+    /// rejection leaves no empty folder behind.
+    #[test]
+    fn validate_trainer_root_candidate_refuses_a_full_drive_and_creates_nothing() {
+        let root = std::env::temp_dir().join(format!("lu-trainer-validate-full-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let full = |_: &Path| Some(1024 * 1024 * 1024);
+        let err = super::validate_trainer_root_candidate_with(&root.to_string_lossy(), full)
+            .expect_err("a drive with 1 GB free must be refused");
+        assert!(err.contains("1.0 GB free"), "the message must name the room that is there: {err}");
+        assert!(!root.exists(), "a refusal on room must not leave a folder behind");
     }
 
     /// BLOCKER 2, negative control on the write-then-check order: pointing
@@ -4214,6 +4660,7 @@ mod tests {
                 note_severity: None,
                 arch: None,
                 uuid: None,
+                shared_memory_mib: None,
             },
             crate::commands::gpu::DetectedGpu {
                 index: 1,
@@ -4225,6 +4672,7 @@ mod tests {
                 note_severity: None,
                 arch: None,
                 uuid: None,
+                shared_memory_mib: None,
             },
         ];
         let selection = crate::commands::gpu::GpuSelection { vendor: "nvidia".into(), indices: vec![1] };
@@ -4249,6 +4697,7 @@ mod tests {
                 note_severity: None,
                 arch: None,
                 uuid: None,
+                shared_memory_mib: None,
             },
             crate::commands::gpu::DetectedGpu {
                 index: 1,
@@ -4260,6 +4709,7 @@ mod tests {
                 note_severity: None,
                 arch: None,
                 uuid: None,
+                shared_memory_mib: None,
             },
         ];
         let selection = crate::commands::gpu::GpuSelection::default();
@@ -4285,6 +4735,7 @@ mod tests {
                 note_severity: None,
                 arch: None,
                 uuid: Some("GPU-aaaa".into()),
+                shared_memory_mib: None,
             },
             crate::commands::gpu::DetectedGpu {
                 index: 1,
@@ -4296,6 +4747,7 @@ mod tests {
                 note_severity: None,
                 arch: None,
                 uuid: Some("GPU-bbbb".into()),
+                shared_memory_mib: None,
             },
         ];
         let selection = crate::commands::gpu::GpuSelection::default();
@@ -4319,6 +4771,7 @@ mod tests {
             note_severity: None,
             arch: None,
             uuid: Some("GPU-cccc".into()),
+            shared_memory_mib: None,
         }];
         let selection = crate::commands::gpu::GpuSelection { vendor: "nvidia".into(), indices: vec![0] };
         let choice = super::choose_trainer_gpu(&cards, &selection, None).expect("a card was chosen");
@@ -4341,6 +4794,7 @@ mod tests {
                 note_severity: None,
                 arch: None,
                 uuid: None,
+                shared_memory_mib: None,
             },
             crate::commands::gpu::DetectedGpu {
                 index: 1,
@@ -4352,6 +4806,7 @@ mod tests {
                 note_severity: None,
                 arch: None,
                 uuid: None,
+                shared_memory_mib: None,
             },
         ];
         let selection = crate::commands::gpu::GpuSelection::default();
@@ -4397,6 +4852,7 @@ mod tests {
                 out_dir: "/t/out",
                 out_name: "char_dave_zimage",
                 precision: super::train_precision_for_capability(Some((8, 9))),
+                preset: super::TrainPreset::Standard,
             },
         );
         super::trainer_child_env(&mut cmd);
@@ -4428,6 +4884,7 @@ mod tests {
                 out_dir: "/t/out",
                 out_name: "char_dave_zimage",
                 precision: super::train_precision_for_capability(Some((8, 9))),
+                preset: super::TrainPreset::Standard,
             },
         );
         assert_eq!(
@@ -4490,7 +4947,7 @@ mod tests {
         assert_eq!(unknown.optimizer_type, "AdamW");
     }
 
-    /// Positive control: sdrairsoft's Tesla P100 (compute capability 6.0)
+    /// Positive control: a user's Tesla P100 (compute capability 6.0)
     /// must never reach `training_command` at all any more; it is refused
     /// by `capability_floor_refusal` before the trainer environment is even
     /// installed. See `capability_floor_now_refuses_pascal_the_concrete_melder_case`.
@@ -4517,6 +4974,7 @@ mod tests {
                 out_dir: "/t/out",
                 out_name: "char_dave_zimage",
                 precision: super::train_precision_for_capability(Some((8, 6))),
+                preset: super::TrainPreset::Standard,
             },
         );
         let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
@@ -4638,7 +5096,7 @@ mod shutdown_tests {
         assert_eq!(venv_create_args(VenvAction::Keep), ["-m", "venv"]);
     }
 
-    // ── ticket 0004: the venv from the wrong Python (sockenmonster) ─────────
+    // ── ticket 0004: the venv from the wrong Python ─────────
     //
     // His machine has Python 3.14.6 and nothing older. LU used it for the
     // venv, torch from cu128 installed fine, and step 4 died on "Package
@@ -4650,7 +5108,7 @@ mod shutdown_tests {
     #[test]
     fn a_venv_from_a_python_the_trainer_cannot_use_is_rebuilt_not_kept() {
         use super::{venv_action, VenvAction};
-        assert_eq!(venv_action(true, Some("3.14.6"), true), VenvAction::Rebuild, "sockenmonster's venv");
+        assert_eq!(venv_action(true, Some("3.14.6"), true), VenvAction::Rebuild, "a user's venv");
         assert_eq!(venv_action(true, Some("3.13.5"), true), VenvAction::Rebuild, "the box's newest Python");
         assert_eq!(venv_action(true, Some("3.9.13"), true), VenvAction::Rebuild, "too old is as wrong as too new");
         for v in ["3.10.6", "3.11.7", "3.12.1"] {
@@ -4661,7 +5119,7 @@ mod shutdown_tests {
     /// K4, nachgebessert nach dem Opus-Review: before this, `arch_ok` did not
     /// exist and a venv built from a 32-bit or ARM64 Python 3.11 -- a version
     /// `trainer_supports_python` accepts -- always read Keep on this Keep
-    /// path, so "delete the 3.11 environment" (gekiritz was told this) had
+    /// path, so "delete the 3.11 environment" (a user was told this) had
     /// nothing to do here: the NEXT setup run rebuilt with the same bad
     /// interpreter, because nothing on the Keep path ever asked its
     /// architecture.
@@ -4697,7 +5155,7 @@ mod shutdown_tests {
         // so a working venv is never rebuilt because a Python appeared.
         let got = choose_trainer_python(&[pair("C:\\py311", "3.11.7"), pair("C:\\py312", "3.12.1")]);
         assert_eq!(got, Some(pair("C:\\py311", "3.11.7")));
-        // sockenmonster: the default is 3.14, and there is a 3.10 and a 3.12
+        // A user: the default is 3.14, and there is a 3.10 and a 3.12
         // further down the list. The newest that fits wins.
         let got = choose_trainer_python(&[
             pair("C:\\py314", "3.14.6"),
@@ -4715,23 +5173,24 @@ mod shutdown_tests {
     fn when_no_python_fits_the_message_names_what_is_there_and_where_to_get_one() {
         use super::{install_failed_message, no_trainer_python_message, repair_aborted_message, Preflight};
         let found = vec![("C:\\Python314\\python.exe".to_string(), "3.14.6".to_string())];
-        let win = no_trainer_python_message(&found, "windows", true);
+        let win = no_trainer_python_message(&found, "windows");
         assert!(win.contains("3.10, 3.11 or 3.12"), "{win}");
         assert!(win.contains("has Python 3.14.6"), "{win}");
         // K4: the path is what tells two same-version Pythons apart.
         assert!(win.contains("at C:\\Python314\\python.exe"), "{win}");
-        assert!(win.contains("winget") && win.contains("python.org/downloads/windows"), "{win}");
+        assert!(win.contains("python.org/downloads/windows"), "{win}");
+        // Since 3.0.7 LU sets up its own Python instead of running winget;
+        // this sentence is only reached where it has none for the system.
+        assert!(!win.contains("winget"), "{win}");
         assert!(win.contains("Set up trainer"), "{win}");
         // Settings > Install Python short-circuits as soon as ANY Python exists,
         // which on this machine is the one that cannot help.
         assert!(!win.contains("Settings"), "{win}");
-        let win_no_try = no_trainer_python_message(&found, "windows", false);
-        assert!(!win_no_try.contains("winget"), "{win_no_try}");
-        let linux = no_trainer_python_message(&found, "linux", false);
+        let linux = no_trainer_python_message(&found, "linux");
         assert!(linux.contains("package manager") && !linux.contains("python.org"), "{linux}");
-        let mac = no_trainer_python_message(&found, "macos", false);
+        let mac = no_trainer_python_message(&found, "macos");
         assert!(mac.contains("brew install python@3.12"), "{mac}");
-        let none = no_trainer_python_message(&[], "windows", true);
+        let none = no_trainer_python_message(&[], "windows");
         assert!(none.contains("no Python that starts"), "{none}");
         // It carries its own way out, so neither wrapper may bury it.
         assert_eq!(install_failed_message(&win), win);
@@ -4760,13 +5219,12 @@ mod shutdown_tests {
     /// fixture.
     #[test]
     fn presence_alone_never_counts_as_a_working_interpreter() {
-        use crate::python::python_version;
         let dir = crate::os_paths::test_dir("trainer-venv-probe");
         let fake = dir.join("python-not-an-interpreter");
         std::fs::write(&fake, b"pyvenv.cfg points at a home that is gone").unwrap();
         assert!(fake.exists(), "the file is there, which is all the old check asked");
-        assert_eq!(python_version(&fake.to_string_lossy()), None, "but it does not run, which is the question");
-        assert_eq!(python_version(&dir.join("nothing-here").to_string_lossy()), None);
+        assert!(super::trainer_python_probe(&fake.to_string_lossy()).is_err(), "but it does not run, which is the question");
+        assert!(super::trainer_python_probe(&dir.join("nothing-here").to_string_lossy()).is_err());
     }
 
     #[test]
@@ -4826,7 +5284,7 @@ mod shutdown_tests {
         roh.push_str("ERROR: Could not install packages due to an OSError: [Errno 28] No space left on device\n");
         for i in 0..12 {
             roh.push_str(&format!(
-                "Moving to c:\\users\\ddrob\\musubi\\venv\\lib\\site-packages\\torch\\lib\\part{i}.dll\n"
+                "Moving to c:\\users\\alice\\musubi\\venv\\lib\\site-packages\\torch\\lib\\part{i}.dll\n"
             ));
         }
         let msg = repair_aborted_message(&Preflight::TorchBroken("No module named 'torch'".into()), &roh);
@@ -4867,7 +5325,7 @@ mod shutdown_tests {
     #[test]
     fn an_error_that_already_names_its_button_is_left_alone() {
         use super::{install_failed_message, no_trainer_python_message, repair_aborted_message, Preflight};
-        let eigen = no_trainer_python_message(&[("C:\\Python314\\python.exe".to_string(), "3.14.6".to_string())], "windows", false);
+        let eigen = no_trainer_python_message(&[("C:\\Python314\\python.exe".to_string(), "3.14.6".to_string())], "windows");
         assert_eq!(install_failed_message(&eigen), eigen);
         assert_eq!(
             repair_aborted_message(&Preflight::TorchBroken("x".into()), &eigen),
@@ -4911,8 +5369,8 @@ mod shutdown_tests {
 
     // ── A2 stage one: the setup step told everyone to check the network ────
     //
-    // aikabatzu (Discord #general, 2026-08-27), confirmed by aldrich_ironhart
-    // and by Z0mbieK in GH #121 on 2026-08-29: "Setting up the trainer
+    // A user (Discord #general, 2026-08-27), confirmed by a user
+    // and by a user in GH #121 on 2026-08-29: "Setting up the trainer
     // environment failed. Check that you are online" while online, with the
     // firewall off. Every failure class ended in that one sentence, because
     // there was only one sentence.
@@ -5056,6 +5514,24 @@ mod shutdown_tests {
     }
 
     #[test]
+    fn missing_bases_names_only_the_absent_files_with_their_size() {
+        // Box run: only z_image_bf16 was missing, the panel still said 19 GB.
+        let only_dit = super::missing_bases([false, true, true]);
+        assert_eq!(only_dit.len(), 1);
+        assert_eq!(only_dit[0]["filename"], "z_image_bf16.safetensors");
+        assert_eq!(only_dit[0]["subfolder"], "diffusion_models");
+        assert_eq!(only_dit[0]["bytes"], 12_309_866_400u64);
+        assert!(super::missing_bases([true, true, true]).is_empty());
+        let all = super::missing_bases([false, false, false]);
+        let names: Vec<&str> = all.iter().map(|v| v["filename"].as_str().unwrap()).collect();
+        assert_eq!(names, ["z_image_bf16.safetensors", "qwen_3_4b.safetensors", "ae.safetensors"]);
+        // Each download target is one the status itself would resolve.
+        assert_eq!(super::BASE_DOWNLOADS[0].0, super::DIT_CANDIDATES[0]);
+        assert_eq!(super::BASE_DOWNLOADS[1].0, super::TE_CANDIDATES[0]);
+        assert_eq!(super::BASE_DOWNLOADS[2].0, super::VAE_CANDIDATES[0]);
+    }
+
+    #[test]
     fn a_failed_repair_makes_the_environment_report_as_not_ready() {
         // The button the message points at only renders on envReady false, and
         // the file checks alone cannot see a broken interpreter or a torch
@@ -5088,7 +5564,7 @@ mod shutdown_tests {
 
 // ── the whole journey, ticket 0004 follow-up (06.09.2026) ───────────────────
 //
-// David's line: the app cannot afford to hand anyone instructions; from the
+// The owner's line: the app cannot afford to hand anyone instructions; from the
 // first error to a finished training, everything has to happen in the app.
 // These pin the pieces that replaced a pointer with an action: no git needed,
 // room checked before the first byte, a dropped download retried, the Visual
@@ -5205,10 +5681,10 @@ mod journey_tests {
         assert_eq!(parse_vram_mib("TORCH_OK 2.5.1\nCUDA 1\nCAP 8 6\nARCHS sm_86\nVRAM_MIB 12288\n"), Some(12288));
         assert_eq!(parse_vram_mib("TORCH_OK 2.5.1\nCUDA 0\n"), None);
         let fp8_on = train_precision_for_capability(Some((8, 6)));
-        assert!(vram_verdict(Some(12288), &fp8_on).is_none(), "the box's 12 GB card trains");
-        assert!(vram_verdict(Some(16 * 1024), &fp8_on).is_none());
-        assert!(vram_verdict(None, &fp8_on).is_none(), "no card reported is the processor case, handled elsewhere");
-        let small = vram_verdict(Some(8 * 1024), &fp8_on).expect("8 GB is below the floor");
+        assert!(vram_verdict(Some(12288), &fp8_on, TrainPreset::Standard).is_none(), "the box's 12 GB card trains");
+        assert!(vram_verdict(Some(16 * 1024), &fp8_on, TrainPreset::Standard).is_none());
+        assert!(vram_verdict(None, &fp8_on, TrainPreset::Standard).is_none(), "no card reported is the processor case, handled elsewhere");
+        let small = vram_verdict(Some(8 * 1024), &fp8_on, TrainPreset::Standard).expect("8 GB is below the floor");
         assert!(small.contains("8 GB"), "{small}");
         assert!(small.contains("12 GB"), "{small}");
         assert!(small.contains("Cloud mode"), "names the way that works: {small}");
@@ -5226,8 +5702,8 @@ mod journey_tests {
         assert!(fp8_on.fp8);
         assert!(!fp8_off.fp8);
         let between = 16 * 1024; // 16 GB: above the fp8 floor, below the no-fp8 one.
-        assert!(vram_verdict(Some(between), &fp8_on).is_none(), "16 GB trains fine with fp8 on");
-        let msg = vram_verdict(Some(between), &fp8_off).expect("16 GB is below the no-fp8 floor");
+        assert!(vram_verdict(Some(between), &fp8_on, TrainPreset::Standard).is_none(), "16 GB trains fine with fp8 on");
+        let msg = vram_verdict(Some(between), &fp8_off, TrainPreset::Standard).expect("16 GB is below the no-fp8 floor");
         assert!(msg.contains("16 GB"), "{msg}");
         assert!(msg.contains("24 GB"), "names the higher floor: {msg}");
     }
@@ -5309,7 +5785,10 @@ mod journey_tests {
         assert!(body.contains("winget_install(\"Microsoft.VCRedist.2015+.x64\", false"), "the runtime is installed, not linked");
         let base = &src[src.find("fn trainer_base_python(").expect("base")..];
         let base = &base[..base.find("fn musubi_source_marker").expect("end of base")];
-        assert!(base.contains("winget_install(\"Python.Python.3.12\", true"), "Python comes through the quiet winget path");
+        // 3.0.7: no winget for Python any more, LU's own Python through the
+        // function ComfyUI uses too, on every system the pin carries.
+        assert!(base.contains("crate::commands::install::machine_or_own("), "Python comes through the shared own-Python path");
+        assert!(!base.contains("winget_install(\"Python.Python.3.12\""), "the second, Windows-only way is gone");
         let code = &src[..src.find("#[cfg(test)]").expect("tests start")];
         assert!(!code.contains("run_streamed(winget"), "winget lines never stream into the note");
     }
@@ -5317,7 +5796,7 @@ mod journey_tests {
     /// The interpreter is decided BEFORE the setup spends anything. A machine
     /// with only Python 3.13 or 3.14 has to be told so in one sentence, not
     /// after an archive, a venv and 2.5 GB of wheels (ticket 0004,
-    /// sockenmonster 2026-09-05, whose setup died in pip's step 4 with
+    /// A user 2026-09-05, whose setup died in pip's step 4 with
     /// "requires a different Python").
     #[test]
     fn the_python_rule_is_enforced_before_anything_is_downloaded() {
@@ -5329,12 +5808,12 @@ mod journey_tests {
             let at = body.find(later).unwrap_or_else(|| panic!("{later} is gone from the setup"));
             assert!(gate < at, "{later} runs before the Python rule is enforced");
         }
-        assert!(body.contains("trainer_base_python(python_bin, state, status_kind, cancel, pid_slot)?"),
+        assert!(body.contains("trainer_base_python(python_bin, state, status_kind, cancel)?"),
             "a Python the trainer cannot use has to end the setup, not warn");
         // The sentence names the versions, and the range is the one musubi and
         // the wheels agree on.
         assert_eq!(TRAINER_PYTHON_RANGE, "3.10, 3.11 or 3.12");
-        let msg = no_trainer_python_message(&[("C:\\Python314\\python.exe".to_string(), "3.14.6".to_string())], "windows", false);
+        let msg = no_trainer_python_message(&[("C:\\Python314\\python.exe".to_string(), "3.14.6".to_string())], "windows");
         assert!(msg.contains("3.10, 3.11 or 3.12"), "{msg}");
         assert!(msg.contains("3.14.6"), "the message names what is on the machine: {msg}");
         assert!(!trainer_supports_python("3.13.0") && !trainer_supports_python("3.14.6"));
@@ -5393,7 +5872,7 @@ mod progress_line_tests {
         let body = &body[..body.find("let exit = loop").expect("wait loop")];
         let reader = &body[body.find("for_each_progress_line(stream").expect("reader")..];
         let gate = reader.find("if cancel.load(Ordering::SeqCst)").expect("the reader checks the cancel flag");
-        let log = reader.find("push_log(&run, trimmed)").expect("the reader logs");
+        let log = reader.find("push_child_line(&run, trimmed)").expect("the reader logs");
         assert!(gate < log, "the cancel check comes before anything reaches the log");
     }
 
@@ -5457,5 +5936,341 @@ mod git_preflight_call_site_guard {
             "is_git_present() (byte {at_probe}) must be checked before building \
              the Linux hint (byte {at_hint}), not the other way round"
         );
+    }
+}
+
+// ── 3.0.8 D28/D20: per photo captions and the Low VRAM recipe ───────────────
+#[cfg(test)]
+mod captions_and_low_vram_tests {
+    use super::*;
+
+    fn temp_set(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lu-trainer-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn args_for(preset: TrainPreset) -> Vec<String> {
+        let cmd = training_command(
+            "/tmp/venv/bin/python",
+            Path::new("/tmp/musubi-tuner"),
+            &TrainStep {
+                dit: "/m/dit.safetensors",
+                vae: "/m/ae.safetensors",
+                text_encoder: "/m/qwen.safetensors",
+                dataset: "/t/set.toml",
+                steps: "1200",
+                out_dir: "/t/out",
+                out_name: "char_dave_zimage",
+                precision: train_precision_for_capability(Some((8, 6))),
+                preset,
+            },
+        );
+        cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
+    }
+
+    fn value_of<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).map(String::as_str)
+    }
+
+    #[test]
+    fn a_photo_and_its_own_caption_land_side_by_side_as_musubi_reads_them() {
+        let dir = temp_set("caption");
+        let staged = stage_image_into(&dir, "beach day.jpg", b"JPEGDATA", "davechar, a photo of davechar, red jacket, short hair, at the beach")
+            .expect("staged");
+        assert_eq!(staged, "beach_day.jpg");
+        assert_eq!(fs::read(dir.join("beach_day.jpg")).unwrap(), b"JPEGDATA");
+        // Same stem, `.txt`: what `caption_extension = ".txt"` makes musubi open.
+        assert_eq!(
+            fs::read_to_string(dir.join("beach_day.txt")).unwrap(),
+            "davechar, a photo of davechar, red jacket, short hair, at the beach",
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_caption_is_one_line_without_stray_whitespace_and_capped() {
+        assert_eq!(caption_file_text("  davechar,\n red jacket\r\n\tbeach  "), "davechar, red jacket beach");
+        assert_eq!(caption_file_text("davechar, a photo of davechar"), "davechar, a photo of davechar");
+        let long = format!("davechar, {}", "word ".repeat(400));
+        let capped = caption_file_text(&long);
+        assert!(capped.chars().count() <= 600, "{}", capped.len());
+        assert!(capped.starts_with("davechar, "), "the trigger word stays in front");
+        assert!(!capped.ends_with(' '));
+    }
+
+    #[test]
+    fn staging_still_refuses_what_it_refused_before() {
+        let dir = temp_set("refuse");
+        assert!(stage_image_into(&dir, "x.gif", b"GIF", "c").is_err());
+        assert!(stage_image_into(&dir, "x.png", b"", "c").is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_dataset_config_carries_the_presets_resolution_and_the_txt_captions() {
+        let img = Path::new("/t/set/img");
+        let cache = Path::new("/t/set/cache");
+        let normal = dataset_toml(img, cache, 10, TrainPreset::Standard);
+        assert!(normal.contains("resolution = [768, 768]"), "{normal}");
+        assert!(normal.contains("caption_extension = \".txt\""), "{normal}");
+        assert!(normal.contains("num_repeats = 10"), "{normal}");
+        let low = dataset_toml(img, cache, 10, TrainPreset::LowVram);
+        assert!(low.contains("resolution = [512, 512]"), "{low}");
+        assert!(low.contains("caption_extension = \".txt\""), "{low}");
+    }
+
+    #[test]
+    fn the_normal_recipe_is_unchanged() {
+        let args = args_for(TrainPreset::Standard);
+        assert_eq!(value_of(&args, "--blocks_to_swap"), Some("16"));
+        assert_eq!(value_of(&args, "--network_dim"), Some("32"));
+        assert_eq!(value_of(&args, "--network_alpha"), Some("32"));
+        assert!(!args.iter().any(|a| a == "--gradient_checkpointing_cpu_offload"), "{args:?}");
+        assert!(args.iter().any(|a| a == "--gradient_checkpointing"));
+        assert!(args.iter().any(|a| a == "--fp8_base") && args.iter().any(|a| a == "--fp8_scaled"));
+    }
+
+    #[test]
+    fn the_low_vram_recipe_swaps_the_most_blocks_z_image_allows_and_offloads_activations() {
+        let args = args_for(TrainPreset::LowVram);
+        // 28 = num_blocks (30) - 2, the assert in zimage_model.py enable_block_swap.
+        assert_eq!(value_of(&args, "--blocks_to_swap"), Some("28"));
+        assert_eq!(value_of(&args, "--network_dim"), Some("16"));
+        assert_eq!(value_of(&args, "--network_alpha"), Some("16"));
+        assert!(args.iter().any(|a| a == "--gradient_checkpointing_cpu_offload"), "{args:?}");
+        // The offload only works on top of gradient checkpointing.
+        assert!(args.iter().any(|a| a == "--gradient_checkpointing"));
+        assert!(args.iter().any(|a| a == "--fp8_base") && args.iter().any(|a| a == "--fp8_scaled"));
+        // Nothing beyond what musubi-tuner v0.3.4 declares for this script.
+        let known = [
+            "--dit", "--vae", "--text_encoder", "--dataset_config", "--sdpa", "--mixed_precision", "--fp8_base",
+            "--fp8_scaled", "--blocks_to_swap", "--timestep_sampling", "--weighting_scheme", "--discrete_flow_shift",
+            "--optimizer_type", "--learning_rate", "--gradient_checkpointing", "--gradient_checkpointing_cpu_offload",
+            "--max_data_loader_n_workers", "--persistent_data_loader_workers", "--network_module", "--network_dim",
+            "--network_alpha", "--max_train_steps", "--save_precision", "--seed", "--output_dir", "--output_name",
+        ];
+        for a in args.iter().filter(|a| a.starts_with("--")) {
+            assert!(known.contains(&a.as_str()), "{a} is not an argument this recipe has evidence for");
+        }
+    }
+
+    #[test]
+    fn the_preset_arrives_as_text_and_anything_unknown_is_normal() {
+        assert_eq!(TrainPreset::from_arg(Some("low-vram")), TrainPreset::LowVram);
+        assert_eq!(TrainPreset::from_arg(Some(" low-vram ")), TrainPreset::LowVram);
+        assert_eq!(TrainPreset::from_arg(Some("standard")), TrainPreset::Standard);
+        assert_eq!(TrainPreset::from_arg(Some("ultra")), TrainPreset::Standard);
+        assert_eq!(TrainPreset::from_arg(None), TrainPreset::Standard, "an older frontend sends nothing");
+        assert_eq!(TrainPreset::LowVram.text_encoder_batch(), "1");
+        assert_eq!(TrainPreset::Standard.text_encoder_batch(), "8");
+    }
+
+    #[test]
+    fn an_eight_gigabyte_card_is_pointed_at_low_vram_and_then_let_in() {
+        let fp8 = train_precision_for_capability(Some((8, 6)));
+        // An 8 GB card reports a little under 8192 MiB.
+        let eight = 8188;
+        let normal = vram_verdict(Some(eight), &fp8, TrainPreset::Standard).expect("Normal refuses 8 GB");
+        assert!(normal.contains("Low VRAM"), "{normal}");
+        assert!(normal.contains("Cloud mode"), "{normal}");
+        assert!(vram_verdict(Some(eight), &fp8, TrainPreset::LowVram).is_none(), "Low VRAM takes an 8 GB card");
+        // The 12 GB box trains with both.
+        assert!(vram_verdict(Some(12288), &fp8, TrainPreset::LowVram).is_none());
+    }
+
+    #[test]
+    fn a_six_gigabyte_card_stays_out_even_with_low_vram() {
+        let fp8 = train_precision_for_capability(Some((8, 6)));
+        let msg = vram_verdict(Some(6 * 1024), &fp8, TrainPreset::LowVram).expect("6 GB is below the Low VRAM floor");
+        assert!(msg.contains("6 GB"), "{msg}");
+        assert!(msg.contains("Cloud mode"), "{msg}");
+        let normal = vram_verdict(Some(6 * 1024), &fp8, TrainPreset::Standard).expect("and below Normal");
+        assert!(!normal.contains("Switch the trainer to Low VRAM"), "Low VRAM would not fit either: {normal}");
+    }
+
+    #[test]
+    fn without_fp8_low_vram_has_no_lower_floor_of_its_own() {
+        let no_fp8 = train_precision_for_capability(None);
+        assert_eq!(vram_floor_mib(&no_fp8, TrainPreset::LowVram), vram_floor_mib(&no_fp8, TrainPreset::Standard));
+        assert_eq!(vram_floor_mib(&train_precision_for_capability(Some((8, 6))), TrainPreset::LowVram), 7680);
+    }
+
+    #[test]
+    fn the_run_threads_the_preset_into_every_place_that_depends_on_it() {
+        let src = include_str!("trainer.rs");
+        let run = &src[src.find("pub fn start_character_training").expect("start fn")..];
+        let run = &run[..run.find("pub fn character_training_status").expect("end of run")];
+        assert!(run.contains("TrainPreset::from_arg(preset.as_deref())"));
+        assert!(run.contains("dataset_toml(&img_dir, &cache_dir, repeats, preset)"));
+        assert!(run.contains("vram_verdict(vram_mib, &precision, preset)"));
+        assert!(run.contains("preset.text_encoder_batch()"));
+        assert!(run.contains("            preset,\n        });"), "the training step gets the preset");
+    }
+
+    #[test]
+    fn a_style_run_writes_a_style_file_and_an_older_frontend_trains_a_character() {
+        assert_eq!(TrainKind::from_arg(Some("style")), TrainKind::Style);
+        assert_eq!(TrainKind::from_arg(Some(" style ")), TrainKind::Style);
+        assert_eq!(TrainKind::from_arg(Some("character")), TrainKind::Character);
+        assert_eq!(TrainKind::from_arg(Some("pose")), TrainKind::Character);
+        assert_eq!(TrainKind::from_arg(None), TrainKind::Character, "an older frontend sends nothing");
+        assert_eq!(TrainKind::Character.output_name("anna"), "char_anna_zimage");
+        assert_eq!(TrainKind::Style.output_name("inkwash"), "style_inkwash_zimage");
+        // The Use shelf and the Edit references read `char_..._zimage`; a style
+        // must not look like one (character_files.rs `trigger_of`).
+        assert!(crate::commands::character_files::trigger_of("style_inkwash_zimage.safetensors").is_none());
+        let style = TrainKind::Style.finished_line("style_inkwash_zimage.safetensors", Path::new("/l/x"), "inkwash");
+        assert!(style.starts_with("Style ready"), "{style}");
+        assert!(!style.contains("Character"), "{style}");
+    }
+
+    #[test]
+    fn the_run_threads_the_kind_into_the_file_name_and_keeps_a_style_out_of_the_references() {
+        let src = include_str!("trainer.rs");
+        let run = &src[src.find("pub fn start_character_training").expect("start fn")..];
+        let run = &run[..run.find("pub fn character_training_status").expect("end of run")];
+        assert!(run.contains("TrainKind::from_arg(kind.as_deref())"));
+        assert!(run.contains("let out_name = kind.output_name(&lora_name);"));
+        assert!(!run.contains("format!(\"char_{lora_name}_zimage\")"));
+        let marker = run.find("write_training_marker").expect("the marker call");
+        assert!(run[..marker].ends_with("if kind == TrainKind::Character {\n            crate::commands::character_files::"), "only a character's photos become references");
+    }
+}
+
+/// C31 (Discord, 03.11.2026): Windows, Python 3.11.4 and 3.12, the trainer
+/// setup said its Python was one it cannot use, and the log ended at
+/// "character trainer install start".
+#[cfg(test)]
+mod c31_old_pip_and_log_guard {
+    fn body_of<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let body = &src[src.find(start).expect(start)..];
+        &body[..body.find(end).expect(end)]
+    }
+
+    #[test]
+    fn an_old_pip_in_the_trainer_venv_is_lifted_before_pytorch() {
+        let src = include_str!("trainer.rs");
+        let body = body_of(src, "fn provision_trainer_env(", "\n}\n");
+        let venv = body.find("let vpy = venv_python(root)").expect("the venv is decided");
+        let lift = body.find("lift_old_pip_before_torch(&vpy, state, Some(cancel))").expect("the trainer lifts pip like the ComfyUI install");
+        let torch = body.find("(3/4): installing PyTorch").expect("the PyTorch step");
+        assert!(venv < lift && lift < torch, "after the venv (kept or new), before PyTorch");
+        // It runs on every path through here, the repair inside a run included:
+        // a kept venv is exactly the one that looped.
+        assert!(!body[venv..lift].contains("VenvAction::"), "not only for a new venv");
+    }
+
+    #[test]
+    fn the_lift_asks_for_pip_24_from_pypi() {
+        let line = "pip 23.1.2 from C:\\Users\\a\\AppData\\Roaming\\com.purpledoubled.locally-uncensored\\musubi\\venv\\Lib\\site-packages\\pip (python 3.11)";
+        let args = crate::commands::install::pip_upgrade_before_torch_args(Some(line)).expect("pip 23.1.2 from Python 3.11.4 is lifted");
+        assert_eq!(args.last().map(String::as_str), Some("pip>=24.0"));
+        assert!(!args.iter().any(|a| a.contains("index-url")), "pip comes from PyPI: {args:?}");
+        assert_eq!(crate::commands::install::pip_upgrade_before_torch_args(Some("pip 24.0 from x (python 3.12)")), None);
+    }
+
+    #[test]
+    fn the_setup_steps_and_the_error_reach_the_log_file() {
+        let src = include_str!("trainer.rs");
+        let push = body_of(src, "fn push_log(", "\n}\n");
+        assert!(push.contains("info!("), "LU's own lines go to the log file");
+        let status = body_of(src, "fn set_status(", "\n}\n");
+        assert!(status.contains("warn!(") && status.contains("info!("), "headlines go there, an error as a warning");
+        // pip, musubi and tqdm stay in the panel only.
+        let child = body_of(src, "fn push_child_line(", "\n}\n");
+        assert!(!child.contains("info!(") && !child.contains("warn!("));
+        let run = body_of(src, "fn run_child(", "let exit = loop");
+        assert!(run.contains("push_child_line(&run, trimmed)"));
+        assert!(!run.contains("push_log(&run, trimmed)"), "a training run would flood the log");
+    }
+}
+
+/// C31 Nachtrag (Discord, 03.11.2026, Windows): the setup ended before the
+/// trainer folder existed, with "none that starts" on a machine whose
+/// Python 3.11 and 3.12 run in a cmd window. The trainer now starts its
+/// Pythons without PYTHONHOME/PYTHONPATH on Windows, and every Python it
+/// skips is logged with the reason.
+#[cfg(test)]
+mod c31_python_that_does_not_start {
+    use super::*;
+
+    fn body_of<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let body = &src[src.find(start).expect(start)..];
+        &body[..body.find(end).expect(end)]
+    }
+
+    const INIT_FS_ENCODING: &str = "Python path configuration:\r\n  PYTHONHOME = 'C:\\Users\\a\\AppData\\Local\\Programs\\Python\\Python313'\r\n  PYTHONPATH = (not set)\r\nFatal Python error: init_fs_encoding: failed to get the Python codec of the filesystem encoding\r\nPython runtime state: core initialized\r\nModuleNotFoundError: No module named 'encodings'\r\n\r\nCurrent thread 0x00001a2c (most recent call first):\r\n  <no Python frame>\r\n";
+
+    #[test]
+    fn a_python_that_dies_at_start_up_is_named_with_exit_code_and_cause() {
+        assert_eq!(
+            probe_failure_detail(Some(1), INIT_FS_ENCODING),
+            "exit code 1: Fatal Python error: init_fs_encoding: failed to get the Python codec of the filesystem encoding"
+        );
+        // Negative control: without the pick, the last line would be this.
+        assert!(INIT_FS_ENCODING.trim_end().ends_with("<no Python frame>"));
+        assert_eq!(
+            probe_failure_detail(Some(1), "Traceback (most recent call last):\n  File \"<string>\", line 1\nImportError: DLL load failed\n"),
+            "exit code 1: ImportError: DLL load failed"
+        );
+        assert_eq!(probe_failure_detail(Some(9009), ""), "exit code 9009");
+        assert_eq!(probe_failure_detail(None, "  \n"), "no exit code");
+    }
+
+    #[test]
+    fn the_trainer_drops_pythonhome_and_pythonpath_on_windows_only() {
+        let mut cmd = Command::new("python");
+        trainer_child_env(&mut cmd);
+        let removed = |k: &str| cmd.get_envs().any(|(n, v)| n == k && v.is_none());
+        assert_eq!(removed("PYTHONHOME"), cfg!(target_os = "windows"));
+        assert_eq!(removed("PYTHONPATH"), cfg!(target_os = "windows"));
+        // What the trainer sets stays set.
+        assert!(cmd.get_envs().any(|(n, v)| n == "PYTHONUTF8" && v.is_some()));
+    }
+
+    #[test]
+    fn every_trainer_python_question_goes_through_the_trainer_probe() {
+        let src = include_str!("trainer.rs");
+        let base = body_of(src, "fn trainer_base_python(", "\n}\n");
+        assert!(base.contains("trainer_python_probe(&p)"));
+        assert!(base.contains("it did not start from LU ({why})"), "a skipped Python says why");
+        assert!(!base.contains("None => {}"), "nothing is dropped without a line");
+        assert!(!base.contains("python_version_and_arch"));
+        let provision = body_of(src, "fn provision_trainer_env(", "\n}\n");
+        assert!(provision.contains("trainer_python_probe(&vpy_path.to_string_lossy())"), "the venv check too");
+        let listing = body_of(src, "fn python_version_next_step(", "\n}\n");
+        assert!(listing.contains("does not start from LU: {why}"));
+        let probe = body_of(src, "fn trainer_python_probe(", "\n}\n");
+        assert!(probe.contains("trainer_child_env(&mut cmd)"));
+    }
+
+    #[test]
+    fn comfyui_and_the_other_python_calls_keep_their_environment() {
+        // The fix is the trainer's: python_command, which ComfyUI and every
+        // other lane use, does not drop PYTHONHOME.
+        let python = include_str!("../python.rs");
+        let shared = body_of(python, "pub fn python_command<", "\n}\n");
+        assert!(shared.contains("let mut cmd = Command::new(python_bin)"), "the shared builder itself");
+        assert!(!shared.contains("env_remove"), "no variable is dropped there");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_probe_reports_a_failing_interpreter_and_reads_a_working_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("python3.11");
+        fs::write(&fake, "#!/bin/sh\necho 'Fatal Python error: init_fs_encoding: failed' >&2\necho '  <no Python frame>' >&2\nexit 1\n").unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        let err = trainer_python_probe(&fake.to_string_lossy()).unwrap_err();
+        assert_eq!(err, "exit code 1: Fatal Python error: init_fs_encoding: failed");
+        let gone = dir.path().join("python3.13");
+        assert!(trainer_python_probe(&gone.to_string_lossy()).unwrap_err().starts_with("it could not be started: "));
+        if let Ok(real) = which::which("python3") {
+            let (v, arch_ok) = trainer_python_probe(&real.to_string_lossy()).expect("a working python3 answers");
+            assert!(python_major_minor(&v).is_some(), "{v}");
+            assert!(arch_ok, "off Windows the architecture is not checked");
+        }
     }
 }

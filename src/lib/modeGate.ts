@@ -2,7 +2,7 @@ import { getProviderIdFromModel } from '../api/providers'
 
 /**
  * The Cloud switch is a MONEY gate: a model from the wrong mode must never
- * reach a provider. Discord bug-reports 2026-08-09 (helpslowlydying): with no
+ * reach a provider. Discord bug-reports 2026-08-09: with no
  * local model installed, flipping the switch to Local left the lu-cloud model
  * silently active and every chat kept billing credits. The AppShell reselect
  * keeps the header honest; this predicate is what the send path enforces.

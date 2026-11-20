@@ -24,7 +24,9 @@ import {
   buildToolDefs,
   capToolResult,
   compactApiMessages,
+  countAgentHourTokens,
   decayToolResults,
+  estimateAgentTokens,
   extractToolCallsFromContent,
   isDecayedAt,
   isSystemPromptEcho,
@@ -61,6 +63,7 @@ import {
   var ICON_SVG_OPEN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">';
   var ICON_SVG_CLOSE = '</svg>';
   var ICONS = {
+    mic:'<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/>',
     menu:'<line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>',
     close:'<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
     add:'<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
@@ -292,6 +295,15 @@ import {
           if(data.exitCode!==undefined || data.stdout!==undefined){
             var out = data.stdout || '';
             var err = data.stderr || '';
+            // T1: the desktop moved a command that outran its timeout into a
+            // background task instead of killing it.
+            if(data.timedOut && data.taskId){
+              var soFar = (out + (err ? '\n[stderr]\n' + err : '')).replace(/\s+$/, '');
+              if(soFar.length > 2000) soFar = '…' + soFar.slice(-2000);
+              return 'Still running after its timeout, so it was not stopped: it keeps running in the background as task ' + data.taskId + '.\n'
+                + (soFar ? 'Output so far:\n' + soFar + '\n' : '')
+                + 'Use shell_execute with task "status" and task_id "' + data.taskId + '" to read its output, or task "kill" to stop it.';
+            }
             if(data.timedOut) return 'Execution timed out.';
             if(data.exitCode && data.exitCode!==0) return 'Error ('+data.exitCode+'):\n'+(err||out);
             return out || (err ? 'stderr: '+err : 'Done.');
@@ -458,7 +470,7 @@ import {
     } else if(dispatchedSystemPrompt && !agentOn && !isCodex){
       // Only apply the desktop-dispatched system prompt in plain chat
       // mode. In agent / codex mode any extra prompt fights with the
-      // autonomy rules and breaks tool calling — David's "Devil's
+      // autonomy rules and breaks tool calling — the owner's "Devil's
       // Advocate hijack" repro. The desktop side now also defaults
       // personaEnabled to false, so dispatchedSystemPrompt should
       // typically be empty here anyway. Defense in depth.
@@ -640,6 +652,33 @@ import {
     el('retry-remote').onclick = function(){location.reload();};
   });
 
+  // The hint at the top: the LU app is the better way in (sealed channel,
+  // also away from home). Android gets the download page; the App Store link
+  // goes into APP_LINK_IOS once the app is out there, until then iPhones see
+  // no hint. Hidden for good with its close button.
+  var APP_LINK_ANDROID = 'https://lu-labs.ai/android';
+  var APP_LINK_IOS = '';
+  var APP_HINT_KEY = 'lu-remote-app-hint-hidden';
+  function appHintHtml(ua, hidden){
+    if(hidden) return '';
+    var ios = /iPhone|iPad|iPod/.test(ua || '');
+    var link = ios ? APP_LINK_IOS : APP_LINK_ANDROID;
+    if(!link) return '';
+    return '<div class="app-hint" id="app-hint" role="note">' +
+      '<span class="app-hint-text">The LU app does this better: end to end encrypted, also away from home.</span>' +
+      '<a class="app-hint-link" href="'+H(link)+'" target="_blank" rel="noopener noreferrer">Get the app</a>' +
+      '<button class="app-hint-close" onclick="window._hideAppHint()" aria-label="Hide this hint" title="Hide"><span class="material-symbols-outlined">'+svgIcon('close')+'</span></button>' +
+    '</div>';
+  }
+  function appHintHidden(){
+    try{ return localStorage.getItem(APP_HINT_KEY) === '1'; }catch(_){ return false; }
+  }
+  window._hideAppHint = function(){
+    try{ localStorage.setItem(APP_HINT_KEY, '1'); }catch(_){}
+    var h = el('app-hint');
+    if(h && h.parentNode) h.parentNode.removeChild(h);
+  };
+
   function renderShell(){
     var mode = getCurrentMode();
     var isCodex = mode === 'codex';
@@ -685,6 +724,7 @@ import {
             '<span class="material-symbols-outlined">'+svgIcon('extension')+'</span>' +
           '</button>' +
         '</div>' +
+        appHintHtml(navigator.userAgent, appHintHidden()) +
         '<div class="chat-area" id="chat-area"></div>' +
         '<div class="input-bar">' +
           '<div class="img-preview-row" id="img-preview-row" style="display:none"></div>' +
@@ -699,6 +739,7 @@ import {
             // route to the right action.
             (function(){
               var busy = streaming || agentRunning;
+              if(!busy && voiceMicShown()) return micButtonHtml();
               var btnCls = busy ? 'send-btn cancel' : 'send-btn';
               var handler = busy ? 'window._cancelSend()' : 'window._doSend()';
               var label = busy ? 'Stop' : 'Send';
@@ -714,6 +755,7 @@ import {
     setupFileInput();
     renderChat();
     renderAttachments();
+    voiceSlot();
   }
 
   // ── Drawer ──
@@ -805,7 +847,7 @@ import {
   function setupInput(){
     var inp = el('msg-input');
     if(!inp) return;
-    inp.addEventListener('input', function(){inp.style.height='auto';inp.style.height=Math.min(inp.scrollHeight,220)+'px';});
+    inp.addEventListener('input', function(){inp.style.height='auto';inp.style.height=Math.min(inp.scrollHeight,220)+'px';voiceSlot();});
     inp.addEventListener('keydown', function(e){if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();window._doSend();}});
   }
 
@@ -848,7 +890,7 @@ import {
   function renderAttachments(){
     var row = el('img-preview-row');
     if(!row) return;
-    if(!pendingImages.length){ row.style.display='none'; row.innerHTML=''; return; }
+    if(!pendingImages.length){ row.style.display='none'; row.innerHTML=''; voiceSlot(); return; }
     row.style.display='flex';
     var html = '';
     for(var i=0;i<pendingImages.length;i++){
@@ -859,6 +901,7 @@ import {
               '</div>';
     }
     row.innerHTML = html;
+    voiceSlot();
   }
 
   // ── Plan strip (todo_write) ───────────────────────────────────
@@ -988,13 +1031,13 @@ import {
       if(isUser){
         html += '<div class="msg-actions msg-actions-user">';
         html += '<button class="msg-action-btn" title="Edit" onclick="window._editMsg(\''+m.id+'\')"><span class="material-symbols-outlined">'+svgIcon('pencil')+'</span></button>';
-        html += '<button class="msg-action-btn" title="Copy" onclick="window._copyMsg('+i+')"><span class="material-symbols-outlined">'+svgIcon('content_copy')+'</span></button>';
+        html += '<button class="msg-action-btn" title="Copy" onclick="window._copyMsg('+i+',this)"><span class="material-symbols-outlined">'+svgIcon('content_copy')+'</span></button>';
         html += '</div>';
       } else {
         html += '<div class="msg-model">'+H(currentModel)+'</div>';
         html += '<div class="msg-actions">';
         var canRegen = !streaming && !agentRunning;
-        html += '<button class="msg-action-btn" title="Copy" onclick="window._copyMsg('+i+')"><span class="material-symbols-outlined">'+svgIcon('content_copy')+'</span></button>';
+        html += '<button class="msg-action-btn" title="Copy" onclick="window._copyMsg('+i+',this)"><span class="material-symbols-outlined">'+svgIcon('content_copy')+'</span></button>';
         if(canRegen){
           html += '<button class="msg-action-btn" title="Regenerate" onclick="window._regenMsg(\''+m.id+'\')"><span class="material-symbols-outlined">'+svgIcon('refresh')+'</span></button>';
         }
@@ -1077,7 +1120,7 @@ import {
             '<span class="cb-lang">'+H(langLabel)+'</span>'+
             '<div class="cb-actions">'+
               previewBtn +
-              '<button class="cb-action" onclick="window._copyCodeKey(\''+key+'\')" aria-label="Copy"><span class="material-symbols-outlined">'+svgIcon('content_copy')+'</span><span class="cb-action-label">Copy</span></button>'+
+              '<button class="cb-action" onclick="window._copyCodeKey(\''+key+'\',this)" aria-label="Copy"><span class="material-symbols-outlined">'+svgIcon('content_copy')+'</span><span class="cb-action-label">Copy</span></button>'+
             '</div>'+
           '</div>'+
           '<pre class="cb-pre"><code>'+displayCode+'</code></pre>'+
@@ -1096,9 +1139,9 @@ import {
   };
   // Copy handler that reads from our cache (no DOM scraping → handles
   // collapsed blocks correctly).
-  window._copyCodeKey = function(key){
+  window._copyCodeKey = function(key, btn){
     var src = codeBlockSource[key];
-    if(src && src.code) navigator.clipboard.writeText(src.code).catch(function(){});
+    if(src && src.code) copyText(src.code, btn);
   };
   // Feature #8: full-screen sandboxed HTML preview. Opens an iframe with
   // `srcdoc` + sandbox flags so user-supplied JS can't reach the parent
@@ -1402,14 +1445,73 @@ import {
     });
   };
 
-  window._copyMsg = function(idx){
-    if(msgs[idx]) navigator.clipboard.writeText(msgs[idx].content).catch(function(){});
+  // Copy. On the plain http page in the Wi-Fi the browser has no
+  // navigator.clipboard at all (it is only there in a secure context), and
+  // calling it threw before any catch, so the button did nothing. The old
+  // way through a hidden textarea and execCommand('copy') still works there.
+  // Either way the button says what happened.
+  function copyText(text, btn){
+    var clip = null;
+    try { clip = (window.isSecureContext !== false && navigator.clipboard && navigator.clipboard.writeText) ? navigator.clipboard : null; } catch(e) { clip = null; }
+    if(clip){
+      var p = null;
+      try { p = clip.writeText(text); } catch(e) { p = null; }
+      if(p && typeof p.then === 'function'){
+        p.then(function(){ flashCopy(btn, true); }, function(){ flashCopy(btn, legacyCopy(text)); });
+        return;
+      }
+    }
+    flashCopy(btn, legacyCopy(text));
+  }
+  function legacyCopy(text){
+    var ta = document.createElement('textarea');
+    ta.value = String(text == null ? '' : text);
+    ta.setAttribute('readonly', '');
+    // Off screen, and 16px so iOS does not zoom in on focus.
+    ta.style.position = 'fixed';
+    ta.style.top = '0';
+    ta.style.left = '-9999px';
+    ta.style.opacity = '0';
+    ta.style.fontSize = '16px';
+    document.body.appendChild(ta);
+    var ok = false;
+    try {
+      ta.focus();
+      ta.select();
+      if(ta.setSelectionRange) ta.setSelectionRange(0, ta.value.length);
+      ok = !!document.execCommand('copy');
+    } catch(e) { ok = false; }
+    document.body.removeChild(ta);
+    return ok;
+  }
+  function flashCopy(btn, ok){
+    if(!btn) return;
+    if(btn._copyRestore){ clearTimeout(btn._copyTimer); btn._copyRestore(); }
+    var html = btn.innerHTML;
+    var title = btn.getAttribute('title');
+    var aria = btn.getAttribute('aria-label');
+    var word = ok ? 'Copied' : 'Copy failed';
+    btn.innerHTML = '<span class="copy-flash'+(ok ? '' : ' copy-flash-failed')+'">'+word+'</span>';
+    btn.setAttribute('title', word);
+    btn.setAttribute('aria-label', word);
+    btn.setAttribute('data-copy-state', ok ? 'copied' : 'failed');
+    btn._copyRestore = function(){
+      btn.innerHTML = html;
+      if(title === null) btn.removeAttribute('title'); else btn.setAttribute('title', title);
+      if(aria === null) btn.removeAttribute('aria-label'); else btn.setAttribute('aria-label', aria);
+      btn.removeAttribute('data-copy-state');
+      btn._copyRestore = null;
+    };
+    btn._copyTimer = setTimeout(function(){ if(btn._copyRestore) btn._copyRestore(); }, ok ? 1500 : 2500);
+  }
+  window._copyMsg = function(idx, btn){
+    if(msgs[idx]) copyText(msgs[idx].content, btn);
   };
   window._copyCode = function(btn){
     var pre = btn.parentElement;
     if(!pre) return;
     var code = pre.querySelector('code');
-    if(code) navigator.clipboard.writeText(code.textContent).catch(function(){});
+    if(code) copyText(code.textContent, btn);
   };
   window._toggleThink = function(msgId){
     for(var i=0;i<msgs.length;i++){
@@ -1783,7 +1885,21 @@ import {
       // context with room to spare for the model's reply.
       apiMessages = compactApiMessages(apiMessages, 24000);
 
+      var sentChars = JSON.stringify(apiMessages).length + JSON.stringify(tools).length;
       nativeToolChat(apiMessages, tools).then(function(res){
+        // Hourly token limit (agent-core.js): estimated from the characters
+        // that went out and came back. Over it, the run ends here, before
+        // any further tool runs, and the next message goes on.
+        var gotChars = (res.content || '').length + (res.thinking || '').length + JSON.stringify(res.toolCalls || []).length;
+        if(countAgentHourTokens(estimateAgentTokens(sentChars + gotChars))){
+          if(thinkingStepIdx >= 0 && target.agentSteps && target.agentSteps[thinkingStepIdx]){
+            target.agentSteps.splice(thinkingStepIdx, 1);
+            thinkingStepIdx = -1;
+          }
+          appendAgentStep('error', 'Paused: agent runs from this phone sent a lot to the model in the last hour. Send a message to go on.');
+          finishToolLoop(null);
+          return;
+        }
         // Remove the initial "thinking" placeholder on the first
         // successful response (only matters for iter === 1).
         if(thinkingStepIdx >= 0 && target.agentSteps && target.agentSteps[thinkingStepIdx]){
@@ -1827,7 +1943,7 @@ import {
         // guard in useCodex.ts. Once retries are exhausted the echo
         // is replaced with an empty content so finishToolLoop builds
         // a step-summary instead of leaking the literal greeting to
-        // the user (this was Bug 2 reported by David — after several
+        // the user (this was Bug 2 reported by the owner — after several
         // failures the model ended the turn with the greeting as the
         // final answer).
         if(isSystemPromptEcho(turnContent)){
@@ -2134,6 +2250,7 @@ import {
       var finalText = target ? (target.content || '') : '';
       postChatEvent('assistant', finalText);
       syncCurrentChat();
+      voiceAnswerDone();
     }
 
     step();
@@ -2250,5 +2367,479 @@ import {
     // disabled button.
     renderShell();
     renderChat();
+    voiceAnswerDone();
   }
+  // ── Voice over remote (GitHub #212) ─────────────────────────────
+  // The same two ways as in the LU app (src/mobile/screens/remote/parts/
+  // RemoteVoice.tsx): hold the microphone to talk and let go to send, or
+  // tap it for hands free, where this page hears the end of a sentence by
+  // itself, reads the answer aloud and listens again until End. The
+  // computer writes the take down (/remote-api/voice/transcribe), the text
+  // goes into the chat like a typed message. The answer is read with the
+  // voice of this phone, else with the voice of the computer.
+  //
+  // A browser hands out the microphone only on a secure page. Over the
+  // plain Wi-Fi address it is not one, so there the microphone says that
+  // once and points to the LU app or the keyboard's own dictation.
+  var VOICE_SPEECH_LEVEL = 0.1;
+  var VOICE_QUIET_LEVEL = 0.05;
+  var VOICE_SPEECH_MIN_MS = 250;
+  var VOICE_END_QUIET_MS = 1100;
+  var VOICE_GIVE_UP_MS = 30000;
+  var VOICE_HOLD_MS = 300;
+  var VOICE_MIN_TAKE_MS = 400;
+  var VOICE_TEXT = {
+    mic: 'Talk to your computer. Hold to talk, tap for hands free',
+    listening: 'Listening',
+    talk: 'Talk, let go to send',
+    quiet: 'Nothing heard so far',
+    sending: 'Your computer writes it down',
+    waiting: 'LU is answering',
+    speaking: 'Reading the answer',
+    interrupt: 'Tap to talk',
+    end: 'End',
+    ok: 'OK',
+    insecure: 'This browser gives the microphone only to a secure page, and the Wi-Fi address is not one. Talk in the LU app, or use the microphone of your keyboard.',
+    denied: 'The browser has no access to the microphone. Allow it for this page.',
+    nothing: 'Nothing was heard. Hold the microphone a little longer.',
+    gaveUp: 'Hands free ended after a long silence.',
+    failed: 'The computer could not write down what you said.',
+    speakFailed: 'The answer could not be read aloud.'
+  };
+  var voiceFeature = false;
+  var voice = { phase: 'off', mode: null, since: 0, downAt: 0, pendingUp: null, rec: null, token: 0, turn: null, timer: null, heard: false, caps: null, capsAt: 0, answerBefore: null, note: '', audio: null };
+
+  function voiceSecure(){
+    try{ return !!(window.isSecureContext && navigator.mediaDevices && navigator.mediaDevices.getUserMedia); }catch(_){ return false; }
+  }
+
+  // Ask once whether the computer offers voice at all (feature `voice`).
+  fetch('/remote-api/status/full',{headers:{'Authorization':'Bearer '+TOKEN}})
+    .then(absorbRefresh)
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(s){
+      var f = s && Array.isArray(s.features) ? s.features : [];
+      voiceFeature = f.indexOf('voice') >= 0;
+      voiceSlot();
+      // Asking now also lets the computer load its speech recognition before the first take.
+      if(voiceFeature && voiceSecure()) voiceCaps().catch(function(){});
+    })
+    .catch(function(){});
+
+  function voiceCaps(){
+    if(voice.caps && Date.now() - voice.capsAt < 30000) return Promise.resolve(voice.caps);
+    return fetch('/remote-api/voice',{headers:{'Authorization':'Bearer '+TOKEN}})
+      .then(absorbRefresh)
+      .then(function(r){ if(r.status===401){clearAuthAndReload();throw new Error('401');} return r.json(); })
+      .then(function(c){ voice.caps = c || {}; voice.capsAt = Date.now(); return voice.caps; });
+  }
+
+  /** Does the shared slot show the microphone: an empty field, nothing running, the computer offers voice. */
+  function voiceMicShown(){
+    if(!voiceFeature || streaming || agentRunning) return false;
+    if(voice.phase === 'recording' || voice.phase === 'sending') return true;
+    var inp = el('msg-input');
+    return !(inp && inp.value.trim()) && !pendingImages.length;
+  }
+
+  function micButtonHtml(){
+    return '<button class="send-btn mic'+(voice.phase==='recording'?' live':'')+'" id="send-btn" aria-label="'+H(VOICE_TEXT.mic)+'" title="'+H(VOICE_TEXT.mic)+'"'+(voice.phase==='sending'?' disabled':'')+'><span class="material-symbols-outlined">'+svgIcon('mic')+'</span></button>';
+  }
+
+  /** Swap Send and the microphone in place, as the field fills and empties. */
+  function voiceSlot(){
+    var btn = el('send-btn');
+    if(!btn || streaming || agentRunning) return;
+    var wantMic = voiceMicShown();
+    var isMic = btn.classList.contains('mic');
+    if(wantMic !== isMic){
+      var wrap = document.createElement('div');
+      wrap.innerHTML = wantMic ? micButtonHtml() :
+        '<button class="send-btn" id="send-btn" onclick="window._doSend()" aria-label="Send" title="Send"><span class="material-symbols-outlined">'+svgIcon('arrow_upward')+'</span></button>';
+      btn.parentNode.replaceChild(wrap.firstChild, btn);
+      btn = el('send-btn');
+    }
+    if(wantMic) bindMic(btn);
+    voiceLine();
+  }
+
+  function bindMic(btn){
+    if(btn._voiceBound) return;
+    btn._voiceBound = true;
+    var pressed = false;
+    btn.addEventListener('pointerdown', function(e){
+      if(e.button !== 0) return;
+      e.preventDefault();
+      try{ btn.setPointerCapture(e.pointerId); }catch(_){}
+      pressed = true;
+      voiceDown();
+    });
+    var up = function(){ if(!pressed) return; pressed = false; voiceUp(); };
+    btn.addEventListener('pointerup', up);
+    btn.addEventListener('pointercancel', up);
+    btn.addEventListener('contextmenu', function(e){ e.preventDefault(); });
+    btn.addEventListener('click', function(e){ if(e.detail === 0){ voiceDown(); voiceUp(); } });
+  }
+
+  /** The line in place of the text field while a turn runs. */
+  function voiceLine(){
+    var row = document.querySelector('.input-row');
+    var inp = el('msg-input');
+    if(!row || !inp) return;
+    var line = el('voice-line');
+    if(voice.phase === 'off' && !voice.note){
+      if(line) line.parentNode.removeChild(line);
+      inp.style.display = '';
+      return;
+    }
+    if(!line){
+      line = document.createElement('div');
+      line.id = 'voice-line';
+      line.className = 'voice-line';
+      line.setAttribute('role','status');
+      row.insertBefore(line, inp);
+    }
+    inp.style.display = 'none';
+    line.setAttribute('data-state', voice.note ? 'note' : voice.phase);
+    line.setAttribute('data-mode', voice.mode || 'pending');
+    var end = '<button class="voice-end" type="button" id="voice-end">'+H(voice.note ? VOICE_TEXT.ok : VOICE_TEXT.end)+'</button>';
+    var html;
+    if(voice.note){
+      html = '<span class="voice-hint voice-note">'+H(voice.note)+'</span>' + end;
+    } else if(voice.phase === 'recording'){
+      html = '<span class="voice-bars" id="voice-bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>' +
+        '<span class="voice-clock" id="voice-clock">0:00</span>' +
+        '<span class="voice-hint" id="voice-hint">'+H(voice.mode==='free' ? VOICE_TEXT.listening : VOICE_TEXT.talk)+'</span>' +
+        (voice.mode === 'free' ? end : '');
+    } else if(voice.phase === 'speaking'){
+      html = '<button class="voice-tap" type="button" id="voice-interrupt"><span class="voice-hint">'+H(VOICE_TEXT.speaking)+'</span><span class="voice-sub">'+H(VOICE_TEXT.interrupt)+'</span></button>' + end;
+    } else {
+      html = '<span class="voice-spin" aria-hidden="true"></span><span class="voice-hint">'+H(voice.phase==='sending' ? VOICE_TEXT.sending : VOICE_TEXT.waiting)+'</span>' + end;
+    }
+    line.innerHTML = html;
+    var e = el('voice-end'); if(e) e.onclick = function(){ voice.note = ''; voiceEnd(); };
+    var it = el('voice-interrupt'); if(it) it.onclick = voiceInterrupt;
+  }
+
+  function voiceTell(text){
+    voiceEnd();
+    voice.note = text;
+    voiceLine();
+  }
+
+  function voiceStopListening(){
+    if(voice.timer){ clearInterval(voice.timer); voice.timer = null; }
+    voice.turn = null;
+  }
+
+  function voiceEnd(){
+    voice.token++;
+    voiceStopListening();
+    if(voice.rec){ try{ voice.rec.cancel(); }catch(_){} voice.rec = null; }
+    voice.pendingUp = null;
+    try{ if(window.speechSynthesis) window.speechSynthesis.cancel(); }catch(_){}
+    if(voice.audio){ try{ voice.audio.pause(); }catch(_){} voice.audio = null; }
+    voice.phase = 'off';
+    voice.mode = null;
+    voiceSlot();
+    voiceLine();
+  }
+
+  /** The microphone: a recorder with its level, the take as 16 kHz mono WAV. */
+  function voiceOpenRecorder(){
+    return navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}}).then(function(stream){
+      var Ctx = window.AudioContext || window.webkitAudioContext;
+      var ctx = new Ctx();
+      var src = ctx.createMediaStreamSource(stream);
+      var an = ctx.createAnalyser(); an.fftSize = 256; src.connect(an);
+      var proc = ctx.createScriptProcessor(4096, 1, 1);
+      var mute = ctx.createGain(); mute.gain.value = 0;
+      src.connect(proc); proc.connect(mute); mute.connect(ctx.destination);
+      var chunks = [];
+      proc.onaudioprocess = function(e){ chunks.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
+      if(ctx.state === 'suspended'){ try{ ctx.resume(); }catch(_){} }
+      var buf = new Uint8Array(an.fftSize);
+      var level = 0;
+      var close = function(){
+        try{ proc.disconnect(); src.disconnect(); mute.disconnect(); }catch(_){}
+        try{ stream.getTracks().forEach(function(t){ t.stop(); }); }catch(_){}
+        try{ ctx.close(); }catch(_){}
+      };
+      return {
+        level: function(){
+          an.getByteTimeDomainData(buf);
+          var s = 0;
+          for(var i = 0; i < buf.length; i++){ var v = (buf[i]-128)/128; s += v*v; }
+          var now = Math.min(1, Math.sqrt(s/buf.length)*4);
+          level = now >= level ? now : level*0.6 + now*0.4;
+          return level;
+        },
+        stop: function(){ close(); return voiceWav(chunks, ctx.sampleRate); },
+        cancel: close
+      };
+    });
+  }
+
+  function voiceWav(chunks, rate){
+    var total = 0, i, j;
+    for(i = 0; i < chunks.length; i++) total += chunks[i].length;
+    var target = 16000;
+    var ratio = rate > target ? rate/target : 1;
+    var outLen = Math.floor(total/ratio);
+    var out = new Int16Array(outLen);
+    var all = new Float32Array(total), o = 0;
+    for(i = 0; i < chunks.length; i++){ all.set(chunks[i], o); o += chunks[i].length; }
+    for(j = 0; j < outLen; j++){
+      var a = Math.floor(j*ratio), b = Math.min(total, Math.floor((j+1)*ratio)), s = 0;
+      for(i = a; i < b; i++) s += all[i];
+      var v = b > a ? s/(b-a) : all[a] || 0;
+      v = Math.max(-1, Math.min(1, v));
+      out[j] = v < 0 ? v*0x8000 : v*0x7fff;
+    }
+    var outRate = ratio > 1 ? target : rate;
+    var buffer = new ArrayBuffer(44 + out.length*2);
+    var view = new DataView(buffer);
+    var w = function(off, s){ for(var k = 0; k < s.length; k++) view.setUint8(off+k, s.charCodeAt(k)); };
+    w(0,'RIFF'); view.setUint32(4, 36 + out.length*2, true); w(8,'WAVE'); w(12,'fmt ');
+    view.setUint32(16,16,true); view.setUint16(20,1,true); view.setUint16(22,1,true);
+    view.setUint32(24,outRate,true); view.setUint32(28,outRate*2,true); view.setUint16(32,2,true); view.setUint16(34,16,true);
+    w(36,'data'); view.setUint32(40, out.length*2, true);
+    for(j = 0; j < out.length; j++) view.setInt16(44 + j*2, out[j], true);
+    return new Blob([view], {type:'audio/wav'});
+  }
+
+  function voiceStartTake(token){
+    return voiceOpenRecorder().then(function(rec){
+      if(token !== voice.token){ rec.cancel(); return false; }
+      voice.rec = rec;
+      voice.since = Date.now();
+      voice.heard = false;
+      voice.phase = 'recording';
+      voiceSlot();
+      voiceLine();
+      // The bars and the clock, ten times a second; hands free also watches for the end of a sentence.
+      voice.timer = setInterval(function(){ voiceTick(token); }, 90);
+      return true;
+    }, function(err){
+      if(token !== voice.token) return false;
+      voiceTell(err && (err.name === 'NotAllowedError' || err.name === 'SecurityError') ? VOICE_TEXT.denied : VOICE_TEXT.insecure);
+      return false;
+    });
+  }
+
+  function voiceTick(token){
+    if(token !== voice.token || !voice.rec) return;
+    var now = Date.now();
+    var level = voice.rec.level();
+    if(level >= VOICE_SPEECH_LEVEL) voice.heard = true;
+    var bars = el('voice-bars');
+    if(bars){
+      var weights = [0.55,0.85,1,0.8,0.5];
+      for(var i = 0; i < bars.children.length; i++) bars.children[i].style.transform = 'scaleY('+Math.max(0.15, Math.min(1, level*weights[i]*1.6)).toFixed(2)+')';
+    }
+    var clock = el('voice-clock');
+    if(clock){ var s = Math.floor((now - voice.since)/1000); clock.textContent = Math.floor(s/60)+':'+('0'+(s%60)).slice(-2); }
+    var hint = el('voice-hint');
+    if(hint && !voice.heard && now - voice.since > 3000) hint.textContent = VOICE_TEXT.quiet;
+    else if(hint && voice.heard) hint.textContent = voice.mode === 'free' ? VOICE_TEXT.listening : VOICE_TEXT.talk;
+    if(voice.mode !== 'free' || !voice.turn) return;
+    var t = voice.turn;
+    if(!t.heard){
+      if(level >= VOICE_SPEECH_LEVEL){
+        if(t.loudSince === null) t.loudSince = now;
+        if(now - t.loudSince >= VOICE_SPEECH_MIN_MS){ t.heard = true; t.quietSince = null; }
+      } else {
+        if(level < VOICE_QUIET_LEVEL) t.loudSince = null;
+        if(now - t.since >= VOICE_GIVE_UP_MS){ voiceTell(VOICE_TEXT.gaveUp); }
+      }
+      return;
+    }
+    if(level >= VOICE_QUIET_LEVEL){ t.quietSince = null; return; }
+    if(t.quietSince === null) t.quietSince = now;
+    if(now - t.quietSince >= VOICE_END_QUIET_MS) voiceFinish(token);
+  }
+
+  function voiceListenFree(token){
+    voice.mode = 'free';
+    voice.turn = { since: Date.now(), loudSince: null, heard: false, quietSince: null };
+    voiceLine();
+  }
+
+  function voiceListenAgain(token){
+    if(token !== voice.token) return;
+    voiceStartTake(token).then(function(ok){ if(ok) voiceListenFree(token); });
+  }
+
+  function voiceFinish(token){
+    if(token !== voice.token || !voice.rec) return;
+    var rec = voice.rec; voice.rec = null;
+    voiceStopListening();
+    var free = voice.mode === 'free';
+    var long = Date.now() - voice.since >= VOICE_MIN_TAKE_MS;
+    var wav = rec.stop();
+    if(!free && !long){ voiceTell(VOICE_TEXT.nothing); return; }
+    voice.phase = 'sending';
+    voiceSlot(); voiceLine();
+    fetch('/remote-api/voice/transcribe',{method:'POST',headers:{'Authorization':'Bearer '+TOKEN,'Content-Type':'audio/wav'},body:wav})
+      .then(absorbRefresh)
+      .then(function(r){
+        if(r.status===401){clearAuthAndReload();throw new Error('401');}
+        return r.json().catch(function(){ return {}; }).then(function(b){ return {ok: r.ok, body: b || {}}; });
+      })
+      .then(function(a){
+        if(token !== voice.token) return;
+        if(!a.ok){ voice.caps = null; voiceTell(a.body.message || VOICE_TEXT.failed); return; }
+        var text = String(a.body.text || '').trim();
+        if(!text){ if(free) return voiceListenAgain(token); voiceTell(VOICE_TEXT.nothing); return; }
+        var last = voiceLastAnswer();
+        voice.answerBefore = last ? last.id : null;
+        voice.phase = 'waiting';
+        var inp = el('msg-input');
+        if(inp){ inp.style.display = ''; inp.value = text; }
+        window._doSend();
+        // Not sent (no model picked yet): the picker is open, the turn ends here.
+        if(!streaming && !agentRunning){ voiceEnd(); return; }
+        voiceLine();
+      })
+      .catch(function(){ if(token === voice.token) voiceTell(VOICE_TEXT.failed); });
+  }
+
+  function voiceDown(){
+    if(!voiceSecure()){ voiceTell(VOICE_TEXT.insecure); return; }
+    if(voice.phase === 'recording' && voice.mode === 'free'){ voiceFinish(voice.token); return; }
+    if(voice.phase === 'speaking'){ voiceEnd(); }
+    else if(voice.phase !== 'off') return;
+    voice.note = '';
+    var token = voice.token;
+    voice.downAt = Date.now();
+    voice.pendingUp = null;
+    voice.mode = null;
+    voiceCaps().then(function(c){
+      if(token !== voice.token) return;
+      if(!c || !c.listen){ voiceTell((c && c.why) || VOICE_TEXT.failed); return; }
+      return voiceStartTake(token).then(function(ok){
+        if(ok && token === voice.token && voice.pendingUp) voiceDecide(token, voice.pendingUp);
+      });
+    }, function(){ if(token === voice.token) voiceTell(VOICE_TEXT.failed); });
+  }
+
+  function voiceDecide(token, kind){
+    voice.pendingUp = null;
+    if(kind === 'hold'){ voice.mode = 'hold'; voiceFinish(token); }
+    else voiceListenFree(token);
+  }
+
+  function voiceUp(){
+    if(voice.mode === 'free') return;
+    var kind = Date.now() - voice.downAt >= VOICE_HOLD_MS ? 'hold' : 'tap';
+    if(!voice.rec){ voice.pendingUp = kind; return; }
+    voiceDecide(voice.token, kind);
+  }
+
+  function voiceInterrupt(){
+    var free = voice.mode === 'free';
+    voice.token++;
+    try{ if(window.speechSynthesis) window.speechSynthesis.cancel(); }catch(_){}
+    if(voice.audio){ try{ voice.audio.pause(); }catch(_){} voice.audio = null; }
+    if(free){ voice.mode = 'free'; voiceListenAgain(voice.token); }
+    else voiceEnd();
+  }
+
+  function voiceLastAnswer(){
+    for(var i = msgs.length - 1; i >= 0; i--){ if(msgs[i].role === 'assistant' && !msgs[i].hidden) return msgs[i]; }
+    return null;
+  }
+
+  /** What of an answer is read aloud: no code, no links, no Markdown marks. */
+  function voiceWords(md){
+    return String(md || '')
+      .replace(/<think>[\s\S]*?<\/think>/gi,' ')
+      .replace(/```[\s\S]*?(```|$)/g,' ')
+      .replace(/`([^`]+)`/g,'$1')
+      .replace(/!\[[^\]]*\]\([^)]*\)/g,' ')
+      .replace(/\[([^\]]+)\]\([^)]*\)/g,'$1')
+      .replace(/https?:\/\/\S+/g,' ')
+      .replace(/^\s{0,3}#{1,6}\s+/gm,'')
+      .replace(/^\s*[-*+]\s+/gm,'')
+      .replace(/^\s*>\s?/gm,'')
+      .replace(/(\*\*|__|\*|_|~~)(?=\S)([\s\S]*?\S)\1/g,'$2')
+      .replace(/\|/g,' ')
+      .replace(/\s+/g,' ')
+      .trim();
+  }
+
+  function voiceAfter(token){
+    if(token !== voice.token) return;
+    if(voice.mode === 'free') voiceListenAgain(token);
+    else voiceEnd();
+  }
+
+  function voiceSpeakPhone(words){
+    return new Promise(function(resolve, reject){
+      var u = new SpeechSynthesisUtterance(words);
+      var de = (words.match(/[äöüß]|\b(der|die|das|und|ist|nicht|ich|ein|eine|mit)\b/gi) || []).length;
+      var en = (words.match(/\b(the|and|is|are|of|to|in|that|it|you)\b/gi) || []).length;
+      u.lang = de > en && de >= 2 ? 'de-DE' : en > de && en >= 2 ? 'en-US' : (navigator.language || 'en-US');
+      u.onend = function(){ resolve(); };
+      u.onerror = function(e){ if(e && (e.error === 'interrupted' || e.error === 'canceled')) resolve(); else reject(e); };
+      window.speechSynthesis.speak(u);
+    });
+  }
+
+  function voiceSpeakComputer(words, token){
+    var pieces = [], rest = words, max = (voice.caps && voice.caps.max_speak_chars) || 1500;
+    while(rest.length > max){
+      var cut = Math.max(rest.lastIndexOf('. ', max), rest.lastIndexOf('? ', max), rest.lastIndexOf('! ', max));
+      if(cut < max/3) cut = rest.lastIndexOf(' ', max);
+      if(cut < max/3) cut = max;
+      pieces.push(rest.slice(0, cut+1).trim()); rest = rest.slice(cut+1).trim();
+    }
+    if(rest) pieces.push(rest);
+    var fetchPiece = function(p){
+      return fetch('/remote-api/voice/speak',{method:'POST',headers:{'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'},body:JSON.stringify({text:p})})
+        .then(absorbRefresh)
+        .then(function(r){ if(!r.ok) throw new Error('speak '+r.status); return r.blob(); });
+    };
+    var i = 0;
+    var next = pieces.length ? fetchPiece(pieces[0]) : null;
+    var play = function(){
+      if(!next || token !== voice.token) return Promise.resolve();
+      return next.then(function(blob){
+        if(token !== voice.token) return;
+        i++;
+        next = i < pieces.length ? fetchPiece(pieces[i]) : null;
+        return new Promise(function(resolve, reject){
+          var url = URL.createObjectURL(blob);
+          var a = new Audio(url);
+          voice.audio = a;
+          a.onended = function(){ URL.revokeObjectURL(url); resolve(); };
+          a.onerror = function(){ URL.revokeObjectURL(url); reject(new Error('play')); };
+          a.play().catch(reject);
+        }).then(play);
+      });
+    };
+    return play();
+  }
+
+  function voiceHasPhoneVoice(){
+    try{ return !!(window.speechSynthesis && window.speechSynthesis.getVoices().length); }catch(_){ return false; }
+  }
+
+  /** The chat finished an answer (finishStream, finishToolLoop). */
+  function voiceAnswerDone(){
+    if(voice.phase !== 'waiting') return;
+    var token = voice.token;
+    var last = voiceLastAnswer();
+    var words = last && last.id !== voice.answerBefore ? voiceWords(last.content) : '';
+    if(!words) return voiceAfter(token);
+    voice.phase = 'speaking';
+    voiceSlot(); voiceLine();
+    var spoken = voiceHasPhoneVoice() ? voiceSpeakPhone(words) :
+      voiceCaps().then(function(c){ if(!c || !c.speak) return; return voiceSpeakComputer(words, token); });
+    spoken.then(function(){ voiceAfter(token); }, function(){
+      if(token !== voice.token) return;
+      voiceTell(VOICE_TEXT.speakFailed);
+    });
+  }
+
 })();

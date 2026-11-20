@@ -55,11 +55,31 @@ interface CodexState {
    */
   modeByConversation: Record<string, CodexMode>
   /**
+   * The last Ask or Bypass the user picked anywhere. A NEW conversation is
+   * stamped with it when it is created (startConversationMode), instead of
+   * falling back to Ask, which made every "New" undo the user's choice
+   * (Gegenprobe 01.10.2026). Stamped, not used as a fallback: an older
+   * conversation that never picked keeps running in what it always ran in.
+   * Plan is per task and never carried over: a fresh conversation does not
+   * start read-only. Persisted, additive, a downgrade only loses this key.
+   */
+  lastPickedMode: Exclude<CodexMode, 'plan'> | null
+  /**
    * A mode picked while a run is in flight. It does NOT touch the running turn:
    * a switch takes effect from the next send, which is what the dropdown says.
    * Transient on purpose, an app restart has no run to park anything for.
    */
   parkedModeByConversation: Record<string, CodexMode>
+  /**
+   * A mode picked on the Code start screen, before any conversation exists
+   * (A37, 26.10.2026). The dropdown used to show the global default there and
+   * drop a pick on the floor ("Open a coding chat first"), while the first
+   * send stamped the new conversation with `lastPickedMode`. A user who had
+   * once picked Bypass saw "Ask" and got an unattended run. The next
+   * conversation created is stamped with this, then it is cleared.
+   * Transient: a restart shows lastPickedMode again, which is also what runs.
+   */
+  draftMode: CodexMode | null
   /** The mode this conversation had before it went into Plan mode. */
   prePlanModeByConversation: Record<string, CodexMode>
   /** Plan finished, waiting for approval. Cleared when the run is approved. */
@@ -111,10 +131,24 @@ interface CodexState {
    * PARKED and applied by the next send; otherwise it lands immediately.
    */
   chooseCodexMode: (conversationId: string, mode: CodexMode, runActive: boolean) => void
+  /** A pick on the start screen, before a conversation exists (see draftMode). */
+  chooseDraftMode: (mode: CodexMode) => void
+  /** A Code conversation was just created: it starts in the start-screen pick,
+   *  else the last Ask/Bypass pick. */
+  startConversationMode: (conversationId: string) => void
   /** Apply a parked pick. Called once at the start of every send. */
   applyParkedMode: (conversationId: string) => void
   /** The conversation's mode, falling back to the global default. */
   codexModeFor: (conversationId: string | null | undefined, defaultMode: unknown) => CodexMode
+  /**
+   * The mode the NEXT send in this conversation runs under, or, without a
+   * conversation, the mode the one a send creates will run under. The dropdown
+   * shows exactly this, so what it says and what runs come from one function
+   * (A37). A parked pick counts: the next send applies it.
+   */
+  nextSendMode: (conversationId: string | null | undefined, defaultMode: unknown) => CodexMode
+  /** Pin a conversation to a mode without touching lastPickedMode or parks. */
+  alignConversationMode: (conversationId: string, mode: CodexMode) => void
   setPlanApproval: (conversationId: string, approval: CodexPlanApproval | null) => void
 
   getThread: (conversationId: string) => CodexThread | undefined
@@ -147,7 +181,9 @@ export const useCodexStore = create<CodexState>()(
       workingDirectory: '',
       fileTreeVersion: 0,
       modeByConversation: {},
+      lastPickedMode: null,
       parkedModeByConversation: {},
+      draftMode: null,
       prePlanModeByConversation: {},
       planApprovalByConversation: {},
 
@@ -186,7 +222,8 @@ export const useCodexStore = create<CodexState>()(
           // what "Approve and run" reads to decide its target mode. While a run
           // is active that is all it is, the running turn keeps its own mode.
           const parked = { ...state.parkedModeByConversation, [conversationId]: mode }
-          if (runActive) return { parkedModeByConversation: parked }
+          const lastPickedMode = mode === 'plan' ? state.lastPickedMode : mode
+          if (runActive) return { parkedModeByConversation: parked, lastPickedMode }
           const current = state.modeByConversation[conversationId]
           const prePlan =
             mode === 'plan' && current !== 'plan' && current
@@ -196,6 +233,23 @@ export const useCodexStore = create<CodexState>()(
             parkedModeByConversation: parked,
             prePlanModeByConversation: prePlan,
             modeByConversation: { ...state.modeByConversation, [conversationId]: mode },
+            lastPickedMode,
+          }
+        }),
+
+      chooseDraftMode: (mode) =>
+        set((state) => ({
+          draftMode: mode,
+          lastPickedMode: mode === 'plan' ? state.lastPickedMode : mode,
+        })),
+
+      startConversationMode: (conversationId) =>
+        set((state) => {
+          const stamp = state.draftMode ?? state.lastPickedMode
+          if (!stamp || state.modeByConversation[conversationId]) return state
+          return {
+            draftMode: null,
+            modeByConversation: { ...state.modeByConversation, [conversationId]: stamp },
           }
         }),
 
@@ -220,6 +274,22 @@ export const useCodexStore = create<CodexState>()(
           conversationId ? get().modeByConversation[conversationId] : undefined,
           defaultMode,
         ),
+
+      nextSendMode: (conversationId, defaultMode) => {
+        const state = get()
+        if (!conversationId) {
+          return resolveCodexMode(state.draftMode ?? state.lastPickedMode, defaultMode)
+        }
+        return resolveCodexMode(
+          state.parkedModeByConversation[conversationId] ?? state.modeByConversation[conversationId],
+          defaultMode,
+        )
+      },
+
+      alignConversationMode: (conversationId, mode) =>
+        set((state) => state.modeByConversation[conversationId] === mode
+          ? state
+          : { modeByConversation: { ...state.modeByConversation, [conversationId]: mode } }),
 
       setPlanApproval: (conversationId, approval) =>
         set((state) => ({
@@ -339,6 +409,7 @@ export const useCodexStore = create<CodexState>()(
       partialize: (state) => ({
         workingDirectory: state.workingDirectory,
         modeByConversation: state.modeByConversation,
+        lastPickedMode: state.lastPickedMode,
       }),
       // Existing installs have a persisted `chatMode: 'codex'` (or similar) in
       // localStorage from v2.3.8 and earlier. partialize only affects writes,

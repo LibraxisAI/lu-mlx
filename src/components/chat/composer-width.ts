@@ -1,7 +1,7 @@
 /**
  * Wie breit das Promptfenster ist, an EINER Stelle.
  *
- * David, 03.09.2026, am echten Windows-Build: "prompt fenster auf windows im
+ * 03.09.2026, am echten Windows-Build: "prompt fenster auf windows im
  * chat bzw coding bereich ist mir etwas zu gross, lieber so gross wie im
  * create tab, eventuell minimal groesser, so dass jedes UI Button platz
  * dafuer hat."
@@ -25,7 +25,7 @@
  * Think, Werkzeuge, Modellwaehler, Senden, plus Abstaende und Innenrand). In
  * den Rest passen der Effort-Regler und der Stop-Knopf, die erst waehrend
  * eines Laufs dazukommen, und ein langer Modellname. Die Leiste bricht deshalb
- * nicht um, und genau das war Davids Bedingung.
+ * nicht um, und genau das war die Bedingung des Inhabers.
  *
  * ACHTUNG, 713 ist kein Tippfehler, und 820 waere heute falsch. Seit dem
  * Massstabwechsel steht das Wurzelmass auf 16 px und die App-Wurzel traegt die
@@ -40,7 +40,7 @@
  *
  * OFFEN, und ausdruecklich nicht hier entschieden: das Transkript darueber
  * laeuft auf --lu-measure (759 gerenderte px), dieses Fenster auf 820. Die
- * 61 px sind Davids "eventuell minimal groesser" und keine Panne. Der
+ * 61 px sind das bestellte "eventuell minimal groesser" und keine Panne. Der
  * Token-Kommentar in index.css beschreibt --lu-measure aber als EINE Spalte
  * fuer Transkript, Fenster und Statusanker. Welche der beiden Aussagen gilt,
  * ist eine Designentscheidung und braucht eine Messung am laufenden Fenster,
@@ -72,7 +72,7 @@ export const COMPOSER_BOX_PX =
 /**
  * Wie breit das Transkript ist, abgeleitet und nicht daneben gestellt.
  *
- * David, 05.09.2026: das Transkript stand exakt auf `--lu-measure` (759
+ * 05.09.2026: das Transkript stand exakt auf `--lu-measure` (759
  * gerenderte px) und war damit sogar schmaler als die Promptbox darunter
  * (792,3). Er will es links und rechts um je rund 20 Prozent ueber die Box
  * hinausragen sehen, also die 1,4-fache Breite bei gleicher Mitte.

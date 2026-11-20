@@ -88,7 +88,7 @@ describe('classifyModel', () => {
     expect(classifyModel('ernie_image_turbo_bf16.safetensors')).toBe('ernie_image')
   })
 
-  // K9 (GH #136, eloieloie): Krea 2 checkpoints fell through to 'unknown' and
+  // K9 (GH #136): Krea 2 checkpoints fell through to 'unknown' and
   // got CheckpointLoaderSimple with no CLIP wired in ("clip input is invalid:
   // None"). Filenames from the reporter's own install (krea-2, krea2, KREA_2).
   it('classifies Krea 2 models (K9, GH #136)', () => {
@@ -107,11 +107,10 @@ describe('classifyModel', () => {
     expect(classifyModel('qwenimage_2_1.safetensors')).toBe('qwenimage')
     // Older Qwen-Image generations stay unknown rather than being routed onto
     // the 2.1 pipeline, which would build a node graph they cannot run.
-    expect(classifyModel('qwen_image_fp8_e4m3fn.safetensors')).toBe('unknown')
-    // Qwen-Image-Edit 2509/2511 have their own lane (TextEncodeQwenImageEditPlus,
-    // dynamic-workflow-qwen-image-edit.test.ts), never the 2.1 pipeline.
-    expect(classifyModel('qwen_image_edit_2509_fp8.safetensors')).toBe('qwen_image_edit')
-    expect(classifyModel('qwen_image_edit_2509_fp8.safetensors')).not.toBe('qwenimage')
+    // Since 2026-09-28 they have their own pipeline (qwenimage1), see
+    // qwen-image-21-workflow.test.ts and sniffed-families-workflow.test.ts.
+    expect(classifyModel('qwen_image_fp8_e4m3fn.safetensors')).toBe('qwenimage1')
+    expect(classifyModel('qwen_image_edit_2509_fp8.safetensors')).toBe('qwenimage1')
     // Companion files, which this same function also sees.
     expect(classifyModel('qwen3vl_8b_int8_convrot.safetensors')).toBe('unknown')
     expect(classifyModel('qwen_image_vae.safetensors')).toBe('unknown')
@@ -382,7 +381,7 @@ describe('determineStrategy', () => {
   })
 })
 
-// ─── extractComfyOutputFiles (Bug R — v2.4.7, silentrunningcaUSA #6) ───
+// ─── extractComfyOutputFiles (Bug R — v2.4.7, #6) ───
 //
 // Pre-v2.4.7 LU only checked `images` / `gifs` / `videos` on each history
 // node output. Custom save nodes (Civitai workflows, SaveImageWithMetadata,
@@ -393,6 +392,16 @@ describe('determineStrategy', () => {
 // stay safe for downstream URL construction.
 
 describe('extractComfyOutputFiles', () => {
+  it('leaves out the input preview LoadVideo reports (B18 box run)', () => {
+    const files = extractComfyOutputFiles({
+      images: [{ filename: 'lu_long_1.mp4', subfolder: '', type: 'input' }],
+    })
+    expect(files).toEqual([])
+    expect(extractComfyOutputFiles({
+      images: [{ filename: 'clip_00002_.mp4', subfolder: '', type: 'output' }],
+    })).toEqual([{ filename: 'clip_00002_.mp4', subfolder: '', type: 'output' }])
+  })
+
   it('extracts canonical SaveImage output (images key)', () => {
     const node = {
       images: [

@@ -3,7 +3,7 @@
  *
  * „NICHTS im prompt fenster!"
  *
- * David, 21.09.2026, mehrfach und veraergert, am echten Windows-Bau. Der
+ * 21.09.2026, mehrfach und veraergert, am echten Windows-Bau. Der
  * Befund lag als Bild vor (e2e/box-gruen/t15/shots/B3-dropdown-hint.png):
  * direkt ueber der Chat-Eingabe, IM Kasten des Composers, stand eine Leiste
  * mit x und dem Satz
@@ -63,7 +63,7 @@ describe('der Composer haengt keine Hinweis-Bauteile mehr ein', () => {
     // weiterhin los, nur zeichnet ihn eine Etage hoeher.
     const jsx = src.slice(src.indexOf('return ('))
     expect(jsx).not.toContain('Waiting for the local model')
-    expect(jsx).not.toContain('The clip attaches images')
+    expect(jsx).not.toContain('The model only gets a summary')
     expect(jsx).not.toContain("This model can't read images")
   })
 
@@ -129,13 +129,13 @@ describe('ChatNotices: der neue Platz, oben im Verlauf', () => {
     expect(screen.queryByTestId('chat-notices')).toBeNull()
   })
 
-  it('zeigt die Zeile des fehlgegangenen Anhangs, und das x nimmt sie weg', () => {
+  it('zeigt die Zeile ueber ein angehaengtes Dokument, und das x nimmt sie weg', () => {
     useChatNoticeStore.getState().show(
-      'attachment-is-not-an-image',
-      'The clip attaches images. To ask about a PDF, Word, or text file, add it in the Documents panel.',
+      'document-belongs-in-docs',
+      'The model only gets a summary of this document. To ask about its text, add it in the Documents panel.',
     )
     render(<ChatNotices />)
-    expect(screen.getByTestId('chat-notices').textContent).toContain('The clip attaches images')
+    expect(screen.getByTestId('chat-notices').textContent).toContain('The model only gets a summary of this document')
 
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
     expect(screen.queryByTestId('chat-notices')).toBeNull()
@@ -144,7 +144,7 @@ describe('ChatNotices: der neue Platz, oben im Verlauf', () => {
 
   it('bietet den Weg in die Dokumentenablage an, wenn es einen gibt', () => {
     let geoeffnet = 0
-    useChatNoticeStore.getState().show('attachment-is-not-an-image', 'The clip attaches images.')
+    useChatNoticeStore.getState().show('document-belongs-in-docs', 'The model only gets a summary of this document.')
     render(<ChatNotices onAttachDocs={() => { geoeffnet += 1 }} />)
     fireEvent.click(screen.getByRole('button', { name: 'Open Documents' }))
     expect(geoeffnet).toBe(1)
@@ -153,10 +153,10 @@ describe('ChatNotices: der neue Platz, oben im Verlauf', () => {
   })
 
   it('GEGENPROBE: ohne den Weg dorthin bleibt der Satz wahr und der Knopf weg', () => {
-    useChatNoticeStore.getState().show('attachment-is-not-an-image', 'The clip attaches images.')
+    useChatNoticeStore.getState().show('document-belongs-in-docs', 'The model only gets a summary of this document.')
     render(<ChatNotices />)
     expect(screen.queryByRole('button', { name: 'Open Documents' })).toBeNull()
-    expect(screen.getByTestId('chat-notices').textContent).toContain('The clip attaches images')
+    expect(screen.getByTestId('chat-notices').textContent).toContain('The model only gets a summary of this document')
   })
 
   it('zeigt die Zeile des blinden Modells', () => {

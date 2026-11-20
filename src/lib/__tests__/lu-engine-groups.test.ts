@@ -1,5 +1,5 @@
 /**
- * A14 (2.6.8), David: "Die Modelle erscheinen unter Installed in einer Gruppe
+ * A14 (2.6.8), the owner: "Die Modelle erscheinen unter Installed in einer Gruppe
  * 'LU Engine' (analog zu den Provider-Gruppen)" and the same in the composer's
  * picker.
  *
@@ -135,7 +135,10 @@ describe('splitBackendSwitchRows, ein fremdes Backend HAELT den Platz', () => {
     const src = readFileSync(
       resolve(__dirname, '..', '..', 'components/models/ModelSelector.tsx'), 'utf8',
     )
-    expect(src).toContain('splitBackendSwitchRows(textModels, luEngineHoldsChat, standbyName, holderName)')
+    // GitHub #173: the rows of additional entries are split off first and
+    // never take part in the slot's switch logic.
+    expect(src).toContain('const { entryGroups, slotRows } = splitEntryRows(textModels)')
+    expect(src).toContain('splitBackendSwitchRows(slotRows, luEngineHoldsChat, standbyName, holderName)')
     expect(src).toContain('wechsel.holding.length > 0 && wechsel.holderLabel')
   })
 })
@@ -214,7 +217,7 @@ describe('de-duplication asks about the FILE, never about the model', () => {
     expect(dropDuplicateLuEngineRows([ours], lmsHas('qwen/qwen2.5-0.5b'))).toEqual([])
   })
 
-  // THE A14 THIRD REVIEW FINDING, and David's own machine: ~/lu-e2e-models
+  // THE A14 THIRD REVIEW FINDING, and the owner's own machine: ~/lu-e2e-models
   // holds Qwen2.5-0.5B-Instruct-Q8_0.gguf, LM Studio reports the collapsed id
   // because it happens to hold one quant, and that quant may be a Q4_K_M in a
   // completely different folder. Our file names its quant, so the two are not

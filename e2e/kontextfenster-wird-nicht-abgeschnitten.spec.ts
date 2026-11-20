@@ -3,7 +3,7 @@ import { tauriMockInit, DEFAULT_ASSISTANT_REPLY, DEFAULT_MODEL_NAME } from './su
 import { openNewChat } from './support/ui'
 
 /**
- * David am 07.09.2026: das Kontextfenster im Chat ist abgeschnitten, "wenn man
+ * Am 07.09.2026: das Kontextfenster im Chat ist abgeschnitten, "wenn man
  * den Context neu ausfuellen moechte".
  *
  * Nachgemessen bei 1280x800, vor der Reparatur: die Liste stand von y=686 bis
@@ -117,4 +117,57 @@ test('im flachen Fenster scrollt sie, statt aus der Flaeche zu laufen', async ({
   expect(m.top).toBeGreaterThanOrEqual(m.grenzeOben)
   // Gedeckelt, also gescrollt, und nicht ueber die Kante gewachsen.
   expect(m.inhalt, 'die Liste haette hier scrollen muessen').toBeGreaterThan(m.sichtbar)
+})
+
+/**
+ * GitHub #149, 03.10.2026: seit dem Befund in Create gehen alle Aufklappmenues
+ * ueber dieselbe Platzlogik (`usePopoverPlatz`). Hier die beiden, die neben der
+ * Kontextliste in der Eingabezeile sitzen, im 400 px hohen Fenster eines
+ * Tiling-Fenstermanagers: beide bleiben ganz in der Flaeche, die sie
+ * abschneiden koennte, und was nicht passt, scrollt.
+ */
+async function inSeinerFlaeche(page: Page, testId: string) {
+  const el = page.getByTestId(testId)
+  await expect(el).toBeVisible()
+  // Erst messen, wenn die Einblendung steht: sie skaliert und verschiebt.
+  await expect.poll(() => el.evaluate((e) => getComputedStyle(e).opacity)).toBe('1')
+  return el.evaluate((e) => {
+    let oben = 0
+    let unten = window.innerHeight
+    for (let p = e.parentElement; p; p = p.parentElement) {
+      const cs = getComputedStyle(p)
+      if (cs.overflowY !== 'visible' || cs.overflowX !== 'visible') {
+        const b = p.getBoundingClientRect()
+        oben = Math.max(oben, b.top)
+        unten = Math.min(unten, b.bottom)
+      }
+    }
+    const r = e.getBoundingClientRect()
+    return { top: r.top, bottom: r.bottom, left: r.left, right: r.right, oben, unten, breite: window.innerWidth }
+  })
+}
+
+test('Modellauswahl und Sampling-Popup bleiben im 400 px hohen Fenster in ihrer Flaeche', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await completeBuiltinOnboarding(page)
+  await openNewChat(page)
+  await page.setViewportSize({ width: 1280, height: 400 })
+
+  await page.getByRole('button', { name: 'Select chat model' }).click()
+  const menue = await inSeinerFlaeche(page, 'model-picker-menu')
+  expect(menue.top, 'die Modellauswahl ragt oben hinaus').toBeGreaterThanOrEqual(menue.oben)
+  expect(menue.bottom, 'die Modellauswahl ragt unten hinaus').toBeLessThanOrEqual(menue.unten)
+  expect(menue.left).toBeGreaterThanOrEqual(0)
+  expect(menue.right).toBeLessThanOrEqual(menue.breite)
+  await page.keyboard.press('Escape')
+  await expect(page.getByTestId('model-picker-menu')).toHaveCount(0)
+
+  await page.getByTestId('sampling-trigger').click()
+  const popup = await inSeinerFlaeche(page, 'sampling-panel')
+  expect(popup.top, 'das Sampling-Popup ragt oben hinaus').toBeGreaterThanOrEqual(popup.oben)
+  expect(popup.bottom, 'das Sampling-Popup ragt unten hinaus').toBeLessThanOrEqual(popup.unten)
+  // Hausregel: ein Popup mit X, und Escape schliesst es auch.
+  await expect(page.getByTestId('sampling-close')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByTestId('sampling-panel')).toHaveCount(0)
 })

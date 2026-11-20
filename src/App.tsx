@@ -36,6 +36,36 @@ function App() {
         const { useSettingsStore: store } = await import('./stores/settingsStore')
         await syncCustomModelDir(store.getState().settings.hfDownloadPathOverride)
       })()
+
+      // The download speed limit sits in Rust and starts at none on every
+      // launch (lib/download-limit.ts).
+      void import('./lib/download-limit').then(({ startDownloadLimitSync }) => startDownloadLimitSync())
+
+      // So does the idle unload of the LU Engine (lib/engine-idle-unload.ts).
+      void import('./lib/engine-idle-unload').then(({ startEngineIdleUnloadSync }) => startEngineIdleUnloadSync())
+
+      // C81: an engine that died on its own says how (lib/engine-exit-notice.ts).
+      void import('./lib/engine-exit-notice').then(({ startEngineExitNotices }) => startEngineExitNotices())
+
+      // The phone's tab name (GitHub #19) sits in Rust the same way
+      // (lib/remote-page-title.ts).
+      void import('./lib/remote-page-title').then(({ startRemotePageTitleSync }) => startRemotePageTitleSync())
+
+      // The Local API comes up with LU when the user switched that on, so a
+      // server that starts LU with its session keeps the API after a reboot.
+      void import('./stores/localApiStore').then(({ startLocalApiAtLaunch }) => startLocalApiAtLaunch()).catch(() => {})
+      // Create over the desktop: a paired phone's jobs arrive as an event and
+      // run in this window (lib/remote-create-runner.ts).
+      void import('./lib/remote-create-runner').then(({ startRemoteCreateRunner }) => startRemoteCreateRunner()).catch(() => {})
+      // Shared chats: the phone's actions arrive as an event and run in this
+      // window (lib/remote-chats-bridge.ts).
+      void import('./lib/remote-chats-start').then(({ startRemoteChatsBridge }) => startRemoteChatsBridge()).catch(() => {})
+      // Watchers: the clock in Rust says when, the run happens in this window
+      // (lib/watchers/runner.ts).
+      void import('./lib/watchers/runner').then(({ startWatcherRunner }) => startWatcherRunner()).catch(() => {})
+      // Device tests only: a build with the Cargo feature `e2e-remote` and
+      // its environment says so; every other build answers no.
+      void import('./lib/remote-e2e').then(({ startRemoteForDeviceTests }) => startRemoteForDeviceTests()).catch(() => {})
     }
 
     // Probe local Whisper (STT) once at boot and push the result into the voice
@@ -43,9 +73,13 @@ function App() {
     // previously never called anywhere → isSpeechRecognitionSupported() stayed
     // false forever → the mic was permanently disabled even with faster-whisper
     // installed and running. Fire-and-forget; never blocks first render.
-    import('./api/voice').then(({ initWhisperCheck, initTtsCheck }) => {
+    import('./api/voice').then(({ initWhisperCheck, initTtsCheck, parakeetStatus }) => {
       initWhisperCheck()
         .then((ok) => useVoiceStore.getState().setSttAvailable(ok))
+        .catch(() => {})
+      // Parakeet dictation (#233): installed means the microphone works with it.
+      parakeetStatus()
+        .then((s) => useVoiceStore.getState().setParakeetReady(!!s?.installed))
         .catch(() => {})
       // Same one-shot probe for local neural TTS (Piper) so the speaker
       // buttons reflect real availability and light up after the install.

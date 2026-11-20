@@ -62,13 +62,18 @@ export async function studioQuote(
   model: string,
   prompt: string,
   params: StudioQuoteParams,
+  /** Vorab-Preis vor dem Hochladen (02.10.2026): nur die ZAHL der Bilder, nie
+   *  eine Adresse. Ein Server, der das Feld nicht kennt, ignoriert es; der
+   *  Aufrufer sendet es darum nur an einen Server, der Stufen fuehrt (also
+   *  neu genug ist), siehe useStudioPrice. */
+  quoteImages?: number,
 ): Promise<StudioQuoteResult> {
   let res: Response
   try {
     res = await cloudFetch('/api/jobs/studio-quote', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model, prompt, params }),
+      body: JSON.stringify({ model, prompt, params, ...(quoteImages ? { quote_images: quoteImages } : {}) }),
     })
   } catch (err) {
     if (err instanceof CloudJobError && err.status !== 0) throw err

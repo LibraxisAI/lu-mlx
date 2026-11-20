@@ -90,17 +90,17 @@ describe('the probe reports WHERE the text would go, not just whether it can go'
   })
 
   it('a LAN Ollama is a REMOTE lane and hands back the host it would ship to', async () => {
-    base = 'http://192.168.0.54:11434'
+    base = 'http://192.168.1.54:11434'
     ollamaModels = [{ name: 'nomic-embed-text' }]
     const info = await embeddingLane('nomic-embed-text')
     expect(info.lane).toBe('ollama-remote')
-    expect(info.endpoint).toBe('http://192.168.0.54:11434')
+    expect(info.endpoint).toBe('http://192.168.1.54:11434')
     // The claim the panel must not make in this configuration.
     expect(laneIsOnThisMachine(info.lane)).toBe(false)
   })
 
   it('a named remote host is remote as well, not just a raw IP', async () => {
-    base = 'http://dd.local:11434'
+    base = 'http://nas.local:11434'
     ollamaModels = [{ name: 'nomic-embed-text' }]
     expect((await embeddingLane('nomic-embed-text')).lane).toBe('ollama-remote')
   })
@@ -122,7 +122,7 @@ describe('the probe reports WHERE the text would go, not just whether it can go'
     // upload pre-flight's answer in any case.
     ollamaModels = [{ name: 'nomic-embed-text' }]
     expect(await embeddingBackendReady('nomic-embed-text')).toBe(true)
-    base = 'http://192.168.0.54:11434'
+    base = 'http://192.168.1.54:11434'
     expect(await embeddingBackendReady('nomic-embed-text')).toBe(true)
     ollamaModels = []
     expect(await embeddingBackendReady('nomic-embed-text')).toBe(false)
@@ -136,7 +136,7 @@ describe('the probe never hangs the UI on a dead host (review 3)', () => {
     // tooltip, the install button and the privacy paragraph all froze for five
     // minutes. The paragraph froze hardest: it does not render until a lane is
     // measured at all.
-    base = 'http://192.168.0.54:11434'
+    base = 'http://192.168.1.54:11434'
     ollamaModels = [{ name: 'nomic-embed-text' }]
     await embeddingLane('nomic-embed-text')
     expect(connectionArgs).toEqual([EMBED_PROBE_TIMEOUT_MS])

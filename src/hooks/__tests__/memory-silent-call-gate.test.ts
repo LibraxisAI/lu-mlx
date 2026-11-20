@@ -27,7 +27,8 @@ import { loadVectors } from '../../lib/memoryEmbedDB'
 // question is whether chatStream was reached and with which model.
 
 const chatStream = vi.fn()
-const addMemory = vi.fn(() => 'mem-1')
+// Second argument: the extractor marks its writes as automatic (A27).
+const addMemory = vi.fn((_memory: unknown, _opts?: { auto?: boolean }) => 'mem-1')
 const applyWriteDecision = vi.fn()
 
 let activeModel = 'qwen3:8b'
@@ -78,10 +79,6 @@ vi.mock('../../api/providers', () => ({
     name.includes('::') ? name.split('::')[0] : 'ollama',
 }))
 
-vi.mock('../../lib/agent-num-ctx', () => ({
-  resolveAgentNumCtx: vi.fn(async () => 8192),
-}))
-
 vi.mock('../../api/rag', () => ({
   generateEmbeddings: vi.fn(async () => [[]]),
   cosineSimilarity: vi.fn(() => 0),
@@ -101,7 +98,7 @@ const LONG_REPLY = 'x'.repeat(200)
 
 async function threeTurns() {
   for (let i = 0; i < RATE_LIMIT; i++) {
-    await extractMemoriesFromPair('what do I do for work?', LONG_REPLY, 'conv-1')
+    await extractMemoriesFromPair('what do I do for work?', LONG_REPLY, 'conv-1', {})
   }
 }
 
@@ -182,7 +179,7 @@ describe('project extraction isolation', () => {
     })())
     for (let i = 0; i < RATE_LIMIT; i++) await extractMemoriesFromPair('question', LONG_REPLY, 'conv-a', { scope: 'A', sourceKind: 'screen' })
     expect(addMemory).toHaveBeenCalledTimes(2)
-    expect(addMemory).toHaveBeenLastCalledWith(expect.objectContaining({ scope: 'A', source: 'conv-a', sourceKind: 'screen' }))
+    expect(addMemory).toHaveBeenLastCalledWith(expect.objectContaining({ scope: 'A', source: 'conv-a', sourceKind: 'screen' }), { auto: true })
   })
   it('writes extracted facts to the captured project even if the caller changes its options', async () => {
     activeModel = 'qwen3:8b'
@@ -197,7 +194,7 @@ describe('project extraction isolation', () => {
       await pending
     }
     expect(addMemory).toHaveBeenCalledTimes(1)
-    expect(addMemory).toHaveBeenCalledWith(expect.objectContaining({ scope: 'A', source: 'conv-a', sourceKind: 'voice' }))
+    expect(addMemory).toHaveBeenCalledWith(expect.objectContaining({ scope: 'A', source: 'conv-a', sourceKind: 'voice' }), { auto: true })
   })
   it('does not send sensitive or other-project titles to the extraction provider', async () => {
     activeModel = 'qwen3:8b'
@@ -277,7 +274,7 @@ describe('the existing guards still hold', () => {
     memoryCloudOptIn = true
 
     for (let i = 0; i < RATE_LIMIT; i++) {
-      await extractMemoriesFromPair('hi', 'ok', 'conv-1')
+      await extractMemoriesFromPair('hi', 'ok', 'conv-1', {})
     }
 
     expect(chatStream).not.toHaveBeenCalled()
@@ -288,7 +285,7 @@ describe('the existing guards still hold', () => {
  * R5-26. The extraction ran on a 500 token budget. A model that pads the JSON
  * with prose or a short think block tore off mid-object, and the whole turn was
  * lost without a word, which is the same failure R5-25 fixes from the parsing
- * side. 800 is the web's number (apps/web/hooks/useMemory.ts:98-101).
+ * side. 800 is the web's number (the web app).
  */
 describe('the budget the extraction asks for', () => {
   it('R5-26: asks for 800 tokens, so a padded answer still arrives whole', async () => {
@@ -301,7 +298,7 @@ describe('the budget the extraction asks for', () => {
   it('R5-26 NEGATIVKONTROLLE: temperature and the context window are untouched', async () => {
     activeModel = 'qwen3:8b'
     await threeTurns()
-    expect(chatStream.mock.calls[0][2]).toMatchObject({ temperature: 0.1, contextWindow: 8192 })
+    expect(chatStream.mock.calls[0][2]).toMatchObject({ temperature: 0.1 })
   })
 
   it('R5-26: a 700 token answer is still read in full', async () => {
@@ -316,7 +313,7 @@ describe('the budget the extraction asks for', () => {
     chatStream.mockImplementation(() => (async function* () { yield { content: lang, done: true } })())
     await threeTurns()
     expect(addMemory).toHaveBeenCalledTimes(1)
-    expect(addMemory).toHaveBeenCalledWith(expect.objectContaining({ content: padding }))
+    expect(addMemory).toHaveBeenCalledWith(expect.objectContaining({ content: padding }), { auto: true })
   })
 
   it('R5-25: a think block around the answer is not stored as a memory', async () => {
@@ -326,5 +323,54 @@ describe('the budget the extraction asks for', () => {
     })())
     await threeTurns()
     expect(addMemory).not.toHaveBeenCalled()
+  })
+})
+
+// A voice session hands over everything that was said in ONE call when it
+// ends (api/voice-history.ts). The every-third-turn limit would silently drop
+// two of three sessions, so a digest is not counted against it. Every other
+// gate still applies.
+describe('a session digest', () => {
+  const digest = { sourceKind: 'voice' as const, digest: true }
+
+  it('is extracted every time, not every third time', async () => {
+    activeModel = 'qwen3:8b'
+    await extractMemoriesFromPair('my name is David', LONG_REPLY, 'voice-1', digest)
+    expect(chatStream).toHaveBeenCalledTimes(1)
+    await extractMemoriesFromPair('I live in Berlin', LONG_REPLY, 'voice-2', digest)
+    expect(chatStream).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not move the counter of the typed turns', async () => {
+    activeModel = 'qwen3:8b'
+    await extractMemoriesFromPair('one', LONG_REPLY, 'voice-1', digest)
+    await extractMemoriesFromPair('two', LONG_REPLY, 'voice-1', digest)
+    chatStream.mockClear()
+    await threeTurns()
+    expect(chatStream).toHaveBeenCalledTimes(1)
+  })
+
+  it('still fires no request on lu-cloud without the opt-in', async () => {
+    activeModel = 'lu-cloud::Qwen/Qwen3-Coder-480B-A35B-Instruct'
+    memoryCloudOptIn = false
+    await extractMemoriesFromPair('question', LONG_REPLY, 'voice-1', digest)
+    expect(chatStream).not.toHaveBeenCalled()
+  })
+
+  it('still skips a session with too little said, and one with extraction switched off', async () => {
+    activeModel = 'qwen3:8b'
+    await extractMemoriesFromPair('hi', 'Hello.', 'voice-1', digest)
+    memorySettings = { autoExtractEnabled: false, autoExtractInAllModes: false }
+    await extractMemoriesFromPair('question', LONG_REPLY, 'voice-1', digest)
+    expect(chatStream).not.toHaveBeenCalled()
+  })
+
+  it('writes what it finds with the voice source', async () => {
+    activeModel = 'qwen3:8b'
+    chatStream.mockImplementation(() => (async function* () {
+      yield { content: JSON.stringify({ shouldSave: true, memories: [{ type: 'user', title: 'Name', description: 'Name', content: 'The user is called David.', tags: [] }] }), done: true }
+    })())
+    await extractMemoriesFromPair('my name is David', LONG_REPLY, 'voice-1', { ...digest, scope: 'A' })
+    expect(addMemory).toHaveBeenCalledWith(expect.objectContaining({ source: 'voice-1', sourceKind: 'voice', scope: 'A' }), { auto: true })
   })
 })

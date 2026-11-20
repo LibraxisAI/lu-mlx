@@ -54,7 +54,7 @@ function toolParameters(t: AgentToolDef | ToolLike): unknown {
  * A zero-width space after the opening bracket is enough: the marker stops
  * being one for the model and for parseHermesToolCalls, while the text still
  * reads normally to a human and to a model summarising it. Ordinary prose with
- * a less-than sign is untouched. Mirrors apps/web/lib/chat/prompt-tools.ts.
+ * a less-than sign is untouched. Mirrors the web app.
  */
 const TAG_MARKERS = /<(?=[|/]{0,2}(?:tool_call|tool_response|tools|tool)\b)/gi
 const ZERO_WIDTH_SPACE = '\u200B'
@@ -87,10 +87,14 @@ export function buildHermesToolPrompt(tools: (AgentToolDef | ToolLike)[]): strin
   const notes: string[] = []
   if (has('todo_write')) {
     notes.push(
-      'PLAN: for a task of more than about three calls, call todo_write FIRST with the whole plan, then again after each step with the COMPLETE list (finished item completed, next one in_progress). The user sees that list while you work.',
+      'PLAN: for a task of more than about three calls, send todo_write with the whole plan TOGETHER WITH your first real tool call, and later updates together with the next real call (finished item completed, next one in_progress), never as a step of its own. The user sees that list while you work.',
     )
   }
-  if (has('web_search') && has('web_fetch')) {
+  if (has('web_research')) {
+    notes.push(
+      'WEB: for questions about current or real-world facts call web_research. It searches and reads the best pages in one call. Answer from its sources and cite them as [1], [2]. Use web_fetch only for one more page.',
+    )
+  } else if (has('web_search') && has('web_fetch')) {
     notes.push(
       'IMPORTANT: web_search returns ONLY short snippets, NOT real data. You MUST ALWAYS call web_fetch on the best URL to read actual page content before answering.\nWorkflow: web_search → get URLs → web_fetch → read page → answer based on real data.',
     )
@@ -143,6 +147,43 @@ export interface ParsedToolCall {
  * Looks for <tool_call>...</tool_call> XML tags containing JSON.
  * Returns array of parsed tool calls (can be 0 or more).
  */
+/**
+ * The XML call format of Qwen3-Coder and Qwen3.5 templates (C59 A3):
+ *
+ *   <function=file_read>
+ *   <parameter=path>
+ *   notes.txt
+ *   </parameter>
+ *   </function>
+ *
+ * usually inside <tool_call>…</tool_call>, sometimes without it. A server whose
+ * parser does not know the format (llama.cpp issues #20260/#20837, Ollama
+ * #14745) hands it through as plain text, and the run stopped on it. A value
+ * that reads as JSON (number, true/false, object, array) is taken as that,
+ * everything else as the string between the tags, trimmed of the one newline
+ * the template puts on each side.
+ */
+const FUNCTION_XML = /<function=([A-Za-z0-9_.:-]+)>\s*([\s\S]*?)\s*<\/function>/g
+const PARAMETER_XML = /<parameter=([A-Za-z0-9_.-]+)>\n?([\s\S]*?)\n?<\/parameter>/g
+
+export function parseFunctionXmlCalls(text: string): ParsedToolCall[] {
+  const calls: ParsedToolCall[] = []
+  for (const m of text.matchAll(FUNCTION_XML)) {
+    const args: ToolArgs = {}
+    for (const p of m[2].matchAll(PARAMETER_XML)) {
+      const raw = p[2]
+      const trimmed = raw.trim()
+      let value: unknown = raw
+      if (/^(-?\d+(\.\d+)?|true|false|null)$/.test(trimmed) || /^[[{]/.test(trimmed)) {
+        try { value = JSON.parse(trimmed) } catch { value = raw }
+      }
+      args[p[1]] = value as ToolArgs[string]
+    }
+    calls.push({ name: m[1], arguments: args })
+  }
+  return calls
+}
+
 export function parseHermesToolCalls(output: string): ParsedToolCall[] {
   const calls: ParsedToolCall[] = []
 
@@ -152,6 +193,11 @@ export function parseHermesToolCalls(output: string): ParsedToolCall[] {
 
   while ((match = regex.exec(output)) !== null) {
     const jsonStr = match[1].trim()
+    // Qwen's XML form inside the wrapper (see parseFunctionXmlCalls).
+    if (/^<function=/.test(jsonStr)) {
+      calls.push(...parseFunctionXmlCalls(jsonStr))
+      continue
+    }
     // Try direct parse, then repair
     const parsed = repairJson(jsonStr)
     if (parsed && parsed.name) {
@@ -173,6 +219,8 @@ export function parseHermesToolCalls(output: string): ParsedToolCall[] {
       }
     }
   }
+  // The same XML form without the <tool_call> wrapper.
+  if (!calls.length && output.includes('<function=')) calls.push(...parseFunctionXmlCalls(output))
 
   return calls
 }
@@ -183,6 +231,7 @@ export function parseHermesToolCalls(output: string): ParsedToolCall[] {
 export function stripToolCallTags(output: string): string {
   return output
     .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '')
+    .replace(/<function=[A-Za-z0-9_.:-]+>[\s\S]*?<\/function>/g, '')
     .replace(/<tool_response>[\s\S]*?<\/tool_response>/g, '')
     .trim()
 }

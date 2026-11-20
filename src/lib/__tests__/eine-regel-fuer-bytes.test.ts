@@ -90,7 +90,7 @@ describe('eine Zaehlweise fuer Dateigroessen', () => {
 describe('die GGUF-Seite', () => {
   it('Karte und Leiste nennen fuer das Startmodell dieselbe Zahl', () => {
     const starter = ONBOARDING_MODELS.find((m) => m.name === 'qwen2.5-7b')
-    expect(starter?.expectedBytes).toBe(4_683_074_240)
+    expect(starter?.expectedBytes).toBe(4_683_073_920)
     // Die Karte schreibt "4.4 GiB", die Leiste rechnet dieselben Bytes: der
     // Einheitenname ist dort ausgeschrieben, die Zahl ist dieselbe.
     expect(starter?.size).toBe('4.4 GiB')
@@ -101,11 +101,11 @@ describe('die GGUF-Seite', () => {
   // review-onboard9b.md): "5.3 GiB" stand von Hand geschrieben neben
   // expectedBytes, ohne dass ein Test die beiden zusammenhaelt. Jetzt
   // gepinnt wie beim Starter oben.
-  it('und fuer den zweiten Eintrag (Qwen 3.5 9B) ebenso', () => {
+  it('und fuer den zweiten Eintrag (Qwen 3.5 9B Abliterated) ebenso', () => {
     const nineB = ONBOARDING_MODELS.find((m) => m.name === 'qwen3.5-9b')
-    expect(nineB?.expectedBytes).toBe(5_680_522_464)
-    expect(nineB?.size).toBe('5.3 GiB')
-    expect(formatBytes(nineB!.expectedBytes!)).toBe('5.3 GB')
+    expect(nineB?.expectedBytes).toBe(5_627_045_216)
+    expect(nineB?.size).toBe('5.2 GiB')
+    expect(formatBytes(nineB!.expectedBytes!)).toBe('5.2 GB')
   })
 })
 
@@ -140,9 +140,11 @@ describe('keine zweite Rechnung', () => {
     // Eine Division durch 1024 mit einer Einheit dahinter im selben Ausdruck:
     // genau die Form, die `prettySize` hatte.
     const muster = /\/\s*1024[^\n]{0,60}(toFixed|Math\.round)[^\n]{0,40}(\bB\b|KB|MB|GB|TB|KiB|MiB|GiB|TiB)/
+    // Relative paths with forward slashes: the exemptions below are written
+    // that way, and on Windows `join` hands back backslashes.
     const treffer = dateien(WURZEL)
-      .filter((p) => !p.endsWith('lib/formatters.ts'))
-      .map((p) => p.slice(WURZEL.length + 1))
+      .map((p) => p.slice(WURZEL.length + 1).replace(/\\/g, '/'))
+      .filter((p) => p !== 'lib/formatters.ts')
       .filter((p) => !NICHT_DATEIGROESSEN.includes(p))
       .filter((p) => muster.test(readFileSync(resolve(WURZEL, p), 'utf8')))
     expect(treffer).toEqual([])

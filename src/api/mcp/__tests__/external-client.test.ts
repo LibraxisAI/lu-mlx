@@ -10,7 +10,7 @@
  * makes that a hard failure again: touching `stdin` throws.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { MCPExternalClient } from '../external-client'
+import { MCPExternalClient, HANDSHAKE_CAP_MS, HANDSHAKE_QUIET_MS, INSTALLING_NOTE, handshakeWaitLeft } from '../external-client'
 import type { MCPServerConfig } from '../types'
 
 class Emitter {
@@ -144,12 +144,87 @@ const serverStarted = () => until(() => lastServer !== null, 'the server to spaw
 const wroteRequests = (n: number) => until(() => (lastServer?.written.length ?? 0) >= n, `${n} requests`)
 
 describe('connecting to an external server', () => {
+  // d307-k (19.10.2026): an npx server answers `initialize` only once its
+  // packages are installed. REA's first start on the Windows box took about
+  // two minutes and ended at the general 30 s every time.
+  // `printEveryMs`: the server writes a progress line to stderr that often
+  // while it is not answering, as uvx and npm do while they download.
+  async function slowHandshake(
+    initializeTimeoutMs: number | undefined,
+    answerAfterMs: number,
+    printEveryMs = 0,
+    notes: (string | null)[] = [],
+  ) {
+    vi.useFakeTimers()
+    try {
+      let held: FakeRequest | null = null
+      responder = (req) => {
+        if (req.method === 'initialize') { held = req; return null }
+        return goodServer(req)
+      }
+      const client = new MCPExternalClient({ ...config, initializeTimeoutMs }, { onProgress: (n) => notes.push(n) })
+      const done = client.connect().then(() => 'connected', (e: unknown) => String(e))
+      for (let i = 0; i < 100 && !held; i++) await vi.advanceTimersByTimeAsync(1)
+      expect(held).not.toBeNull()
+      if (printEveryMs > 0) {
+        for (let t = 0; t < answerAfterMs; t += printEveryMs) {
+          lastServer!.stderr.emit('data', 'Downloading cryptography (3.2MiB)\n')
+          await vi.advanceTimersByTimeAsync(Math.min(printEveryMs, answerAfterMs - t))
+        }
+      } else {
+        await vi.advanceTimersByTimeAsync(answerAfterMs)
+      }
+      lastServer!.stdout.emit('data', JSON.stringify({ jsonrpc: '2.0', id: held!.id, result: { protocolVersion: '2024-11-05' } }) + '\n')
+      await vi.advanceTimersByTimeAsync(1)
+      return await done
+    } finally {
+      vi.useRealTimers()
+    }
+  }
+
+  it('waits for the handshake as long as the server config allows', async () => {
+    expect(await slowHandshake(10 * 60_000, 120_000)).toBe('connected')
+  })
+
+  // Box test 31.10.2026: uvx's first start downloads cryptography, pywin32
+  // and pydantic-core; at 30 s LU stopped it mid-download three times in a row.
+  it('without a handshake time of its own a quiet server gets two minutes, not 30 s', async () => {
+    expect(HANDSHAKE_QUIET_MS).toBe(120_000)
+    expect(await slowHandshake(undefined, 90_000)).toBe('connected')
+  })
+
+  it('a server that stays quiet past the two minutes times out and says why', async () => {
+    expect(await slowHandshake(undefined, 121_000)).toMatch(/Request initialize timed out \(no answer and no progress for 2 min\)/)
+  })
+
+  it('a server still printing download progress gets more time with every line', async () => {
+    const notes: (string | null)[] = []
+    expect(await slowHandshake(undefined, 6 * 60_000, 60_000, notes)).toBe('connected')
+    // The panel was told what is going on, and told again once it was over.
+    expect(notes[0]).toBe(INSTALLING_NOTE)
+    expect(notes.at(-1)).toBeNull()
+  })
+
+  it('even a server that keeps printing is given up at the ten-minute cap', async () => {
+    expect(HANDSHAKE_CAP_MS).toBe(10 * 60_000)
+    expect(await slowHandshake(undefined, 11 * 60_000, 60_000)).toMatch(/Request initialize timed out/)
+  })
+
+  it('the wait left is the quiet window since the last line, never past the cap', () => {
+    expect(handshakeWaitLeft(0, 0, 0, 120_000, 600_000)).toBe(120_000)
+    expect(handshakeWaitLeft(150_000, 0, 100_000, 120_000, 600_000)).toBe(70_000)
+    expect(handshakeWaitLeft(121_000, 0, 0, 120_000, 600_000)).toBeNull()
+    expect(handshakeWaitLeft(590_000, 0, 580_000, 120_000, 600_000)).toBe(10_000)
+    expect(handshakeWaitLeft(600_000, 0, 599_000, 120_000, 600_000)).toBeNull()
+  })
+
   it('completes the handshake and returns the discovered tools', async () => {
     const client = new MCPExternalClient(config)
     const tools = await client.connect()
 
     expect(tools).toHaveLength(1)
-    expect(tools[0]).toMatchObject({ name: 'get_forecast', source: 'external', serverId: 'srv-1' })
+    // B12: its own permission row, never 'workflow'.
+    expect(tools[0]).toMatchObject({ name: 'get_forecast', category: 'mcp', source: 'external', serverId: 'srv-1' })
     expect(client.isConnected()).toBe(true)
   })
 
@@ -360,7 +435,7 @@ describe('the settings panel is what acts on that', () => {
       resolve(dirname(fileURLToPath(import.meta.url)), '../../../components/settings/MCPServerSettings.tsx'),
       'utf8',
     )
-    expect(panel).toContain('onExit: (id) => {')
+    expect(panel).toContain('const onExit = (id: string) => {')
     expect(panel).toContain('toolRegistry.unregisterServer(id)')
     expect(panel).toContain('setConnected(id, false)')
     expect(panel).toContain('clearServerTools(id)')

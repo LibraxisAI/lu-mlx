@@ -1,10 +1,10 @@
 import { test, expect, type Page } from '@playwright/test'
 import { tauriMockInit, DEFAULT_ASSISTANT_REPLY, DEFAULT_MODEL_NAME } from './support/tauri-mock'
 import { seedOnboardingDone } from './support/cloud-mock'
-import { openNewChat } from './support/ui'
+import { openNewChat, appModules, type AppWindow } from './support/ui'
 
 /**
- * Issue 138 (Wruktarr, Windows 10, nach dem Sprung 3.0.0 auf 3.0.1): der
+ * Issue 138 (Windows 10, nach dem Sprung 3.0.0 auf 3.0.1): der
  * Code-Reiter zeigt bei einer langen Unterhaltung nur den Anfang des
  * Verlaufs. Keine Bildlaufleiste, das Mausrad bewirkt nichts, und das
  * Eingabefeld samt Werkzeugzeile ist gar nicht mehr zu sehen, weil es unter
@@ -49,9 +49,9 @@ async function bootCode(page: Page): Promise<void> {
  * direkt aus dem laufenden Modul zieht.
  */
 async function langenVerlaufSetzen(page: Page, anzahl: number): Promise<void> {
-  await page.evaluate(async (n) => {
-    const chatPath = '/src/stores/chatStore.ts'
-    const chat = await import(/* @vite-ignore */ chatPath) as typeof import('../src/stores/chatStore')
+  await appModules(page, ['/src/stores/chatStore.ts'])
+  await page.evaluate((n) => {
+    const chat = (window as unknown as AppWindow).__APP__['/src/stores/chatStore.ts'] as typeof import('../src/stores/chatStore')
     const aktiv = chat.useChatStore.getState().activeConversationId
     if (!aktiv) throw new Error('Keine aktive Code-Unterhaltung')
     for (let i = 0; i < n; i++) {

@@ -1,7 +1,7 @@
 /**
  * Registry API-key handling — the store keeps keys obfuscated in memory;
  * getProvider must hand the REAL key to the client. Regression test for the
- * m9mx report (Discord 2026-07-26): Test button + chat sent a garbled Bearer
+ * A user report (Discord 2026-07-26): Test button + chat sent a garbled Bearer
  * token, so Groq said "Invalid API Key" and OpenRouter chat 401ed while its
  * public /models let the Test button claim "connected".
  * Run: npx vitest run src/api/providers/__tests__/registry-key.test.ts

@@ -78,3 +78,56 @@ describe('der Zielordner eines CivitAI-Treffers', () => {
     expect(hits[0].subfolder).toBe('checkpoints')
   })
 })
+
+/**
+ * The Mac's LoRA lane (09.10.2026) asks the same search for LoRAs of one base
+ * model and for a file its folder can list. Without those two words the
+ * search is what it was.
+ */
+describe('die Suche fuer den LoRA-Ordner am Mac', () => {
+  const zweiDateien = JSON.stringify({
+    items: [
+      {
+        id: 1, name: 'Restore', modelVersions: [{
+          downloadUrl: 'https://civitai.com/api/download/models/10',
+          files: [
+            { name: 'Restore workflow.json', sizeKB: 12, downloadUrl: 'https://civitai.com/api/download/models/10?type=Archive' },
+            { name: 'restore.safetensors', sizeKB: 2048, downloadUrl: 'https://civitai.com/api/download/models/10?type=Model' },
+          ],
+        }],
+      },
+      { id: 2, name: 'Only a workflow', modelVersions: [{ downloadUrl: 'https://civitai.com/api/download/models/20', files: [{ name: 'flow.json', sizeKB: 3 }] }] },
+      { id: 3, name: 'Plain', modelVersions: [{ downloadUrl: 'https://civitai.com/api/download/models/30', files: [{ name: 'plain.SAFETENSORS', sizeKB: 1024 }] }] },
+    ],
+  })
+
+  it('fragt nach dem Basismodell, unter dem Namen, den CivitAI fuehrt', async () => {
+    fetchExternal.mockResolvedValue(antwortMit('Detail'))
+    await searchCivitaiModels('detail', 'LORA', undefined, 'civitai.com', { baseModel: 'Qwen 2.1', safetensorsOnly: true })
+    const url = new URL(String(fetchExternal.mock.calls[0][0]))
+    expect(url.searchParams.get('baseModels')).toBe('Qwen 2.1')
+    expect(url.searchParams.get('types')).toBe('LORA')
+  })
+
+  it('nimmt die erste .safetensors-Datei eines Treffers mit IHRER Adresse und laesst Treffer ohne eine weg', async () => {
+    fetchExternal.mockResolvedValue(zweiDateien)
+    const hits = await searchCivitaiModels('x', 'LORA', undefined, 'civitai.com', { baseModel: 'Qwen 2.1', safetensorsOnly: true })
+    expect(hits.map((h) => [h.id, h.filename, h.downloadUrl])).toEqual([
+      [1, 'restore.safetensors', 'https://civitai.com/api/download/models/10?type=Model'],
+      [3, 'plain.SAFETENSORS', 'https://civitai.com/api/download/models/30'],
+    ])
+    expect(hits.every((h) => h.subfolder === 'loras')).toBe(true)
+  })
+
+  it('GEGENPROBE: ohne die beiden Worte bleibt die Suche, wie sie war', async () => {
+    fetchExternal.mockResolvedValue(zweiDateien)
+    const hits = await searchCivitaiModels('x', 'LORA')
+    expect(new URL(String(fetchExternal.mock.calls[0][0])).searchParams.has('baseModels')).toBe(false)
+    // Every hit, each with its first file and the version's address.
+    expect(hits.map((h) => [h.id, h.filename, h.downloadUrl])).toEqual([
+      [1, 'Restore workflow.json', 'https://civitai.com/api/download/models/10'],
+      [2, 'flow.json', 'https://civitai.com/api/download/models/20'],
+      [3, 'plain.SAFETENSORS', 'https://civitai.com/api/download/models/30'],
+    ])
+  })
+})

@@ -1,0 +1,909 @@
+[
+ {
+  "model": "qwen-image-2.1",
+  "options": {
+   "resolution": "1k"
+  },
+  "promptLength": 100,
+  "usd": 0.02
+ },
+ {
+  "model": "qwen-image-2.1",
+  "options": {
+   "resolution": "1.5k"
+  },
+  "promptLength": 100,
+  "usd": 0.04
+ },
+ {
+  "model": "qwen-image-2.1",
+  "options": {
+   "resolution": "2k"
+  },
+  "promptLength": 100,
+  "usd": 0.08
+ },
+ {
+  "model": "qwen-image-2.1-edit",
+  "options": {
+   "resolution": "1k"
+  },
+  "promptLength": 100,
+  "usd": 0.03,
+  "imageCount": 1
+ },
+ {
+  "model": "qwen-image-2.1-edit",
+  "options": {
+   "resolution": "1k"
+  },
+  "promptLength": 100,
+  "usd": 0.04,
+  "imageCount": 2
+ },
+ {
+  "model": "qwen-image-2.1-edit",
+  "options": {
+   "resolution": "1k"
+  },
+  "promptLength": 100,
+  "usd": 0.05,
+  "imageCount": 3
+ },
+ {
+  "model": "qwen-image-2.1-edit",
+  "options": {
+   "resolution": "1.5k"
+  },
+  "promptLength": 100,
+  "usd": 0.06,
+  "imageCount": 1
+ },
+ {
+  "model": "qwen-image-2.1-edit",
+  "options": {
+   "resolution": "1.5k"
+  },
+  "promptLength": 100,
+  "usd": 0.075,
+  "imageCount": 2
+ },
+ {
+  "model": "qwen-image-2.1-edit",
+  "options": {
+   "resolution": "1.5k"
+  },
+  "promptLength": 100,
+  "usd": 0.09,
+  "imageCount": 3
+ },
+ {
+  "model": "qwen-image-2.1-edit",
+  "options": {
+   "resolution": "2k"
+  },
+  "promptLength": 100,
+  "usd": 0.12,
+  "imageCount": 1
+ },
+ {
+  "model": "qwen-image-2.1-edit",
+  "options": {
+   "resolution": "2k"
+  },
+  "promptLength": 100,
+  "usd": 0.14,
+  "imageCount": 2
+ },
+ {
+  "model": "qwen-image-2.1-edit",
+  "options": {
+   "resolution": "2k"
+  },
+  "promptLength": 100,
+  "usd": 0.16,
+  "imageCount": 3
+ },
+ {
+  "model": "ltx-2.5-t2v",
+  "options": {
+   "resolution": "720p",
+   "duration": 5
+  },
+  "promptLength": 100,
+  "usd": 0.5
+ },
+ {
+  "model": "ltx-2.5-t2v",
+  "options": {
+   "resolution": "720p",
+   "duration": 6
+  },
+  "promptLength": 100,
+  "usd": 0.6
+ },
+ {
+  "model": "ltx-2.5-t2v",
+  "options": {
+   "resolution": "720p",
+   "duration": 10
+  },
+  "promptLength": 100,
+  "usd": 1
+ },
+ {
+  "model": "ltx-2.5-t2v",
+  "options": {
+   "resolution": "720p",
+   "duration": 20
+  },
+  "promptLength": 100,
+  "usd": 2
+ },
+ {
+  "model": "ltx-2.5-t2v",
+  "options": {
+   "resolution": "1080p",
+   "duration": 5
+  },
+  "promptLength": 100,
+  "usd": 0.7
+ },
+ {
+  "model": "ltx-2.5-t2v",
+  "options": {
+   "resolution": "1080p",
+   "duration": 6
+  },
+  "promptLength": 100,
+  "usd": 0.84
+ },
+ {
+  "model": "ltx-2.5-t2v",
+  "options": {
+   "resolution": "1080p",
+   "duration": 10
+  },
+  "promptLength": 100,
+  "usd": 1.4
+ },
+ {
+  "model": "ltx-2.5-t2v",
+  "options": {
+   "resolution": "1080p",
+   "duration": 20
+  },
+  "promptLength": 100,
+  "usd": 2.8
+ },
+ {
+  "model": "ltx-2.5-t2v",
+  "options": {
+   "resolution": "2k",
+   "duration": 5
+  },
+  "promptLength": 100,
+  "usd": 1.05
+ },
+ {
+  "model": "ltx-2.5-t2v",
+  "options": {
+   "resolution": "2k",
+   "duration": 6
+  },
+  "promptLength": 100,
+  "usd": 1.26
+ },
+ {
+  "model": "ltx-2.5-t2v",
+  "options": {
+   "resolution": "2k",
+   "duration": 10
+  },
+  "promptLength": 100,
+  "usd": 2.1
+ },
+ {
+  "model": "ltx-2.5-t2v",
+  "options": {
+   "resolution": "2k",
+   "duration": 20
+  },
+  "promptLength": 100,
+  "usd": 4.2
+ },
+ {
+  "model": "ltx-2.5-t2v",
+  "options": {
+   "resolution": "4k",
+   "duration": 5
+  },
+  "promptLength": 100,
+  "usd": 1.65
+ },
+ {
+  "model": "ltx-2.5-t2v",
+  "options": {
+   "resolution": "4k",
+   "duration": 6
+  },
+  "promptLength": 100,
+  "usd": 1.98
+ },
+ {
+  "model": "ltx-2.5-t2v",
+  "options": {
+   "resolution": "4k",
+   "duration": 10
+  },
+  "promptLength": 100,
+  "usd": 3.3
+ },
+ {
+  "model": "ltx-2.5-t2v",
+  "options": {
+   "resolution": "4k",
+   "duration": 20
+  },
+  "promptLength": 100,
+  "usd": 6.6
+ },
+ {
+  "model": "ltx-2.5-i2v",
+  "options": {
+   "resolution": "720p",
+   "duration": 5
+  },
+  "promptLength": 100,
+  "usd": 0.5
+ },
+ {
+  "model": "ltx-2.5-i2v",
+  "options": {
+   "resolution": "720p",
+   "duration": 10
+  },
+  "promptLength": 100,
+  "usd": 1
+ },
+ {
+  "model": "ltx-2.5-i2v",
+  "options": {
+   "resolution": "720p",
+   "duration": 20
+  },
+  "promptLength": 100,
+  "usd": 2
+ },
+ {
+  "model": "ltx-2.5-i2v",
+  "options": {
+   "resolution": "1080p",
+   "duration": 5
+  },
+  "promptLength": 100,
+  "usd": 0.7
+ },
+ {
+  "model": "ltx-2.5-i2v",
+  "options": {
+   "resolution": "1080p",
+   "duration": 10
+  },
+  "promptLength": 100,
+  "usd": 1.4
+ },
+ {
+  "model": "ltx-2.5-i2v",
+  "options": {
+   "resolution": "1080p",
+   "duration": 20
+  },
+  "promptLength": 100,
+  "usd": 2.8
+ },
+ {
+  "model": "ltx-2.5-i2v",
+  "options": {
+   "resolution": "2k",
+   "duration": 5
+  },
+  "promptLength": 100,
+  "usd": 1.05
+ },
+ {
+  "model": "ltx-2.5-i2v",
+  "options": {
+   "resolution": "2k",
+   "duration": 10
+  },
+  "promptLength": 100,
+  "usd": 2.1
+ },
+ {
+  "model": "ltx-2.5-i2v",
+  "options": {
+   "resolution": "2k",
+   "duration": 20
+  },
+  "promptLength": 100,
+  "usd": 4.2
+ },
+ {
+  "model": "ltx-2.5-i2v",
+  "options": {
+   "resolution": "4k",
+   "duration": 5
+  },
+  "promptLength": 100,
+  "usd": 1.65
+ },
+ {
+  "model": "ltx-2.5-i2v",
+  "options": {
+   "resolution": "4k",
+   "duration": 10
+  },
+  "promptLength": 100,
+  "usd": 3.3
+ },
+ {
+  "model": "ltx-2.5-i2v",
+  "options": {
+   "resolution": "4k",
+   "duration": 20
+  },
+  "promptLength": 100,
+  "usd": 6.6
+ },
+ {
+  "model": "minimax-h3-t2v",
+  "options": {
+   "resolution": "480p",
+   "duration": 3
+  },
+  "promptLength": 100,
+  "usd": 0.12
+ },
+ {
+  "model": "minimax-h3-t2v",
+  "options": {
+   "resolution": "480p",
+   "duration": 5
+  },
+  "promptLength": 100,
+  "usd": 0.2
+ },
+ {
+  "model": "minimax-h3-t2v",
+  "options": {
+   "resolution": "480p",
+   "duration": 15
+  },
+  "promptLength": 100,
+  "usd": 0.6
+ },
+ {
+  "model": "minimax-h3-t2v",
+  "options": {
+   "resolution": "540p",
+   "duration": 3
+  },
+  "promptLength": 100,
+  "usd": 0.18
+ },
+ {
+  "model": "minimax-h3-t2v",
+  "options": {
+   "resolution": "540p",
+   "duration": 5
+  },
+  "promptLength": 100,
+  "usd": 0.3
+ },
+ {
+  "model": "minimax-h3-t2v",
+  "options": {
+   "resolution": "540p",
+   "duration": 15
+  },
+  "promptLength": 100,
+  "usd": 0.9
+ },
+ {
+  "model": "minimax-h3-t2v",
+  "options": {
+   "resolution": "768p",
+   "duration": 3
+  },
+  "promptLength": 100,
+  "usd": 0.24
+ },
+ {
+  "model": "minimax-h3-t2v",
+  "options": {
+   "resolution": "768p",
+   "duration": 5
+  },
+  "promptLength": 100,
+  "usd": 0.4
+ },
+ {
+  "model": "minimax-h3-t2v",
+  "options": {
+   "resolution": "768p",
+   "duration": 15
+  },
+  "promptLength": 100,
+  "usd": 1.2
+ },
+ {
+  "model": "minimax-h3-t2v",
+  "options": {
+   "resolution": "1080p",
+   "duration": 3
+  },
+  "promptLength": 100,
+  "usd": 0.48
+ },
+ {
+  "model": "minimax-h3-t2v",
+  "options": {
+   "resolution": "1080p",
+   "duration": 5
+  },
+  "promptLength": 100,
+  "usd": 0.8
+ },
+ {
+  "model": "minimax-h3-t2v",
+  "options": {
+   "resolution": "1080p",
+   "duration": 15
+  },
+  "promptLength": 100,
+  "usd": 2.4
+ },
+ {
+  "model": "minimax-h3-ref",
+  "options": {
+   "resolution": "480p",
+   "duration": 3
+  },
+  "promptLength": 100,
+  "usd": 0.17
+ },
+ {
+  "model": "minimax-h3-ref",
+  "options": {
+   "resolution": "480p",
+   "duration": 5
+  },
+  "promptLength": 100,
+  "usd": 0.27
+ },
+ {
+  "model": "minimax-h3-ref",
+  "options": {
+   "resolution": "480p",
+   "duration": 15
+  },
+  "promptLength": 100,
+  "usd": 0.77
+ },
+ {
+  "model": "minimax-h3-ref",
+  "options": {
+   "resolution": "1080p",
+   "duration": 3
+  },
+  "promptLength": 100,
+  "usd": 0.62
+ },
+ {
+  "model": "minimax-h3-ref",
+  "options": {
+   "resolution": "1080p",
+   "duration": 5
+  },
+  "promptLength": 100,
+  "usd": 1.02
+ },
+ {
+  "model": "minimax-h3-ref",
+  "options": {
+   "resolution": "1080p",
+   "duration": 15
+  },
+  "promptLength": 100,
+  "usd": 3.02
+ },
+ {
+  "model": "minimax-h3-video-edit",
+  "options": {
+   "resolution": "480p",
+   "generate_audio": true
+  },
+  "promptLength": 100,
+  "usd": 1.1,
+  "seconds": 10.026667
+ },
+ {
+  "model": "minimax-h3-video-edit",
+  "options": {
+   "resolution": "480p",
+   "generate_audio": false
+  },
+  "promptLength": 100,
+  "usd": 1.1,
+  "seconds": 10.026667
+ },
+ {
+  "model": "minimax-h3-video-edit",
+  "options": {
+   "resolution": "540p",
+   "generate_audio": true
+  },
+  "promptLength": 100,
+  "usd": 1.65,
+  "seconds": 10.026667
+ },
+ {
+  "model": "minimax-h3-video-edit",
+  "options": {
+   "resolution": "540p",
+   "generate_audio": false
+  },
+  "promptLength": 100,
+  "usd": 1.65,
+  "seconds": 10.026667
+ },
+ {
+  "model": "minimax-h3-video-edit",
+  "options": {
+   "resolution": "768p",
+   "generate_audio": true
+  },
+  "promptLength": 100,
+  "usd": 2.2,
+  "seconds": 10.026667
+ },
+ {
+  "model": "minimax-h3-video-edit",
+  "options": {
+   "resolution": "768p",
+   "generate_audio": false
+  },
+  "promptLength": 100,
+  "usd": 2.2,
+  "seconds": 10.026667
+ },
+ {
+  "model": "minimax-h3-video-edit",
+  "options": {
+   "resolution": "1080p",
+   "generate_audio": true
+  },
+  "promptLength": 100,
+  "usd": 4.4,
+  "seconds": 10.026667
+ },
+ {
+  "model": "minimax-h3-video-edit",
+  "options": {
+   "resolution": "1080p",
+   "generate_audio": false
+  },
+  "promptLength": 100,
+  "usd": 4.4,
+  "seconds": 10.026667
+ },
+ {
+  "model": "wan-3.0-ref",
+  "options": {
+   "resolution": "480p",
+   "duration": 2,
+   "generate_audio": true
+  },
+  "promptLength": 100,
+  "usd": 0.1
+ },
+ {
+  "model": "wan-3.0-ref",
+  "options": {
+   "resolution": "480p",
+   "duration": 2,
+   "generate_audio": false
+  },
+  "promptLength": 100,
+  "usd": 0.1
+ },
+ {
+  "model": "wan-3.0-ref",
+  "options": {
+   "resolution": "480p",
+   "duration": 5,
+   "generate_audio": true
+  },
+  "promptLength": 100,
+  "usd": 0.25
+ },
+ {
+  "model": "wan-3.0-ref",
+  "options": {
+   "resolution": "480p",
+   "duration": 5,
+   "generate_audio": false
+  },
+  "promptLength": 100,
+  "usd": 0.25
+ },
+ {
+  "model": "wan-3.0-ref",
+  "options": {
+   "resolution": "480p",
+   "duration": 30,
+   "generate_audio": true
+  },
+  "promptLength": 100,
+  "usd": 1.5
+ },
+ {
+  "model": "wan-3.0-ref",
+  "options": {
+   "resolution": "480p",
+   "duration": 30,
+   "generate_audio": false
+  },
+  "promptLength": 100,
+  "usd": 1.5
+ },
+ {
+  "model": "wan-3.0-ref",
+  "options": {
+   "resolution": "720p",
+   "duration": 2,
+   "generate_audio": true
+  },
+  "promptLength": 100,
+  "usd": 0.2
+ },
+ {
+  "model": "wan-3.0-ref",
+  "options": {
+   "resolution": "720p",
+   "duration": 2,
+   "generate_audio": false
+  },
+  "promptLength": 100,
+  "usd": 0.2
+ },
+ {
+  "model": "wan-3.0-ref",
+  "options": {
+   "resolution": "720p",
+   "duration": 5,
+   "generate_audio": true
+  },
+  "promptLength": 100,
+  "usd": 0.5
+ },
+ {
+  "model": "wan-3.0-ref",
+  "options": {
+   "resolution": "720p",
+   "duration": 5,
+   "generate_audio": false
+  },
+  "promptLength": 100,
+  "usd": 0.5
+ },
+ {
+  "model": "wan-3.0-ref",
+  "options": {
+   "resolution": "720p",
+   "duration": 30,
+   "generate_audio": true
+  },
+  "promptLength": 100,
+  "usd": 3
+ },
+ {
+  "model": "wan-3.0-ref",
+  "options": {
+   "resolution": "720p",
+   "duration": 30,
+   "generate_audio": false
+  },
+  "promptLength": 100,
+  "usd": 3
+ },
+ {
+  "model": "wan-3.0-ref",
+  "options": {
+   "resolution": "1080p",
+   "duration": 2,
+   "generate_audio": true
+  },
+  "promptLength": 100,
+  "usd": 0.4
+ },
+ {
+  "model": "wan-3.0-ref",
+  "options": {
+   "resolution": "1080p",
+   "duration": 2,
+   "generate_audio": false
+  },
+  "promptLength": 100,
+  "usd": 0.4
+ },
+ {
+  "model": "wan-3.0-ref",
+  "options": {
+   "resolution": "1080p",
+   "duration": 5,
+   "generate_audio": true
+  },
+  "promptLength": 100,
+  "usd": 1
+ },
+ {
+  "model": "wan-3.0-ref",
+  "options": {
+   "resolution": "1080p",
+   "duration": 5,
+   "generate_audio": false
+  },
+  "promptLength": 100,
+  "usd": 1
+ },
+ {
+  "model": "wan-3.0-ref",
+  "options": {
+   "resolution": "1080p",
+   "duration": 30,
+   "generate_audio": true
+  },
+  "promptLength": 100,
+  "usd": 6
+ },
+ {
+  "model": "wan-3.0-ref",
+  "options": {
+   "resolution": "1080p",
+   "duration": 30,
+   "generate_audio": false
+  },
+  "promptLength": 100,
+  "usd": 6
+ },
+ {
+  "model": "minimax-h3-ref",
+  "options": {
+   "resolution": "480p",
+   "duration": 5
+  },
+  "promptLength": 100,
+  "usd": 0.25,
+  "imageCount": 1
+ },
+ {
+  "model": "minimax-h3-ref",
+  "options": {
+   "resolution": "480p",
+   "duration": 5
+  },
+  "promptLength": 100,
+  "usd": 0.27,
+  "imageCount": 1
+ },
+ {
+  "model": "minimax-h3-ref",
+  "options": {
+   "resolution": "480p",
+   "duration": 5
+  },
+  "promptLength": 100,
+  "usd": 0.31,
+  "imageCount": 3
+ },
+ {
+  "model": "minimax-h3-ref",
+  "options": {
+   "resolution": "540p",
+   "duration": 5
+  },
+  "promptLength": 100,
+  "usd": 0.395,
+  "imageCount": 1
+ },
+ {
+  "model": "minimax-h3-ref",
+  "options": {
+   "resolution": "768p",
+   "duration": 5
+  },
+  "promptLength": 100,
+  "usd": 0.52,
+  "imageCount": 1
+ },
+ {
+  "model": "minimax-h3-video-edit",
+  "options": {
+   "resolution": "480p",
+   "duration": 5
+  },
+  "promptLength": 100,
+  "usd": 0.8,
+  "seconds": 10.026667
+ },
+ {
+  "model": "minimax-h3-video-edit",
+  "options": {
+   "resolution": "480p",
+   "duration": 3
+  },
+  "promptLength": 100,
+  "usd": 0.7,
+  "seconds": 10.026667
+ },
+ {
+  "model": "minimax-h3-video-edit",
+  "options": {
+   "resolution": "480p"
+  },
+  "promptLength": 100,
+  "usd": 1.1,
+  "seconds": 10.026667
+ },
+ {
+  "model": "minimax-h3-video-edit",
+  "options": {
+   "resolution": "480p",
+   "duration": 3
+  },
+  "promptLength": 100,
+  "usd": 0.7,
+  "seconds": 10.026667
+ },
+ {
+  "model": "minimax-h3-video-edit",
+  "options": {
+   "resolution": "480p",
+   "duration": 15
+  },
+  "promptLength": 100,
+  "usd": 1.3,
+  "seconds": 10.026667
+ },
+ {
+  "model": "minimax-h3-video-edit",
+  "options": {
+   "resolution": "1080p"
+  },
+  "promptLength": 100,
+  "usd": 4.4,
+  "seconds": 10.026667
+ },
+ {
+  "model": "minimax-h3-video-edit",
+  "options": {
+   "resolution": "1080p",
+   "duration": 3
+  },
+  "promptLength": 100,
+  "usd": 2.8,
+  "seconds": 10.026667
+ },
+ {
+  "model": "minimax-h3-video-edit",
+  "options": {
+   "resolution": "1080p",
+   "duration": 15
+  },
+  "promptLength": 100,
+  "usd": 5.2,
+  "seconds": 10.026667
+ }
+]

@@ -37,7 +37,7 @@ const STALE_MANIFEST_RE =
 // Fresh pulls of the same model name succeed. Treated as stale-manifest so
 // the scan + banner can offer a one-click refresh.
 const SHOW_NOT_FOUND_RE = /model\s+['"]?([\w.:/-]+?)['"]?\s+not\s+found/i
-// Bug C (v2.4.5 — Anson192 GH Discussion #39, RTX 4090): Ollama reports
+// Bug C (v2.4.5 — GH Discussion #39, RTX 4090): Ollama reports
 // `unable to load model: <path>/blobs/sha256-<hash>` (HTTP 500) when the
 // manifest references a blob that isn't on disk. Happens when blobs are
 // manually deleted, the model dir lives on an external drive that wasn't

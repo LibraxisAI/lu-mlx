@@ -1,10 +1,10 @@
 /**
- * Grouping for the tool-call band (David 2026-07-31): consecutive tool_call
+ * Grouping for the tool-call band (2026-07-31): consecutive tool_call
  * blocks in a message render as ONE band that morphs from tool to tool while
  * running and collapses to an expandable "N steps" row when done, instead of
  * stacking a chip per call and flooding the chat.
  *
- * G14-4 (David 2026-08-07): narration BETWEEN tool calls no longer ends the
+ * G14-4 (2026-08-07): narration BETWEEN tool calls no longer ends the
  * band. Any model that talks between calls ("Step 3 done, proceeding…", and
  * gpt-oss does it on every turn) used to shatter the run into band(1), note,
  * band(1), note, which is exactly the stack this module exists to prevent.
@@ -14,7 +14,7 @@
  * trailing answer always stands alone, because that is the model's actual
  * reply and must never disappear into a collapse.
  *
- * G21-2 (David 2026-08-07): per-round thinking blocks are interior notes too.
+ * G21-2 (2026-08-07): per-round thinking blocks are interior notes too.
  * "Die Denkblasen muessen zwischen den Tool Calls dann genau da kommen, in der
  * richtigen Reihenfolge." Round k's thought sits anchored after the last call
  * of round k-1, inside the band, rendered as its own collapsed ThinkingBlock
@@ -68,6 +68,8 @@ export function groupAgentBlocks(blocks: AgentBlock[]): AgentBlockGroup[] {
         groups.push({ kind: 'tools', blocks: [block], calls: [block.toolCall], notes: [] })
       }
     } else if (
+      // A message from the user is never folded into a band (CA U2).
+      !block.steer &&
       INTERIOR_NOTE_PHASES.has(block.phase) &&
       i < lastCallAt &&
       last &&

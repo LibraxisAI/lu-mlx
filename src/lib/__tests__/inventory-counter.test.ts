@@ -60,13 +60,16 @@ describe('the Models page routes both counters through the one rule', () => {
     // Since the LoRAs rail the badge counts one of two things (the category's
     // models, or the LoRAs), and both of them go through the same rule: the
     // call wraps the whole choice instead of one of its arms.
-    expect(manager).toMatch(/const badge = counterView\(\s*key === 'lora'\s*\?\s*loraRows\.length\s*:\s*models\.filter\(\(m\) => m\.type === key && !isLoraRow\(m\)\)\.length,\s*inventoryState,\s*\)/)
+    expect(manager).toMatch(/counterView\(\s*key === 'lora'\s*\?\s*loraRows\.length\s*:\s*models\.filter\(\(m\) => m\.type === key && !isLoraRow\(m\)\)\.length,\s*inventoryState,\s*\)/)
+    // The Mac's media rails count their own catalogue, through the same rule.
+    expect(manager).toMatch(/counterView\(mlxInstalled\[key\], mlxInventoryState\)/)
   })
 
   it('the Installed badge asks counterView', () => {
-    expect(manager).toMatch(/counterView\(installedCount, inventoryState\)/)
+    expect(manager).toMatch(/counterView\(installedCount, showMacLoras \? macLoraState : showMlxPanel \? mlxInventoryState : inventoryState\)/)
     // And that one number is the lane's own count, not a second reading.
-    expect(manager).toMatch(/const installedCount = rail === 'lora' \? loraRows\.length : filteredModels\.length/)
+    // On the Mac that lane is Image, Video or Music (macLane).
+    expect(manager).toMatch(/const installedCount = showMacLoras\s*\? macLoras\.loras\.length\s*: rail === 'lora'\s*\? loraRows\.length\s*: showMlxPanel \? mlxInstalled\[macLane\] : filteredModels\.length/)
   })
 
   it('NEGATIVE CONTROL: neither counter prints a bare list length any more', () => {
@@ -82,6 +85,16 @@ describe('the Models page routes both counters through the one rule', () => {
   })
 
   it('the loading mark carries a label, so it is not a mute flicker', () => {
-    expect(manager).toMatch(/aria-label=\{label\}/)
+    // The mark is drawn by the face of the page: the classic one on Windows
+    // and Linux, the redesign on the Mac. Both carry the label, and both get
+    // the badge they draw from the page, which is the only caller of the rule.
+    for (const face of ['classic.tsx', 'mac.tsx']) {
+      const src = readFileSync(resolve(here, '../../components/models/skin', face), 'utf8')
+      expect(src, face).toMatch(/aria-label=\{label\}/)
+      expect(src, face).toMatch(/installedBadge\.kind === 'loading' \? \(\s*<CountingDots label="Counting installed models" \/>/)
+      expect(src, face).toMatch(/badge\.kind === 'loading' \? \(/)
+      expect(src, face).not.toMatch(/counterView|\.length\}</)
+    }
+    expect(manager).toMatch(/installedBadge=\{installedBadge\}/)
   })
 })

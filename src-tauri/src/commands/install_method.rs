@@ -11,8 +11,7 @@
 //! `linux-x86_64-deb` out of latest.json, downloads a Debian package and runs
 //! `pkexec dpkg -i` on a system that has no dpkg. polkit asks for the
 //! password first and the command fails afterwards, which is exactly what the
-//! customer sees: download fine, password fine, install broken. Full trace in
-//! UPDATER-LINUX-BEFUND.md.
+//! customer sees: download fine, password fine, install broken.
 //!
 //! This module answers the question the plugin skips, by asking the package
 //! managers that are actually installed which one of them owns the file. The
@@ -176,8 +175,8 @@ pub fn collect_probes() -> Probes {
 
 /// The same probes, for a file we name rather than for the running process.
 ///
-/// Split out so the proof can be honest: the containers in
-/// UPDATER-LINUX-BEFUND.md run THIS file, unchanged, against the binary the
+/// Split out so the proof can be honest: the test containers
+/// run THIS file, unchanged, against the binary the
 /// AUR package and the deb actually put on disk. A harness that could only ask
 /// about itself would prove nothing about `/usr/bin/locally-uncensored`.
 ///
@@ -358,8 +357,8 @@ mod tests {
     #[test]
     fn an_appimage_in_the_home_folder() {
         let p = Probes {
-            appimage_env: Some("/home/zen/Apps/LU.AppImage".to_string()),
-            exe_path: PathBuf::from("/home/zen/Apps/LU.AppImage"),
+            appimage_env: Some("/home/bob/Apps/LU.AppImage".to_string()),
+            exe_path: PathBuf::from("/home/bob/Apps/LU.AppImage"),
             exe_dir_writable: true,
             ..Default::default()
         };
@@ -397,8 +396,8 @@ mod tests {
         // An AppImage on a Debian box: dpkg may well own an older copy under
         // /usr, but the file we are running is the AppImage.
         let p = Probes {
-            appimage_env: Some("/home/zen/LU.AppImage".to_string()),
-            exe_path: PathBuf::from("/home/zen/LU.AppImage"),
+            appimage_env: Some("/home/bob/LU.AppImage".to_string()),
+            exe_path: PathBuf::from("/home/bob/LU.AppImage"),
             exe_dir_writable: true,
             has_dpkg: true,
             dpkg_owns_exe: true,
@@ -423,7 +422,7 @@ mod tests {
     #[test]
     fn a_binary_nobody_owns_outside_usr_is_unknown() {
         let p = Probes {
-            exe_path: PathBuf::from("/home/zen/build/locally-uncensored"),
+            exe_path: PathBuf::from("/home/bob/build/locally-uncensored"),
             exe_dir_writable: true,
             has_dpkg: true,
             ..Default::default()

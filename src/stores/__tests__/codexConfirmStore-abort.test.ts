@@ -10,7 +10,7 @@ import { useCodexConfirmStore } from '../codexConfirmStore'
 const req = { toolName: 'shell_execute', command: 'rm -rf build', cloudReason: false }
 
 beforeEach(() => {
-  useCodexConfirmStore.setState({ pending: null, resolve: null })
+  useCodexConfirmStore.setState({ pending: null, resolve: null, queue: [] })
 })
 
 describe('codexConfirmStore.ask with an abort signal', () => {

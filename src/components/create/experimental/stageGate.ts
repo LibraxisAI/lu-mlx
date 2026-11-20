@@ -1,5 +1,6 @@
 import type { CreateBackend, CreateIntent } from '../../../stores/createStore'
-import { videoLaneModels } from '../../../api/comfyui'
+import { runnableVideoLaneModels } from '../../../api/comfyui'
+import { imageLaneModels } from '../../../lib/image-engines'
 import type { IntentMeta } from './intents'
 
 /**
@@ -47,6 +48,12 @@ export interface StageGateInput {
   mlxMissing: { image: boolean; video: boolean } | null
   /** ComfyUI-Sonde: null solange sie laeuft. */
   connected: boolean | null
+  /** Ein ComfyUI-Prozess laeuft, hat den Port aber noch nicht gebunden
+   *  (comfyui_status.starting). Gegenprobe 02.10.2026: in genau diesem Fenster
+   *  sagte die Sonde `false`, und die Buehne bot einen 6,5-GB-Download an,
+   *  waehrend oben "ComfyUI is starting up." stand und die Modelle laengst da
+   *  waren. Ein Klick haette Juggernaut ein zweites Mal geladen. */
+  comfyStarting?: boolean
   modelsLoaded: boolean
   /** Wie viele Modelle diese Spur tatsaechlich anbieten kann. */
   laneModelCount: number
@@ -58,7 +65,8 @@ export interface StageGateInput {
  * `true`, wenn die Buehne fuer diese Spur die Einrichtungskarte zeigt.
  *
  * Die drei Faelle, unveraendert aus Stage.tsx uebernommen:
- *   • Mac (mlxMissing gesetzt): die Gattung ist dort nicht eingerichtet.
+ *   • Mac (mlxMissing gesetzt): die Gattung ist dort nicht eingerichtet,
+ *     oder die Videospur hat kein Modell, das sie fahren kann.
  *   • Windows/Linux, ComfyUI nicht erreichbar: derselbe Knopf installiert es.
  *   • Windows/Linux, ComfyUI da, Sonde fertig, aber die Spur hat kein Modell.
  * `connected === null` (Sonde laeuft noch) oeffnet nichts — sonst blitzte die
@@ -66,16 +74,23 @@ export interface StageGateInput {
  */
 export function stageShowsSetupCard(i: StageGateInput): boolean {
   const mlxOnly = !!i.mlxMissing && !i.comfyRunning
+  // Die Videospur zaehlt auch auf dem Mac ueber die Spur und nicht ueber die
+  // rohe Liste: ein Mac, dessen einziges Videomodell ein Startbild braucht
+  // (Wan 2.2 I2V), hat fuer Text zu Video keines, und die Spur stand sonst
+  // leer da, ohne Karte und mit einer Auswahl ohne Eintrag.
   const macMissing =
     i.backend === 'local' && mlxOnly &&
     (i.requiresModels === 'image' ? i.mlxMissing!.image
-      : i.requiresModels === 'video' ? i.mlxMissing!.video
-        : false)
+      : i.requiresModels === 'video' ? i.mlxMissing!.video || (i.modelsLoaded && i.laneModelCount === 0)
+        // Motion Control (3.0.8): the tab is there while an LTX-2.3 pack is,
+        // and its list stays empty until the LoRA is installed.
+        : i.requiresModels === 'motion' ? i.modelsLoaded && i.laneModelCount === 0
+          : false)
   if (macMissing) return true
   const comfyHost = i.mlxMissing === null || !!i.comfyRunning
   return (
     comfyHost && i.backend === 'local' && !!i.requiresModels && (
-      i.connected === false ||
+      (i.connected === false && !i.comfyStarting) ||
       (i.connected === true && i.modelsLoaded && i.laneModelCount === 0)
     )
   )
@@ -92,7 +107,7 @@ export function stageShowsSetupCard(i: StageGateInput): boolean {
  * SVD und FramePack koennen nur Bild-zu-Video, eine Kiste mit SVD als einzigem
  * Videomodell kam so durch eine blosse Laengenpruefung und bekam nie das
  * Starterpaket angeboten, waehrend die T2V-Auswahl daneben „No matches" zeigte
- * (David 2026-08-01).
+ * (2026-08-01).
  */
 export function laneModelCount(
   intent: CreateIntent,
@@ -103,9 +118,15 @@ export function laneModelCount(
     audio: unknown[]
     lipsync: unknown[]
     motion: unknown[]
+    /** Enhance Image: the files in models/upscale_models. Optional so the
+     *  callers that never ask about it (the Mac setup gate) can leave it out. */
+    upscale?: unknown[]
   },
 ): number {
   if (!requiresModels) return 0
-  if (requiresModels === 'video') return videoLaneModels(lists.video as never, intent).length
-  return lists[requiresModels].length
+  if (requiresModels === 'video') return runnableVideoLaneModels(lists.video as never, intent).length
+  // Dasselbe fuer Edit auf dem Mac: dort zaehlen nur die Modelle, die ein Bild
+  // nehmen. Eine ComfyUI-Liste bleibt, wie sie ist.
+  if (requiresModels === 'image') return imageLaneModels(lists.image as never, intent).length
+  return (lists[requiresModels] ?? []).length
 }

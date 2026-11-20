@@ -4,27 +4,30 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Locally Uncensored vs Kobold.cpp: Which Is Better?</title>
-<meta name="description" content="Kobold.cpp does creative writing. Locally Uncensored generates text, images, and video. All local, all uncensored. Full comparison.">
+<meta name="description" content="Kobold.cpp is a single-file engine built for creative writing. Locally Uncensored is a desktop app for text, images and video. All local, all uncensored. Full comparison.">
 <meta name="keywords" content="locally uncensored vs koboldcpp, kobold.cpp alternative, local ai creative writing, koboldai alternative, uncensored ai local, koboldcpp image generation">
-<meta property="og:title" content="Locally Uncensored vs Kobold.cpp — Which Local AI App Is Better?">
-<meta property="og:description" content="Kobold does creative writing — Locally Uncensored generates anything: text, images, video. All local, all uncensored. Full comparison.">
+<meta property="og:title" content="Locally Uncensored vs Kobold.cpp: Which Local AI App Is Better?">
+<meta property="og:description" content="Kobold.cpp is a single-file engine built for creative writing. Locally Uncensored is a desktop app for text, images and video. All local, all uncensored. Full comparison.">
 <meta property="og:url" content="https://locallyuncensored.com/blog/locally-uncensored-vs-koboldcpp.html">
 <meta property="og:type" content="article">
 <link rel="canonical" href="https://locallyuncensored.com/blog/locally-uncensored-vs-koboldcpp.html">
 <meta name="robots" content="index, follow">
 <!-- Privacy: No external fonts loaded. Using system fonts. -->
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"Article","headline":"Locally Uncensored vs Kobold.cpp — Which Local AI App Is Better?","author":{"@type":"Person","name":"PurpleDoubleD"},"datePublished":"2026-03-30","dateModified":"2026-04-05","publisher":{"@type":"Organization","name":"Locally Uncensored"}}
+{"@context":"https://schema.org","@type":"Article","headline":"Locally Uncensored vs Kobold.cpp: Which Local AI App Is Better?","author":{"@type":"Person","name":"PurpleDoubleD"},"datePublished":"2026-03-30","dateModified":"2026-10-19","publisher":{"@type":"Organization","name":"Locally Uncensored"}}
 </script>
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is Locally Uncensored better than Kobold.cpp for creative writing?","acceptedAnswer":{"@type":"Answer","text":"No. Kobold.cpp is purpose-built for creative writing with story mode, adventure mode, and advanced generation parameters. Locally Uncensored is better if you want text chat combined with image and video generation in one app."}},{"@type":"Question","name":"Does Kobold.cpp support image generation?","acceptedAnswer":{"@type":"Answer","text":"Kobold.cpp has basic image generation via SD.cpp, but it is limited compared to Locally Uncensored's full ComfyUI integration which supports Stable Diffusion XL, FLUX, and video generation workflows."}},{"@type":"Question","name":"Can I use Kobold.cpp with SillyTavern?","acceptedAnswer":{"@type":"Answer","text":"Yes. Kobold.cpp is one of the most popular backends for SillyTavern. Locally Uncensored is a standalone app and does not serve as a backend for third-party frontends."}},{"@type":"Question","name":"Which is easier to set up — Locally Uncensored or Kobold.cpp?","acceptedAnswer":{"@type":"Answer","text":"Kobold.cpp ships as a single executable with zero dependencies. Locally Uncensored requires installing the app plus Ollama. Both are straightforward, but Kobold.cpp has fewer moving parts."}}]}
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is Locally Uncensored better than Kobold.cpp for creative writing?","acceptedAnswer":{"@type":"Answer","text":"No. Kobold.cpp is purpose-built for creative writing with story mode, adventure mode, and advanced generation parameters. Locally Uncensored is better if you want text chat combined with image and video generation in one app."}},{"@type":"Question","name":"Does Kobold.cpp support image generation?","acceptedAnswer":{"@type":"Answer","text":"Yes. KoboldCpp generates images through its built-in stable-diffusion.cpp, with models such as SDXL, SD3, Flux and Qwen Image, and video with models such as WAN 2.2 and LTX 2.3. Locally Uncensored takes another route: it runs ComfyUI on Windows and Linux for image models such as FLUX and Qwen-Image 2.1 and video models such as Wan and LTX."}},{"@type":"Question","name":"Can I use Kobold.cpp with SillyTavern?","acceptedAnswer":{"@type":"Answer","text":"Yes. The KoboldCpp wiki explains how to run SillyTavern on top of it. Locally Uncensored can also serve other apps: Settings, Local API starts an OpenAI compatible server on your machine, port 8129 by default, that lists the models of the LU Engine, Ollama and LM Studio under one address. It listens on localhost unless you allow the LAN and always asks for a token, so any tool that talks to OpenAI can use it. The other way round works too: since 3.0.7, Locally Uncensored can run a KoboldCpp next to LM Studio or the LU Engine as one of several backends, so far checked in automated tests only."}},{"@type":"Question","name":"Which is easier to set up?","acceptedAnswer":{"@type":"Answer","text":"Kobold.cpp ships as a single executable with zero dependencies: download and run. Locally Uncensored is an installer with a first-run wizard that finds an engine you already run, or installs one with a single click, and does the same for ComfyUI. Both are straightforward, but Kobold.cpp has fewer moving parts."}}]}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://locallyuncensored.com/"},{"@type":"ListItem","position":2,"name":"Blog","item":"https://locallyuncensored.com/blog/"},{"@type":"ListItem","position":3,"name":"Locally Uncensored vs Kobold.cpp","item":"https://locallyuncensored.com/blog/locally-uncensored-vs-koboldcpp.html"}]}
 </script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/assets/lu.css">
 <script defer src="/assets/lu.js"></script>
-  <script data-goatcounter="https://lu-uncensored.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+  <script data-goatcounter="https://purple47.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
 </head>
 <body>
 <nav class="lu-nav">
@@ -34,82 +37,95 @@
   </a>
   <div class="lu-nav-links" id="lu-nav-links">
     <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/pricing/">Pricing</a>
     <a class="lu-nav-link" href="/blog/">Blog</a>
     <a class="lu-nav-link" href="/guide/">Guide</a>
     <a class="lu-nav-link" href="/remote-access/">Remote</a>
   </div>
   <div class="lu-nav-right">
-    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">1600+&#8202;⭐</span></a>
-    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">800+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">4200+&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">1700+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
     <span class="lu-nav-sep"></span>
     <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="he-cta" href="/pricing/" aria-label="LU Cloud plans and what they include"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>Cloud</a>
     <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
     <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
   </div>
 </nav>
 <article class="lu-doc">
 <h1>Locally Uncensored vs Kobold.cpp</h1>
-<div class="meta">Published March 30, 2026 &middot; 6 min read</div>
+<div class="meta">Published March 30, 2026 &middot; Updated October 19, 2026 &middot; 6 min read</div>
 
-<p>Kobold.cpp is a powerhouse for creative writing and roleplay. Built on llama.cpp, it ships as a single executable with zero dependencies and offers advanced text generation controls that writers love. But the local AI landscape has evolved beyond text — and <a href="https://locallyuncensored.com/">Locally Uncensored v2.2.2</a> represents that evolution by combining LLM chat with full ComfyUI integration for image and video generation, a built-in coding agent, 13 MCP tools, and multi-provider support.</p>
-<p>If your creative workflow involves visuals alongside text, this comparison gets interesting. Both apps run entirely on your hardware with complete privacy, but they target very different use cases. Here is how Locally Uncensored and Kobold.cpp stack up in 2026.</p>
+<p>Kobold.cpp is a powerhouse for creative writing and roleplay. Built on llama.cpp, it ships as a single executable with zero dependencies and offers advanced text generation controls that writers love. It has grown well past text, with image, video, speech and music generation in the same file. <a href="https://locallyuncensored.com/">Locally Uncensored</a> is a native desktop app instead: version 3.0.6 combines LLM chat with image and video generation, a coding agent, an agent with tools and your own MCP servers, and local engines next to optional cloud providers.</p>
+<p>If your creative workflow involves visuals alongside text, this comparison gets interesting. Both apps run entirely on your hardware with complete privacy, but they target very different use cases. You also do not have to pick only one: Locally Uncensored detects a running KoboldCpp as one of twelve engines. Here is how the two stack up in 2026.</p>
 
 <h2>Feature Comparison</h2>
 <table>
 <thead><tr><th>Feature</th><th class="hl">Locally Uncensored</th><th>Kobold.cpp</th></tr></thead>
 <tbody>
-<tr><td>LLM Chat</td><td><span class="check">Yes (Ollama)</span></td><td><span class="check">Yes (built-in llama.cpp)</span></td></tr>
-<tr><td>Coding Agent</td><td><span class="check hl">Yes</span></td><td><span class="cross">No</span></td></tr>
-<tr><td>MCP Tools</td><td><span class="check hl">13 built-in</span></td><td><span class="cross">No</span></td></tr>
-<tr><td>File Upload + Vision</td><td><span class="check hl">Yes</span></td><td><span class="cross">No</span></td></tr>
-<tr><td>Thinking Mode</td><td><span class="check hl">Yes</span></td><td><span class="cross">No</span></td></tr>
-<tr><td>Granular Permissions</td><td><span class="check hl">7 categories, 3 levels</span></td><td><span class="cross">No</span></td></tr>
-<tr><td>Multi-Provider</td><td><span class="check hl">Ollama + OpenAI + Anthropic</span></td><td><span class="cross">Local only</span></td></tr>
-<tr><td>Model Load/Unload</td><td><span class="check hl">Yes (VRAM mgmt)</span></td><td><span class="cross">No</span></td></tr>
-<tr><td>Image Generation</td><td><span class="check hl">Yes (ComfyUI)</span></td><td><span class="check">Basic (SD.cpp)</span></td></tr>
-<tr><td>Video Generation</td><td><span class="check hl">Yes (ComfyUI)</span></td><td><span class="cross">No</span></td></tr>
+<tr><td>LLM Chat</td><td><span class="check">Yes (bundled LU Engine, or Ollama, LM Studio, KoboldCpp and other engines)</span></td><td><span class="check">Yes (built-in llama.cpp)</span></td></tr>
+<tr><td>Coding Agent</td><td><span class="check hl">Yes</span></td><td><span class="check">Yes (KoboldCpp Agent writes and edits code and runs programs)</span></td></tr>
+<tr><td>MCP Tools</td><td><span class="check hl">Built-in agent tools plus your own MCP servers</span></td><td><span class="check">Yes (MCP servers over HTTP and stdio, plus web search)</span></td></tr>
+<tr><td>File Upload + Vision</td><td><span class="check hl">Yes</span></td><td><span class="check">Vision with a matching mmproj file</span></td></tr>
+<tr><td>Thinking Mode</td><td><span class="check hl">Yes, with an effort control where the model has one, for local models too since 3.0.7</span></td><td><span class="check">Thinking tag settings for reasoning models</span></td></tr>
+<tr><td>Granular Permissions</td><td><span class="check hl">A permission gate on every tool call</span></td><td>Not documented</td></tr>
+<tr><td>Multi-Provider</td><td><span class="check hl">Local engines + OpenAI, Anthropic, OpenRouter and any OpenAI compatible address</span></td><td><span class="check">Yes (AI Horde, OpenAI compatible, Anthropic, OpenRouter, Gemini and more)</span></td></tr>
+<tr><td>Model Load/Unload</td><td><span class="check hl">Yes (VRAM mgmt)</span></td><td><span class="check">Yes (admin mode and router mode switch models at runtime)</span></td></tr>
+<tr><td>Image Generation</td><td><span class="check hl">Yes (ComfyUI; on a Mac without ComfyUI)</span></td><td><span class="check">Yes (stable-diffusion.cpp: SD 1.5, SDXL, SD3, Flux, Qwen Image and more)</span></td></tr>
+<tr><td>Video Generation</td><td><span class="check hl">Yes (ComfyUI; on a Mac without ComfyUI)</span></td><td><span class="check">Yes (WAN 2.2, LTX 2.3 and more)</span></td></tr>
 <tr><td>Story/Adventure Mode</td><td><span class="cross">No</span></td><td><span class="check">Yes</span></td></tr>
-<tr><td>Custom Personas</td><td><span class="check hl">Yes</span></td><td><span class="cross">No</span></td></tr>
-<tr><td>Answers directly, abliterated models available</td><td><span class="check hl">Yes</span></td><td><span class="check">Yes</span></td></tr>
+<tr><td>Custom Personas</td><td><span class="check hl">Yes</span></td><td><span class="check">Characters, plus Tavern character card import</span></td></tr>
+<tr><td>Answers directly, abliterated models available</td><td><span class="check hl">Yes</span></td><td>Depends on the model you load</td></tr>
 <tr><td>License</td><td><span class="check">AGPL-3.0</span></td><td>AGPL v3</td></tr>
-<tr><td>Setup</td><td>Installer + Ollama</td><td>Single executable</td></tr>
-<tr><td>UI Type</td><td>Native Desktop (Tauri)</td><td>Web-based (browser)</td></tr>
-<tr><td>Advanced Gen Controls</td><td>Standard</td><td><span class="check">Extensive</span></td></tr>
-<tr><td>Third-party UI Support</td><td>Standalone</td><td><span class="check">SillyTavern, Tavern, etc.</span></td></tr>
+<tr><td>Setup</td><td>Installer; a wizard installs an engine and ComfyUI with one click if they are missing</td><td>Single executable</td></tr>
+<tr><td>UI Type</td><td>Native Desktop (Tauri)</td><td>Launcher plus KoboldAI Lite in the browser</td></tr>
+<tr><td>Advanced Gen Controls</td><td>Standard, plus sampling per persona with min P and DRY (3.0.7)</td><td><span class="check">Extensive</span></td></tr>
+<tr><td>Serves other apps</td><td><span class="check">Local API: OpenAI compatible, port 8129 by default, token required</span></td><td><span class="check">KoboldAI, OpenAI, Ollama, A1111 and ComfyUI compatible APIs; works with SillyTavern</span></td></tr>
 
 </tbody>
 </table>
 
 <h2>Where Locally Uncensored Wins</h2>
 <ul>
-<li><strong>Full ComfyUI Image/Video Generation</strong> — Professional-grade image and video generation workflows with support for Stable Diffusion XL, FLUX, and Wan 2.1. Kobold.cpp's SD.cpp integration is basic by comparison.</li>
-<li><strong>AGPL-3.0 License</strong> — Same copyleft license family as KoboldCpp, keeping the open source ecosystem strong.</li>
-<li><strong>Native Desktop App</strong> — Tauri-based desktop app vs opening a browser tab. Better OS integration and lighter resource usage, similar to its advantage over <a href="locally-uncensored-vs-open-webui.html">web-based tools like Open WebUI</a>.</li>
-<li><strong>Built-in Model Management</strong> — Browse and download models directly in the app via Ollama. Kobold.cpp requires you to source GGUF files yourself.</li>
-<li><strong>Custom Personas</strong> — Switch between AI personalities instantly. Kobold.cpp focuses on generation parameters rather than persona-based interaction.</li>
-<li><strong>Coding Agent</strong> — Built-in coding agent that reads your codebase, writes files, and runs commands. Kobold.cpp has no coding capabilities.</li>
-<li><strong>13 MCP Tools</strong> — Web search, file operations, shell access, screenshots, and more — all integrated as tool-use capabilities.</li>
-<li><strong>File Upload with Vision</strong> — Drag and drop images and vision models describe them. Kobold.cpp is text-focused.</li>
-<li><strong>Thinking Mode</strong> — Collapsible reasoning blocks that work with all providers for transparent AI reasoning.</li>
-<li><strong>Multi-Provider Support</strong> — Use Ollama, OpenAI, and Anthropic simultaneously instead of being limited to local GGUF models.</li>
-<li><strong>Model Load/Unload</strong> — Manage VRAM directly from the UI by loading and unloading models on demand.</li>
-<li><strong>Granular Permissions</strong> — Control tool access with 7 categories and 3 permission levels for safe agentic workflows.</li>
+<li><strong>Image and video generation</strong>: on Windows and Linux the app installs and runs ComfyUI for you, with text to image, editing and inpainting, video, image to video, music and more, and models such as FLUX, Qwen-Image 2.1, Wan and LTX. On a Mac, Create runs on the Mac itself. KoboldCpp generates images and video too, inside its single executable, with stable-diffusion.cpp for images. The difference here is ComfyUI and its workflows against one built-in runtime.</li>
+<li><strong>AGPL-3.0 license</strong>: the same copyleft license family as KoboldCpp, keeping the open source ecosystem strong.</li>
+<li><strong>Native desktop app</strong>: a Tauri-based desktop app instead of a browser tab, with better OS integration and lighter resource usage, similar to its advantage over <a href="locally-uncensored-vs-open-webui.html">web-based tools like Open WebUI</a>.</li>
+<li><strong>Built-in model management</strong>: browse and download models directly in the app, with a mark on the ones that fit your hardware and a GGUF search on Hugging Face. KoboldCpp ships no models: you fetch GGUF files yourself or start from its Newbie Templates.</li>
+<li><strong>Coding agent</strong>: it builds a map of the repo, edits only the lines you asked for, shows the diff before it applies anything, and runs your tests. KoboldCpp has an agent of its own that writes and edits code and runs programs.</li>
+<li><strong>Agent tools and MCP</strong>: web search and fetch, file operations, a shell, code execution, screenshots and image and video generation, with your own MCP servers on top. KoboldCpp supports MCP servers and web search as well.</li>
+<li><strong>Thinking mode</strong>: the model's reasoning is shown as it happens, with an effort control on the models that offer one. KoboldCpp has thinking tag settings for reasoning models as well.</li>
+<li><strong>Permissions</strong>: every tool call passes a permission gate you control, and a read only run stays read only.</li>
 </ul>
+<p>Version 3.0.6 also brings document chat with a local index, group chats where each model can play its own persona, phone access over your LAN or a tunnel, side by side model compare and a local benchmark, and two beta features: Voice, a spoken conversation run on your own machine, and computer control, which is off until you switch it on.</p>
+
+<h2>What Locally Uncensored 3.0.7 adds</h2>
+<p>Version 3.0.7 brings Locally Uncensored closer to KoboldCpp, and lets the two work together:</p>
+<ul>
+<li><strong>Several local servers at once</strong>: KoboldCpp, LM Studio, a llama.cpp server or any other OpenAI compatible backend each get their own row in Settings, AI Backends, and their models sit in the picker under that name. Adding one no longer pushes another out, and a group chat can mix models from several of them. The context window comes from each server itself. So far this has run in automated tests only, not yet in the app with two real servers.</li>
+<li><strong>Reasoning effort for local models</strong>: the Low, Medium, High and Max button next to Think now works on the LU Engine, on LM Studio 0.4.8 and later, on KoboldCpp (Low to High) and on a llama.cpp server whose chat template reads it. It is one setting for all models, and it has run in automated tests only, not against a real LM Studio, KoboldCpp or llama.cpp server. A separate think budget in tokens works with the LU Engine and with Anthropic.</li>
+<li><strong>KoboldCpp context length</strong>: when KoboldCpp behind its Ollama API names no context length, Locally Uncensored now asks KoboldCpp itself instead of holding the model at 4K. Tested with recorded server answers, not yet against a running KoboldCpp.</li>
+<li><strong>Character cards</strong>: a card as PNG or JSON (versions 1, 2 and 3) becomes a persona with the card picture. A new chat opens with the card's greeting, alternate greetings switch with arrows, and a card persona exports back as a version 2 JSON file. Checked in the app with Holo and Qwen models, not with Gemma.</li>
+<li><strong>Sampling per persona</strong>: a persona can carry its own temperature, top P, top K, min P, max tokens, repeat, presence and frequency penalty and DRY multiplier, also on its seat in a group chat. Values set in the chat still win, and each value only goes to a backend that reads it. Automated tests only so far.</li>
+<li><strong>Duplicate and branch</strong>: Duplicate chat copies a conversation with its persona and settings, Branch from here starts a new chat from any message, and Regenerate keeps the earlier answer as a version you can switch back to. These have run in automated tests only.</li>
+</ul>
+<p>The Settings, Local API page still reaches only the LU Engine, Ollama and LM Studio. Our check of 3.0.7 in the real app ran on one Windows machine.</p>
 
 <h2>Where Kobold.cpp Wins</h2>
 <ul>
-<li><strong>Creative Writing Tools</strong> — Story mode, adventure mode, and advanced generation parameters make it the best tool for fiction writing and roleplay. No other local AI app matches its creative writing capabilities.</li>
-<li><strong>Zero-Dependency Setup</strong> — Single executable, no installer needed. Download and run. This is the simplest setup of any local AI tool.</li>
-<li><strong>Third-party UI Compatibility</strong> — Works as a backend for <a href="locally-uncensored-vs-sillytavern.html">SillyTavern</a> and other popular frontends, giving you flexibility in your UI choice.</li>
-<li><strong>Advanced Generation Controls</strong> — Fine-grained control over temperature, top-k, top-p, repetition penalty, mirostat, and many more parameters that power users demand.</li>
-<li><strong>Mature Uncensored Ecosystem</strong> — Kobold.cpp has been a go-to for uncensored local AI for years, with a large community of users who share models and presets.</li>
+<li><strong>Creative writing tools</strong>: story mode, adventure mode, and advanced generation parameters make it a strong tool for fiction writing and roleplay. KoboldAI Lite adds memory, world info, author's notes, characters and scenarios.</li>
+<li><strong>Zero-dependency setup</strong>: a single executable, no installer needed. Download and run.</li>
+<li><strong>More media in one file</strong>: speech recognition with Whisper, text to speech and music generation run from the same executable.</li>
+<li><strong>Third-party UI compatibility</strong>: works as a backend for <a href="locally-uncensored-vs-sillytavern.html">SillyTavern</a> and other popular frontends, giving you flexibility in your UI choice. The KoboldCpp wiki has its own section on SillyTavern. Locally Uncensored can serve other tools too, through its Local API.</li>
+<li><strong>Advanced generation controls</strong>: fine-grained control over temperature, top-k, top-p, repetition penalty, mirostat, and many more parameters that power users demand.</li>
+<li><strong>Roleplay ecosystem</strong>: KoboldAI Lite imports Tavern character cards from files or external sites, and persistent story saves keep long projects together.</li>
 </ul>
 
 <div class="verdict">
 <h3>The Verdict</h3>
 <p><strong>Choose Kobold.cpp</strong> if you are focused on creative writing, roleplay, or interactive fiction and want the most advanced text generation controls available.</p>
-<p><strong>Choose Locally Uncensored</strong> if you want an all-in-one local AI app with text chat, image generation, video generation, a coding agent, 13 MCP tools, vision support, and multi-provider flexibility under one roof. Especially useful if your creative workflow combines text and visuals.</p>
+<p><strong>Choose Locally Uncensored</strong> if you want a native desktop app that sets up ComfyUI for images and video, a coding agent that shows its diff first, agent tools with a permission gate, vision and the choice between local engines and cloud providers under one roof. It is especially useful if your creative workflow combines text and visuals, and it can sit on top of a KoboldCpp you already run.</p>
 </div>
+<p style="font-size:0.85em;color:#888">What this page says about KoboldCpp comes from its official GitHub README and wiki, as of October 2026.</p>
 
 <div class="faq">
 <h2>Frequently Asked Questions</h2>
@@ -118,13 +134,13 @@
 <p>No. Kobold.cpp is purpose-built for creative writing with story mode, adventure mode, and advanced generation parameters. Locally Uncensored is better if you want text chat combined with image and video generation in one app.</p>
 
 <h3>Does Kobold.cpp support image generation?</h3>
-<p>Kobold.cpp has basic image generation via SD.cpp, but it is limited compared to Locally Uncensored's full ComfyUI integration which supports Stable Diffusion XL, FLUX, and video generation workflows.</p>
+<p>Yes. KoboldCpp generates images through its built-in stable-diffusion.cpp, with models such as SDXL, SD3, Flux and Qwen Image, and video with models such as WAN 2.2 and LTX 2.3. Locally Uncensored takes another route: it runs ComfyUI on Windows and Linux for image models such as FLUX and Qwen-Image 2.1 and video models such as Wan and LTX.</p>
 
 <h3>Can I use Kobold.cpp with SillyTavern?</h3>
-<p>Yes. Kobold.cpp is one of the most popular backends for SillyTavern. Locally Uncensored is a standalone app and does not serve as a backend for third-party frontends.</p>
+<p>Yes. The KoboldCpp wiki explains how to run SillyTavern on top of it. Locally Uncensored can also serve other apps: Settings, Local API starts an OpenAI compatible server on your machine, port 8129 by default, that lists the models of the LU Engine, Ollama and LM Studio under one address. It listens on localhost unless you allow the LAN and always asks for a token, so any tool that talks to OpenAI can use it. The other way round works too: since 3.0.7, Locally Uncensored can run a KoboldCpp next to LM Studio or the LU Engine as one of several backends, so far checked in automated tests only.</p>
 
 <h3>Which is easier to set up?</h3>
-<p>Kobold.cpp ships as a single executable with zero dependencies — download and run. Locally Uncensored requires installing the app plus Ollama. Both are straightforward, but Kobold.cpp has fewer moving parts.</p>
+<p>Kobold.cpp ships as a single executable with zero dependencies: download and run. Locally Uncensored is an installer with a first-run wizard that finds an engine you already run, or installs one with a single click, and does the same for ComfyUI. Both are straightforward, but Kobold.cpp has fewer moving parts.</p>
 </div>
 
 <div class="related">
@@ -141,15 +157,34 @@
 
 <div class="cta">
 <h2>Try Locally Uncensored</h2>
-<p>Free, open source, AGPL-3.0 licensed. One command to get started.</p>
+<p>Free, open source, AGPL-3.0 licensed. One installer to get started.</p>
 <a href="https://github.com/PurpleDoubleD/locally-uncensored" class="btn">View on GitHub</a>
+<p style="margin-top:18px;margin-bottom:0;color:#888">No GPU? LU Cloud runs in a browser, paid from credit packs that start at 15 EUR and need no subscription. <a href="/pricing/">See what it costs</a>.</p>
 </div>
+    <h2>More comparisons</h2>
+
+    <ul>
+      <li><a href="/alternatives/">Alternatives and comparisons</a>, every head to head on one page</li>
+      <li><a href="/vs/lm-studio/">Locally Uncensored vs LM Studio</a>, the most asked comparison</li>
+      <li><a href="/vs/ollama/">Locally Uncensored vs Ollama</a>, app against engine</li>
+      <li><a href="/guide/what-it-is/">What Locally Uncensored is</a>, what runs on your own machine and what runs on LU Cloud</li>
+    </ul>
+
 </article>
 <footer>
   <div class="footer-row footer-meta"><span>&copy; 2026 &middot; Locally Uncensored &middot; AGPL-3.0</span></div>
   <div class="footer-row footer-links">
     <a href="https://locallyuncensored.com/blog/">Blog</a>
     <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/pricing/">Pricing</a>
+    <a href="https://locallyuncensored.com/cloud/">LU Cloud</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-chat-online/">Uncensored AI chat online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-image-generator-online/">Image generator online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-video-generator-online/">Video generator online</a>
+    <a href="https://locallyuncensored.com/unrestricted-ai/">Unrestricted AI</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-coding-agent/">AI coding agent</a>
+    <a href="https://locallyuncensored.com/alternatives/">Alternatives</a>
+    <a href="https://locallyuncensored.com/is-locally-uncensored-safe/">Is it safe?</a>
     <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
     <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
     <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
@@ -157,6 +192,9 @@
     <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
     <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
     <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+    <a href="https://locallyuncensored.com/privacy/">Privacy</a>
+    <a href="https://locallyuncensored.com/terms/">Terms</a>
+    <a href="https://locallyuncensored.com/impressum/">Impressum</a>
   </div>
 </footer>
 </body>

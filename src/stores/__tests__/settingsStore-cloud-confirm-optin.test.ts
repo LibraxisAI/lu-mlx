@@ -1,5 +1,5 @@
 /**
- * v21: the cloud shell confirm becomes an opt-in that ships OFF (David
+ * v21: the cloud shell confirm becomes an opt-in that ships OFF (the owner
  * 2026-08-22, replacing G15a). This store writes the WHOLE settings object to
  * disk, so every profile out there already has `codexCloudConfirmShell: true`
  * materialised and a flipped default would never have reached a single
@@ -32,7 +32,7 @@ const KEY = 'chat-settings'
 /** Must track STORE_VERSION in settingsStore.ts: the case below needs a blob
  *  that zustand does NOT migrate, and that is only true at the current
  *  version. Bumped to 22 with the reasoningEffort field (2.6.8). */
-const CURRENT = 22
+const CURRENT = 23
 /** What a 2.6.5 build stamps back into the shared profile. */
 const OLD_BUILD = 20
 

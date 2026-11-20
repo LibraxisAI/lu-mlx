@@ -6,7 +6,7 @@ import { expect, type Page } from '@playwright/test'
  * Right after onboarding (or an appMode flip) the model list populates
  * asynchronously, and Sidebar.handleNewChat treats a click without an
  * active model as "nothing to chat with": local mode routes to the Models
- * page (the mylogz guard), cloud mode ignores the click. A real user just
+ * page (the a user guard), cloud mode ignores the click. A real user just
  * clicks New Chat again once the list is in; this retry mirrors that user
  * instead of racing the fetch. The race never fires on a fast machine but
  * is near-deterministic on the slow Windows PW box, where the first click
@@ -54,3 +54,50 @@ export async function oeffneSeitenleiste(page: Page): Promise<void> {
     await expect(page.getByRole('button', { name: 'New Chat' }).first()).toBeVisible({ timeout: 10_000 })
   }
 }
+
+/**
+ * Pick a chat model in the composer's picker, the way a user does.
+ *
+ * Needed in Cloud mode since 3.0.5: the app no longer picks a hosted chat
+ * model by itself, so a spec that wants a conversation there names its model
+ * first, exactly like a new account has to. "New Chat" without a picked model
+ * stays on the landing page.
+ */
+export async function pickChatModel(page: Page, name: RegExp): Promise<void> {
+  const picker = page.getByRole('button', { name: 'Select chat model', exact: true })
+  await expect(picker).toBeVisible({ timeout: 20_000 })
+  await picker.click()
+  await page.getByTestId('model-picker-menu').getByRole('button', { name }).click()
+  await expect(picker).toContainText(name)
+}
+
+/**
+ * Load modules of the app into the page once, so a spec can call into them
+ * without importing inside `page.evaluate`.
+ *
+ * `await import('/src/...')` inside an awaited `page.evaluate` holds a
+ * promise across the DevTools protocol. Chromium sometimes drops it, and
+ * Playwright reports any such protocol error as "Execution context was
+ * destroyed, most likely because of a navigation", although the page never
+ * navigated and the code in the page ran (seen on 08.10.2026 in about one
+ * run in ten of voice-computer.spec.ts; the page still had its state and its
+ * navigation entry said "navigate", not "reload").
+ *
+ * Here the page keeps the promise itself and the spec waits for the result.
+ * Afterwards `window.__APP__[path]` is the module, in every evaluate, until
+ * the page navigates or reloads: call it again after that.
+ */
+export async function appModules(page: Page, paths: string[]): Promise<void> {
+  await page.evaluate((wanted) => {
+    const w = window as unknown as { __APP__?: Record<string, unknown> }
+    w.__APP__ ??= {}
+    for (const path of wanted) void import(/* @vite-ignore */ path).then((module) => { w.__APP__![path] = module })
+  }, paths)
+  await page.waitForFunction((wanted) => {
+    const loaded = (window as unknown as { __APP__?: Record<string, unknown> }).__APP__ ?? {}
+    return wanted.every((path) => path in loaded)
+  }, paths)
+}
+
+/** The page after `appModules`: `(window as unknown as AppWindow).__APP__[path]` is a loaded module. */
+export type AppWindow = { __APP__: Record<string, any> } // eslint-disable-line @typescript-eslint/no-explicit-any

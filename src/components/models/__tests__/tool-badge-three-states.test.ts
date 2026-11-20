@@ -1,7 +1,7 @@
 /**
  * The tool badge has three states, not two.
  *
- * David, 2026-08-06, looking at the picker on the installed build: "Aber wieso
+ * 2026-08-06, looking at the picker on the installed build: "Aber wieso
  * ist es nicht toolfähig? Wir haben doch Toolschema für Hermes Modelle. Das
  * haben wir bei Cloud, wenden wir das doch auch an."
  *

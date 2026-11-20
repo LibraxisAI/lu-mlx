@@ -3,7 +3,7 @@ import { tauriMockInit, DEFAULT_ASSISTANT_REPLY, DEFAULT_MODEL_NAME } from './su
 import { seedOnboardingDone } from './support/cloud-mock'
 
 /**
- * David (18.09.2026): "die Reitergruppe [Chat/Create/Compare/Benchmark/
+ * The owner (18.09.2026): "die Reitergruppe [Chat/Create/Compare/Benchmark/
  * Models/Settings] sitzt irgendwie falsch mittig". Sein Massstab: die
  * horizontale Mitte dieser Gruppe soll ueber dem "VS" liegen, das im
  * Compare-Screen zwischen Model A und Model B steht, "das ist genau die

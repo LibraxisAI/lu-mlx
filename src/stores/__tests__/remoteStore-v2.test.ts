@@ -150,7 +150,7 @@ describe('remoteStore › dispatch()', () => {
   })
 
   it('rethrows on startServer failure so Sidebar can clean up the orphan conv', async () => {
-    // #29: phantomderp's bug — silent failure left the user staring at a
+    // #29: a user's bug — silent failure left the user staring at a
     // "Server stopped" banner that did nothing. The store now rethrows
     // so Sidebar.handleDispatch can delete the just-created conv row.
     mockBackend.mockRejectedValueOnce(new Error('port-in-use'))

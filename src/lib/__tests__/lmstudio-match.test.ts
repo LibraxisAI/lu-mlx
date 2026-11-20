@@ -94,7 +94,7 @@ describe('split GGUF (-NNNNN-of-NNNNN) shard tails', () => {
   })
 })
 
-// GH #118 (nayffy, 2026-08-27): "If i close and reopen LU, it changed from
+// GH #118 (2026-08-27): "If i close and reopen LU, it changed from
 // 'Installed' to 'Get', but the 'Get' button doesn't do anything as the files
 // are still downloaded." The badge only ever asked the LM Studio half of the
 // installed list, and a built-in-engine model is stamped

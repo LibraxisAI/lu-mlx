@@ -1,7 +1,9 @@
-import { getImageUrl } from '../../../api/comfyui'
+import { checkComfyConnection, getImageUrl } from '../../../api/comfyui'
+import { platformText } from '../../../lib/platform-text'
 import { refreshResultUrl, resolveResultUrl } from '../../../api/cloud/jobs'
 import { backendCall, fetchLocalhostBytes, isTauri } from '../../../api/backend'
 import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
+import { blobFromUrl } from '../../../lib/render/data-url'
 
 /** A ComfyUI `/view` URL (absolute or the dev `/comfyui/view` proxy path).
  *  blob: and data: are not views. Putting a cross-origin `/view` on an
@@ -24,13 +26,18 @@ export function mustProxyComfyView(url: string, env: { tauri: boolean; mac: bool
 }
 
 export function galleryItemUrl(item: GalleryItem): string {
-  return item.remoteUrl
-    ?? item.dataUrl
-    ?? getImageUrl(
-      item.filename,
-      item.subfolder,
-      item.comfyType ?? 'output',
-    )
+  if (item.remoteUrl ?? item.dataUrl) return (item.remoteUrl ?? item.dataUrl)!
+  const view = getImageUrl(item.filename, item.subfolder, item.comfyType ?? 'output')
+  // A new URL per retry, or the element never asks again (setComfyRunning).
+  return item.reloadKey ? `${view}${view.includes('?') ? '&' : '?'}lu_retry=${item.reloadKey}` : view
+}
+
+/** Does this gallery entry play in a <video>. A clip saved as an animated
+ *  picture (.webp, .gif, or single .png frames from cores without a video
+ *  saver) stays a picture: Wan 2.1 wrote .webp until 3.0.8 (A19), a <video>
+ *  shows those as a broken player, an <img> animates them. */
+export function playsAsVideo(item: Pick<GalleryItem, 'type' | 'filename'>): boolean {
+  return item.type === 'video' && !/\.(webp|gif|png)$/i.test(item.filename)
 }
 
 // Cloud signed URLs expire ~1 h after the last read, so a persisted item's
@@ -58,10 +65,19 @@ export function recoverGalleryUrl(item: GalleryItem): void {
       void restoreFromDisk(item)
       return
     }
-    // Local ComfyUI item whose /view fetch failed (engine not running /
-    // output pruned) — nothing to re-sign. Flag it so the tiles can render
-    // an honest "engine offline" state instead of a silently dead <img>.
-    if (!item.unavailable) useCreateStore.getState().updateGalleryItem(item.id, { unavailable: true })
+    // Local ComfyUI item whose /view fetch failed — nothing to re-sign. Say
+    // which of the two it is: an engine that does not answer (the tile comes
+    // back by itself when it does, see setComfyRunning), or an engine that
+    // answers and no longer has the file.
+    if (!item.unavailable) {
+      void checkComfyConnection().catch(() => false).then((up) => {
+        useCreateStore.getState().updateGalleryItem(item.id, { unavailable: true, unavailableReason: up ? 'gone' : 'offline' })
+        if (!up) {
+          useCreateStore.getState().setComfyRunning(false)
+          watchForEngine()
+        }
+      })
+    }
     return
   }
   const last = recovered.get(item.id)
@@ -86,6 +102,26 @@ export function recoverGalleryUrl(item: GalleryItem): void {
   })
 }
 
+// While tiles wait for an engine that did not answer, ask again every 10 s
+// and let setComfyRunning(true) bring them back. Nothing else polls the
+// connection, so without this they stayed dark until the next app start.
+// Stops by itself as soon as no tile is waiting.
+let engineWatch: ReturnType<typeof setInterval> | null = null
+function watchForEngine(): void {
+  if (engineWatch) return
+  engineWatch = setInterval(() => {
+    const waiting = useCreateStore.getState().gallery.some((g) => g.unavailable && g.unavailableReason === 'offline')
+    if (!waiting) {
+      clearInterval(engineWatch!)
+      engineWatch = null
+      return
+    }
+    void checkComfyConnection().catch(() => false).then((up) => {
+      if (up) useCreateStore.getState().setComfyRunning(true)
+    })
+  }, 10_000)
+}
+
 /**
  * Re-read a local render from disk and hand the tile a fresh blob: URL.
  *
@@ -101,7 +137,8 @@ async function restoreFromDisk(item: GalleryItem): Promise<void> {
     const binary = atob(b64)
     const bytes = new Uint8Array(binary.length)
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-    const url = URL.createObjectURL(new Blob([bytes], { type: guessMime(item.filename) }))
+    // A Mac render keeps no ComfyUI file name: its kind is in the path.
+    const url = URL.createObjectURL(new Blob([bytes], { type: guessMime(item.filename || item.localPath || '') }))
     recovered.set(item.id, Date.now())
     useCreateStore.getState().updateGalleryItem(item.id, { dataUrl: url, unavailable: undefined })
   } catch {
@@ -117,10 +154,22 @@ export function markGalleryItemAvailable(item: GalleryItem): void {
   if (item.unavailable) useCreateStore.getState().updateGalleryItem(item.id, { unavailable: undefined })
 }
 
+/** The bytes of a file the app keeps on disk, read through the guarded
+ *  `read_media_file` command. */
+async function localFileBlob(path: string): Promise<Blob> {
+  const b64 = await backendCall<string>('read_media_file', { path })
+  const binary = atob(b64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return new Blob([bytes], { type: guessMime(path) })
+}
+
 function guessMime(filename: string): string {
   const ext = filename.toLowerCase().split('.').pop() || ''
   if (ext === 'mp4') return 'video/mp4'
   if (ext === 'webm') return 'video/webm'
+  // A track of the Mac's music engine.
+  if (ext === 'wav') return 'audio/wav'
   if (ext === 'gif') return 'image/gif'
   if (ext === 'webp') return 'image/webp'
   if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg'
@@ -132,7 +181,7 @@ function guessMime(filename: string): string {
  * `<video>`/`<img>` /view load with a Sec-Fetch-Site 403, while download +
  * history keep working because those ride the Rust proxy (no Origin header).
  * The user sees "can't view the result" even though the render exists (#75,
- * cinemazverev). Re-fetch the bytes THROUGH the proxy (no Origin → not blocked)
+ * A user). Re-fetch the bytes THROUGH the proxy (no Origin → not blocked)
  * and hand back a blob: URL the element can display. Local items only — cloud
  * media has its own re-sign path (recoverGalleryUrl). Returns null when the
  * fallback doesn't apply or the proxy fetch fails.
@@ -164,17 +213,24 @@ export async function proxiedComfyBlobUrl(item: GalleryItem): Promise<string | n
 /** Fetch a gallery item's media bytes for adoption as an op source.
  *
  *  The naive `fetch(galleryItemUrl(item))` was the "failed to fetch" behind
- *  every source-needing op in cloud mode (David 2026-07-10): a cloud item's
+ *  every source-needing op in cloud mode (2026-07-10): a cloud item's
  *  signed URL expires ~1 h after issue, and a local ComfyUI item's /view URL
  *  is dead whenever the local engine isn't running — both surface as a bare
  *  TypeError. Re-sign expired cloud media once via the job id, and turn the
  *  unrecoverable cases into actionable messages. */
 export async function fetchGalleryItemBlob(item: GalleryItem): Promise<Blob> {
-  const tryFetch = async (url: string) => {
-    const res = await fetch(url)
-    if (!res.ok) throw new Error(`media request failed (${res.status})`)
-    return res.blob()
+  // A render of the MLX lanes keeps its bytes on disk, and after a restart it
+  // has no blob: URL until its tile is drawn. Its file name is empty, so
+  // galleryItemUrl would make a ComfyUI address of it, which a Mac never
+  // answers. Extend Video picks such a clip from the gallery.
+  if (item.localPath && !item.dataUrl) {
+    try {
+      return await localFileBlob(item.localPath)
+    } catch {
+      throw new Error('This render is no longer on disk. Pick another one, or upload the file from disk.')
+    }
   }
+  const tryFetch = blobFromUrl
   try {
     return await tryFetch(galleryItemUrl(item))
   } catch (err) {
@@ -184,7 +240,7 @@ export async function fetchGalleryItemBlob(item: GalleryItem): Promise<Blob> {
         useCreateStore.getState().updateGalleryItem(item.id, { remoteUrl: fresh, unavailable: undefined })
         return tryFetch(fresh)
       }
-      throw new Error('The cloud copy of this render is no longer available. Pick another image, or upload one from disk.')
+      throw new Error(platformText('cloudCopyGone'))
     }
     if (!item.remoteUrl && !item.dataUrl) {
       throw new Error('This image lives in your local ComfyUI output, which is not running right now. Switch to Local (or start ComfyUI) to use it, or upload the file from disk.')
@@ -192,3 +248,9 @@ export async function fetchGalleryItemBlob(item: GalleryItem): Promise<Blob> {
     throw err
   }
 }
+
+/** Discord 2026-09-26: dragging a gallery tile onto the Edit
+ *  drop zone did nothing. An in-page <img> drag carries a URL, never a File,
+ *  so the zone's `dataTransfer.files[0]` was always empty. The tile now names
+ *  its gallery item under this type, and the zone adopts it like a click. */
+export const GALLERY_DRAG_TYPE = 'application/x-lu-gallery-item'

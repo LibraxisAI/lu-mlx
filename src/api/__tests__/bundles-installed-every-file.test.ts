@@ -1,7 +1,7 @@
 /**
  * B1, GH #113 back on 2.6.6: "unfiltered models doesn't shown as installed".
  *
- * Blahx (2026-08-23, screenshot) and lapbo (2026-08-25, "The model is not
+ * Blahx (2026-08-23, screenshot) and a user (2026-08-25, "The model is not
  * visible, although it is downloaded"). The screenshot is the whole bug in one
  * frame: the Video / Unfiltered grid shows Wan 2.2 TI2V 5B and Wan 2.2 Rapid
  * AIO both reading Installed, over a rail counter that says 1.
@@ -15,7 +15,7 @@
  * the same wan_2.1_vae, so one neighbour that installed cleanly leaves those
  * two listed for good. A bundle whose own main model ComfyUI cannot serve then
  * passed the gate on somebody else's file, and the gate that was built for
- * exactly this (pnwpdr4519: LU and ComfyUI reading different model folders)
+ * exactly this (a user: LU and ComfyUI reading different model folders)
  * could never fire for a Wan bundle at all.
  *
  * The engine state below is the real one behind the screenshot: the .gguf is on

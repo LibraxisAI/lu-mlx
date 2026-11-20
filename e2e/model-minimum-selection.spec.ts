@@ -8,7 +8,7 @@ test('small installed model waits for a choice and preserves that explicit choic
   await page.goto('/')
   await expect(page.getByText('Choose a model below. Automatic picks require a known size of at least 7B.')).toBeVisible()
   const picker = page.getByRole('button', { name: 'Select chat model', exact: true })
-  await expect(picker).toContainText('Select Model')
+  await expect(picker).toContainText('Choose a model')
   await picker.click()
   await page.getByRole('button').filter({ hasText: 'Hermes' }).click()
   await expect(picker).toContainText('Hermes')

@@ -1,5 +1,5 @@
 /** Compact relative timestamp for thin history rows: "now", "5m", "3h", "2d", "1w".
- *  Ported 1:1 from apps/web/lib/time-ago.ts so the recent-chats list on the
+ *  Ported 1:1 from the web app so the recent-chats list on the
  *  desktop home screen reads exactly like the web one. */
 export function timeAgo(ts: number, now: number = Date.now()): string {
   const s = Math.max(0, (now - ts) / 1000)

@@ -20,8 +20,8 @@
 //! nothing is left for the user to read.
 //!
 //! Same rule as its neighbour: nothing from tauri in here. The whole sequence
-//! has to be runnable inside an Arch container against the real AUR package,
-//! which is what UPDATER-LINUX-BEFUND.md records. HTTP lives in
+//! has to be runnable inside an Arch container against the real AUR package.
+//! HTTP lives in
 //! `self_migrate_cmd.rs`, everything else lives here.
 
 use std::path::{Path, PathBuf};
@@ -196,13 +196,26 @@ fn tauri_target() -> &'static str {
 // ── The signature ─────────────────────────────────────────────
 
 /// The same check the plugin runs before it installs anything
-/// (tauri-plugin-updater-2.10.1/src/updater.rs, `verify_signature`): both the
+/// (tauri-plugin-updater-2.12.0/src/updater.rs, `verify_signature`): both the
 /// public key and the signature travel base64 wrapped around minisign's own
 /// text format, and the key is the one out of `tauri.conf.json`.
 ///
+/// After the file, the version: latest.json is not signed, so its `version`
+/// alone does not say which release the url and signature belong to. Since
+/// tauri-cli 2.11.5 the trusted comment carries `version:x.y.z`, and the global
+/// signature covers that comment, so it can only be read once `verify` passed.
+/// A signature without it is refused when `require_signed_version` is set
+/// (`requireSignedVersion` in tauri.conf.json), exactly as the plugin does.
+///
 /// A file that fails here is deleted by the caller and never becomes an
 /// executable in the user's home folder.
-pub fn verify_signature(data: &[u8], signature_b64: &str, pub_key_b64: &str) -> Result<(), String> {
+pub fn verify_signature(
+    data: &[u8],
+    signature_b64: &str,
+    pub_key_b64: &str,
+    announced_version: &str,
+    require_signed_version: bool,
+) -> Result<(), String> {
     use base64::Engine;
     let unwrap_b64 = |what: &str, s: &str| -> Result<String, String> {
         let raw = base64::engine::general_purpose::STANDARD
@@ -221,7 +234,32 @@ pub fn verify_signature(data: &[u8], signature_b64: &str, pub_key_b64: &str) -> 
 
     public_key
         .verify(data, &signature, true)
-        .map_err(|e| format!("the signature does not match the downloaded file: {e}"))
+        .map_err(|e| format!("the signature does not match the downloaded file: {e}"))?;
+
+    verify_signed_version(signature.trusted_comment(), announced_version, require_signed_version)
+}
+
+/// The plugin's `verify_signed_version`. `3.0.9` and `v3.0.9` are the same
+/// release; the plugin compares as semver, and our versions are plain x.y.z.
+pub fn verify_signed_version(
+    trusted_comment: &str,
+    announced_version: &str,
+    require_signed_version: bool,
+) -> Result<(), String> {
+    let Some(signed) = trusted_comment.split('\t').find_map(|field| field.strip_prefix("version:")) else {
+        return if require_signed_version {
+            Err("the signature does not name the version it was made for, and this build requires that".to_string())
+        } else {
+            Ok(())
+        };
+    };
+    if signed.trim_start_matches('v') == announced_version.trim_start_matches('v') {
+        Ok(())
+    } else {
+        Err(format!(
+            "the signature was made for version {signed}, but the update server announced {announced_version}"
+        ))
+    }
 }
 
 // ── Putting the file in place ─────────────────────────────────
@@ -437,6 +475,36 @@ pub fn launch_after_exit(exe: &Path, pid: u32) -> Result<(), String> {
         })
 }
 
+/// The file to start again once the plugin has updated this install in place.
+///
+/// An AppImage is started through the path in `APPIMAGE`, the same file the
+/// plugin has just replaced. `current_exe()` is no use there: it points into
+/// the squashfs mount of the OLD file.
+///
+/// A deb or rpm is started through its own path, and there the kernel is in
+/// the way. The package manager renames the new binary over the running one,
+/// the running image loses its name, and `/proc/self/exe` answers
+/// `/usr/bin/locally-uncensored (deleted)` from then on. The new file sits at
+/// exactly the path in front of that suffix.
+///
+/// Nothing here looks at the disk; whether the file is really there is the
+/// caller's question.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn relaunch_target(appimage_env: Option<String>, current_exe: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(appimage) = appimage_env.filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(appimage));
+    }
+    let exe = current_exe?;
+    match exe.to_str().and_then(|text| text.strip_suffix(REPLACED_EXE_SUFFIX)) {
+        Some(named) => Some(PathBuf::from(named)),
+        None => Some(exe),
+    }
+}
+
+/// What Linux appends to the link of a running binary whose file was replaced.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const REPLACED_EXE_SUFFIX: &str = " (deleted)";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,7 +546,7 @@ mod tests {
         // folder has to be writable. That pair is what `migrates_itself`
         // reads, and it must come out false or the next update would migrate
         // all over again.
-        let layout = Layout::at("/home/zen/.local/share");
+        let layout = Layout::at("/home/bob/.local/share");
         let migrated = layout.appimage();
         let probes = super::super::install_method::Probes {
             appimage_env: Some(migrated.to_string_lossy().to_string()),
@@ -493,20 +561,20 @@ mod tests {
 
     #[test]
     fn the_layout_is_the_users_own_tree() {
-        let layout = Layout::at("/home/zen/.local/share");
+        let layout = Layout::at("/home/bob/.local/share");
         assert_eq!(
             layout.appimage(),
-            PathBuf::from("/home/zen/.local/share/locally-uncensored/Locally.Uncensored.AppImage")
+            PathBuf::from("/home/bob/.local/share/locally-uncensored/Locally.Uncensored.AppImage")
         );
         // Staged next to it, or the rename is a copy across filesystems.
         assert_eq!(layout.staged().parent(), layout.appimage().parent());
         assert_eq!(
             layout.desktop_file(),
-            PathBuf::from("/home/zen/.local/share/applications/Locally Uncensored.desktop")
+            PathBuf::from("/home/bob/.local/share/applications/Locally Uncensored.desktop")
         );
         assert_eq!(
             layout.icon_file("128x128"),
-            PathBuf::from("/home/zen/.local/share/icons/hicolor/128x128/apps/locally-uncensored.png")
+            PathBuf::from("/home/bob/.local/share/icons/hicolor/128x128/apps/locally-uncensored.png")
         );
     }
 
@@ -578,12 +646,42 @@ mod tests {
         // a download that got swapped on the way.
         let key = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZDNkRFNzJFRjhFNkIxNDcKUldSSHNlYjRMdWR0YklwQlJhTUR4TXBTTE1xKzFUcWVVTEpTL0hZMi9ldmlOcW5BWFZWeUdzRGMK";
         let sig = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSSHNlYjRMdWR0YklZalVUbGZSSDJ6Y1VYMmNrcmJwZUhwbHFoRFN6Qi84MjRTQ1ROaUdYaE43S2NjODNSU24rclIzVEF2cktpeThpN216QnRQRG1pWEFGQm1rZ2dBbWdzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4NzI1Njk2CWZpbGU6TG9jYWxseSBVbmNlbnNvcmVkXzIuNi44X2FtZDY0LkFwcEltYWdlCjEzRkxyQ0lWNlZ2YWdjdTJ0WGZOMUJNUXRmQWdmRVE5ZmlUTzk5TTM3V29EMXV3NERBSE5nZTd0bkQ2dEcvNVVlVWNTdFNsVFpnbGduclNxY1pBbkJBPT0K";
-        let err = verify_signature(b"this is not the AppImage", sig, key).unwrap_err();
+        let err = verify_signature(b"this is not the AppImage", sig, key, "2.6.8", false).unwrap_err();
         assert!(err.contains("does not match"), "{err}");
 
         // And the two ways the inputs themselves can be wrong.
-        assert!(verify_signature(b"x", "not base64!!", key).unwrap_err().contains("signature"));
-        assert!(verify_signature(b"x", sig, "not base64!!").unwrap_err().contains("public key"));
+        assert!(verify_signature(b"x", "not base64!!", key, "2.6.8", false).unwrap_err().contains("signature"));
+        assert!(verify_signature(b"x", sig, "not base64!!", "2.6.8", false).unwrap_err().contains("public key"));
+    }
+
+    // A throwaway key made for this test with `tauri signer generate` (CLI
+    // 2.11.5), and two signatures over FIXTURE: one with `--app-version 3.0.9`,
+    // whose trusted comment ends in `version:3.0.9`, and one without, which is
+    // what every CLI before 2.11.5 wrote.
+    const TEST_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI2NEU5RUM3QzE5RkY1QkEKUldTNjlaL0J4NTVPSm1YSTdrLzN0YTUyeEZGOC9MWlV4RWc2ME1SdFVvU3dxbHR1RFBVS010Q0IK";
+    const FIXTURE: &[u8] = b"lu self migrate fixture\n";
+    const SIGNED_FOR_309: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTNjlaL0J4NTVPSmpOeEdjcG1JYkUyK0x5Y0Z6WEw0T2ExeENlSncvVTJVVTgrYTluK2hKNEZLc21ZdUZrd0c2YlhkeUUxYnQ4TFhyOUtkN3pRTXl6T3IrUVFZYWhnUnc4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTk2NTQzCWZpbGU6Zml4dHVyZS5iaW4JdmVyc2lvbjozLjAuOQphU1NDQSs2dmVZRFhBVmkxMDRUVWZhRE9tc1JtemN5clRCa1ppQlI3ZVJMVUFhMHJPcVlQV0ZmbVd4RG84RlUzWEhkTWY5a1JOemZ1OEt6akhXVUdDZz09Cg==";
+    const SIGNED_WITHOUT_VERSION: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTNjlaL0J4NTVPSnR5VUY4aFpWNG5mbm5ZZUpvK0RkZUcwajNrL3cyZDNYMXJlSHlHSE1iSGFzaWhyZmlKOWV1eHRSemU0UGVCb1N6RjRxak42YWUyc0hjNEltVWpDY3c0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTk2NTQzCWZpbGU6bGVnYWN5LmJpbgpDZ21FclNTYmtLM3R6eW9ISExpQk9YeHpUcTVON2I1QmZDM0RLU2x1ZTZaTFNkUFh2T2VBU1pKMjJ5T3phaEJ1LzM3VmVBQjh6eVk2cnh4R0tFMHJBUT09Cg==";
+
+    #[test]
+    fn a_signature_made_for_one_version_is_refused_for_another() {
+        // The file and signature are genuine; only latest.json claims a newer
+        // version for them. That is the replay the version binding stops.
+        verify_signature(FIXTURE, SIGNED_FOR_309, TEST_KEY, "3.0.9", true).expect("same version");
+        verify_signature(FIXTURE, SIGNED_FOR_309, TEST_KEY, "v3.0.9", true).expect("v prefix");
+        let err = verify_signature(FIXTURE, SIGNED_FOR_309, TEST_KEY, "3.0.10", true).unwrap_err();
+        assert!(err.contains("made for version 3.0.9") && err.contains("3.0.10"), "{err}");
+        // Like the plugin: a version in the signature is always checked, even
+        // when the build does not require one.
+        assert!(verify_signature(FIXTURE, SIGNED_FOR_309, TEST_KEY, "3.0.10", false).is_err());
+    }
+
+    #[test]
+    fn a_signature_without_a_version_passes_only_when_none_is_required() {
+        verify_signature(FIXTURE, SIGNED_WITHOUT_VERSION, TEST_KEY, "3.0.9", false)
+            .expect("an old signature is still fine where the build does not ask for a version");
+        let err = verify_signature(FIXTURE, SIGNED_WITHOUT_VERSION, TEST_KEY, "3.0.9", true).unwrap_err();
+        assert!(err.contains("does not name the version"), "{err}");
     }
 
     /// The real proof, against the file GitHub serves.
@@ -608,12 +706,12 @@ mod tests {
             .expect("LU_APPIMAGE_PUBKEY: the pubkey out of tauri.conf.json");
 
         let mut bytes = std::fs::read(&path).expect("the fixture");
-        verify_signature(&bytes, &signature, &key).expect("the real download must be accepted");
+        verify_signature(&bytes, &signature, &key, "2.6.8", false).expect("the real download must be accepted");
         eprintln!("accepted {} bytes from {:?}", bytes.len(), path);
 
         let middle = bytes.len() / 2;
         bytes[middle] ^= 0x01;
-        let err = verify_signature(&bytes, &signature, &key)
+        let err = verify_signature(&bytes, &signature, &key, "2.6.8", false)
             .expect_err("one flipped byte must be refused");
         eprintln!("refused after flipping byte {middle}: {err}");
     }
@@ -637,13 +735,35 @@ mod tests {
     fn the_relaunch_waits_for_this_process_to_be_gone() {
         // Without the wait the new AppImage meets single-instance, focuses
         // this window and exits, and the user stays on the old build.
-        let script = relaunch_script(Path::new("/home/zen/.local/share/x/LU.AppImage"), 4242);
+        let script = relaunch_script(Path::new("/home/bob/.local/share/x/LU.AppImage"), 4242);
         assert!(script.contains("kill -0 4242"));
-        assert!(script.contains("exec '/home/zen/.local/share/x/LU.AppImage'"));
+        assert!(script.contains("exec '/home/bob/.local/share/x/LU.AppImage'"));
         // Not forever: twenty seconds at a tenth of a second each.
         assert!(script.contains("[ $n -lt 200 ]"));
         // A quote in the path cannot end the quoting.
         assert!(relaunch_script(Path::new("/home/o'brien/LU.AppImage"), 1).contains("'/home/o'\\''brien/LU.AppImage'"));
+    }
+
+    #[test]
+    fn an_appimage_starts_again_through_the_file_that_was_replaced() {
+        // current_exe() of a running AppImage lies inside the old mount.
+        let target = relaunch_target(
+            Some("/home/bob/Apps/LU.AppImage".to_string()),
+            Some(PathBuf::from("/tmp/.mount_LUabc/usr/bin/locally-uncensored")),
+        );
+        assert_eq!(target, Some(PathBuf::from("/home/bob/Apps/LU.AppImage")));
+    }
+
+    #[test]
+    fn a_package_install_starts_again_through_the_path_the_package_owns() {
+        // After `dpkg -i` or `rpm -U` the running image has lost its name.
+        let replaced = relaunch_target(None, Some(PathBuf::from("/usr/bin/locally-uncensored (deleted)")));
+        assert_eq!(replaced, Some(PathBuf::from("/usr/bin/locally-uncensored")));
+        // A launcher that exports APPIMAGE= with nothing in it is no AppImage.
+        let untouched = relaunch_target(Some(String::new()), Some(PathBuf::from("/usr/bin/locally-uncensored")));
+        assert_eq!(untouched, Some(PathBuf::from("/usr/bin/locally-uncensored")));
+        // No path at all means nothing to start, and the caller only exits.
+        assert_eq!(relaunch_target(None, None), None);
     }
 
     #[test]

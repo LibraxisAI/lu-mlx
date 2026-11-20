@@ -10,7 +10,7 @@
  * Widened twice for 2.6.8. The web-parity round put sidebarOpen into the
  * written set: it is the user saying "rail" or "list", the same class of
  * choice as explorerCollapsed, and forgetting it on every restart is the bug
- * David reported. The design round added the agent panel's two geometry
+ * The owner reported. The design round added the agent panel's two geometry
  * fields and sidebarWidth, the dragged width of the left chat column (D1).
  * Six fields in total. currentView / cloudGateOpen / cloudTeaser stay
  * forbidden, because those steer where the app STARTS rather than how it
@@ -63,7 +63,7 @@ describe('what the ui store writes to disk', () => {
     // luegen wuerde, samt einem Abbrechen-Knopf, der nichts mehr abbricht.
     //
     // 2.6.8 bringt das Agenten-Panel seine zwei Felder mit, dazu kommt
-    // `sidebarWidth`: die gezogene Breite der Chatspalte links (D1, David:
+    // `sidebarWidth`: die gezogene Breite der Chatspalte links (D1, der Inhaber:
     // "bzw dynamisch mit vergroesserung anpassend"). Sie gehoert in dieselbe
     // Klasse wie die Geometrie der anderen Flaechen, eine VORLIEBE, die
     // niemand nach jedem Start neu einstellen will.
@@ -71,7 +71,7 @@ describe('what the ui store writes to disk', () => {
     // `sidebarOpen` steht seit der Web-Paritaetsrunde ebenfalls hier und nicht
     // mehr im Gegentest unten: OB die Spalte offen ist, ist "Schiene" oder
     // "Liste" und damit dieselbe Klasse Vorliebe wie explorerCollapsed. Das
-    // Vergessen bei jedem Start war der Fehler, den David gemeldet hat.
+    // Vergessen bei jedem Start war der Fehler, den der Inhaber gemeldet hat.
     const partialize = useUIStore.persist.getOptions().partialize
     expect(partialize).toBeTypeOf('function')
     const written = partialize!(useUIStore.getState()) as Record<string, unknown>

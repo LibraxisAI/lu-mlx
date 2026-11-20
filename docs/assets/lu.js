@@ -148,10 +148,29 @@
 
   // Preserve a validated campaign source when a visitor crosses from the
   // editorial LUC site to LU Labs. Static pricing links carry a useful default
-  // (`luc-pricing`), but an inbound campaign such as `m300_w1_a` must win so the
-  // eventual Stripe checkout can still be attributed after login.
+  // (`luc-pricing`), but an inbound campaign source must win so the
+  // eventual checkout can still be attributed after login.
   function wireFunnelSource() {
-    var source = new URLSearchParams(window.location.search).get("src");
+    var params = new URLSearchParams(window.location.search);
+    // ?via=hp: the visitor came through a door on the home page. The page
+    // keeps its own source and appends the door, so a purchase shows both
+    // (luc-image-plan-hp). The web keeps sources up to 32 characters.
+    var via = params.get("via");
+    if (via && /^[a-z0-9]{1,8}$/.test(via)) {
+      var tagged = document.querySelectorAll('a[href^="https://lu-labs.ai/"][href*="src="]');
+      for (var j = 0; j < tagged.length; j++) {
+        try {
+          var dest = new URL(tagged[j].href);
+          var own = dest.searchParams.get("src") || "";
+          var joined = own + "-" + via;
+          if (own && joined.length <= 32) {
+            dest.searchParams.set("src", joined);
+            tagged[j].href = dest.toString();
+          }
+        } catch (e) {}
+      }
+    }
+    var source = params.get("src");
     if (!source || !/^[a-z0-9_-]{1,32}$/.test(source)) return;
 
     var links = document.querySelectorAll('a[href^="https://lu-labs.ai/"]');
@@ -198,35 +217,173 @@
     document.body.appendChild(s);
   }
 
+  // The button shows the flag of the language the page is in right now. A
+  // click opens a menu with the one other language.
   function wireLang() {
     if (pageLang() !== "en") return;
     var pref = langPref();
-    var target = pref === "de" ? "en" : "de";
+    var current = pref === "de" ? "de" : "en";
+    var target = current === "de" ? "en" : "de";
+
+    var wrap = document.createElement("div");
+    wrap.className = "lu-lang-wrap notranslate";
+    wrap.setAttribute("translate", "no");
+
     var btn = document.createElement("button");
     btn.type = "button";
-    btn.className = "lu-lang notranslate";
-    btn.setAttribute("translate", "no");
-    btn.title = target === "de" ? "Auf Deutsch anzeigen" : "Show in English";
+    btn.className = "lu-lang";
+    btn.title = current === "de" ? "Sprache: Deutsch" : "Language: English";
     btn.setAttribute("aria-label", btn.title);
-    btn.innerHTML = target === "de" ? FLAG_DE : FLAG_EN;
-    btn.addEventListener("click", function () {
+    btn.setAttribute("aria-haspopup", "menu");
+    btn.setAttribute("aria-expanded", "false");
+    btn.innerHTML = current === "de" ? FLAG_DE : FLAG_EN;
+
+    var menu = document.createElement("div");
+    menu.className = "lu-lang-menu";
+    menu.setAttribute("role", "menu");
+    menu.hidden = true;
+
+    var opt = document.createElement("button");
+    opt.type = "button";
+    opt.className = "lu-lang-opt";
+    opt.setAttribute("role", "menuitem");
+    opt.setAttribute("lang", target);
+    opt.innerHTML = (target === "de" ? FLAG_DE : FLAG_EN) + "<span>" + (target === "de" ? "Deutsch" : "English") + "</span>";
+    menu.appendChild(opt);
+    wrap.appendChild(btn); wrap.appendChild(menu);
+
+    function open(on) {
+      menu.hidden = !on;
+      btn.setAttribute("aria-expanded", on ? "true" : "false");
+      if (on) opt.focus();
+    }
+    btn.addEventListener("click", function (e) { e.stopPropagation(); open(menu.hidden); });
+    document.addEventListener("click", function (e) { if (!menu.hidden && !wrap.contains(e.target)) open(false); });
+    wrap.addEventListener("keydown", function (e) { if (e.key === "Escape" && !menu.hidden) { open(false); btn.focus(); } });
+    opt.addEventListener("click", function () {
       try { localStorage.setItem(LANG_KEY, target); } catch (e) {}
       setGoogTrans(target === "de" ? "/auto/de" : null);
       location.reload();
     });
+
     var right = document.querySelector(".lu-nav-right");
-    if (right) right.insertBefore(btn, right.firstChild);
-    else { btn.classList.add("fixed"); document.body.appendChild(btn); }
+    if (right) right.insertBefore(wrap, right.firstChild);
+    else { wrap.classList.add("fixed"); document.body.appendChild(wrap); }
 
     if (pref === "de") bootTranslate("de");
     else setGoogTrans(null);
+  }
+
+  // ── The phone app (19.10.2026) ──────────────────────────────────────
+  // On a phone, first thing under the navigation: the iPhone app is in review
+  // at the App Store, Google Play follows; on Android the APK of the latest
+  // release downloads now (the GitHub release asset), an iPhone
+  // uses LU Cloud in the browser until then. A computer sees nothing; closed
+  // stays closed in this browser.
+  var PHONE_KEY = "lu_phone_app_banner_closed";
+  var APK_URL = "https://github.com/PurpleDoubleD/locally-uncensored/releases/download/v3.1.2/LU-3.1.2-Android.apk";
+  function phoneKind() {
+    var ua = navigator.userAgent || "";
+    if (/android/i.test(ua)) return "android";
+    if (/iphone|ipad|ipod/i.test(ua)) return "ios";
+    if (/macintosh/i.test(ua) && (navigator.maxTouchPoints || 0) > 1) return "ios";
+    return null;
+  }
+  function wirePhoneApp() {
+    var kind = phoneKind();
+    if (!kind) return;
+    try { if (localStorage.getItem(PHONE_KEY) === "1") return; } catch (e) {}
+    var box = document.createElement("aside");
+    box.className = "lu-phone-app";
+    box.setAttribute("aria-label", "Locally Uncensored on your phone");
+    box.setAttribute("data-kind", kind);
+    // One slim row (20.10.2026, a third of the old height): phone icon,
+    // two short lines, a compact button, close.
+    var icon = '<svg class="lu-phone-app-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+      '<rect x="6.5" y="2.5" width="11" height="19" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/>' +
+      '<path d="M10.5 18.2h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+    box.innerHTML = icon + (kind === "android"
+      ? '<div class="lu-phone-app-text"><p class="lu-phone-app-title">LU on your phone</p>' +
+        '<p class="lu-phone-app-note">iPhone in review, Play soon. <a href="/android/">Install help</a></p></div>' +
+        '<a class="lu-phone-app-cta" href="' + APK_URL + '" aria-label="Download the Android app (APK, about 35 MB)">Get APK</a>'
+      : '<div class="lu-phone-app-text"><p class="lu-phone-app-title">LU for iPhone soon</p>' +
+        '<p class="lu-phone-app-note">In App Store review. Try LU&nbsp;Cloud.</p></div>' +
+        '<a class="lu-phone-app-cta" href="https://lu-labs.ai/app?src=luc-phone-banner">LU Cloud</a>');
+    var x = document.createElement("button");
+    x.type = "button"; x.className = "lu-phone-app-x"; x.setAttribute("aria-label", "Close"); x.textContent = "\u2715";
+    x.addEventListener("click", function () {
+      try { localStorage.setItem(PHONE_KEY, "1"); } catch (e) {}
+      box.remove();
+    });
+    box.appendChild(x);
+    var nav = document.querySelector(".lu-nav");
+    if (nav && nav.parentNode) nav.parentNode.insertBefore(box, nav.nextSibling);
+    else document.body.insertBefore(box, document.body.firstChild);
+  }
+
+  // ── Mac download: the newest release that has a .dmg ────────────────
+  // The Mac file is built on its own run and can come later than the Windows
+  // and Linux files (3.0.10 went Latest on 5 Nov, its .dmg came on 6 Nov).
+  // So every Mac button points at a FIXED tag in the HTML, which never 404s,
+  // and carries data-mac-latest. Here the newest stable release that really
+  // has an LU_<version>_aarch64.dmg replaces it, if that one is newer. No
+  // answer, a rate limit or a blocked request leave the fixed link alone.
+  // Links in old release notes have no data-mac-latest and stay as written.
+  var MAC_REPO = "https://github.com/PurpleDoubleD/locally-uncensored/releases/download/";
+  var MAC_DMG = /\/download\/v(\d+)\.(\d+)\.(\d+)\/LU_\d+\.\d+\.\d+_aarch64\.dmg$/;
+  var MAC_KEY = "lu-mac-dmg";
+
+  function macVer(url) {
+    var m = MAC_DMG.exec(url || "");
+    return m ? [+m[1], +m[2], +m[3]] : null;
+  }
+  function macNewer(a, b) {
+    for (var i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] > b[i];
+    return false;
+  }
+  function applyMac(url) {
+    var v = macVer(url);
+    if (!v || url.indexOf(MAC_REPO) !== 0) return;
+    var links = document.querySelectorAll("a[data-mac-latest]");
+    for (var i = 0; i < links.length; i++) {
+      var a = links[i], old = a.getAttribute("href"), ov = macVer(old);
+      if (!ov || !macNewer(v, ov)) continue;
+      a.setAttribute("href", url);
+      var oldName = old.slice(old.lastIndexOf("/") + 1), name = url.slice(url.lastIndexOf("/") + 1);
+      var code = a.querySelector("code");
+      if (code && code.textContent === oldName) code.textContent = name;
+    }
+  }
+  function wireMacLatest() {
+    if (!document.querySelector("a[data-mac-latest]") || !window.fetch) return;
+    try {
+      var hit = JSON.parse(sessionStorage.getItem(MAC_KEY) || "null");
+      if (hit && Date.now() - hit.t < 3600e3) { applyMac(hit.url); return; }
+    } catch (e) {}
+    fetch("https://api.github.com/repos/PurpleDoubleD/locally-uncensored/releases?per_page=10", {
+      headers: { Accept: "application/vnd.github+json" }
+    }).then(function (r) { return r.ok ? r.json() : []; }).then(function (list) {
+      for (var i = 0; i < list.length; i++) {
+        var rel = list[i];
+        if (!rel || rel.draft || rel.prerelease) continue;
+        var assets = rel.assets || [];
+        for (var j = 0; j < assets.length; j++) {
+          var url = assets[j].browser_download_url;
+          if (/^LU_\d+\.\d+\.\d+_aarch64\.dmg$/.test(assets[j].name || "") && macVer(url)) {
+            try { sessionStorage.setItem(MAC_KEY, JSON.stringify({ url: url, t: Date.now() })); } catch (e) {}
+            applyMac(url);
+            return;
+          }
+        }
+      }
+    }).catch(function () {});
   }
 
   function init() {
     injectAmbient();
     var monos = document.querySelectorAll("[data-mono]");
     for (var i = 0; i < monos.length; i++) buildMono(monos[i]);
-    wireTheme(); wireNav(); wireScrollArrow(); wireFunnelSource(); wireLang();
+    wireTheme(); wireNav(); wireScrollArrow(); wireFunnelSource(); wireLang(); wirePhoneApp(); wireMacLatest();
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);

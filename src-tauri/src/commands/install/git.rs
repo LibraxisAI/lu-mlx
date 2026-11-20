@@ -22,14 +22,14 @@ use super::CREATE_NO_WINDOW;
 
 use crate::process_util::foreign_system_command;
 
-/// Bug N — git probe before ComfyUI install (juliandiggins-stack issue #40).
+/// Bug N — git probe before ComfyUI install (issue #40).
 ///
 /// On Windows the in-app ComfyUI install + custom-node install both shell out
 /// to `git clone`. The previous spawn-error guard only catches a flat
 /// "git not on PATH" — but on a Windows machine where a WSL / Linux-mounted
 /// git binary is first on PATH, `git --version` succeeds and clone *starts*,
 /// then dies because the Linux binary can't handle Windows-style target paths.
-/// juliandiggins-stack hit this on v2.4.5: clone silently fails, user gets
+/// A user hit this on v2.4.5: clone silently fails, user gets
 /// a half-installed ComfyUI with no actionable hint.
 ///
 /// Probe at start of every clone path, classify, and surface the right hint:
@@ -371,7 +371,7 @@ mod tests {
 
     // ── Bug N — windows_git_probe classification matrix ──────────────────
     //
-    // juliandiggins-stack hit a half-installed ComfyUI on Windows because a
+    // A user hit a half-installed ComfyUI on Windows because a
     // WSL git on PATH ran the clone but choked on the Windows-style target
     // path. The probe is the gate that should surface a clear hint instead.
     // These tests pin the classification — the actual `git --version` call
@@ -491,7 +491,7 @@ mod tests {
     fn git_hint_nonnative_warns_about_wsl_and_path() {
         let hint = windows_git_install_hint(&WindowsGitState::NonNative).unwrap();
         let lower = hint.to_lowercase();
-        // Must call out the WSL/PATH ordering scenario juliandiggins hit so
+        // Must call out the WSL/PATH ordering scenario a user hit so
         // users know exactly what to check.
         assert!(lower.contains("path"), "NonNative hint must mention PATH: {}", hint);
         assert!(

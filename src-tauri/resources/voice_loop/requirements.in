@@ -1,0 +1,17 @@
+# Direct dependencies of the voice loop sidecar. requirements.txt is the
+# resolved lock for Windows, macOS and Linux, generated with:
+#
+#   uv pip compile requirements.in -o requirements.txt --universal \
+#     --python-version 3.11 --only-binary :all: --no-binary docopt --no-header \
+#     --extra-index-url https://download.pytorch.org/whl/cpu \
+#     --index-strategy unsafe-best-match --emit-index-url
+#
+# --only-binary proves that nothing needs a compiler on any platform. docopt
+# (pure Python, needed by num2words) ships no wheel and builds without one.
+pipecat-ai[websocket]==1.12.0
+faster-whisper==1.2.1
+pocket-tts==2.1.0
+uvicorn==0.54.0
+# CPU builds only. On Linux the default PyPI wheel drags in the CUDA stack.
+torch==2.14.1 ; sys_platform != "linux"
+torch==2.14.1+cpu ; sys_platform == "linux"

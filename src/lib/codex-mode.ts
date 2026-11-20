@@ -22,7 +22,7 @@
  */
 
 import { MUTATING_TOOLS } from './mutating-tools'
-import { codexConfirmEnabled } from '../hooks/codexShellGate'
+import { CODEX_CONFIRM_TOOLS, codexConfirmEnabled } from '../hooks/codexShellGate'
 
 export type CodexMode = 'ask' | 'bypass' | 'plan'
 
@@ -65,6 +65,19 @@ export function resolveCodexMode(
   return 'ask'
 }
 
+/** Plan reads only, Ask confirms, Bypass runs unattended. Higher is stricter. */
+const STRICTNESS: Record<CodexMode, number> = { bypass: 0, ask: 1, plan: 2 }
+
+/**
+ * The stricter of two modes (A37, 26.10.2026). Where the mode the composer
+ * showed and the mode the store resolves disagree, the run takes this one:
+ * a user who saw Ask must never get an unattended run, whatever state drift
+ * put Bypass behind it.
+ */
+export function stricterCodexMode(a: CodexMode, b: CodexMode): CodexMode {
+  return STRICTNESS[a] >= STRICTNESS[b] ? a : b
+}
+
 export type PermissionDecision = 'ask' | 'allow' | 'deny'
 
 export interface CodexModeRule {
@@ -73,8 +86,9 @@ export interface CodexModeRule {
   decision: PermissionDecision
 }
 
-/** The arbitrary-code-execution tools, same set the H2 confirm gate uses. */
-const EXEC_TOOLS = ['shell_execute', 'code_execute', 'shell_execute_background'] as const
+/** The tools Ask mode confirms, read from the gate itself so the table and
+ *  the gate cannot drift apart. */
+const EXEC_TOOLS = [...CODEX_CONFIRM_TOOLS]
 /** Staged-and-approved writes in Ask mode. */
 const WRITE_TOOLS = ['file_write', 'file_edit'] as const
 
@@ -133,7 +147,6 @@ export interface CodexModeKnobInput {
   settings: {
     codexConfirmShell?: boolean
     codexCloudConfirmOptIn?: boolean
-    codexStageMode?: boolean
     codexReviewMode?: boolean
   }
   /** Provider driving this run, for the cloud arm of the shell gate. */
@@ -148,7 +161,7 @@ export interface CodexModeKnobInput {
  *
  * The cloud shell gate is not a fourth mode: it is the user's own opt-in and
  * is off by default, so on a cloud model every mode behaves exactly as it does
- * on a local one (David 2026-08-22). A user who opts in gets the cloud confirm
+ * on a local one (2026-08-22). A user who opts in gets the cloud confirm
  * in all three modes, Bypass included.
  *
  * Where a mode and Code-Review Mode or a read-only slash command disagree, the

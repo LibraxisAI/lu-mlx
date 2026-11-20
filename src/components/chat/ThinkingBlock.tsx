@@ -9,16 +9,19 @@ interface Props {
     thinking: string
     /** True while the model is actively producing this turn. While it is,
      *  the COLLAPSED block shows a bounded, self-scrolling live peek of the
-     *  reasoning (G14-7, David 2026-08-07: thinking stays folded everywhere
+     *  reasoning (G14-7, 2026-08-07: thinking stays folded everywhere
      *  and streams inside a 3-4 line window; supersedes the 2026-06-04
      *  auto-expand). The user can still expand for the full text. */
     streaming?: boolean
+    /** What the header says once the thought is over. The chat keeps "Thinking";
+     *  a surface that knows how long the thought took says so ("Thought for 4 s"). */
+    label?: string
 }
 
 // Four lines of the 0.65rem / leading-relaxed reasoning text.
 const PREVIEW_MAX_H = 'max-h-[68px]'
 
-export function ThinkingBlock({ thinking, streaming }: Props) {
+export function ThinkingBlock({ thinking, streaming, label = 'Thinking' }: Props) {
     const [open, setOpen] = useState(false)
     const previewRef = useRef<HTMLDivElement>(null)
 
@@ -47,7 +50,7 @@ export function ThinkingBlock({ thinking, streaming }: Props) {
                 aria-label="Toggle thinking details"
             >
                 <Brain size={10} className="text-blue-400/70 shrink-0" />
-                <span className={`t-micro text-blue-400 ${streaming ? 'lu-tool-shimmer' : ''}`}>Thinking</span>
+                <span className={`t-micro italic pr-0.5 text-blue-400 ${streaming ? 'lu-tool-shimmer' : ''}`}>{streaming ? 'Thinking' : label}</span>
                 <ChevronDown
                     size={9}
                     className={`text-blue-400/50 transition-transform duration-[var(--motion-base)] ${open ? 'rotate-180' : ''}`}

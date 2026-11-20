@@ -2,10 +2,12 @@ import { useState } from 'react'
 import { motion } from 'framer-motion'
 import { MessageSquarePlus, Bot } from 'lucide-react'
 import { Modal } from '../ui/Modal'
+import { ModalActions, ModalButton } from '../ui/ModalActions'
 import { useAgentModeStore } from '../../stores/agentModeStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useModelStore } from '../../stores/modelStore'
 import { useSettingsStore } from '../../stores/settingsStore'
+import { useChatNoticeStore } from '../../stores/chatNoticeStore'
 import { canUseTools } from '../../lib/tool-support'
 import { FEATURE_FLAGS } from '../../lib/constants'
 import { AgentWorkspaceDialog } from './AgentWorkspaceDialog'
@@ -112,6 +114,8 @@ export function AgentModeToggle() {
     const persona = useSettingsStore.getState().getActivePersona()
     const newId = createConversation(activeModel, persona?.systemPrompt || '')
     useAgentModeStore.getState().toggleAgentMode(newId)
+    // Die Zeile "Plain chat cannot open files" hat ihren Rat gegeben.
+    useChatNoticeStore.getState().dismiss('agent-for-local-files')
     void maybeOpenWorkspaceDialog(newId)
   }
 
@@ -134,7 +138,10 @@ export function AgentModeToggle() {
     toggleAgentMode(activeConversationId)
     // If the user just turned agent ON (was inactive, now active) and
     // hasn't picked a workspace for this conversation, prompt for one.
-    if (!isActive) void maybeOpenWorkspaceDialog(activeConversationId)
+    if (!isActive) {
+      useChatNoticeStore.getState().dismiss('agent-for-local-files')
+      void maybeOpenWorkspaceDialog(activeConversationId)
+    }
   }
 
   const handleNewAgentChat = () => {
@@ -199,26 +206,25 @@ export function AgentModeToggle() {
       </button>
 
       {/* New Chat Required Modal */}
-      <Modal open={showNewChatModal} onClose={() => { setShowNewChatModal(false); setNeverShowChecked(false) }} title="" ariaLabel="New chat required">
+      <Modal open={showNewChatModal} onClose={() => { setShowNewChatModal(false); setNeverShowChecked(false) }} title="New Chat Required" ariaLabel="New chat required">
         <div className="space-y-4">
           <motion.div
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: MOTION_S.base }}
-            className="text-center space-y-3"
+            className="space-y-3"
           >
             {/* Hier leuchtete ein gelber Punkt mit Schein. Er war reine
                 Zierde: ein Zustandspunkt sagt an, aus oder kaputt, und
                 „dieser Dialog ist offen" ist keins davon. Der Titel darunter
                 sagt dasselbe in Worten (`lib/hinweis.ts`). */}
-            <h3 className="text-base font-semibold text-white">New Chat Required</h3>
             <p className="text-[12px] text-gray-400 leading-relaxed">
               Agent Mode needs to be active from the start of a conversation to work properly. Start a new chat with Agent Mode enabled.
             </p>
           </motion.div>
 
           {/* Never show again */}
-          <label className="flex items-center justify-center gap-2 cursor-pointer group">
+          <label className="flex items-center gap-2 cursor-pointer group">
             <input
               type="checkbox"
               checked={neverShowChecked}
@@ -231,22 +237,15 @@ export function AgentModeToggle() {
           </label>
 
           {/* Actions */}
-          <div className="flex items-center justify-between pt-1">
-            <button
-              onClick={() => { setShowNewChatModal(false); setNeverShowChecked(false) }}
-              className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[0.7rem] text-gray-400 hover:text-white hover:bg-white/10 transition-colors"
-            >
+          <ModalActions>
+            <ModalButton variant="quiet" onClick={() => { setShowNewChatModal(false); setNeverShowChecked(false) }}>
               Cancel
-            </button>
-
-            <button
-              onClick={handleNewAgentChat}
-              className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-[0.7rem] font-medium bg-green-500/15 border border-green-500/30 text-green-300 hover:bg-green-500/25 transition-colors"
-            >
+            </ModalButton>
+            <ModalButton variant="primary" onClick={handleNewAgentChat}>
               <MessageSquarePlus size={14} />
               New Agent Chat
-            </button>
-          </div>
+            </ModalButton>
+          </ModalActions>
         </div>
       </Modal>
 

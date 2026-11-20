@@ -3,7 +3,7 @@
  *
  * checkBundlesInstalled confirms its disk verdict against the running
  * ComfyUI, so a bundle that sits in a folder ComfyUI does not read cannot
- * claim to be installed (pnwpdr4519). It built that visible-set from
+ * claim to be installed. It built that visible-set from
  * checkpoints, diffusion_models, vae and text_encoders, and UNETLoader only
  * enumerates .safetensors and .sft. GGUF quants are listed by ComfyUI-GGUF's
  * own loader, which the Create probe learned in b8531b6 and this one did not.
@@ -71,7 +71,7 @@ describe('a GGUF bundle on disk is confirmed against the loader that lists it', 
     // Same disk answer, same engine, only the GGUF loader silent as well.
     // This one is green before and after on purpose: it pins that the fix
     // taught the check a fifth list rather than weakening the gate. The
-    // pnwpdr4519 case, a model folder ComfyUI does not read, must still be
+    // A user case, a model folder ComfyUI does not read, must still be
     // caught. The test above is the one that was red before the fix.
     ggufUnets.mockResolvedValue([])
     const out = await checkBundlesInstalled([GGUF_BUNDLE])

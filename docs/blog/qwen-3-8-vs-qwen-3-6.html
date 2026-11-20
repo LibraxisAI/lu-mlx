@@ -30,12 +30,15 @@
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is Qwen 3.8 better than Qwen 3.6?","acceptedAnswer":{"@type":"Answer","text":"The Max is, by a wide margin on the launch benchmarks: it is a 2.4 trillion parameter frontier model, while Qwen 3.6 tops out at 35B. But they are not really competitors. Qwen 3.8 Max is a hosted API model today; Qwen 3.6 is the generation you can download and run on your own GPU right now."}},{"@type":"Question","name":"Should I wait for Qwen 3.8 27B or run Qwen 3.6 now?","acceptedAnswer":{"@type":"Answer","text":"No need to wait any more: the 3.8 27B weights came out on August 13, 2026 and GGUFs appeared the same day. On 16 GB of VRAM or better, run the 3.8. Below that, Qwen 3.6 27B is still proven and runs from 8 GB up, and switching later is one click, not a migration."}},{"@type":"Question","name":"Does Qwen 3.8 have a bigger context window than Qwen 3.6?","acceptedAnswer":{"@type":"Answer","text":"Yes: 1 million tokens for Qwen 3.8 Max versus 256K for Qwen 3.6. The open weight 3.8 27B ships with a native 262,144 token window that stretches further with the usual scaling tricks."}},{"@type":"Question","name":"Is there an uncensored Qwen 3.8?","acceptedAnswer":{"@type":"Answer","text":"The weights are public and the 27B is Apache 2.0, so finetunes and abliterations are fully legal and community builds started appearing within a day. Qwen 3.6 abliterated builds are still the proven option and are among the strongest uncensored local models of 2026."}}]}
 </script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://locallyuncensored.com/"},{"@type":"ListItem","position":2,"name":"Blog","item":"https://locallyuncensored.com/blog/"},{"@type":"ListItem","position":3,"name":"Qwen 3.8 vs Qwen 3.6: What Changed, and Which to Use","item":"https://locallyuncensored.com/blog/qwen-3-8-vs-qwen-3-6.html"}]}
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/assets/lu.css">
 <script defer src="/assets/lu.js"></script>
-  <script data-goatcounter="https://lu-uncensored.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+  <script data-goatcounter="https://purple47.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
 </head>
 <body>
 
@@ -46,15 +49,17 @@
   </a>
   <div class="lu-nav-links" id="lu-nav-links">
     <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/pricing/">Pricing</a>
     <a class="lu-nav-link" href="/blog/">Blog</a>
     <a class="lu-nav-link" href="/guide/">Guide</a>
     <a class="lu-nav-link" href="/remote-access/">Remote</a>
   </div>
   <div class="lu-nav-right">
-    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">1600+&#8202;⭐</span></a>
-    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">800+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">4200+&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">1700+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
     <span class="lu-nav-sep"></span>
     <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="he-cta" href="/pricing/" aria-label="LU Cloud plans and what they include"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>Cloud</a>
     <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
     <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
   </div>
@@ -78,7 +83,7 @@
 
     <aside class="lu-cloud-box">
       <span class="lu-cloud-kicker">No GPU? Run it online</span>
-      <p>Both generations are also reachable without a download through our <a href="/uncensored-ai-api/">OpenAI-compatible API</a> at https://lu-labs.ai/api/inference/v1, where a key beginning with lu_ spends credits from the account instead of your own GPU hours.</p>
+      <p>Both generations are also reachable without a download through our <a href="/uncensored-ai-api/">OpenAI-compatible API</a> at https://lu-labs.ai/api/inference/v1, where a key beginning with lu_ spends credits from the account instead of your own GPU hours. <a href="/pricing/">See what it costs</a>.</p>
     </aside>
 
     <h2>The Two Generations at a Glance</h2>
@@ -107,14 +112,14 @@
       <li><strong>It exists on your GPU.</strong> Qwen 3.6 27B runs today from 8 GB VRAM up, fully offline, no logging, no rate limits, free. The Max never will, and the 3.8 27B is still a promise plus a GGUF pipeline away. The <a href="how-to-run-qwen-3-6-locally.html">setup guide</a> takes about 15 minutes.</li>
       <li><strong>Uncensored builds exist.</strong> The abliterated and heretic Qwen 3.6 variants are proven, downloadable, and among the strongest entries on our <a href="best-uncensored-ai-models-2026.html">2026 uncensored models list</a>. Qwen 3.8 has none until the weights drop, and then the community needs weeks.</li>
       <li><strong>Proven, not promised.</strong> 3.6 has three months of independent testing behind it. 3.8 has launch day screenshots.</li>
-      <li><strong>Total privacy.</strong> A local 3.6 never phones home. The hosted Max is an API with logs, whatever the quality gap.</li>
+      <li><strong>Privacy.</strong> A local 3.6 answers on your own machine, and your prompts stay there. The hosted Max is an API with logs, whatever the quality gap.</li>
     </ul>
 
     <h2>The Interesting Case: Qwen 3.8 27B</h2>
 
     <p>The announced open weight 27B is where the generations actually meet. If it inherits even part of the Max's agentic gains at 3.6 27B hardware cost (~16 GB at Q4), it becomes the default local Qwen the day usable GGUFs appear, and the abliterated builds that follow become the new uncensored baseline. The realistic timeline: weights within the week, GGUFs days later, tooling and abliterations over the following weeks. Our <a href="can-you-run-qwen-3-8-locally.html">hardware breakdown</a> tracks what is confirmed versus projected.</p>
 
-    <p>The weights are public now, so the projection is settled. LU Labs lists the measured quant sizes and the one chat template setting that decides whether it works in its guide on how to <a href="https://lu-labs.ai/blog/how-to-run-qwen-3-8-27b-locally" target="_blank" rel="noopener">run Qwen 3.8 27B locally: VRAM table and setup</a>.</p>
+    <p>The weights are public now, so the projection is settled. LU Labs lists the measured quant sizes and the one chat template setting that decides whether it works in its guide on how to <a href="https://lu-labs.ai/blog/how-to-run-qwen-3-8-27b-locally?src=luc-b-qwen-3-8-vs-qwen-3-6" target="_blank" rel="noopener">run Qwen 3.8 27B locally: VRAM table and setup</a>.</p>
 
     <h2>So Which Should You Use?</h2>
 
@@ -155,6 +160,15 @@ cd locally-uncensored
     <hr>
 
     <p><em>Locally Uncensored is AGPL-3.0 licensed and free to use. Built by <a href="https://github.com/PurpleDoubleD">PurpleDoubleD</a>.</em></p>
+    <h2>In the handbook</h2>
+
+    <ul>
+      <li><a href="/qwen/">All Qwen guides</a>, every generation on one page</li>
+      <li><a href="/guide/install/">Install and update</a>, the SmartScreen warning and how updates arrive</li>
+      <li><a href="/guide/chat/">Chat</a>, the model picker, the context window and thinking mode</li>
+      <li><a href="/guide/faq-and-glossary/">FAQ and glossary</a>, answers to the questions people really ask</li>
+    </ul>
+
   </article>
 
   <div class="post-footer">
@@ -163,6 +177,7 @@ cd locally-uncensored
       <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
       Get Started on GitHub
     </a>
+    <p style="margin-top:14px;margin-bottom:0">No GPU? LU Cloud runs in a browser, paid from credit packs that start at 15 EUR and need no subscription. <a href="/pricing/">See what it costs</a>.</p>
   </div>
 </div>
 
@@ -171,6 +186,15 @@ cd locally-uncensored
   <div class="footer-row footer-links">
     <a href="https://locallyuncensored.com/blog/">Blog</a>
     <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/pricing/">Pricing</a>
+    <a href="https://locallyuncensored.com/cloud/">LU Cloud</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-chat-online/">Uncensored AI chat online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-image-generator-online/">Image generator online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-video-generator-online/">Video generator online</a>
+    <a href="https://locallyuncensored.com/unrestricted-ai/">Unrestricted AI</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-coding-agent/">AI coding agent</a>
+    <a href="https://locallyuncensored.com/alternatives/">Alternatives</a>
+    <a href="https://locallyuncensored.com/is-locally-uncensored-safe/">Is it safe?</a>
     <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
     <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
     <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
@@ -178,6 +202,9 @@ cd locally-uncensored
     <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
     <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
     <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+    <a href="https://locallyuncensored.com/privacy/">Privacy</a>
+    <a href="https://locallyuncensored.com/terms/">Terms</a>
+    <a href="https://locallyuncensored.com/impressum/">Impressum</a>
   </div>
 </footer>
 </body>

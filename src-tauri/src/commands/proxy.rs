@@ -124,7 +124,70 @@ pub async fn fetch_external(url: String, authToken: Option<String>) -> Result<St
         return Err(format!("HTTP {}: {}", resp.status().as_u16(), redact_url(&url)));
     }
 
-    resp.text().await.map_err(|e| os_error::english(&e))
+    read_text_capped(resp, FETCH_EXTERNAL_MAX_BYTES, &url).await
+}
+
+/// How much of an answer `fetch_external` reads before it gives up.
+///
+/// It used to read whatever came. On a phone a 100 MiB answer became one
+/// string over the bridge and ended the app (out of memory); on the desktop it
+/// only cost memory. The callers are the catalogue (Hugging Face search and
+/// file tree, CivitAI search), with addresses the app builds. Measured on
+/// 10.10.2026: Hugging Face search 9 to 15 KB, a file tree up to 127 KB (a
+/// page of the tree API holds at most 1000 entries, about 0.4 MB), a CivitAI
+/// search of 20 models 0.13 to 2.07 MB. The desktop limit is eight times the
+/// largest of those. The phone never asks CivitAI, so its limit is eight
+/// times a full page of a file tree, and far below what its memory gives.
+const fn fetch_external_limit(phone: bool) -> usize {
+    if phone {
+        4 * 1024 * 1024
+    } else {
+        16 * 1024 * 1024
+    }
+}
+const FETCH_EXTERNAL_MAX_BYTES: usize = fetch_external_limit(cfg!(mobile));
+
+fn fetch_external_too_large(limit: usize, url: &str) -> String {
+    format!(
+        "The answer from {} is larger than {} MB, so it was not read.",
+        redact_url(url),
+        limit / (1024 * 1024)
+    )
+}
+
+/// Read a text body piece by piece and stop at `limit` bytes. A
+/// `Content-Length` over the limit ends it before the first piece; a body
+/// without one is counted while it arrives, and dropping the response closes
+/// the connection. What was read is then decoded by reqwest exactly as
+/// `Response::text()` did before (charset of the Content-Type, UTF-8
+/// otherwise, lossy), so an answer under the limit is the same string.
+async fn read_text_capped(
+    mut resp: reqwest::Response,
+    limit: usize,
+    url: &str,
+) -> Result<String, String> {
+    if resp.content_length().is_some_and(|len| len > limit as u64) {
+        return Err(fetch_external_too_large(limit, url));
+    }
+    let content_type = resp.headers().get(reqwest::header::CONTENT_TYPE).cloned();
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(piece) = resp.chunk().await.map_err(|e| os_error::english(&e))? {
+        if body.len() + piece.len() > limit {
+            return Err(fetch_external_too_large(limit, url));
+        }
+        body.extend_from_slice(&piece);
+    }
+    let mut rebuilt = axum::http::Response::builder();
+    if let Some(value) = content_type {
+        rebuilt = rebuilt.header(reqwest::header::CONTENT_TYPE, value);
+    }
+    let rebuilt = rebuilt
+        .body(body)
+        .map_err(|e| format!("fetch_external: {}", e))?;
+    reqwest::Response::from(rebuilt)
+        .text()
+        .await
+        .map_err(|e| os_error::english(&e))
 }
 
 /// Binary HTTP proxy — fetch any external URL and return bytes.
@@ -211,39 +274,143 @@ pub(crate) fn validate_public_url(raw: &str) -> Result<(), String> {
 /// against the machine's real resolver.
 type HostResolver = fn(&str, u16) -> Result<Vec<SocketAddr>, String>;
 
-/// Resolve with a hard cap. `to_socket_addrs` has no timeout knob and an
-/// unreachable resolver parks the calling thread for the OS default (tens of
-/// seconds on some stacks); the gate sits on a request path, so it caps the wait
-/// and fails closed rather than hanging the command.
-fn resolve_host(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
-    use std::net::ToSocketAddrs;
-    const CAP: Duration = Duration::from_secs(5);
-    let target = format!("{}:{}", host, port);
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let resolved = target
-            .to_socket_addrs()
-            .map(|it| it.collect::<Vec<_>>())
-            // Windows words a resolver failure in the system language; the app
-            // is English-only.
-            .map_err(|e| os_error::english(&e));
-        let _ = tx.send(resolved);
-    });
-    match rx.recv_timeout(CAP) {
-        Ok(Ok(addrs)) => Ok(addrs),
-        Ok(Err(e)) => Err(format!("Blocked: cannot resolve host ({})", e)),
-        Err(_) => Err(format!(
-            "Blocked: '{}' did not resolve within {} s",
-            host,
-            CAP.as_secs()
-        )),
+/// What the user reads when a name could not be looked up.
+///
+/// Deliberately not worded as "Blocked": nothing was blocked. The gate could
+/// not get an answer from the resolver, which on a phone on a train and on a
+/// desktop behind a sleepy router means the same thing: the network is slow
+/// or gone. The sentence says that and what to do, and it names the host so a
+/// typo in a custom address is visible too.
+pub(crate) fn lookup_failed_message(host: &str) -> String {
+    format!(
+        "Could not look up '{}'. The network seems to be slow or offline. Check the connection and try again.",
+        host
+    )
+}
+
+/// How long each attempt of a lookup may take. One entry is one attempt.
+///
+/// The quick list is for everything that sits inside a click or inside a
+/// redirect hop of a short request: one attempt, five seconds, then "cannot
+/// tell". The patient list is for a download, where five seconds was not
+/// enough on a slow line and the user saw a failed row for a file that would
+/// have started on the next try (models 26c): three attempts, each with more
+/// time than the one before.
+const QUICK_LOOKUP: &[Duration] = &[Duration::from_secs(5)];
+const PATIENT_LOOKUP: &[Duration] =
+    &[Duration::from_secs(5), Duration::from_secs(10), Duration::from_secs(20)];
+/// A resolver that answers "unknown" at once is asked again after this pause:
+/// a network that is just coming up answers the second time.
+const LOOKUP_RETRY_PAUSE: Duration = Duration::from_millis(1500);
+
+/// What a download does with a resolver that answers "unknown" AT ONCE.
+///
+/// On the phone that answer is what a network change looks like (WLAN to
+/// mobile data), so the lookup is repeated after a breath. On the desktop an
+/// instant "unknown" means there is no network, and v3.0.5 said so at once.
+/// It still does: `None` makes that answer final. Only a lookup that runs
+/// into its time limit, which is what a slow line looks like, is repeated
+/// there.
+const DOWNLOAD_LOOKUP_RETRY: Option<Duration> = download_lookup_retry(cfg!(mobile));
+
+const fn download_lookup_retry(phone: bool) -> Option<Duration> {
+    if phone {
+        Some(LOOKUP_RETRY_PAUSE)
+    } else {
+        None
     }
+}
+
+/// The blocking lookup itself, injectable so the retry logic can be tested
+/// against a resolver that hangs, fails or answers late.
+type RawLookup = fn(&str, u16) -> std::io::Result<Vec<SocketAddr>>;
+
+fn os_lookup(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+    use std::net::ToSocketAddrs;
+    format!("{}:{}", host, port).to_socket_addrs().map(|it| it.collect())
+}
+
+/// Resolve with a hard cap per attempt. `to_socket_addrs` has no timeout knob
+/// and an unreachable resolver parks the calling thread for the OS default
+/// (tens of seconds on some stacks); the gate sits on a request path, so it
+/// caps the wait and fails closed rather than hanging the command.
+///
+/// Every attempt starts its own lookup and all of them report into one
+/// channel: an answer that an earlier, slow attempt finally gets still
+/// counts. Silent: nothing is shown or logged to the user between attempts.
+fn resolve_with(
+    host: &str,
+    port: u16,
+    caps: &[Duration],
+    pause: Option<Duration>,
+    lookup: RawLookup,
+) -> Result<Vec<SocketAddr>, String> {
+    let (tx, rx) = std::sync::mpsc::channel::<std::io::Result<Vec<SocketAddr>>>();
+    // Lookups that have not reported yet. A failure only counts once nobody
+    // is left who could still bring an answer.
+    let mut outstanding = 0usize;
+    for (attempt, cap) in caps.iter().enumerate() {
+        let last = attempt + 1 == caps.len();
+        let tx = tx.clone();
+        let target = host.to_string();
+        std::thread::spawn(move || {
+            let _ = tx.send(lookup(&target, port));
+        });
+        outstanding += 1;
+        let deadline = std::time::Instant::now() + *cap;
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match rx.recv_timeout(left) {
+                Ok(Ok(addrs)) => return Ok(addrs),
+                Ok(Err(_)) => {
+                    outstanding = outstanding.saturating_sub(1);
+                    if outstanding > 0 {
+                        continue;
+                    }
+                    if last {
+                        return Err(lookup_failed_message(host));
+                    }
+                    // The resolver did answer, with "unknown". A network that
+                    // is just coming up answers differently a moment later.
+                    // Without a pause that answer is final: there is no
+                    // network, and saying so now beats saying so later.
+                    let Some(pause) = pause else {
+                        return Err(lookup_failed_message(host));
+                    };
+                    std::thread::sleep(pause);
+                    break;
+                }
+                // This attempt's time is up. Its lookup keeps running and may
+                // still answer during the next one.
+                Err(_) => break,
+            }
+        }
+    }
+    Err(lookup_failed_message(host))
+}
+
+fn resolve_host(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+    resolve_with(host, port, QUICK_LOOKUP, Some(LOOKUP_RETRY_PAUSE), os_lookup)
+}
+
+/// The resolver of a download: three attempts with growing time, see
+/// `PATIENT_LOOKUP`. Blocks for up to 35 s in the worst case (a resolver that
+/// never answers at all), so it is only ever called from a blocking thread.
+/// On the desktop a resolver that answers "unknown" ends it at once, see
+/// `DOWNLOAD_LOOKUP_RETRY`.
+fn resolve_host_patient(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+    resolve_with(host, port, PATIENT_LOOKUP, DOWNLOAD_LOOKUP_RETRY, os_lookup)
 }
 
 /// The gate, returning the addresses it approved so the caller can pin the
 /// connection to exactly those (see `pinned_client`).
 pub(crate) fn validate_public_url_addrs(raw: &str) -> Result<Vec<SocketAddr>, String> {
     validate_public_url_addrs_with(raw, resolve_host)
+}
+
+/// The same gate with the patient resolver. For downloads only.
+pub(crate) fn validate_public_url_addrs_patient(raw: &str) -> Result<Vec<SocketAddr>, String> {
+    validate_public_url_addrs_with(raw, resolve_host_patient)
 }
 
 fn validate_public_url_addrs_with(
@@ -323,8 +490,20 @@ pub(crate) fn ssrf_safe_redirect_policy(max: usize) -> reqwest::redirect::Policy
 /// walks through untouched. `resolve_to_addrs` overrides only the address — the
 /// port always comes from the URL.
 fn pinned_client(host: &str, addrs: &[SocketAddr], timeout: Duration) -> Result<reqwest::Client, String> {
+    pinned_client_as(host, addrs, timeout, crate::app_identity::outgoing_agent!("2.0"))
+}
+
+/// The same pin for a caller that names itself differently (`web_reach`, the
+/// page fetch of the agent). Nothing else about the client changes.
+pub(crate) fn pinned_client_as(
+    host: &str,
+    addrs: &[SocketAddr],
+    timeout: Duration,
+    user_agent: &str,
+) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
-        .user_agent("LocallyUncensored/2.0")
+        .user_agent(user_agent)
+        .no_gzip()
         .timeout(timeout)
         // Redirects are followed by hand in `ssrf_safe_fetch` so every hop gets
         // its own check AND its own pin; letting reqwest follow them would
@@ -346,7 +525,7 @@ fn pinned_client(host: &str, addrs: &[SocketAddr], timeout: Duration) -> Result<
 /// `bearer` is the user's CivitAI API key. It is attached per hop and ONLY while
 /// that hop is a CivitAI host, so a redirect off CivitAI drops the credential
 /// instead of handing it to whoever the catalogue pointed at.
-async fn ssrf_safe_fetch(
+pub(crate) async fn ssrf_safe_fetch(
     url: &str,
     label: &str,
     timeout: Duration,
@@ -393,12 +572,165 @@ async fn ssrf_safe_fetch(
     Err(format!("{}: too many redirects", label))
 }
 
+/// The client of one hop of a model download: pinned to the addresses the
+/// gate approved for that hop, no automatic redirects, and limits per connect
+/// and per read instead of one deadline for the whole transfer (a download
+/// may take hours, a dead socket must not).
+fn pinned_download_client(
+    host: &str,
+    addrs: &[SocketAddr],
+    connect_secs: u64,
+    read_secs: u64,
+) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .user_agent(crate::app_identity::outgoing_agent!("1.5"))
+        .no_gzip()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(connect_secs))
+        .read_timeout(Duration::from_secs(read_secs));
+    if parse_ip_host(host).is_none() {
+        builder = builder.resolve_to_addrs(host, addrs);
+    }
+    builder.build().map_err(|e| os_error::english(&e))
+}
+
+/// How often a connection that could not be opened is tried again before the
+/// download row turns into an error, and how long to wait in between.
+///
+/// Phone only. A connection that is refused or unreachable AT ONCE is what a
+/// phone between two networks looks like, so it waits and tries again. On the
+/// desktop the same answer means the network or the server is gone, and
+/// v3.0.5 said so at once: no retries there, the error comes as fast as it
+/// did. (A slow line shows as a timeout, and that is not retried anywhere:
+/// it already took its whole limit.)
+const CONNECT_RETRY_PAUSES: &[Duration] = connect_retry_pauses(cfg!(mobile));
+
+const PHONE_CONNECT_RETRY_PAUSES: &[Duration] = &[Duration::from_millis(1500), Duration::from_secs(4)];
+
+const fn connect_retry_pauses(phone: bool) -> &'static [Duration] {
+    if phone {
+        PHONE_CONNECT_RETRY_PAUSES
+    } else {
+        &[]
+    }
+}
+
+/// Send the first request of a model download and follow its redirects by
+/// hand.
+///
+/// Why not the redirect policy of reqwest, as before: the policy can only
+/// look a host up with the quick resolver (it runs inside reqwest), and
+/// reqwest then looks the same name up a second time to connect. On a slow
+/// line that was two chances per hop to run into the five second cap, and
+/// the user got "Blocked: 'huggingface.co' did not resolve within 5 s" or
+/// "Request failed: error following redirect" for a download that started on
+/// the next click (models 26c). Here every hop
+///
+///   * is looked up ONCE, by the patient resolver (three attempts, growing
+///     time), off the reactor,
+///   * is held to the same gate as before (`validate_public_url`), and
+///   * is connected to exactly the addresses that passed, so a resolver that
+///     answers differently the second time has nothing to answer.
+///
+/// A connection that cannot be opened is tried again twice, silently. A
+/// timeout is not: that already took its whole limit.
+///
+/// `build` makes the request for one hop. It gets the address of that hop,
+/// so a credential can be attached for the host it belongs to and for no
+/// other, which is what reqwest did by dropping `Authorization` on a change
+/// of host.
+pub(crate) async fn send_download_request<F>(
+    url: &str,
+    connect_secs: u64,
+    read_secs: u64,
+    max_hops: usize,
+    build: F,
+) -> Result<reqwest::Response, String>
+where
+    F: Fn(&reqwest::Client, &str) -> reqwest::RequestBuilder,
+{
+    send_download_request_with(
+        url,
+        connect_secs,
+        read_secs,
+        max_hops,
+        build,
+        validate_public_url_addrs_patient,
+        CONNECT_RETRY_PAUSES,
+    )
+    .await
+}
+
+async fn send_download_request_with<F>(
+    url: &str,
+    connect_secs: u64,
+    read_secs: u64,
+    max_hops: usize,
+    build: F,
+    gate: fn(&str) -> Result<Vec<SocketAddr>, String>,
+    retry_pauses: &[Duration],
+) -> Result<reqwest::Response, String>
+where
+    F: Fn(&reqwest::Client, &str) -> reqwest::RequestBuilder,
+{
+    let mut current = url.to_string();
+    for _ in 0..=max_hops {
+        let target = current.clone();
+        let addrs = tokio::task::spawn_blocking(move || gate(&target))
+            .await
+            .map_err(|e| format!("Request failed: resolver task failed: {}", e))??;
+        let parsed = url::Url::parse(&current).map_err(|e| format!("Invalid URL: {}", e))?;
+        let host = parsed.host_str().unwrap_or("").to_string();
+        let client = pinned_download_client(&host, &addrs, connect_secs, read_secs)?;
+
+        let mut pauses = retry_pauses.iter();
+        let resp = loop {
+            match build(&client, &current).send().await {
+                Ok(resp) => break resp,
+                Err(e) if e.is_connect() && !e.is_timeout() => match pauses.next() {
+                    Some(pause) => tokio::time::sleep(*pause).await,
+                    None => return Err(connect_failed_message(&host, &os_error::english(&e))),
+                },
+                Err(e) => return Err(format!("Request failed: {}", os_error::english(&e))),
+            }
+        };
+        if !matches!(resp.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            return Ok(resp);
+        }
+        let location = match resp.headers().get(reqwest::header::LOCATION).and_then(|v| v.to_str().ok()) {
+            Some(l) => l.to_string(),
+            None => return Ok(resp),
+        };
+        current = parsed
+            .join(&location)
+            .map_err(|e| format!("Invalid redirect target: {}", e))?
+            .to_string();
+    }
+    Err("Request failed: too many redirects".to_string())
+}
+
+/// What the user reads when the server of a download could not be reached
+/// after the silent retries. The technical reason stays at the end for a bug
+/// report, the sentence in front is the part to act on.
+fn connect_failed_message(host: &str, detail: &str) -> String {
+    format!(
+        "Could not reach '{}'. The network seems to be slow or offline. Check the connection and try again. ({})",
+        host, detail
+    )
+}
+
 /// True only for private/LAN hosts a user could legitimately point a local
 /// backend at. `register_openai_host` requires this so the RUST boundary — not
 /// the JS caller — enforces the LAN-only intent and can't be tricked into
 /// allow-listing arbitrary public/intranet hosts (SSRF hardening M2). Mirrors
 /// the frontend `isPrivateOrLanHost`. Input must be bracket-stripped+lowercased.
 fn is_registerable_lan_host(host: &str) -> bool {
+    is_registerable_lan_host_on(host, cfg!(mobile))
+}
+
+/// `phone` switches on the one rule the desktop of v3.0.5 did not have: a bare
+/// number is no machine name. The desktop keeps accepting what it accepted.
+fn is_registerable_lan_host_on(host: &str, phone: bool) -> bool {
     let h = host.trim_matches(|c| c == '[' || c == ']').to_lowercase();
     if h.is_empty() {
         return false;
@@ -430,8 +762,23 @@ fn is_registerable_lan_host(host: &str) -> bool {
         }
         return false;
     }
+    // A bare number is not a machine name: `2852039166` and `0xA9FEA9FE` are
+    // both 169.254.169.254 to the resolver. The request itself was never
+    // fooled (the URL parser turns them into the dotted form, and that one is
+    // judged), but such an entry has no business in the list either.
+    // Phone only: on the desktop this is the list of v3.0.5, unchanged.
+    if phone && is_numeric_host_form(&h) {
+        return false;
+    }
     // Bare single-label machine name (no dots, no stray ':') = LAN host.
     !h.contains('.') && !h.contains(':')
+}
+
+/// An address written as one number, decimal or `0x` hex.
+fn is_numeric_host_form(h: &str) -> bool {
+    let decimal = !h.is_empty() && h.chars().all(|c| c.is_ascii_digit());
+    let hex = h.len() > 2 && h.starts_with("0x") && h[2..].chars().all(|c| c.is_ascii_hexdigit());
+    decimal || hex
 }
 
 /// True for a public hostname a user can legitimately host an OpenAI-compatible
@@ -468,6 +815,9 @@ struct ProxyAllowList {
     ollama: String,
     comfy: String,
     openai: std::collections::HashSet<String>,
+    /// True in the Android and iOS builds. There a host out on the internet
+    /// is only reached over https, see `check`.
+    phone: bool,
 }
 
 impl ProxyAllowList {
@@ -495,6 +845,7 @@ impl ProxyAllowList {
                 .ok()
                 .map(|g| g.clone())
                 .unwrap_or_default(),
+            phone: cfg!(mobile),
         }
     }
 
@@ -532,13 +883,22 @@ impl ProxyAllowList {
             return Ok(());
         }
 
-        if !self.ollama.is_empty() && host == self.ollama {
-            return Ok(());
-        }
-        if !self.comfy.is_empty() && host == self.comfy {
-            return Ok(());
-        }
-        if self.openai.contains(&host) {
+        let registered = (!self.ollama.is_empty() && host == self.ollama)
+            || (!self.comfy.is_empty() && host == self.comfy)
+            || self.openai.contains(&host);
+        if registered {
+            // A phone does not talk plain http to the internet: the API key
+            // of a provider would cross a mobile network and every public
+            // wifi in the clear. The webview is held to the same rule by the
+            // system (usesCleartextTraffic=false on Android, App Transport
+            // Security on iOS), and this proxy must not be the way around
+            // it. A server in the home network stays reachable over http,
+            // that is what people run there. The desktop is unchanged.
+            if self.phone && parsed.scheme() == "http" && !is_registerable_lan_host_on(&host, true) {
+                return Err(format!(
+                    "This phone only connects to '{host}' over https. Change the address of this provider so that it starts with https://."
+                ));
+            }
             return Ok(());
         }
 
@@ -566,7 +926,7 @@ impl ProxyAllowList {
 fn proxy_client(timeout: Duration, allow: ProxyAllowList) -> Result<reqwest::Client, String> {
     const MAX_HOPS: usize = 3;
     reqwest::Client::builder()
-        .user_agent("LocallyUncensored/2.0")
+        .user_agent(crate::app_identity::outgoing_agent!("2.0"))
         .gzip(true)
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::custom(move |attempt| {
@@ -619,6 +979,28 @@ pub fn register_openai_host(
         hosts.insert(h);
     }
     Ok(())
+}
+
+/// The caller's headers, with the key of the LU Engine on a request that goes
+/// to one (engine_key.rs). The web view never knows the key, so whatever it
+/// sent as `Authorization` for the engine (an empty key from the provider
+/// slot, at most) is replaced, not added to. Every other request keeps the
+/// caller's headers as they were.
+fn with_engine_key(
+    url: &str,
+    headers: Option<std::collections::HashMap<String, String>>,
+    engine_ports: &[u16],
+) -> Option<std::collections::HashMap<String, String>> {
+    if !super::engine_key::goes_to_engine(url, engine_ports) {
+        return headers;
+    }
+    let mut out: std::collections::HashMap<String, String> = headers
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(k, _)| !k.eq_ignore_ascii_case("authorization") && !k.eq_ignore_ascii_case("x-api-key"))
+        .collect();
+    out.insert("Authorization".to_string(), super::engine_key::bearer());
+    Some(out)
 }
 
 /// Attach the body and the caller's headers to a proxied request.
@@ -883,7 +1265,7 @@ async fn cancellable_request(
 ///
 /// `call_id` (optional) is the same callId/cancel mechanic the chunked stream
 /// path already has (`proxy_localhost_stream_chunked` + `cancel_proxy_stream`,
-/// David 2026-06-15): the caller mints an id, sends it here, and fires
+/// 2026-06-15): the caller mints an id, sends it here, and fires
 /// `cancel_proxy_call(call_id)` when the user hits Stop.
 #[tauri::command]
 pub async fn proxy_localhost(
@@ -899,6 +1281,7 @@ pub async fn proxy_localhost(
     allow.check(&url)?;
     // A generation request may not name a model the engine is not holding.
     guard_builtin_model(&url, body.as_deref(), &state)?;
+    let headers = with_engine_key(&url, headers, &super::engine_key::engine_ports(&state));
 
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(300_000));
 
@@ -913,6 +1296,7 @@ pub async fn proxy_localhost(
         _ => client.get(&url),
     };
 
+    request = super::engine_token::attach(request, &url);
     request = apply_body_and_headers(request, body, headers);
 
     // Register against the shared CancelRegistry (mirrors stream_tokens /
@@ -944,6 +1328,158 @@ pub fn cancel_proxy_call(
     Ok(())
 }
 
+/// What `mcp_http_request` hands back: the status, the two headers the
+/// Streamable HTTP transport of MCP lives on, and the body.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpHttpReply {
+    status: u16,
+    content_type: Option<String>,
+    session_id: Option<String>,
+    body: String,
+}
+
+/// An MCP answer is a few kilobytes; a tool result with an image maybe a few
+/// megabytes. Past this the server is not answering a request.
+const MCP_BODY_LIMIT: usize = 16 * 1024 * 1024;
+
+/// True once `buf` holds a complete event stream event whose data is the
+/// JSON-RPC response (result or error) to request `id`.
+fn sse_has_response(buf: &str, id: i64) -> bool {
+    let normalised = buf.replace("\r\n", "\n");
+    let mut events: Vec<&str> = normalised.split("\n\n").collect();
+    // The last piece is an event still being written.
+    events.pop();
+    events.iter().any(|event| {
+        let data: Vec<&str> = event
+            .lines()
+            .filter_map(|l| l.strip_prefix("data:"))
+            .map(|l| l.strip_prefix(' ').unwrap_or(l))
+            .collect();
+        if data.is_empty() {
+            return false;
+        }
+        match serde_json::from_str::<serde_json::Value>(&data.join("\n")) {
+            Ok(v) => {
+                v.get("id").and_then(|x| x.as_i64()) == Some(id)
+                    && v.get("method").is_none()
+                    && (v.get("result").is_some() || v.get("error").is_some())
+            }
+            Err(_) => false,
+        }
+    })
+}
+
+/// One request to an MCP server that the user added by its URL (M1, 3.1.0).
+///
+/// `proxy_localhost` returns the body alone, and Streamable HTTP needs two
+/// response headers besides it: the content type (one JSON answer or an
+/// event stream) and `Mcp-Session-Id`, which a stateful server issues on
+/// `initialize` and wants on every later request. Same allow list, redirect
+/// policy and cancel registry (`cancel_proxy_call`) as `proxy_localhost`. A
+/// non-2xx answer is returned, not turned into an error, so the frontend can
+/// tell an expired session (404) from a refused token (401). An event stream
+/// is read until the response to `expect_id` is in, because a server may
+/// keep the stream open after it (the spec says SHOULD close).
+///
+/// Headers are forwarded as given and never logged: they carry the user's
+/// token for that server.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn mcp_http_request(
+    url: String,
+    method: Option<String>,
+    body: Option<String>,
+    headers: Option<std::collections::HashMap<String, String>>,
+    expect_id: Option<i64>,
+    timeout_ms: Option<u64>,
+    call_id: Option<String>,
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<McpHttpReply, String> {
+    use futures_util::StreamExt;
+
+    let allow = ProxyAllowList::snapshot(&state);
+    allow.check(&url)?;
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(120_000).clamp(1_000, 600_000));
+    let client = proxy_client(timeout, allow)?;
+
+    let mut request = match method.as_deref().unwrap_or("POST") {
+        "GET" => client.get(&url),
+        "DELETE" => client.delete(&url),
+        _ => client.post(&url),
+    };
+    request = apply_body_and_headers(request, body, headers);
+
+    let (token, _guard) = match call_id {
+        Some(id) => {
+            let (token, guard) = state.call_tokens.register(id);
+            (token, Some(guard))
+        }
+        None => (tokio_util::sync::CancellationToken::new(), None),
+    };
+    if token.is_cancelled() {
+        return Err("mcp_http_request: cancelled".to_string());
+    }
+
+    let resp = tokio::select! {
+        biased;
+        _ = token.cancelled() => return Err("mcp_http_request: cancelled".to_string()),
+        r = request.send() => r.map_err(|e| format!("mcp_http_request: {}", os_error::english(&e)))?,
+    };
+
+    let status = resp.status().as_u16();
+    let header = |name: &str| {
+        resp.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_string())
+    };
+    let content_type = header("content-type");
+    let session_id = header("mcp-session-id");
+    let is_stream = content_type
+        .as_deref()
+        .is_some_and(|t| t.to_ascii_lowercase().contains("text/event-stream"));
+
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut stream = resp.bytes_stream();
+    loop {
+        let next = tokio::select! {
+            biased;
+            _ = token.cancelled() => return Err("mcp_http_request: cancelled".to_string()),
+            n = stream.next() => n,
+        };
+        match next {
+            None => break,
+            Some(Err(e)) => {
+                // A stream that breaks after the answer was in is still an answer.
+                if is_stream && expect_id.is_some_and(|id| sse_has_response(&String::from_utf8_lossy(&bytes), id)) {
+                    break;
+                }
+                return Err(format!("mcp_http_request: {}", os_error::english(&e)));
+            }
+            Some(Ok(chunk)) => {
+                bytes.extend_from_slice(&chunk);
+                if bytes.len() > MCP_BODY_LIMIT {
+                    return Err("mcp_http_request: the answer is larger than 16 MB".to_string());
+                }
+                if is_stream
+                    && (200..300).contains(&status)
+                    && expect_id.is_some_and(|id| sse_has_response(&String::from_utf8_lossy(&bytes), id))
+                {
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(McpHttpReply {
+        status,
+        content_type,
+        session_id,
+        body: String::from_utf8_lossy(&bytes).into_owned(),
+    })
+}
+
 /// Streaming localhost proxy — BUFFERS the whole body (no streaming). Kept for
 /// non-streaming callers (e.g. proxy-download). For chat, use the chunked variant
 /// below so a long generation doesn't look like a multi-minute "model loading" hang.
@@ -953,6 +1489,7 @@ pub async fn proxy_localhost_stream(url: String, method: Option<String>, body: O
     allow.check(&url)?;
     // A generation request may not name a model the engine is not holding.
     guard_builtin_model(&url, body.as_deref(), &state)?;
+    let headers = with_engine_key(&url, headers, &super::engine_key::engine_ports(&state));
 
     let client = proxy_client(Duration::from_secs(7200), allow)?;
 
@@ -965,6 +1502,7 @@ pub async fn proxy_localhost_stream(url: String, method: Option<String>, body: O
         _ => client.get(&url),
     };
 
+    request = super::engine_token::attach(request, &url);
     request = apply_body_and_headers(request, body, headers);
 
     let resp = request
@@ -981,13 +1519,13 @@ pub async fn proxy_localhost_stream(url: String, method: Option<String>, body: O
     resp.bytes().await.map(|b| b.to_vec()).map_err(|e| os_error::english(&e))
 }
 
-/// Chunked streaming localhost proxy for Ollama chat (David 2026-06-02).
+/// Chunked streaming localhost proxy for Ollama chat (2026-06-02).
 ///
 /// The webview CANNOT fetch Ollama directly — its origin is `http://tauri.localhost`
 /// and Ollama's CORS rejects it ("TypeError: Failed to fetch"), so ALL chat traffic
 /// is routed through the proxy. The buffered `proxy_localhost_stream` awaits the
 /// ENTIRE body (2-hour timeout), so a long/slow generation produced NOTHING in the UI
-/// until fully finished — a multi-minute "model loading"/hang (dhasim Discord report).
+/// until fully finished — a multi-minute "model loading"/hang (Discord report).
 /// This variant forwards each chunk to the caller's `on_chunk` Channel as it arrives
 /// → true token-by-token streaming. (`Channel` must be a required arg — wrapping it in
 /// `Option` does not implement `Deserialize`, hence a separate command.)
@@ -1002,12 +1540,16 @@ pub async fn proxy_localhost_stream_chunked(
     // Optional id so the JS side can deterministically cancel THIS stream via
     // `cancel_proxy_stream(stream_id)`. Without it, aborting only broke the JS
     // read-loop while Ollama kept generating to completion on the proxy path
-    // (David 2026-06-15: deleting/Stopping a chat must stop the backend too).
+    // (2026-06-15: deleting/Stopping a chat must stop the backend too).
     stream_id: Option<String>,
     // Max silence between two chunks once the backend has started answering.
     // Optional so the renderer can widen it for a backend that is known to
     // think for minutes between tokens; see IDLE_TIMEOUT_MS for the default.
     idle_timeout_ms: Option<u64>,
+    // Issue 177: the wait for the FIRST chunk, from Settings, General, Chat
+    // Reply Timeout. None keeps FIRST_CHUNK_GRACE, 0 means Off (wait as long
+    // as the connection stays open). See first_chunk_window.
+    first_chunk_timeout_ms: Option<u64>,
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<(), String> {
     // No chunk for this long once the stream is running means the backend died
@@ -1025,12 +1567,14 @@ pub async fn proxy_localhost_stream_chunked(
     allow.check(&url)?;
     // A generation request may not name a model the engine is not holding.
     guard_builtin_model(&url, body.as_deref(), &state)?;
+    let headers = with_engine_key(&url, headers, &super::engine_key::engine_ports(&state));
 
     // Built before the token is registered: everything after the registration
     // has to reach the pump, which is what guarantees the EOF marker and the
     // registry cleanup. An early `?` between the two would skip both.
     let idle = Duration::from_millis(idle_timeout_ms.unwrap_or(IDLE_TIMEOUT_MS));
-    let client = proxy_client(Duration::from_secs(7200), allow)?;
+    let first_chunk_grace = first_chunk_window(first_chunk_timeout_ms, FIRST_CHUNK_GRACE);
+    let client = proxy_client(whole_request_limit(first_chunk_grace), allow)?;
 
     // Register against the shared CancelRegistry (mirrors call_tokens /
     // proxy_localhost). Survives a cancel that arrives before this line
@@ -1055,10 +1599,42 @@ pub async fn proxy_localhost_stream_chunked(
         headers,
         &token,
         idle,
-        FIRST_CHUNK_GRACE,
+        first_chunk_grace,
         &move |chunk| on_chunk.send(chunk).is_ok(),
     )
     .await
+}
+
+/// "Off" for the first chunk wait: thirty days, far past any prompt and still
+/// a value tokio can add to an Instant without overflowing.
+const FIRST_CHUNK_OFF: Duration = Duration::from_secs(30 * 24 * 3600);
+
+/// The first chunk window for one stream (issue 177): the renderer's setting
+/// in ms, 0 for Off, or the built in default when it sent none.
+fn first_chunk_window(setting_ms: Option<u64>, default: Duration) -> Duration {
+    match setting_ms {
+        None => default,
+        Some(0) => FIRST_CHUNK_OFF,
+        Some(ms) => Duration::from_millis(ms).min(FIRST_CHUNK_OFF),
+    }
+}
+
+/// The reqwest timeout over the WHOLE request. It used to be a flat 7200 s,
+/// which a first chunk limit above roughly two hours (or Off) would have
+/// undercut: the request would die of the total limit while the setting still
+/// promised to wait. An hour of answer on top of the first chunk window, and
+/// never less than the old two hours.
+fn whole_request_limit(first_chunk: Duration) -> Duration {
+    Duration::from_secs(7200).max(first_chunk.saturating_add(Duration::from_secs(3600)))
+}
+
+/// The reason a stream ends when the first chunk window ran out, before or
+/// after the response headers (issue 177).
+fn nothing_sent_for(window: Duration) -> String {
+    format!(
+        "the backend accepted the request but sent nothing for {} s. A very large model or a very long prompt can take this long; raise Chat Reply Timeout in Settings, General, or restart the backend if it is not working.",
+        window.as_secs()
+    )
 }
 
 /// The stream pump behind `proxy_localhost_stream_chunked`, with the IPC channel
@@ -1098,12 +1674,22 @@ async fn pump_proxy_stream(
             _ => client.get(url),
         };
 
+        request = super::engine_token::attach(request, url);
         request = apply_body_and_headers(request, body, headers);
 
         // Race the request against cancellation even during connect/headers.
+        // Issue 177: the first chunk window also covers the wait for the
+        // response headers. A server that holds them back until its first
+        // token (Ollama while it loads a model, a proxy in front of a busy
+        // backend) used to wait the whole request limit of two hours, whatever
+        // Chat Reply Timeout said (Windows run d307-j: limit 30 s, a stub
+        // that answered after 45 s without headers got its answer through).
         let resp = tokio::select! {
             _ = token.cancelled() => return Ok(()),
-            r = request.send() => r.map_err(|e| format!("proxy_localhost_stream_chunked: {}", os_error::english(&e)))?,
+            r = tokio::time::timeout(first_chunk_grace, request.send()) => match r {
+                Err(_) => return Err(nothing_sent_for(first_chunk_grace)),
+                Ok(r) => r.map_err(|e| format!("proxy_localhost_stream_chunked: {}", os_error::english(&e)))?,
+            },
         };
 
         if !resp.status().is_success() {
@@ -1137,10 +1723,7 @@ async fn pump_proxy_stream(
                             window.as_secs()
                         )
                     } else {
-                        format!(
-                            "the backend accepted the request but sent nothing for {} s. A very large model can take this long to load; if it is not loading, restart the backend and try again.",
-                            window.as_secs()
-                        )
+                        nothing_sent_for(window)
                     }),
                     Ok(Some(it)) => {
                         let bytes = it.map_err(|e| os_error::english(&e))?;
@@ -1204,7 +1787,7 @@ pub fn cancel_proxy_stream(
 /// Upload an image to ComfyUI's `/upload/image` as a clean multipart POST from
 /// Rust. `uploadImage()` in the frontend used a RAW browser `fetch()` — the only
 /// non-proxy fetch left — which 400'd on some WebView2 builds (multipart /
-/// boundary / CORS-preflight quirks; konata 2026-06-14 "Failed to upload image:
+/// boundary / CORS-preflight quirks; 2026-06-14 "Failed to upload image:
 /// HTTP 400"). reqwest's multipart is machine-independent and removes WebView2
 /// as a variable, matching the "everything via the Rust proxy" pattern
 /// (WebView2-149 finding). Returns ComfyUI's JSON body ({ name, subfolder, type }).
@@ -1284,7 +1867,7 @@ pub async fn pull_model_stream(app: tauri::AppHandle, state: tauri::State<'_, cr
     }
 
     let client = reqwest::Client::builder()
-        .user_agent("LocallyUncensored/2.0")
+        .user_agent(crate::app_identity::outgoing_agent!("2.0"))
         .timeout(std::time::Duration::from_secs(7200))
         .build()
         .map_err(|e| os_error::english(&e))?;
@@ -1315,7 +1898,7 @@ pub async fn pull_model_stream(app: tauri::AppHandle, state: tauri::State<'_, cr
     let mut buffer = String::new();
 
     let mut was_cancelled = false;
-    // Bug Z/a v2.5.0 — leonsk29 GH #48. We need to know whether the stream
+    // Bug Z/a v2.5.0 — GH #48. We need to know whether the stream
     // ever produced a terminal "success" line, OR whether it produced an
     // `error` field. Ollama 0.4+ responds to a broken HF reference (e.g.
     // bartowski/Hermes-3 GGUF on llama.cpp-incompatible builds) with HTTP
@@ -1436,7 +2019,7 @@ pub async fn ollama_search(query: String) -> Result<serde_json::Value, String> {
     );
 
     let client = reqwest::Client::builder()
-        .user_agent("LocallyUncensored/2.0")
+        .user_agent(crate::app_identity::outgoing_agent!("2.0"))
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| os_error::english(&e))?;
@@ -1458,6 +2041,23 @@ pub async fn ollama_search(query: String) -> Result<serde_json::Value, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mcp_event_stream_is_done_once_the_answer_is_in() {
+        use super::sse_has_response;
+        // A progress notification first, then the answer to request 3.
+        let note = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{}}\n\n";
+        assert!(!sse_has_response(note, 3));
+        let half = format!("{note}data: {{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{{}}}}");
+        assert!(!sse_has_response(&half, 3), "an event still being written is not in yet");
+        let full = format!("{half}\n\n");
+        assert!(sse_has_response(&full, 3));
+        assert!(!sse_has_response(&full, 4), "an answer to another request does not count");
+        // A request from the server with the same id is no answer.
+        assert!(!sse_has_response("data: {\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}\n\n", 3));
+        // CRLF framing and an error answer.
+        assert!(sse_has_response("data: {\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{\"code\":-1,\"message\":\"x\"}}\r\n\r\n", 7));
+    }
+
     use super::*;
 
     fn built_headers(
@@ -1509,6 +2109,37 @@ mod tests {
         assert_eq!(sent.get(reqwest::header::CONTENT_TYPE).unwrap(), "application/xml");
     }
 
+    /// Security pass of 2026-10-13: the engine answered every web page. It
+    /// now wants its key, and only the Rust side has it.
+    #[test]
+    fn a_request_to_the_engine_carries_its_key_and_no_key_of_the_caller() {
+        let engine = [8127];
+        let sent = with_engine_key(
+            "http://127.0.0.1:8127/v1/chat/completions",
+            Some(caller("authorization", "Bearer ")),
+            &engine,
+        )
+        .unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent["Authorization"], super::super::engine_key::bearer());
+        let with_x_key = with_engine_key("http://localhost:8127/v1/models", Some(caller("X-Api-Key", "k")), &engine).unwrap();
+        assert!(!with_x_key.keys().any(|k| k.eq_ignore_ascii_case("x-api-key")));
+        assert!(with_engine_key("http://127.0.0.1:8127/slots", None, &engine).is_some());
+    }
+
+    #[test]
+    fn a_request_anywhere_else_keeps_the_headers_of_the_caller_and_never_gets_the_key() {
+        let engine = [8127];
+        for url in ["http://127.0.0.1:11434/api/chat", "http://127.0.0.1:1234/v1/models", "http://192.168.1.5:8127/v1/models"] {
+            let sent = with_engine_key(url, Some(caller("Authorization", "Bearer k")), &engine).unwrap();
+            assert_eq!(sent["Authorization"], "Bearer k", "{url}");
+            assert!(with_engine_key(url, None, &engine).is_none(), "{url}");
+        }
+        // No engine running: nothing is an engine request.
+        let sent = with_engine_key("http://127.0.0.1:8127/v1/models", None, &[]);
+        assert!(sent.is_none());
+    }
+
     #[test]
     fn a_body_without_caller_headers_still_gets_json() {
         let sent = built_headers(Some("{}".to_string()), None);
@@ -1541,7 +2172,7 @@ mod tests {
         rt.block_on(async {
             let url = "http://127.0.0.1:18899/prompt";
             let client = reqwest::Client::builder()
-                .user_agent("LocallyUncensored/2.0")
+                .user_agent(crate::app_identity::outgoing_agent!("2.0"))
                 .build()
                 .unwrap();
 
@@ -1597,7 +2228,7 @@ mod tests {
 
         let req = apply_body_and_headers(
             reqwest::Client::builder()
-                .user_agent("LocallyUncensored/2.0")
+                .user_agent(crate::app_identity::outgoing_agent!("2.0"))
                 .build()
                 .unwrap()
                 .post("http://127.0.0.1:8188/prompt"),
@@ -1664,7 +2295,7 @@ mod tests {
         assert!(!is_blocked_proxy_host("2606:4700::1111"));
     }
 
-    /// goonerforporn's key used to ride in the search URL as `&token=`, and
+    /// a user's key used to ride in the search URL as `&token=`, and
     /// this function is what quotes that URL back into an error the app then
     /// logs. The scrubber cannot see a secret that is only a substring of a
     /// URL, so the query goes.
@@ -2042,12 +2673,7 @@ mod tests {
 
             // 2. Nothing listening: the failure happens before the first byte.
             //    No marker, or the refused connection reads as a dropped answer.
-            let dead = {
-                let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let p = l.local_addr().unwrap().port();
-                drop(l);
-                p
-            };
+            let (dead, _held) = crate::test_support::refusing_port();
             let token = tokio_util::sync::CancellationToken::new();
             let (out, chunks) = pump_and_collect(
                 &format!("http://127.0.0.1:{}/", dead), &token, short, short).await;
@@ -2194,6 +2820,77 @@ mod tests {
             let err = out.expect_err("the load window has to end eventually too");
             assert!(err.contains("sent nothing"), "wrong reason: {err}");
             assert!(chunks.is_empty(), "nothing arrived, so there is nothing to end: {chunks:?}");
+        });
+    }
+
+    /// Issue 177, found in the app on Windows (d307-j): a server that takes
+    /// the request but holds back even its headers is bound by the same
+    /// window. Before, only the whole request limit of two hours ended it.
+    #[test]
+    fn a_server_that_sends_no_headers_ends_at_the_first_chunk_window() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let port = raw_stub("", Some(Duration::from_secs(30))).await;
+            let token = tokio_util::sync::CancellationToken::new();
+            let started = std::time::Instant::now();
+            let (out, chunks) = pump_and_collect(
+                &format!("http://127.0.0.1:{}/", port),
+                &token,
+                Duration::from_millis(50),
+                Duration::from_millis(400),
+            ).await;
+            let err = out.expect_err("no headers within the window has to end the wait");
+            assert!(started.elapsed() < Duration::from_secs(10), "waited past the window");
+            assert!(err.contains("sent nothing for 0 s"), "wrong reason: {err}");
+            assert!(err.contains("Chat Reply Timeout"), "does not say where to change it: {err}");
+            assert!(chunks.is_empty(), "nothing arrived: {chunks:?}");
+        });
+    }
+
+    /// Issue 177: the first chunk window is the user's setting. None keeps the
+    /// old 600 s, 0 is Off, any other value is taken in ms.
+    #[test]
+    fn the_first_chunk_window_follows_the_setting() {
+        let default = Duration::from_secs(600);
+        assert_eq!(first_chunk_window(None, default), default);
+        assert_eq!(first_chunk_window(Some(1_800_000), default), Duration::from_secs(1800));
+        assert_eq!(first_chunk_window(Some(0), default), FIRST_CHUNK_OFF);
+        assert_eq!(first_chunk_window(Some(u64::MAX), default), FIRST_CHUNK_OFF);
+    }
+
+    /// The whole request limit never undercuts the first chunk window: with
+    /// four hours to wait for the first byte, a flat two hour total would have
+    /// ended the request first.
+    #[test]
+    fn the_whole_request_limit_leaves_room_after_the_first_chunk() {
+        assert_eq!(whole_request_limit(Duration::from_secs(600)), Duration::from_secs(7200));
+        assert_eq!(whole_request_limit(Duration::from_secs(4 * 3600)), Duration::from_secs(5 * 3600));
+        assert!(whole_request_limit(FIRST_CHUNK_OFF) > FIRST_CHUNK_OFF);
+    }
+
+    /// The window from the setting is the one the pump waits, and the reason
+    /// names it and the place to change it.
+    #[test]
+    fn a_short_setting_ends_the_wait_with_its_own_number() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let port = raw_stub(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+                Some(Duration::from_secs(30)),
+            ).await;
+            let token = tokio_util::sync::CancellationToken::new();
+            let window = first_chunk_window(Some(1_000), Duration::from_secs(600));
+            let started = std::time::Instant::now();
+            let (out, _chunks) = pump_and_collect(
+                &format!("http://127.0.0.1:{}/", port),
+                &token,
+                Duration::from_millis(50),
+                window,
+            ).await;
+            let err = out.expect_err("the set window has to end the wait");
+            assert!(started.elapsed() < Duration::from_secs(10), "waited past the setting");
+            assert!(err.contains("sent nothing for 1 s"), "wrong reason: {err}");
+            assert!(err.contains("Chat Reply Timeout"), "does not say where to change it: {err}");
         });
     }
 
@@ -2559,7 +3256,7 @@ mod builtin_model_guard_tests {
     use super::*;
 
     const PORT: u16 = 8127;
-    const GEMMA: &str = "C:\\Users\\ddrob\\AppData\\Roaming\\lu\\models\\mlabonne_gemma-3-4b-it-abliterated-Q4_K_M.gguf";
+    const GEMMA: &str = "C:\\Users\\alice\\AppData\\Roaming\\lu\\models\\mlabonne_gemma-3-4b-it-abliterated-Q4_K_M.gguf";
     const CHAT: &str = "http://127.0.0.1:8127/v1/chat/completions";
 
     fn body(model: &str) -> String {
@@ -2674,5 +3371,676 @@ mod builtin_model_guard_tests {
         assert_eq!(builtin_model_name_from_path("/Users/x/models/qwen2.5-0.5b.gguf"), "qwen2.5-0.5b");
         assert_eq!(builtin_model_name_from_path("C:\\m\\qwen2.5-0.5b.GGUF"), "qwen2.5-0.5b");
         assert_eq!(builtin_model_name_from_path("qwen2.5-0.5b"), "qwen2.5-0.5b");
+    }
+}
+
+/// Slow or missing networks (models 26c): the lookup is tried again with more
+/// time, silently, and what is left at the end is a sentence about the
+/// network, not a "Blocked".
+#[cfg(test)]
+mod patient_lookup_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+
+    const MS: fn(u64) -> Duration = Duration::from_millis;
+
+    fn answer(port: u16) -> Vec<SocketAddr> {
+        vec![SocketAddr::new("93.184.216.34".parse().unwrap(), port)]
+    }
+
+    fn unknown() -> std::io::Error {
+        std::io::Error::other("failed to lookup address information")
+    }
+
+    #[test]
+    fn a_lookup_that_hangs_once_is_asked_again_and_the_second_answer_counts() {
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn lookup(_: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+            if CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
+                std::thread::sleep(MS(3000));
+                return Err(unknown());
+            }
+            Ok(answer(port))
+        }
+        let started = Instant::now();
+        let out = resolve_with("huggingface.co", 443, &[MS(150), MS(300), MS(600)], Some(MS(20)), lookup);
+        assert_eq!(out, Ok(answer(443)));
+        assert_eq!(CALLS.load(Ordering::SeqCst), 2, "one silent retry, not three");
+        assert!(started.elapsed() < MS(1500), "the second attempt answered, nobody waits for the first");
+    }
+
+    #[test]
+    fn an_answer_that_arrives_late_still_counts() {
+        // The first lookup needs longer than its own time, but less than the
+        // time of the first two attempts together. The second one never
+        // answers. The app must take what the first one finally brings.
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn lookup(_: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+            if CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
+                std::thread::sleep(MS(350));
+                return Ok(answer(port));
+            }
+            std::thread::sleep(MS(5000));
+            Err(unknown())
+        }
+        let out = resolve_with("huggingface.co", 443, &[MS(150), MS(600), MS(600)], Some(MS(20)), lookup);
+        assert_eq!(out, Ok(answer(443)));
+    }
+
+    #[test]
+    fn a_resolver_that_says_unknown_is_asked_again_after_a_breath() {
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn lookup(_: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+            if CALLS.fetch_add(1, Ordering::SeqCst) < 2 {
+                return Err(unknown());
+            }
+            Ok(answer(port))
+        }
+        let out = resolve_with("huggingface.co", 443, &[MS(500), MS(500), MS(500)], Some(MS(30)), lookup);
+        assert_eq!(out, Ok(answer(443)));
+        assert_eq!(CALLS.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn a_network_that_never_answers_ends_in_a_sentence_about_the_network() {
+        fn lookup(_: &str, _: u16) -> std::io::Result<Vec<SocketAddr>> {
+            std::thread::sleep(MS(4000));
+            Err(unknown())
+        }
+        let started = Instant::now();
+        let err = resolve_with("huggingface.co", 443, &[MS(100), MS(200), MS(400)], Some(MS(20)), lookup).unwrap_err();
+        let waited = started.elapsed();
+        assert!(waited >= MS(690) && waited < MS(2500), "the three limits add up, waited {waited:?}");
+        assert_eq!(err, lookup_failed_message("huggingface.co"));
+        assert!(!err.contains("Blocked"), "nothing was blocked: {err}");
+        assert!(err.contains("huggingface.co") && err.contains("slow or offline") && err.contains("try again"), "{err}");
+    }
+
+    #[test]
+    fn an_offline_resolver_fails_after_its_retries_and_not_before() {
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn lookup(_: &str, _: u16) -> std::io::Result<Vec<SocketAddr>> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Err(unknown())
+        }
+        let err = resolve_with("huggingface.co", 443, &[MS(500), MS(500), MS(500)], Some(MS(20)), lookup).unwrap_err();
+        assert_eq!(CALLS.load(Ordering::SeqCst), 3);
+        assert!(!err.contains("Blocked"), "{err}");
+    }
+
+    /// The desktop rule: a resolver that answers "unknown" at once is the
+    /// sign of a machine without network. v3.0.5 reported that immediately,
+    /// and so does the download now. One lookup, no pause.
+    #[test]
+    fn on_the_desktop_an_offline_resolver_fails_at_once() {
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn lookup(_: &str, _: u16) -> std::io::Result<Vec<SocketAddr>> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Err(unknown())
+        }
+        let started = Instant::now();
+        let err = resolve_with("huggingface.co", 443, PATIENT_LOOKUP, download_lookup_retry(false), lookup).unwrap_err();
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1, "asked once");
+        assert!(started.elapsed() < MS(1000), "no pause and no second attempt: {:?}", started.elapsed());
+        assert_eq!(err, lookup_failed_message("huggingface.co"));
+    }
+
+    /// The other half: a slow line (the lookup runs into its limit) is still
+    /// asked again on the desktop, and the second answer counts.
+    #[test]
+    fn on_the_desktop_a_slow_lookup_is_still_asked_again() {
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn lookup(_: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+            if CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
+                std::thread::sleep(MS(3000));
+                return Err(unknown());
+            }
+            Ok(answer(port))
+        }
+        let out = resolve_with("huggingface.co", 443, &[MS(150), MS(300), MS(600)], download_lookup_retry(false), lookup);
+        assert_eq!(out, Ok(answer(443)));
+        assert_eq!(CALLS.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn the_phone_keeps_its_breath_and_the_desktop_has_none() {
+        assert_eq!(download_lookup_retry(true), Some(LOOKUP_RETRY_PAUSE));
+        assert_eq!(download_lookup_retry(false), None);
+        assert_eq!(DOWNLOAD_LOOKUP_RETRY.is_some(), cfg!(mobile));
+        assert_eq!(CONNECT_RETRY_PAUSES.is_empty(), !cfg!(mobile));
+    }
+
+    #[test]
+    fn the_quick_resolver_asks_once() {
+        // Everything inside a click keeps the short wait: one attempt.
+        assert_eq!(QUICK_LOOKUP.len(), 1);
+        assert_eq!(QUICK_LOOKUP[0], Duration::from_secs(5));
+        // The download waits longer each time.
+        assert_eq!(PATIENT_LOOKUP.len(), 3);
+        assert!(PATIENT_LOOKUP.windows(2).all(|w| w[0] < w[1]), "growing limits");
+    }
+
+    #[test]
+    fn a_failed_lookup_is_not_worded_as_a_refusal_of_the_gate() {
+        fn dead(_: &str, _: u16) -> Result<Vec<SocketAddr>, String> {
+            Err(lookup_failed_message("huggingface.co"))
+        }
+        let err = validate_public_url_addrs_with("https://huggingface.co/a/b/resolve/main/m.gguf", dead).unwrap_err();
+        assert!(!err.contains("Blocked"), "{err}");
+        // A real refusal keeps its word.
+        let err = validate_public_url("http://127.0.0.1/x").unwrap_err();
+        assert!(err.contains("Blocked"), "{err}");
+    }
+
+    // ── the request of a download, hop by hop ────────────────────────────
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// The gate of these tests: loopback passes (that is where the stubs
+    /// live), except the one port a test declares forbidden.
+    static FORBIDDEN_PORT: AtomicUsize = AtomicUsize::new(0);
+    fn loopback_gate(raw: &str) -> Result<Vec<SocketAddr>, String> {
+        let parsed = url::Url::parse(raw).map_err(|e| e.to_string())?;
+        let port = parsed.port().unwrap_or(80);
+        if port as usize == FORBIDDEN_PORT.load(Ordering::SeqCst) {
+            return Err("Blocked: private/reserved IP 127.0.0.1".to_string());
+        }
+        Ok(vec![SocketAddr::new("127.0.0.1".parse().unwrap(), port)])
+    }
+
+    /// One tiny HTTP server. Answers every request with `head` and records
+    /// the request text it saw.
+    async fn stub(listener: TcpListener, head: String, seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else { break };
+            let head = head.clone();
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                seen.lock().unwrap().push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let _ = sock.write_all(head.as_bytes()).await;
+            });
+        }
+    }
+
+    const OK_HEAD: &str = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+
+    #[tokio::test]
+    async fn every_hop_is_checked_and_a_key_only_rides_to_its_own_host() {
+        let seen_a = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_b = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let b = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port_b = b.local_addr().unwrap().port();
+        let a = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port_a = a.local_addr().unwrap().port();
+        tokio::spawn(stub(b, OK_HEAD.to_string(), seen_b.clone()));
+        tokio::spawn(stub(
+            a,
+            format!("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port_b}/file\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+            seen_a.clone(),
+        ));
+
+        let first = format!("http://127.0.0.1:{port_a}/start");
+        let key_host = format!("127.0.0.1:{port_a}");
+        let resp = send_download_request_with(&first, 5, 5, 4, |client, hop| {
+            let mut r = client.get(hop).header("Range", "bytes=7-");
+            if hop.contains(&key_host) {
+                r = r.bearer_auth("hf_secret");
+            }
+            r
+        }, loopback_gate, PHONE_CONNECT_RETRY_PAUSES)
+        .await
+        .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let a_saw = seen_a.lock().unwrap().join("\n").to_ascii_lowercase();
+        let b_saw = seen_b.lock().unwrap().join("\n").to_ascii_lowercase();
+        assert!(a_saw.contains("authorization: bearer hf_secret"), "the first host gets its key");
+        assert!(!b_saw.contains("authorization"), "the redirect target must not see the key: {b_saw}");
+        assert!(b_saw.contains("range: bytes=7-"), "the range survives the redirect: {b_saw}");
+    }
+
+    /// The same chain with the key rule the real download uses: there and
+    /// back again. The key goes out on the first hop only, and a later hop
+    /// on the first host does not get it back (reqwest in v3.0.5 removed the
+    /// header for the rest of the chain).
+    #[tokio::test]
+    async fn the_download_key_is_gone_for_good_once_a_redirect_left_its_host() {
+        let seen_a = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_b = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let b = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port_b = b.local_addr().unwrap().port();
+        let a = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port_a = a.local_addr().unwrap().port();
+        // b sends everything back to a, a sends /start to b and answers the rest.
+        tokio::spawn(stub(
+            b,
+            format!("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port_a}/file\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+            seen_b.clone(),
+        ));
+        let seen = seen_a.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = a.accept().await else { return };
+                let mut buf = vec![0u8; 4096];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                let head = if text.starts_with("GET /start") {
+                    format!("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port_b}/signed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                } else {
+                    OK_HEAD.to_string()
+                };
+                seen.lock().unwrap().push(text);
+                let _ = sock.write_all(head.as_bytes()).await;
+            }
+        });
+
+        let first = format!("http://127.0.0.1:{port_a}/start");
+        let key = crate::commands::download::RidingKey::new(&first, Some("hf_secret".to_string()));
+        let resp = send_download_request_with(&first, 5, 5, 4, |client, hop| {
+            let mut r = client.get(hop);
+            if let Some(t) = key.for_hop(hop) {
+                r = r.bearer_auth(t);
+            }
+            r
+        }, loopback_gate, PHONE_CONNECT_RETRY_PAUSES)
+        .await
+        .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let a_saw: Vec<String> = seen_a.lock().unwrap().iter().map(|s| s.to_ascii_lowercase()).collect();
+        let b_saw = seen_b.lock().unwrap().join("\n").to_ascii_lowercase();
+        assert_eq!(a_saw.len(), 2, "{a_saw:?}");
+        assert!(a_saw[0].starts_with("get /start") && a_saw[0].contains("authorization: bearer hf_secret"), "{a_saw:?}");
+        assert!(!b_saw.contains("authorization"), "the other host must not see the key: {b_saw}");
+        assert!(a_saw[1].starts_with("get /file") && !a_saw[1].contains("authorization"), "{a_saw:?}");
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_a_refused_address_is_never_requested() {
+        let seen_a = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_b = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let b = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port_b = b.local_addr().unwrap().port();
+        let a = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port_a = a.local_addr().unwrap().port();
+        FORBIDDEN_PORT.store(port_b as usize, Ordering::SeqCst);
+        tokio::spawn(stub(b, OK_HEAD.to_string(), seen_b.clone()));
+        tokio::spawn(stub(
+            a,
+            format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:{port_b}/admin\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+            seen_a.clone(),
+        ));
+        let first = format!("http://127.0.0.1:{port_a}/start");
+        let err = send_download_request_with(&first, 5, 5, 4, |client, hop| client.get(hop), loopback_gate, PHONE_CONNECT_RETRY_PAUSES)
+            .await
+            .unwrap_err();
+        FORBIDDEN_PORT.store(0, Ordering::SeqCst);
+        assert!(err.contains("Blocked"), "{err}");
+        assert_eq!(seen_a.lock().unwrap().len(), 1);
+        assert!(seen_b.lock().unwrap().is_empty(), "the refused hop got a request");
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_is_tried_again_silently() {
+        // Nobody listens at first. The server comes up while the first pause
+        // runs, and the request then simply succeeds.
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_task = seen.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(MS(500)).await;
+            let listener = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+            stub(listener, OK_HEAD.to_string(), seen_task).await;
+        });
+        let url = format!("http://127.0.0.1:{port}/m.gguf");
+        let resp = send_download_request_with(&url, 5, 5, 2, |client, hop| client.get(hop), loopback_gate, PHONE_CONNECT_RETRY_PAUSES)
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_server_that_stays_away_ends_in_a_sentence_about_the_network() {
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let url = format!("http://127.0.0.1:{port}/m.gguf");
+        let started = Instant::now();
+        let err = send_download_request_with(&url, 5, 5, 2, |client, hop| client.get(hop), loopback_gate, PHONE_CONNECT_RETRY_PAUSES)
+            .await
+            .unwrap_err();
+        let total: Duration = PHONE_CONNECT_RETRY_PAUSES.iter().sum();
+        assert!(started.elapsed() >= total, "both pauses were waited");
+        assert!(err.starts_with("Could not reach '127.0.0.1'"), "{err}");
+        assert!(err.contains("slow or offline"), "{err}");
+        assert!(!err.contains("Blocked"), "{err}");
+    }
+
+    /// The desktop: a server that refuses the connection is reported at
+    /// once, as in v3.0.5. No pause, no second attempt.
+    #[tokio::test]
+    async fn on_the_desktop_a_server_that_stays_away_is_reported_at_once() {
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let url = format!("http://127.0.0.1:{port}/m.gguf");
+        // A refused connect is not instant everywhere: Windows itself tries a
+        // closed port again for about two seconds. So the bound is one such
+        // attempt plus a margin, which stays below the first pause of the
+        // phone (1.5 s) and below a second attempt.
+        let one = Instant::now();
+        let _ = tokio::net::TcpStream::connect(("127.0.0.1", port)).await;
+        let one = one.elapsed();
+        let started = Instant::now();
+        let err = send_download_request_with(&url, 5, 5, 2, |client, hop| client.get(hop), loopback_gate, connect_retry_pauses(false))
+            .await
+            .unwrap_err();
+        assert!(started.elapsed() < one + MS(1000), "no pause was waited: {:?}, one refused connect: {one:?}", started.elapsed());
+        assert!(err.starts_with("Could not reach '127.0.0.1'"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_dead_name_never_reaches_the_network() {
+        fn dead(_: &str) -> Result<Vec<SocketAddr>, String> {
+            Err(lookup_failed_message("huggingface.co"))
+        }
+        let err = send_download_request_with(
+            "https://huggingface.co/a/b/resolve/main/m.gguf",
+            5,
+            5,
+            2,
+            |client, hop| client.get(hop),
+            dead,
+            PHONE_CONNECT_RETRY_PAUSES,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, lookup_failed_message("huggingface.co"));
+    }
+}
+
+/// Custom endpoints on a phone (round 2, CSP): the webview may only fetch the
+/// hosts its CSP names, everything a user enters himself goes through this
+/// proxy, and the proxy keeps the rules the system holds the webview to.
+#[cfg(test)]
+mod phone_proxy_tests {
+    use super::*;
+
+    fn list(phone: bool, hosts: &[&str]) -> ProxyAllowList {
+        ProxyAllowList {
+            ollama: String::new(),
+            comfy: String::new(),
+            openai: hosts.iter().map(|h| h.to_string()).collect(),
+            phone,
+        }
+    }
+
+    #[test]
+    fn a_phone_reaches_a_host_on_the_internet_over_https_only() {
+        let phone = list(true, &["llm.example.com", "192.168.1.20", "nas.local", "desktop"]);
+        assert!(phone.check("https://llm.example.com/v1/chat/completions").is_ok());
+        let err = phone.check("http://llm.example.com/v1/chat/completions").unwrap_err();
+        assert!(err.contains("https") && err.contains("llm.example.com"), "{err}");
+        // The frontend turns a line that looks like a dead connection into
+        // "the server is unreachable". This one must stay readable as it is.
+        for word in ["proxy_localhost", "error sending request", "connection refused", "failed to fetch", "tcp connect"] {
+            assert!(!err.to_ascii_lowercase().contains(word), "{err} reads like a transport failure");
+        }
+        // A server at home is what people run over plain http.
+        for home in ["http://192.168.1.20:1234/v1/models", "http://nas.local:8080/v1/models", "http://desktop:11434/api/tags"] {
+            assert!(phone.check(home).is_ok(), "{home}");
+        }
+        // The engine on the phone itself.
+        assert!(phone.check("http://127.0.0.1:8127/v1/chat/completions").is_ok());
+    }
+
+    #[test]
+    fn the_desktop_keeps_what_it_had() {
+        let desktop = list(false, &["llm.example.com"]);
+        assert!(desktop.check("http://llm.example.com/v1/models").is_ok());
+        assert!(desktop.check("https://llm.example.com/v1/models").is_ok());
+    }
+
+    #[test]
+    fn a_host_nobody_entered_and_the_metadata_address_stay_closed_on_both() {
+        for phone in [true, false] {
+            let allow = list(phone, &["llm.example.com"]);
+            assert!(allow.check("https://other.example.com/v1/models").is_err());
+            assert!(allow.check("https://169.254.169.254/latest/meta-data/").is_err());
+            assert!(allow.check("file:///etc/passwd").is_err());
+        }
+    }
+
+    #[test]
+    fn only_a_name_or_a_home_address_can_be_entered() {
+        // What `register_openai_host` lets in: a server at home, or a public
+        // name. A bare public number and every numeric disguise stay out.
+        for ok in ["192.168.1.20", "10.0.2.2", "nas.local", "desktop", "llm.example.com", "api.x.ai"] {
+            assert!(is_registerable_lan_host(ok) || is_registerable_public_host(ok), "{ok}");
+        }
+        for bad in ["8.8.8.8", "2852039166", "0xA9FEA9FE", "169.254.169.254", "", "a b.example", "llm.example.com/path"] {
+            let refused = is_blocked_proxy_host(bad) || (!is_registerable_lan_host_on(bad, true) && !is_registerable_public_host(bad));
+            assert!(refused, "{bad} was accepted");
+        }
+    }
+
+    /// The rule against a bare number is new with the phone. The desktop
+    /// accepted such an entry in v3.0.5 (the request itself was never fooled,
+    /// see `validate_public_url_blocks_numeric_ip_encodings`), and it still
+    /// does: nothing a desktop user had entered stops working.
+    #[test]
+    fn a_bare_number_is_refused_on_the_phone_and_kept_on_the_desktop() {
+        for number in ["2130706433", "0x7f000001", "2852039166", "0xa9fea9fe"] {
+            assert!(!is_registerable_lan_host_on(number, true), "{number} on the phone");
+            assert!(is_registerable_lan_host_on(number, false), "{number} on the desktop, as in v3.0.5");
+        }
+        // Everything else is judged the same on both.
+        for host in ["192.168.1.20", "nas", "box.lan", "8.8.8.8", "169.254.169.254", "api.openai.com", ""] {
+            assert_eq!(is_registerable_lan_host_on(host, true), is_registerable_lan_host_on(host, false), "{host}");
+        }
+        assert_eq!(is_registerable_lan_host("2130706433"), !cfg!(mobile));
+    }
+
+    /// The webview fetches exactly the hosts its CSP names, and the frontend
+    /// decides by its own copy of that list (`CSP_DIRECT_HOSTS`) whether a
+    /// request goes direct or through this proxy. If the two lists drift, a
+    /// provider either dies inside the webview or takes the proxy for
+    /// nothing. And the CSP never opens the whole internet: that is what the
+    /// proxy with its entered hosts is for.
+    #[test]
+    fn the_csp_and_the_direct_list_of_the_frontend_name_the_same_hosts() {
+        let backend = include_str!("../../../src/api/backend.ts");
+        let start = backend.find("const CSP_DIRECT_HOSTS = new Set([").expect("CSP_DIRECT_HOSTS in src/api/backend.ts");
+        let block = &backend[start..];
+        let block = &block[..block.find("])").expect("end of the set")];
+        let direct: Vec<&str> = block
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix('\''))
+            .filter_map(|l| l.split('\'').next())
+            .collect();
+        assert!(direct.len() >= 10, "the list was not read: {direct:?}");
+
+        for (file, raw) in [
+            ("tauri.conf.json", include_str!("../../tauri.conf.json")),
+            ("tauri.ios.conf.json", include_str!("../../tauri.ios.conf.json")),
+        ] {
+            let conf: serde_json::Value = serde_json::from_str(raw).unwrap();
+            let csp = conf["app"]["security"]["csp"].as_str().unwrap_or_else(|| panic!("{file} has no CSP"));
+            let connect = csp
+                .split(';')
+                .map(str::trim)
+                .find(|d| d.starts_with("connect-src "))
+                .unwrap_or_else(|| panic!("{file} has no connect-src"));
+            let sources: Vec<&str> = connect.split_whitespace().skip(1).collect();
+            for host in &direct {
+                assert!(sources.contains(&format!("https://{host}").as_str()), "{file}: connect-src lacks https://{host}");
+            }
+            // Every https source is one the frontend knows as direct.
+            for source in sources.iter().filter(|s| s.starts_with("https://")) {
+                let host = source.trim_start_matches("https://");
+                let known = direct.contains(&host)
+                    || (host.starts_with("*.") && direct.contains(&&host[2..]));
+                assert!(known, "{file}: connect-src names {source}, which the frontend would send through the proxy");
+            }
+            // No door for the whole internet, and no plain http or ws beyond this device.
+            for source in &sources {
+                assert!(!matches!(*source, "*" | "https:" | "http:" | "wss:" | "ws:" | "https://*"), "{file}: connect-src opens {source}");
+                if source.starts_with("http://") || source.starts_with("ws://") {
+                    let rest = source.split("://").nth(1).unwrap_or("");
+                    let host = rest.split(':').next().unwrap_or("");
+                    assert!(
+                        matches!(host, "localhost" | "127.0.0.1" | "ipc.localhost" | "tauri.localhost"),
+                        "{file}: connect-src allows plain {source}"
+                    );
+                }
+            }
+        }
+        // Android has no CSP of its own and inherits the one of tauri.conf.json.
+        let android: serde_json::Value = serde_json::from_str(include_str!("../../tauri.android.conf.json")).unwrap();
+        assert!(android["app"]["security"].is_null(), "tauri.android.conf.json got its own CSP, add it to this test");
+    }
+}
+
+/// `fetch_external` reads up to a limit and no further.
+#[cfg(test)]
+mod fetch_external_limit_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// A server that answers one request with `head` and then `body_len`
+    /// bytes of "a", in pieces. Returns how many bytes it managed to send.
+    async fn body_stub(head: String, body_len: usize) -> (String, tokio::task::JoinHandle<usize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://127.0.0.1:{}/big", listener.local_addr().unwrap().port());
+        let task = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let _ = sock.write_all(head.as_bytes()).await;
+            let piece = vec![b'a'; 16 * 1024];
+            let mut sent = 0usize;
+            while sent < body_len {
+                let n = piece.len().min(body_len - sent);
+                if sock.write_all(&piece[..n]).await.is_err() {
+                    break;
+                }
+                sent += n;
+            }
+            let _ = sock.shutdown().await;
+            sent
+        });
+        (url, task)
+    }
+
+    const SMALL_LIMIT: usize = 64 * 1024;
+
+    #[tokio::test]
+    async fn a_body_over_the_limit_with_content_length_ends_before_the_first_piece() {
+        let len = 8 * 1024 * 1024;
+        let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n");
+        let (url, server) = body_stub(head, len).await;
+        let resp = reqwest::get(&url).await.unwrap();
+        let err = read_text_capped(resp, SMALL_LIMIT, &url).await.unwrap_err();
+        assert!(err.starts_with("The answer from http://127.0.0.1:"), "{err}");
+        assert!(err.ends_with("is larger than 0 MB, so it was not read."), "{err}");
+        // The connection is gone with the response: the server cannot push the rest.
+        let sent = server.await.unwrap();
+        assert!(sent < len, "the server sent all {sent} bytes, nothing stopped it");
+    }
+
+    #[tokio::test]
+    async fn a_body_over_the_limit_without_content_length_ends_while_it_arrives() {
+        let len = 8 * 1024 * 1024;
+        // No Content-Length: the body ends when the server closes.
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n".to_string();
+        let (url, server) = body_stub(head, len).await;
+        let resp = reqwest::get(&url).await.unwrap();
+        assert_eq!(resp.content_length(), None);
+        let err = read_text_capped(resp, SMALL_LIMIT, &url).await.unwrap_err();
+        assert!(err.contains("so it was not read."), "{err}");
+        let sent = server.await.unwrap();
+        assert!(sent < len, "the server sent all {sent} bytes, nothing stopped it");
+    }
+
+    #[tokio::test]
+    async fn a_body_at_the_limit_is_read_whole_with_and_without_content_length() {
+        for with_length in [true, false] {
+            let len = SMALL_LIMIT;
+            let head = if with_length {
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n")
+            } else {
+                "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_string()
+            };
+            let (url, server) = body_stub(head, len).await;
+            let resp = reqwest::get(&url).await.unwrap();
+            let text = read_text_capped(resp, SMALL_LIMIT, &url).await.unwrap();
+            assert_eq!(text.len(), len);
+            assert!(text.bytes().all(|b| b == b'a'));
+            assert_eq!(server.await.unwrap(), len);
+        }
+    }
+
+    /// The string is the one `Response::text()` gave before: the charset of
+    /// the Content-Type decides, UTF-8 without one, bad bytes become U+FFFD.
+    #[tokio::test]
+    async fn the_text_is_decoded_as_before() {
+        async fn once(head: &str, body: &[u8]) -> (String, String) {
+            let mut seen = Vec::new();
+            for _ in 0..2 {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let url = format!("http://127.0.0.1:{}/t", listener.local_addr().unwrap().port());
+                let mut answer = format!("{head}Content-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+                answer.extend_from_slice(body);
+                tokio::spawn(async move {
+                    let (mut sock, _) = listener.accept().await.unwrap();
+                    let mut buf = vec![0u8; 4096];
+                    let _ = sock.read(&mut buf).await;
+                    let _ = sock.write_all(&answer).await;
+                });
+                seen.push(url);
+            }
+            let before = reqwest::get(&seen[0]).await.unwrap().text().await.unwrap();
+            let resp = reqwest::get(&seen[1]).await.unwrap();
+            let now = read_text_capped(resp, SMALL_LIMIT, &seen[1]).await.unwrap();
+            (before, now)
+        }
+        // UTF-8 JSON, the usual answer of both catalogues.
+        let (before, now) = once("HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n", "{\"name\":\"Gr\u{fc}\u{df}e \u{1f600}\"}".as_bytes()).await;
+        assert_eq!(now, before);
+        assert!(now.contains('\u{fc}'));
+        // Latin-1 named in the header.
+        let (before, now) = once("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=iso-8859-1\r\n", &[b'G', b'r', 0xFC, 0xDF, b'e']).await;
+        assert_eq!(now, before);
+        assert_eq!(now, "Gr\u{fc}\u{df}e");
+        // No Content-Type and bytes that are not UTF-8.
+        let (before, now) = once("HTTP/1.1 200 OK\r\n", &[b'o', b'k', 0xFF, 0xFE, b'!']).await;
+        assert_eq!(now, before);
+        assert!(now.contains('\u{fffd}'));
+    }
+
+    #[test]
+    fn the_limit_holds_every_answer_a_caller_expects_today() {
+        // Measured on 10.10.2026 (bytes): the largest answer per caller.
+        const HF_SEARCH: usize = 14_600;
+        const HF_TREE: usize = 126_815;
+        const HF_TREE_FULL_PAGE: usize = 450_000;
+        const CIVITAI_SEARCH: usize = 2_070_325;
+        // The phone asks Hugging Face only.
+        for size in [HF_SEARCH, HF_TREE, HF_TREE_FULL_PAGE] {
+            assert!(size * 8 <= fetch_external_limit(true), "{size}");
+        }
+        for size in [HF_SEARCH, HF_TREE, HF_TREE_FULL_PAGE, CIVITAI_SEARCH] {
+            assert!(size * 8 <= fetch_external_limit(false), "{size}");
+        }
+        assert_eq!(FETCH_EXTERNAL_MAX_BYTES, fetch_external_limit(cfg!(mobile)));
+        // No key and no query in the sentence: the address is cut like in every other error.
+        let msg = fetch_external_too_large(fetch_external_limit(false), "https://civitai.com/api/v1/models?token=secret");
+        assert_eq!(msg, "The answer from https://civitai.com/api/v1/models is larger than 16 MB, so it was not read.");
     }
 }

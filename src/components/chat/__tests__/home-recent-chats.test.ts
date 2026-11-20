@@ -1,7 +1,7 @@
 /**
  * @vitest-environment jsdom
  *
- * The empty chat screen, mounted for real (2.6.8, David).
+ * The empty chat screen, mounted for real (2.6.8).
  *
  * "auch die Latest Chats dann im Hauptscreen wie in der Webapp, ausser man
  *  klappt das Sidepanel auf."
@@ -11,7 +11,7 @@
  * holds the rule that connects it to the panel: it stands in the main area
  * while the panel is collapsed, and nowhere while the panel is open.
  *
- * Widened after the screen check on the bundle (David, 2026-09-02): the list
+ * Widened after the screen check on the bundle (2026-09-02): the list
  * only stood on the no-chat screen, so New Chat led to a blank main area. It
  * has to stand above the composer for as long as the open chat is still empty,
  * and go the moment the first message is sent.
@@ -25,6 +25,7 @@ import { ChatView } from '../ChatView'
 import { useUIStore } from '../../../stores/uiStore'
 import { useChatStore } from '../../../stores/chatStore'
 import { useCompareStore } from '../../../stores/compareStore'
+import { useCodexStore } from '../../../stores/codexStore'
 import type { Conversation, Message } from '../../../types/chat'
 
 // The composer's dictation button reaches for the microphone and the Tauri
@@ -42,6 +43,7 @@ const said = (text: string): Message => ({
 })
 
 beforeEach(() => {
+  useCodexStore.setState({ chatMode: 'lu' })
   useUIStore.setState({ currentView: 'chat', sidebarOpen: false })
   useCompareStore.setState({ isComparing: false })
   useChatStore.setState({
@@ -75,6 +77,33 @@ describe('the latest chats on the home screen', () => {
     expect(useChatStore.getState().activeConversationId).toBe('a')
   })
 
+  // GH #141: with Code or Remote picked in the collapsed rail the
+  // list showed the plain chats. It follows the mode now, like the panel.
+  it('Code picked in the rail: the code chats, and opening one stays in Code', () => {
+    useChatStore.setState({
+      conversations: [
+        conv('a', 'Yesterdays thread', NOW - 3600_000),
+        { ...conv('c', 'Refactor the parser', NOW - 7200_000), mode: 'codex' },
+      ],
+    })
+    useCodexStore.setState({ chatMode: 'codex' })
+    render(createElement(ChatView))
+    const list = screen.getByTestId('home-recent-chats')
+    expect(list.textContent).toContain('Recent code chats')
+    expect(list.textContent).toContain('Refactor the parser')
+    expect(list.textContent).not.toContain('Yesterdays thread')
+    fireEvent.click(screen.getByText('Refactor the parser'))
+    expect(useChatStore.getState().activeConversationId).toBe('c')
+    expect(useCodexStore.getState().chatMode).toBe('codex')
+  })
+
+  it('Remote picked in the rail with no remote chats: says so, lists no plain chats', () => {
+    useCodexStore.setState({ chatMode: 'remote' })
+    render(createElement(ChatView))
+    const list = screen.getByTestId('home-recent-chats')
+    expect(list.textContent).toBe('No remote chats yet.')
+  })
+
 })
 
 describe('an open but still empty chat', () => {
@@ -91,6 +120,20 @@ describe('an open but still empty chat', () => {
     expect(list.textContent).toContain('Yesterdays thread')
     // The composer is still there, at the bottom, and the list did not replace it.
     expect(document.querySelector('textarea')).toBeTruthy()
+  })
+
+  it('the open, empty chat as the only one: not "No chats yet", there is one', () => {
+    // How-it-works session, 3.0.7: the list dropped the open chat and then
+    // said there were none, above the composer of that very chat.
+    useChatStore.setState({ conversations: [conv('fresh', 'New Chat', NOW)], activeConversationId: 'fresh' })
+    render(createElement(ChatView))
+    expect(screen.getByTestId('home-recent-chats').textContent).toBe('No other chats yet.')
+  })
+
+  it('COUNTER-TEST: really no chat at all still says "No chats yet."', () => {
+    useChatStore.setState({ conversations: [], activeConversationId: null })
+    render(createElement(ChatView))
+    expect(screen.getByTestId('home-recent-chats').textContent).toBe('No chats yet.')
   })
 
   it('the chat you are in is not offered as somewhere to go', () => {

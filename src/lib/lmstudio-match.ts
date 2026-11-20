@@ -26,6 +26,8 @@ export interface InstalledModelLike {
   model?: string
   name?: string
   lmsKey?: string
+  /** GitHub #173: set on a row of an additional OpenAI-compatible entry. */
+  providerEntry?: string
 }
 
 // Matches a trailing GGUF quant tag: optional `ud-` prefix, then
@@ -88,6 +90,9 @@ export function isRowOfBackend(
 ): boolean {
   if (!m || !name || m.provider !== 'openai') return false
   if (isBuiltinEngineEntry(m)) return false
+  // A row of an additional entry (GitHub #173) is served by that entry, never
+  // by the backend in or beside the slot, even under the same name.
+  if (m.providerEntry) return false
   return (m.providerName || '').toLowerCase() === name.toLowerCase()
 }
 
@@ -152,7 +157,7 @@ export function matchesLmStudioInstalled(
  * Same question for every local GGUF store the app can write into: LM Studio
  * AND the built-in engine.
  *
- * GH #118 (nayffy, 2026-08-27): the Discover badge only ever consulted the LM
+ * GH #118 (2026-08-27): the Discover badge only ever consulted the LM
  * Studio half, so a chat model downloaded for the BUILT-IN engine lost its
  * INSTALLED badge on the next app start (the in-session download store is the
  * only other evidence and it does not survive a restart). The tile then

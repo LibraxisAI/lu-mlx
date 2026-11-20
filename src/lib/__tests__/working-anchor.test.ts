@@ -1,5 +1,5 @@
 /**
- * One run, one anchor (G14-6, David 2026-08-07): "anstatt wir diese drei
+ * One run, one anchor (G14-6, 2026-08-07): "anstatt wir diese drei
  * langweiligen Punkte haben … möchte ich Working mit derselben Animation, die
  * wir in unseren Toolcalls haben, außerdem daneben die Zeit … die soll immer
  * der Anker sein für alles, ganz unten, bis der Agent fertig ist. Dann kannst
@@ -53,7 +53,7 @@ describe('the anchor is wired on every surface', () => {
   const anchor = read('../../components/chat/WorkingAnchor.tsx')
 
   it('carries the SAME shimmer class as a live tool name', () => {
-    expect(anchor).toContain('lu-tool-shimmer')
+    expect(read('../../components/status/StatusChip.tsx')).toContain('lu-tool-shimmer')
     // and that class really is the tool shimmer, not a lookalike
     expect(read('../../index.css')).toContain('.lu-tool-shimmer')
   })
@@ -65,7 +65,9 @@ describe('the anchor is wired on every surface', () => {
   it('CodexView (Code) renders it and names an approval wait for what it is', () => {
     const src = read('../../components/chat/CodexView.tsx')
     expect(src).toContain('<WorkingAnchor')
-    expect(src).toContain("'Waiting for your approval'")
+    // An approval, or the question of the first use of computer control in this chat.
+    expect(src).toContain('awaitingApproval={!!pendingConfirm || chatAsked}')
+    expect(read('../../components/status/run-status.ts')).toContain("'Waiting for your approval'")
   })
 
   it('NEGATIVE CONTROL: the anchor renders nothing once the run is over', () => {

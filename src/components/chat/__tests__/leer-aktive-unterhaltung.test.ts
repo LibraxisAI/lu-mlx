@@ -1,7 +1,7 @@
 /**
  * @vitest-environment jsdom
  *
- * F1, N9-Nachtest Windows-Box (David, 19.09.2026, box-gruen/n2/BERICHT.md
+ * F1, N9-Nachtest Windows-Box (19.09.2026, box-gruen/n2/BERICHT.md
  * Teil A): "+ New Chat" legt sofort eine aktive, aber leere Unterhaltung an
  * (`createConversation` in chatStore.ts setzt `activeConversationId`
  * synchron). Bei AUFGEKLAPPTER Seitenleiste (dem Normalzustand) griff die

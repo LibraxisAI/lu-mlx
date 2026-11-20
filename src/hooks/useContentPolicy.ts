@@ -3,8 +3,8 @@ import { getContentPolicy, type ContentPolicy } from '../api/cloud/jobs'
 
 /**
  * C2: the account's content policy, fetched once and shared across every
- * surface that only needs it for DISPLAY (today: ModelChip's "No refusals"
- * mark). Mirrors uselu apps/web/lib/render/use-content-policy.ts so the same
+ * surface that only needs it for DISPLAY (today: ModelChip's "No Filter"
+ * mark). Mirrors the web app so the same
  * rule reads the same way on both sides: a small module-level cache plus a
  * listener set, instead of every mounted ModelChip firing its own GET.
  *
@@ -39,7 +39,7 @@ export async function loadContentPolicy(): Promise<ContentPolicy> {
  * The policy as currently known, without triggering a fetch. `null` means
  * "not loaded yet"; a caller that needs to act on it (B3: the client-side
  * cloud adult gate in useCloudCreate) must treat that as "unknown", not as
- * a guessed rule, mirroring uselu's contentPolicySnapshot().
+ * a guessed rule, mirroring the web app's contentPolicySnapshot().
  */
 export function contentPolicySnapshot(): ContentPolicy | null {
   return cached

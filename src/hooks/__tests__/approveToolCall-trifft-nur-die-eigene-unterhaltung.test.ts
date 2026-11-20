@@ -15,8 +15,7 @@
  * Konversations-Schluessel liest und dequeueApproval() damit aufruft, echt
  * ueber zwei montierte Konversationen hinweg, nicht nur am Modul selbst.
  *
- * Vorbild: das Web-Repo (/Users/purple/Desktop/LU/lu-301-wt/web, Commit
- * 1b1b1ce6) fuehrt seine `approvalQueueRef` ebenfalls als Map je
+ * Vorbild: das Web-Repo (Commit 1b1b1ce6) fuehrt seine `approvalQueueRef` ebenfalls als Map je
  * Unterhaltung; dieselbe Form, hier am Desktop-Hook nachgemessen statt nur
  * am Modul.
  *

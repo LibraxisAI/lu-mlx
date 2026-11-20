@@ -1,13 +1,9 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-cli/schema.json",
-  "bundle": {
-    "macOS": {
-      "dmg": {
-        "background": "icons/dmg-background.png"
-      }
-    }
-  },
   "app": {
+    "security": {
+      "csp": "default-src 'self' ipc: http://ipc.localhost; connect-src 'self' ipc: ipc://localhost blob: http://ipc.localhost http://tauri.localhost http://localhost:* http://127.0.0.1:* https://lu-labs.ai https://lrrhheztdytyfpizvuup.supabase.co https://civitai.com https://*.civitai.com https://huggingface.co https://*.huggingface.co https://ollama.com https://openrouter.ai https://api.openai.com https://api.groq.com https://api.together.xyz https://api.deepseek.com https://api.mistral.ai https://api.minimax.io https://api.anthropic.com ws://localhost:* ws://127.0.0.1:*; img-src 'self' data: blob: http://localhost:* http://127.0.0.1:* https://lrrhheztdytyfpizvuup.supabase.co https://*.civitai.com https://*.githubusercontent.com; media-src 'self' blob: http://localhost:* http://127.0.0.1:* https://lrrhheztdytyfpizvuup.supabase.co https://lu-labs.ai; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; frame-src 'self' http://127.0.0.1:*"
+    },
     "windows": [
       {
         "title": "LU",
@@ -20,8 +16,31 @@
         "transparent": false,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "dragDropEnabled": false
+        "dragDropEnabled": false,
+        "backgroundThrottling": "disabled"
       }
     ]
+  },
+  "bundle": {
+    "externalBin": [
+      "bin/lu-llama-server",
+      "bin/lu-llama-quantize",
+      "bin/lu-llama-cvector-generator"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "14.0",
+      "dmg": {
+        "background": "icons/dmg-background.png"
+      }
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "locallyuncensored"
+        ]
+      }
+    }
   }
 }

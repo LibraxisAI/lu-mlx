@@ -1,7 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { ComputerControlHost } from '../computer/ComputerControlHost'
 import { Header } from './Header'
 import { StaleModelsBanner } from './StaleModelsBanner'
 import { BackgroundShutdownBanner } from './BackgroundShutdownBanner'
+import { CloudOutageBanner } from './CloudOutageBanner'
+import { RemoteCreateBar } from './RemoteCreateBar'
 import { StorageQuotaToast } from './StorageQuotaToast'
 import { Sidebar } from './Sidebar'
 import { ChatView } from '../chat/ChatView'
@@ -14,24 +17,31 @@ import {
   ModelManagerSkeleton,
   OnboardingSkeleton,
   SettingsSkeleton,
+  VoiceSkeleton,
 } from './ViewSkeletons'
-import { useUIStore } from '../../stores/uiStore'
+import { useUIStore, readViewportWidth } from '../../stores/uiStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useCompareStore } from '../../stores/compareStore'
-import { useProviderStore } from '../../stores/providerStore'
+import { useProviderStore, rememberOllamaResetBase } from '../../stores/providerStore'
 import { mayEnableFromWizard } from '../../lib/onboarding-provider-gate'
+import { sameEndpoint } from '../../lib/openai-entries'
 import { useChatStore } from '../../stores/chatStore'
 import { useGenerationStore } from '../../stores/generationStore'
 import { offloadWhenLocalLaneFree } from '../../lib/cloud-offload-defer'
 import { useModelStore } from '../../stores/modelStore'
 import { useRemoteStore } from '../../stores/remoteStore'
 import { useRemoteRecovery } from '../../hooks/useRemoteRecovery'
+import { useRemoteAnywhere } from '../../hooks/useRemoteAnywhere'
+import { RemotePairPrompt } from '../remote/RemotePairPrompt'
+import { PhoneContinuedBar } from '../remote/PhoneContinuedBar'
+import { RemoteSigninPrompt } from '../remote/RemoteSigninPrompt'
 import { useModelHealthStore } from '../../stores/modelHealthStore'
 import { extractMemoriesFromPair } from '../../hooks/useMemory'
 import { detectLocalBackends, type DetectedBackend } from '../../lib/backend-detector'
 import { whenRunsIdle } from '../../lib/run-idle'
 import { backendCall, isTauri } from '../../api/backend'
-import { idbStorage } from '../../lib/idbStorage'
+import { idbStorage, hasReadableItem } from '../../lib/idbStorage'
+import { recoverChatsFromBackup } from '../../lib/chat-backup-recovery'
 import { STORE_KEYS, IDB_STORE_KEYS, backupStoresIfChanged, flushSyncStoreBackup } from '../../lib/store-backup'
 import { idbKeysToRestore, mayReloadForIdbRestore } from '../../lib/idb-restore'
 import { log } from '../../lib/logger'
@@ -43,15 +53,24 @@ import type { TextChunk } from '../../types/rag'
 import type { Role } from '../../types/chat'
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts'
 import { useCloudAuth } from '../../hooks/useCloudAuth'
+import { useTraySync } from '../../hooks/useTraySync'
+import { useCloudOutageWatch } from '../../hooks/useCloudOutageWatch'
 import { useCloudAuthStore, deriveCloudAvailable } from '../../stores/cloudAuthStore'
 import { useCreateStore } from '../../stores/createStore'
 import { CloudGateModal } from '../cloud/CloudGateModal'
 import { CloudTeaserModal } from '../cloud/CloudTeaserModal'
 import { ReleaseNotesModal } from '../release/ReleaseNotesModal'
 import { ShortcutsModal } from './ShortcutsModal'
+import { RenderFixupModal } from '../create/experimental/RenderFixupModal'
 import { CommandPalette } from '../ui/CommandPalette'
 import { CreditsExhaustedModal } from './CreditsExhaustedModal'
 import { Titlebar } from './Titlebar'
+import { ChatRescueHint } from './ChatRescueHint'
+import { HfLinkInbox } from '../models/HfLinkInbox'
+import { useNeuronFollowsPersona } from '../../hooks/useNeuronFollowsPersona'
+import { startGalleryStore } from '../../lib/gallery-persist-wiring'
+import { useNeuronPluginSync } from '../../hooks/useNeuronPlugin'
+import { NeuronWindowHost } from '../neuron/NeuronWindowHost'
 
 // Aus der Komponente herausgezogen: `new Set(STORE_KEYS)` entstand bei jedem
 // Render neu und war damit die instabile Referenz, wegen der der Restore-Effekt
@@ -113,6 +132,7 @@ const loadModelManager = () => import('../models/ModelManager').then((m) => ({ d
 const loadBenchmarkView = () => import('../models/BenchmarkView').then((m) => ({ default: m.BenchmarkView }))
 const loadSettingsPage = () => import('../settings/SettingsPage').then((m) => ({ default: m.SettingsPage }))
 const loadCreateExperimental = () => import('../create/experimental/CreateExperimental').then((m) => ({ default: m.CreateExperimental }))
+const loadVoiceView = () => import('../voice/VoiceView').then((m) => ({ default: m.VoiceView }))
 const loadOnboarding = () => import('../onboarding/Onboarding').then((m) => ({ default: m.Onboarding }))
 
 /**
@@ -125,6 +145,7 @@ const loadOnboarding = () => import('../onboarding/Onboarding').then((m) => ({ d
  */
 export function AppShell() {
   useRemoteRecovery()
+  useRemoteAnywhere()
   // Targeted, NOT `useUIStore()`. A whole-store subscription here put the
   // entire app tree behind every uiStore write — and the explorer's resize
   // handle writes `explorerWidth` on every pointermove, so dragging the
@@ -134,7 +155,7 @@ export function AppShell() {
   const settings = useSettingsStore((s) => s.settings)
   const updateSettings = useSettingsStore((s) => s.updateSettings)
   // A/B Compare takes over the chat area; hide the left chat sidebar entirely
-  // while comparing (David 2026-06-06) so the two model columns get full width.
+  // while comparing (2026-06-06) so the two model columns get full width.
   const isComparing = useCompareStore((s) => s.isComparing)
   const onboardingDone = useSettingsStore((s) => s.settings.onboardingDone)
   const [restoring, setRestoring] = useState(false)
@@ -147,9 +168,28 @@ export function AppShell() {
   const [showSelector, setShowSelector] = useState(false)
 
   useKeyboardShortcuts()
+
+  // Issue 309 T1: die Seitenpanels gegen die Fensterbreite halten, beim
+  // Einhaengen und bei jedem Resize (NARROW_VIEWPORT_WIDTH in uiStore).
+  // Layout-Effekt, damit ein schmal startendes Fenster nicht erst einen
+  // Rahmen lang die gequetschte Spalte zeigt. getState statt Abo: diese
+  // Komponente soll von der Breite nicht neu rendern.
+  useLayoutEffect(() => {
+    const fit = () => useUIStore.getState().fitToViewport(readViewportWidth())
+    fit()
+    window.addEventListener('resize', fit)
+    return () => window.removeEventListener('resize', fit)
+  }, [])
   // LU Cloud account boot: keychain session restore + /api/me probe; keeps
   // the cloud Create axis and the lu-cloud chat provider in sync.
   useCloudAuth()
+  // T2: the tray menu's lines (account or engine, model, memory).
+  useTraySync()
+  useCloudOutageWatch()
+  useNeuronFollowsPersona()
+  // Neurons is a plugin (3.1.0): Rust's switch follows the Plugins row.
+  useNeuronPluginSync()
+  const neuronsOn = settings.neuronsPluginEnabled === true && settings.appMode !== 'cloud' && isTauri()
 
   // ── Global Local/Cloud mode (2.5.7) — appMode drives everything ──
   const appMode = settings.appMode
@@ -212,7 +252,7 @@ export function AppShell() {
     // holds the empty list harmless, and it clears rather than leaves an
     // out-of-mode model active when the new mode has nothing to offer: a
     // lu-cloud model left active in Local mode kept billing credits after the
-    // switch said Local (Discord 2026-08-09, helpslowlydying).
+    // switch said Local (Discord 2026-08-09).
     //
     // The fourth argument is the model the user NAMED on the way in, by
     // clicking its row in the local-mode LU Cloud strip. Without it every one
@@ -247,17 +287,20 @@ export function AppShell() {
     if (pick.usedRequest) setPendingCloudModel(null)
   }, [appMode, allModels])
 
-  // Local-hardware views (Models/Benchmark) don't exist in cloud mode — the
-  // header hides them, this guard covers a view that was already open.
+  // Local-hardware views (Voice/Models/Benchmark) don't exist in cloud mode —
+  // the header hides them, this guard covers a view that was already open.
+  // Voice has no cloud service yet. Leaving its view is also what ends a
+  // running session and lets go of the microphone (VoiceSessionPanel stops on
+  // unmount), so there is no second stop here.
   useEffect(() => {
     const ui = useUIStore.getState()
-    if (appMode === 'cloud' && (ui.currentView === 'models' || ui.currentView === 'benchmark')) {
+    if (appMode === 'cloud' && (ui.currentView === 'voice' || ui.currentView === 'models' || ui.currentView === 'benchmark' || ui.currentView === 'neuron')) {
       ui.setView('chat')
     }
   }, [appMode])
 
   // ── Cloud = cloud-only: release every LOCAL model backend so nothing sits
-  // in RAM/VRAM while inference runs in the cloud (David 2026-07-11). Whisper
+  // in RAM/VRAM while inference runs in the cloud (2026-07-11). Whisper
   // STT, the bundled llama.cpp sidecar + embeddings, Ollama-loaded models and
   // ComfyUI VRAM are freed by offload_local_models; LM Studio via its own JIT
   // unload (`lms unload --all`). Local mode reloads LAZILY on first use
@@ -302,6 +345,10 @@ export function AppShell() {
         // it: the backend panel in Settings.
         backendCall('offload_local_models').catch(() => {})
         backendCall('lmstudio_unload_model', { model: '--all' }).catch(() => {})
+        // The Voice engine is a local model process like the others (about
+        // 1.2 GB), and Voice is not reachable in Cloud. Stopping an engine
+        // that is not running is a no-op.
+        backendCall('voice_loop_stop').catch(() => {})
       })
       return cancelDeferredOffload
     }
@@ -373,13 +420,20 @@ export function AppShell() {
           // what a self update is, can leave Chromium discarding the whole
           // IndexedDB database while localStorage comes back whole, and this
           // branch IS that boot: every localStorage store answers, so the full
-          // restore below never runs. aldrich_ironhart lost a 230k token
+          // restore below never runs. A user lost a 230k token
           // coding chat that way on 2.6.5 with a good copy of it sitting in
           // store_backup.json the entire time.
           try {
             const live: Record<string, string | null> = {}
             for (const key of IDB_STORE_KEYS) {
-              live[key] = await Promise.resolve(idbStorage.getItem(key)).catch(() => null)
+              // A value hydration can use, not just a row (3.0.10, perrt):
+              // a row that is no string, or a leftover localStorage copy,
+              // used to count as present while the store hydrated empty, and
+              // nothing was restored. A read that failed counts as present:
+              // what could not be read must never be written over.
+              const readable = await hasReadableItem(key)
+              live[key] = readable === false ? null : 'present'
+              if (readable === null) log.warn('[AppShell] could not read an IndexedDB store at launch, not restoring it', { key })
             }
             if (Object.values(live).some((v) => !v)) {
               const raw = await backendCall<string | null>('restore_stores')
@@ -392,7 +446,10 @@ export function AppShell() {
                 try {
                   await Promise.resolve(idbStorage.setItem(key, (parsed as Record<string, string>)[key]))
                   back++
-                } catch { /* one key failing must not stop the rest */ }
+                } catch (err) {
+                  // One key failing must not stop the rest.
+                  log.warn('[AppShell] restoring an IndexedDB store from the appData backup failed', { key, err: String(err) })
+                }
               }
               if (back > 0) {
                 log.warn('[AppShell] IndexedDB stores were empty, restored from the appData backup', { keys: wanted })
@@ -405,7 +462,25 @@ export function AppShell() {
                 }
               }
             }
-          } catch { /* best-effort, the RAG restore below still runs */ }
+          } catch (err) {
+            // Best effort, the RAG restore below still runs. Said out loud
+            // since 3.0.10: this branch failing silently is how a good backup
+            // sat unused while the chats looked gone.
+            log.warn('[AppShell] the IndexedDB restore at launch failed', { err: String(err) })
+          }
+          // Chats a failed IndexedDB save never kept, see chat-backup-recovery.ts.
+          // Before resolveRestoreDecided below: the first backup must not
+          // replace store_backup.json before it has been looked at.
+          try {
+            await new Promise<void>((resolve) => {
+              if (useChatStore.persist.hasHydrated()) resolve()
+              else useChatStore.persist.onFinishHydration(() => resolve())
+            })
+            await recoverChatsFromBackup(
+              () => useChatStore.getState().conversations,
+              (chats) => { useChatStore.getState().importConversations(chats, 'merge') },
+            )
+          } catch (err) { log.warn('[AppShell] chat recovery from the backup failed, will retry next launch', { err: String(err) }) }
           try {
             const data = await backendCall<string | null>('restore_rag_chunks')
             if (data) {
@@ -469,7 +544,7 @@ export function AppShell() {
               if (restored > 0) {
                 // Pull RAG chunks from %APPDATA% before the reload so the new
                 // localStorage references find their embeddings in IndexedDB
-                // (Bug V, kj103x 2026-05-23). Best-effort: missing backup =
+                // (Bug V, a user 2026-05-23). Best-effort: missing backup =
                 // chunks need to be re-indexed by re-uploading docs.
                 try {
                   const ragData = await backendCall<string | null>('restore_rag_chunks')
@@ -570,6 +645,10 @@ export function AppShell() {
       // state over the only good store_backup.json.
       await restoreDecided
       if (disposed) return
+      // The gallery list to IndexedDB (3.1.0, C27), after the restore above
+      // wrote its copy back. Its failure keeps the old way and must not cost
+      // the backups below.
+      void startGalleryStore().catch(() => {})
 
       let backupInflight = false
       const doBackup = async () => {
@@ -585,7 +664,7 @@ export function AppShell() {
         backupInflight = false
       }
 
-      // Separate, debounced backup for RAG IndexedDB chunks (Bug V, kj103x
+      // Separate, debounced backup for RAG IndexedDB chunks (Bug V, a user
       // 2026-05-23). These are heavy (768-float embedding vectors per chunk,
       // sometimes thousands per doc) so we don't bundle them into the chat
       // snapshot — the chat-store backup must stay fast for the 1 s debounce
@@ -758,7 +837,9 @@ export function AppShell() {
       if (!cancelled) armSubscription()
 
       try {
-        const res = await backendCall<{ base?: string }>('get_ollama_host')
+        const res = await backendCall<{ base?: string; defaultBase?: string }>('get_ollama_host')
+        // Where "Reset AI Backends" points Ollama (OLLAMA_HOST, else default).
+        rememberOllamaResetBase(res?.defaultBase)
         if (!cancelled && res?.base) {
           setOllamaBase(res.base)
           const current = useProviderStore.getState().providers.ollama?.baseUrl
@@ -904,6 +985,9 @@ export function AppShell() {
               extractMemoriesFromPair(userMsg, content, dispatchedConversationId, {
                 scope: useChatStore.getState().conversations
                   .find((c) => c.id === dispatchedConversationId)?.memoryScope,
+                // The remote client talks to the backend through the bridge
+                // and names no context window, so this call names none either.
+                window: 'backend-default',
               }).catch(() => {})
             }
           }
@@ -965,7 +1049,7 @@ export function AppShell() {
       // from the built-in engine (slot not managed). When the built-in engine
       // is the active default, detected externals stay opt-in via the selector
       // modal below and Settings → Providers ("use another engine").
-      // (Pre-2.5.7 rationale — Discord #help-chat, djoks.exe 2026-04-21: without
+      // (Pre-2.5.7 rationale — Discord #help-chat 2026-04-21: without
       //  auto-enable, dismissing the selector left LM Studio disabled and its
       //  models never appeared. Still true for users who left the built-in slot.)
       //
@@ -976,7 +1060,15 @@ export function AppShell() {
       // fragt. Der baseUrl-Teil darf bleiben: ein geaenderter Port ist keine
       // Einschaltung, nur eine aktuelle Adresse.
       const openaiSlot = useProviderStore.getState().providers.openai
-      const nonOllama = backends.find((b) => b.id !== 'ollama')
+      // GitHub #173: a backend that already has its own entry is not adopted
+      // into the slot a second time, and a slot whose own backend is among the
+      // detected ones keeps it. Before, the first detected server overwrote the
+      // slot on every start, whichever one the user had put there.
+      const entries = useProviderStore.getState().openaiEntries
+      const slotDetected = backends.some((b) => b.id !== 'ollama' && sameEndpoint(b.baseUrl, openaiSlot.baseUrl))
+      const nonOllama = slotDetected
+        ? undefined
+        : backends.find((b) => b.id !== 'ollama' && !entries.some((e) => sameEndpoint(e.baseUrl, b.baseUrl)))
       if (nonOllama && !openaiSlot.managed) {
         useProviderStore.getState().setProviderConfig('openai', {
           ...(mayEnableFromWizard(openaiSlot) ? { enabled: true } : {}),
@@ -1094,8 +1186,10 @@ export function AppShell() {
       <div className="h-full flex flex-col">
         <Titlebar />
         <Header />
+        <CloudOutageBanner />
         <StaleModelsBanner />
         <BackgroundShutdownBanner />
+        <RemoteCreateBar />
         {restoreError && (
           <div className="mx-2 mt-2 flex items-start gap-2 rounded-lg border border-red-500/20 bg-red-500/[0.06] px-3 py-2">
             <p role="alert" className="flex-1 text-[0.65rem] leading-snug text-red-500 dark:text-red-400 whitespace-pre-line">
@@ -1109,6 +1203,8 @@ export function AppShell() {
             </button>
           </div>
         )}
+        {/* 3.0.10: the backup files hold chats the list does not (lib/chat-rescue.ts). */}
+        <ChatRescueHint />
         <StorageQuotaToast />
         <div className="flex-1 flex overflow-hidden gap-2 p-2">
           {!isComparing && <Sidebar />}
@@ -1122,9 +1218,13 @@ export function AppShell() {
             {currentView === 'benchmark' && <LazyView load={loadBenchmarkView} fallback={<BenchmarkSkeleton />} />}
             {currentView === 'settings' && <LazyView load={loadSettingsPage} fallback={<SettingsSkeleton />} />}
             {currentView === 'create' && <LazyView load={loadCreateExperimental} fallback={<CreateSkeleton />} />}
+            {currentView === 'voice' && <LazyView load={loadVoiceView} fallback={<VoiceSkeleton />} />}
           </main>
         </div>
       </div>
+
+      {/* Neurons (3.1.0): its window floats over Chat, Code and Agent. */}
+      {neuronsOn && currentView === 'chat' && <NeuronWindowHost />}
 
       {/* Backend selection dialog (shown when multiple local backends detected) */}
       <BackendSelector
@@ -1141,6 +1241,10 @@ export function AppShell() {
           it can never stack on top of the onboarding wizard. */}
       <ReleaseNotesModal />
       <ShortcutsModal />
+      <RemotePairPrompt />
+      <HfLinkInbox />
+      <RemoteSigninPrompt />
+      <PhoneContinuedBar />
       {/* Cmd/Ctrl+K. Hoert auf `lu-command-palette`, genau wie die
           Kuerzel-Uebersicht darueber auf `lu-show-shortcuts` hoert — kein
           zweiter Tastatur-Handler. */}
@@ -1148,6 +1252,13 @@ export function AppShell() {
       {/* Out-of-credits purchase prompt: opens when LU Cloud answers
           code:'credits_exhausted' (monthly budget + top-up wallet empty). */}
       <CreditsExhaustedModal />
+      {/* "One more file is needed" / "ComfyUI needs an update": asked by every
+          local render, from Create and from the agent's tool in Chat, so it
+          lives here and not inside Create. */}
+      <RenderFixupModal />
+      {/* Computer control: its status bar and its two questions. Asked from
+          the agent chat and from Voice alike, so it lives here. */}
+      <ComputerControlHost />
     </div>
   )
 }

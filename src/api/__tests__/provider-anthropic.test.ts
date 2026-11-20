@@ -273,7 +273,7 @@ describe('AnthropicProvider', () => {
 
   // ── Bug O (v2.4.7) — messages URL construction across custom proxies ──
   //
-  // 0yagizz reported Custom-Anthropic "not working" on v2.4.5. Most proxies
+  // A user reported Custom-Anthropic "not working" on v2.4.5. Most proxies
   // (claude-relay-server, LiteLLM, opencode-zen) document baseUrls in two
   // shapes: either `https://proxy.example` (canonical Anthropic style) or
   // `https://proxy.example/v1` (where the operator already pinned the API

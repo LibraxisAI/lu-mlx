@@ -34,20 +34,27 @@ test('flash metadata and paid fallback reach the actual desktop composer', async
   await expect(cloudSwitch(page)).toBeVisible()
   await signInViaGate(page)
   await expect(cloudSwitch(page)).toBeChecked()
-  await page.getByRole('button', { name: /New Chat/i }).first().click()
+  // The model first, then the chat: in Cloud the app picks no model by
+  // itself (3.0.5), and "New Chat" without one stays on the landing page.
   await page.getByRole('button', { name: 'Select chat model', exact: true }).click()
-  const row = page.getByRole('button', { name: /Llama 3.1 8B Turbo/ })
+  const menu = page.getByTestId('model-picker-menu')
+  const row = menu.getByRole('option').filter({ hasText: 'Llama 3.1 8B Turbo' })
   // Der Aufdruck der Marke ist zweimal gewandert: "Flash", dann "No credits",
-  // dann "Included". David am 12.09.2026 endgueltig zurueck auf "No credits",
+  // dann "Included". Am 12.09.2026 endgueltig zurueck auf "No credits",
   // weil "Included" nur sagt, dass etwas dabei ist. Dass die Marke am KONTO
-  // haengt, traegt die Logik daneben und der Titel, nicht das Etikett. Die
-  // Zeile selbst ist unveraendert, nur ihr Aufdruck. Sie steht weiterhin in
-  // der Modellauswahl selbst (`ModelRowMarks`), unabhaengig vom Etikett in
-  // der Sitzungsleiste.
-  const marke = row.getByText('No credits', { exact: true })
-  await expect(marke).toBeVisible()
-  await expect(marke).toHaveAttribute('title', 'No credits on your plan, up to 50,000 tokens per day.')
-  await row.click()
+  // haengt, traegt die Logik daneben und der Satz dazu, nicht das Etikett.
+  //
+  // Seit dem Waehler von 3.0.5 steht sie nicht mehr in der Zeile: die Zeile
+  // traegt keine Credit-Angabe. "No credits" ist ein Etikett ueber der Liste,
+  // das auf diese Modelle einengt, und der Satz mit der Tagesmenge steht
+  // hinter dem Fragezeichen der Zeile.
+  await expect(row.getByText('No credits', { exact: true })).toHaveCount(0)
+  await expect(menu.locator('[data-chip="free"]')).toContainText('No credits')
+  await row.getByRole('button', { name: 'Credit rates' }).click()
+  await expect(page.getByTestId('model-rate-popover')).toHaveText('No credits on your plan, up to 50,000 tokens per day.')
+  await page.keyboard.press('Escape')
+  await row.locator('.lu-picker-pick').click()
+  await page.getByRole('button', { name: /New Chat/i }).first().click()
 
   // Runde 3 (Abnahme 19.09.2026, Blocker A2): kein Dauerband mehr ueber der
   // Eingabe. Der Hinweis ist ein Etikett neben dem Agent-Schalter, das ein

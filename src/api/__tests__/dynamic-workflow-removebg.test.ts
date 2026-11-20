@@ -1,5 +1,5 @@
 /**
- * Local background removal (David 2026-07-04): buildDynamicWorkflow must emit a
+ * Local background removal (2026-07-04): buildDynamicWorkflow must emit a
  * self-contained LoadImage → RMBG → SaveImage cutout graph instead of letting a
  * `removebg` request fall through to a diffusion pass. Every RMBG widget is
  * defaulted from the node's LIVE object_info schema so we never hard-code an

@@ -33,7 +33,7 @@ esac
 echo -e "${PURPLE}"
 echo "    ╔═══════════════════════════════════════════╗"
 echo "    ║         LOCALLY  UNCENSORED               ║"
-echo "    ║   Private, local AI. No cloud.            ║"
+echo "    ║   Private, local AI on your own machine.  ║"
 echo "    ║   No censorship. Chat + Images + Video.   ║"
 echo "    ╚═══════════════════════════════════════════╝"
 echo -e "${NC}"

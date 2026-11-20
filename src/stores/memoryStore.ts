@@ -5,13 +5,17 @@ import type { MemoryCategory, MemoryFile, MemoryType, MemorySettings, MemoryBudg
 import { MEMORY_MIGRATION_MAP, MEMORY_BUDGET_TIERS } from '../types/agent-mode'
 import { memoryPersistence } from '../lib/memory-persistence'
 import { generateEmbeddings } from '../api/rag'
+import { singleModelSlot } from '../lib/capabilities'
 import { saveVector, loadVectors, deleteVector, clearAll as clearAllVectors, type MemoryVectorRecord } from '../lib/memoryEmbedDB'
 import { scoreMemoriesBlended, isStale, type BlendCandidate } from '../lib/memory-retrieval'
+import { onlyStatesAGap } from '../lib/memory-gap'
 import type { ResolutionDecision } from '../lib/memory-extraction'
 import { isRecord, prop, asString, asNumber, asStringArray } from '../types/json-guards'
 import { log } from '../lib/logger'
+import { charsPerToken } from '../lib/token-estimate'
 import { useCloudAuthStore } from './cloudAuthStore'
 import type { MemorySyncBaseline } from '../lib/memory-sync-plan'
+import { forgetMark, isForgotten, liftForgotten, readForgotten, withForgotten, type ForgottenMemory } from '../lib/memory-forget'
 
 // ── Embedding model + dim (mirrors rag.ts default) ────────────────
 const MEMORY_EMBED_MODEL = 'nomic-embed-text'
@@ -20,10 +24,10 @@ const MEMORY_EMBED_MODEL = 'nomic-embed-text'
 // Defaults to the real RAG embedder. Tests call __setMemoryEmbedFn to inject
 // a fake (or a thrower, to exercise the offline fallback).
 type MemoryEmbedFn = (texts: string[]) => Promise<number[][]>
-let _embedFn: MemoryEmbedFn = (texts) => generateEmbeddings(texts, MEMORY_EMBED_MODEL)
+let _embedFn: MemoryEmbedFn = (texts) => generateEmbeddings(texts, MEMORY_EMBED_MODEL, { purpose: 'memory' })
 /** Test hook, override the embedding function. Pass nothing to reset. */
 export function __setMemoryEmbedFn(fn?: MemoryEmbedFn): void {
-  _embedFn = fn ?? ((texts) => generateEmbeddings(texts, MEMORY_EMBED_MODEL))
+  _embedFn = fn ?? ((texts) => generateEmbeddings(texts, MEMORY_EMBED_MODEL, { purpose: 'memory' }))
 }
 
 // ── Content hashing (djb2, same trick as embedding-router) ───────
@@ -45,7 +49,7 @@ export interface MemoryInjectOpts {
    * tool call it was never offered, gemma4 then spends the whole turn in its
    * thinking channel deciding to "use the web_search tool", emits zero
    * content, and the user stares at a silent empty bubble (live find
-   * 2026-06-11, David's no-answer report). Agent chats keep them: there the
+   * 2026-06-11, the owner's no-answer report). Agent chats keep them: there the
    * tools actually exist.
    */
   excludeToolResults?: boolean
@@ -132,6 +136,11 @@ function hashContent(s: string): string {
  * Skips when the existing stored vector already matches the content hash.
  */
 async function enqueueEmbedding(entry: Pick<MemoryFile, 'id' | 'title' | 'content'>): Promise<void> {
+  // One model slot (lib/model-slot.ts): a phone never loads the embedder for
+  // memory. Adding, editing and the lazy backfill all end here, so this one
+  // line keeps every one of them from pushing the chat model out of memory.
+  // Memories are found by keyword there (getMemoriesForPrompt).
+  if (singleModelSlot()) return
   const collectionRevision = useMemoryStore.getState().memoryCollectionRevision
   try {
     const text = embedText(entry)
@@ -161,11 +170,52 @@ async function enqueueEmbedding(entry: Pick<MemoryFile, 'id' | 'title' | 'conten
 
 // ── Memory Budget Helper ──────────────────────────────────────
 
+/**
+ * The budget of a phone whose engine runs with a window of 2048 tokens or
+ * less (M9, acceptance on the small iPhone, 08.10.2026).
+ *
+ * The first tier gives such a window nothing, which is right for a desktop
+ * where 2048 is an accident of a missing setting. On a small phone 2048 IS
+ * the setting the app recommends, so every memory the user wrote in the
+ * settings was silently left out of every chat. Two short facts about the
+ * user cost about a hundred tokens, and that the window has.
+ */
+export const MOBILE_SMALL_WINDOW_BUDGET: MemoryBudgetTier = {
+  maxContext: 2048, budgetTokens: 150, maxMemories: 2, typesAllowed: ['user', 'feedback'],
+}
+
 export function getMemoryBudget(contextTokens: number) {
   for (const tier of MEMORY_BUDGET_TIERS) {
-    if (contextTokens <= tier.maxContext) return tier
+    if (contextTokens <= tier.maxContext) {
+      return tier.maxMemories === 0 && contextTokens > 0 && singleModelSlot() ? MOBILE_SMALL_WINDOW_BUDGET : tier
+    }
   }
   return MEMORY_BUDGET_TIERS[MEMORY_BUDGET_TIERS.length - 1]
+}
+
+/** Words of a question for the keyword search: letters and digits, so "drink?" is "drink". */
+function queryWords(query: string): string[] {
+  return query.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(w => w.length > 2)
+}
+
+/**
+ * What the keyword search hands on, on a phone (M9).
+ *
+ * A desktop finds "Mara likes tea" for "what is my favourite beverage" by
+ * meaning, through the embedder. A phone holds one model and never loads the
+ * embedder for memory, so only a shared word finds a memory there, and a
+ * question rarely repeats the words of the fact it asks about. What the user
+ * told LU about themselves is short and is exactly what such a question is
+ * after: on a phone the places a word match left free go to the newest of
+ * those notes. The tier still caps count, kind and tokens.
+ */
+function fillWithUserNotes(matched: MemoryFile[], candidates: MemoryFile[], maxMemories: number): MemoryFile[] {
+  if (!singleModelSlot() || matched.length >= maxMemories) return matched
+  const taken = new Set(matched.map(m => m.id))
+  const notes = candidates
+    .filter(m => !taken.has(m.id) && (m.type === 'user' || m.type === 'feedback'))
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+  return [...matched, ...notes.slice(0, maxMemories - matched.length)]
 }
 
 /**
@@ -173,7 +223,7 @@ export function getMemoryBudget(contextTokens: number) {
  * context-tier budget unchanged. A positive override sets the injected count,
  * grows the token budget (~150 tok/memory, never below the tier's) so the extra
  * entries actually fit, and allows all types, so the user isn't locked to
- * "32k ctx = 15 memories" (David 2026-06-07). Exported for unit testing.
+ * "32k ctx = 15 memories" (2026-06-07). Exported for unit testing.
  */
 export function effectiveMemoryBudget(contextTokens: number, override?: number | null): MemoryBudgetTier {
   const tier = getMemoryBudget(contextTokens)
@@ -267,6 +317,23 @@ const TYPE_ORDER: MemoryType[] = ['user', 'feedback', 'project', 'reference']
 export const MEMORY_CONTEXT_TOKEN_CAP = 1000
 
 /**
+ * GH #238 (A28): with "Max memories injected" set, the user asked for more
+ * memory than the 1k ceiling holds. The override then lifts the ceiling, but
+ * never past this share of the model's context window, so a small model keeps
+ * the 1k (10 percent of 8K is under it) and a 256K model may carry the
+ * override's full budget (100 memories x 150 tokens = 15K, under its 26K).
+ */
+export const MEMORY_OVERRIDE_CONTEXT_SHARE = 0.1
+
+/** The ceiling of the memory block for this window and override. Without an
+ *  override it is MEMORY_CONTEXT_TOKEN_CAP, as before. */
+export function memoryContextCeiling(contextTokens: number, override?: number | null): number {
+  if (override == null || !(override > 0)) return MEMORY_CONTEXT_TOKEN_CAP
+  const share = Number.isFinite(contextTokens) && contextTokens > 0 ? Math.floor(contextTokens * MEMORY_OVERRIDE_CONTEXT_SHARE) : 0
+  return Math.max(MEMORY_CONTEXT_TOKEN_CAP, share)
+}
+
+/**
  * Render an ALREADY-ORDERED, ALREADY-FILTERED list of memories into the
  * grouped <remembered_context> block, respecting the tier's char budget and
  * sanitizing every injected line. Shared by the sync (keyword) and async
@@ -284,9 +351,9 @@ export interface MemoryContext {
   owner?: string
 }
 
-export function renderMemoryContext(ordered: MemoryFile[], budgetTokens: number): MemoryContext {
+export function renderMemoryContext(ordered: MemoryFile[], budgetTokens: number, ceilingTokens: number = MEMORY_CONTEXT_TOKEN_CAP): MemoryContext {
   if (ordered.length === 0) return { text: '', memoryIds: [] }
-  const cappedTokens = Math.min(budgetTokens, MEMORY_CONTEXT_TOKEN_CAP)
+  const cappedTokens = Math.min(budgetTokens, ceilingTokens)
 
   // Group by type for structured output (preserve incoming order within type).
   const grouped: Record<MemoryType, MemoryFile[]> = {
@@ -294,7 +361,10 @@ export function renderMemoryContext(ordered: MemoryFile[], budgetTokens: number)
   }
   for (const entry of ordered) grouped[entry.type].push(entry)
 
-  const maxChars = cappedTokens * 4
+  // GH #167: the cap is in tokens. A flat 4 characters per token let a
+  // Japanese memory block run to about 2.8 times its budget; the script aware
+  // density keeps it at the budget, and pure ASCII still reads 4.
+  const overBudget = (text: string) => text.length > cappedTokens * charsPerToken(text)
   let result = ''
   const memoryIds: string[] = []
 
@@ -303,13 +373,13 @@ export function renderMemoryContext(ordered: MemoryFile[], budgetTokens: number)
     if (items.length === 0) continue
 
     const header = `### ${TYPE_SECTION_HEADERS[type]}\n`
-    if (result.length + header.length > maxChars) break
+    if (overBudget(result + header)) break
     result += header
 
     for (const item of items) {
       const sanitized = sanitizeForInjection(item.content).replace(/\n/g, ' ')
       const line = `- ${item.title}: ${sanitized}\n`
-      if (result.length + line.length > maxChars) break
+      if (overBudget(result + line)) break
       result += line
       memoryIds.push(item.id)
     }
@@ -320,13 +390,27 @@ export function renderMemoryContext(ordered: MemoryFile[], budgetTokens: number)
   return { text: `<remembered_context>\n${result.trim()}\n</remembered_context>`, memoryIds }
 }
 
-function renderRememberedContext(ordered: MemoryFile[], budgetTokens: number, onInjected?: MemoryInjectOpts['onInjected']): string {
-  const context = renderMemoryContext(ordered, budgetTokens)
+function renderRememberedContext(ordered: MemoryFile[], budgetTokens: number, ceilingTokens: number, onInjected?: MemoryInjectOpts['onInjected']): string {
+  const context = renderMemoryContext(ordered, budgetTokens, ceilingTokens)
   onInjected?.(context.memoryIds)
   return context.text
 }
 
 // ── Store Interface ───────────────────────────────────────────
+
+/**
+ * What one delete took away, enough to put it back (A27: every delete in the
+ * Memory panel and in Settings offers Undo). `positions` are the indexes the
+ * entries had, so Undo restores the order the user saw. `revision` ties the
+ * removal to the collection it came from: after a switch of account the undo
+ * would otherwise write one account's memories into another's.
+ */
+export interface MemoryRemoval {
+  entries: MemoryFile[]
+  positions: number[]
+  revision: number
+  owner: string | null
+}
 
 interface MemoryState {
   entries: MemoryFile[]
@@ -339,13 +423,20 @@ interface MemoryState {
   selectMemoryCollection: (owner: string | null) => boolean
   settings: MemorySettings
   lastSynced: number
+  /** Marks of deleted memories, see lib/memory-forget.ts. Hashes, never text. */
+  forgotten: ForgottenMemory[]
 
   // CRUD
-  addMemory: (memory: Omit<MemoryFile, 'id' | 'createdAt' | 'updatedAt'>) => string
+  /** `auto`: the writer is the extractor, not the user, so a deleted fact is refused. */
+  addMemory: (memory: Omit<MemoryFile, 'id' | 'createdAt' | 'updatedAt'>, opts?: { auto?: boolean }) => string
   updateMemory: (id: string, updates: Partial<Pick<MemoryFile, 'title' | 'description' | 'content' | 'type' | 'tags' | 'sensitive' | 'scope'>>) => void
-  removeMemory: (id: string) => void
+  removeMemory: (id: string) => MemoryRemoval | null
+  /** Removes every listed id in one write. Null when none of them was there. */
+  removeMemories: (ids: readonly string[]) => MemoryRemoval | null
+  /** Undo of a removal. False when the collection changed in between (other account). */
+  restoreMemories: (removal: MemoryRemoval) => boolean
   confirmMemory: (id: string) => void
-  clearAll: () => void
+  clearAll: () => MemoryRemoval | null
 
   // Search & Inject
   searchMemories: (query: string, options?: { type?: MemoryType; limit?: number }) => MemoryFile[]
@@ -362,7 +453,7 @@ interface MemoryState {
   updateMemorySettings: (updates: Partial<MemorySettings>) => void
 
   // Export / Import: importers report what they did with every usable entry
-  // of the file so the UI can give feedback (konata-session 2026-06-07: silent
+  // of the file so the UI can give feedback (a user-session 2026-06-07: silent
   // 0-import; box test T5 2026-09-11: re-import doubled the collection).
   exportAsMarkdown: () => string
   importFromMarkdown: (markdown: string) => MemoryImportResult
@@ -548,7 +639,7 @@ export function migrateMemoryState(persistedState: unknown, version: number): Me
  * two are written as code points on purpose: the house rule bans the characters
  * themselves from this tree, and a character class is no exception.
  *
- * R5-23 (3.0.1): apps/web/stores/memoryStore.ts writes a different pair of
+ * R5-23 (3.0.1): the web app writes a different pair of
  * separators again (`**title**: content ... *(source)* · date`, a colon and a
  * middle dot, plus the same two dashes as an accepted read variant). A memory
  * exported by one app and imported into the other silently dropped tags,
@@ -709,13 +800,17 @@ export const useMemoryStore = create<MemoryState>()(
         maxMemoryChars: 3000,
       },
       lastSynced: 0,
+      forgotten: [],
 
       // ── CRUD ────────────────────────────────────────────────
 
-      addMemory: (memory) => {
+      addMemory: (memory, opts) => {
         if (memory.scope !== undefined && !memory.scope.trim()) return ''
         const trimmedContent = memory.content.trim()
         if (!trimmedContent) return ''
+        // A27: the user deleted this fact; the extractor does not get to write
+        // it back. A hand-written or imported one lifts the mark below.
+        if (opts?.auto && isForgotten(get().forgotten, { title: memory.title, content: trimmedContent })) return ''
 
         // Deduplicate: don't add if the same memory is already in the collection.
         //
@@ -744,6 +839,8 @@ export const useMemoryStore = create<MemoryState>()(
             },
           ],
           lastSynced: Date.now(),
+          ...(opts?.auto || state.forgotten.length === 0 ? {}
+            : { forgotten: liftForgotten(state.forgotten, { title: memory.title, content: trimmedContent }) }),
         }))
         // Embed in the background, never blocks the synchronous add.
         void enqueueEmbedding({ id, title: memory.title, content: trimmedContent })
@@ -774,18 +871,49 @@ export const useMemoryStore = create<MemoryState>()(
           ? { ...entry, confirmedAt: now, updatedAt: now } : entry), lastSynced: now }))
       },
 
-      removeMemory: (id) => {
-        set((state) => ({
-          entries: state.entries.filter((e) => e.id !== id),
-          lastSynced: Date.now(),
-        }))
-        void deleteVector(id)
+      removeMemory: (id) => get().removeMemories([id]),
+
+      removeMemories: (ids) => {
+        const wanted = new Set(ids)
+        const state = get()
+        const entries: MemoryFile[] = []
+        const positions: number[] = []
+        state.entries.forEach((entry, index) => {
+          if (wanted.has(entry.id)) { entries.push(entry); positions.push(index) }
+        })
+        if (entries.length === 0) return null
+        const now = Date.now()
+        set({
+          entries: state.entries.filter((e) => !wanted.has(e.id)),
+          forgotten: withForgotten(state.forgotten, entries.map(e => forgetMark(e, now))),
+          lastSynced: now,
+        })
+        if (entries.length === state.entries.length) void clearAllVectors()
+        else for (const entry of entries) void deleteVector(entry.id)
+        return { entries, positions, revision: state.memoryCollectionRevision, owner: state.activeMemoryOwner }
       },
 
-      clearAll: () => {
-        set({ entries: [], lastSynced: Date.now() })
-        void clearAllVectors()
+      restoreMemories: (removal) => {
+        const state = get()
+        if (state.memoryCollectionRevision !== removal.revision || state.activeMemoryOwner !== removal.owner) return false
+        const present = new Set(state.entries.map(e => e.id))
+        const back = removal.entries.map((entry, i) => ({ entry, at: removal.positions[i] ?? Number.MAX_SAFE_INTEGER }))
+          .filter(({ entry }) => !present.has(entry.id))
+        if (back.length === 0) return true
+        // Ascending positions: each one is the index the entry had in the list
+        // that still contained the ones before it, so inserting in this order
+        // rebuilds the old list exactly when nothing else changed meanwhile.
+        const entries = [...state.entries]
+        for (const { entry, at } of back.sort((a, b) => a.at - b.at)) entries.splice(Math.min(at, entries.length), 0, entry)
+        let forgotten = state.forgotten
+        for (const { entry } of back) forgotten = liftForgotten(forgotten, entry)
+        set({ entries, forgotten, lastSynced: Date.now() })
+        // The vectors went with the delete; sensitive entries never had one.
+        for (const { entry } of back) if (!entry.sensitive) void enqueueEmbedding(entry)
+        return true
       },
+
+      clearAll: () => get().removeMemories(get().entries.map(e => e.id)),
 
       // ── Search ──────────────────────────────────────────────
 
@@ -823,8 +951,12 @@ export const useMemoryStore = create<MemoryState>()(
         // No budget for tiny models
         if (budget.budgetTokens === 0 || budget.maxMemories === 0) return ''
 
-        const words = query.toLowerCase().split(/\s+/).filter(w => w.length > 2)
-        let candidates = get().entries.filter(e => !e.sensitive && !isStale(e) && memoryMatchesScope(e, opts?.scope))
+        // A phone has only this path, so its words are taken without the
+        // punctuation ("drink?" must find "drink"). The desktop keeps its split.
+        const words = singleModelSlot() ? queryWords(query) : query.toLowerCase().split(/\s+/).filter(w => w.length > 2)
+        // An entry that only says something is unknown would outvote the real
+        // fact next to it (memory-gap.ts, CA bench AG10).
+        let candidates = get().entries.filter(e => !e.sensitive && !isStale(e) && !onlyStatesAGap(e) && memoryMatchesScope(e, opts?.scope))
         if (opts?.excludeToolResults) {
           candidates = candidates.filter(e => !isToolResultMemory(e))
         }
@@ -851,7 +983,8 @@ export const useMemoryStore = create<MemoryState>()(
           .slice(0, budget.maxMemories)
           .map(({ entry }) => entry)
 
-        return renderRememberedContext(ordered, budget.budgetTokens, opts?.onInjected)
+        const ceiling = memoryContextCeiling(contextTokens, get().settings.maxMemoriesOverride)
+        return renderRememberedContext(fillWithUserNotes(ordered, candidates, budget.maxMemories), budget.budgetTokens, ceiling, opts?.onInjected)
       },
 
       // ── Context-Aware Prompt Injection (async, embedding-first) ──
@@ -888,7 +1021,7 @@ export const useMemoryStore = create<MemoryState>()(
           // stubbed sync method in tests is honoured).
           if (budget.budgetTokens === 0 || budget.maxMemories === 0) return fallback()
 
-          let candidates = get().entries.filter(e => !e.sensitive && !isStale(e) && memoryMatchesScope(e, requestOpts?.scope))
+          let candidates = get().entries.filter(e => !e.sensitive && !isStale(e) && !onlyStatesAGap(e) && memoryMatchesScope(e, requestOpts?.scope))
           if (requestOpts?.excludeToolResults) {
             candidates = candidates.filter(e => !isToolResultMemory(e))
           }
@@ -900,6 +1033,10 @@ export const useMemoryStore = create<MemoryState>()(
           // Embed the query. Empty query has nothing to embed → no semantic
           // signal → keyword path is strictly better (it filters by score).
           if (!query.trim()) return fallback()
+          // One model slot: embedding the question would load the embedder
+          // right before the chat request that needs the room. The keyword
+          // path carries memory on its own there.
+          if (singleModelSlot()) return fallback()
           let queryVec: number[] = []
           const [vec] = await _embedFn([query])
           if (vec && vec.length > 0) queryVec = vec
@@ -935,7 +1072,7 @@ export const useMemoryStore = create<MemoryState>()(
           // it CAN still catch is an entry whose embedding is missing or bad.
           if (ordered.length === 0) return fallback()
 
-          return renderRememberedContext(ordered, budget.budgetTokens, requestOpts?.onInjected)
+          return renderRememberedContext(ordered, budget.budgetTokens, memoryContextCeiling(contextTokens, get().settings.maxMemoriesOverride), requestOpts?.onInjected)
         } catch {
           return fallback()
         }
@@ -1182,7 +1319,7 @@ export const useMemoryStore = create<MemoryState>()(
           return { added: 0, updated: 0, alreadyPresent: 0 }
         }
         // Tolerant shape handling: accept LU's own {entries:[...]} export, a
-        // bare [...] array, or {memories:[...]} (konata-session 2026-06-07,
+        // bare [...] array, or {memories:[...]} (a user-session 2026-06-07,
         // imports silently produced 0 entries on any other shape).
         const entriesField = prop(raw, 'entries')
         const memoriesField = prop(raw, 'memories')
@@ -1339,6 +1476,7 @@ export const useMemoryStore = create<MemoryState>()(
           accountCollections: isRecord(saved.accountCollections) ? saved.accountCollections : collections,
           activeMemoryOwner: null,
           memoryCollectionRevision: current.memoryCollectionRevision + 1,
+          forgotten: readForgotten(saved.forgotten),
         } as MemoryState
       },
       partialize: (state) => ({
@@ -1349,6 +1487,7 @@ export const useMemoryStore = create<MemoryState>()(
         memorySyncPending: state.memorySyncPending,
         settings: state.settings,
         lastSynced: state.lastSynced,
+        forgotten: state.forgotten,
       }),
     }
   )

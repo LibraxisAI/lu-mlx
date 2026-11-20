@@ -1,5 +1,5 @@
 /**
- * The Cloud switch counter (David, 2026-09-06). Pins the four-name mapping,
+ * The Cloud switch counter (2026-09-06). Pins the four-name mapping,
  * that exactly one bridge call goes out per press with nothing but the
  * event, and that a dead bridge never reaches the switch.
  *

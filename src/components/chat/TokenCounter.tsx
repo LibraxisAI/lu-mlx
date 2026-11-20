@@ -3,7 +3,7 @@ import { computeContextFill } from '../../lib/token-usage'
 import { useActiveContextWindow } from '../../hooks/useActiveContextWindow'
 import { useSendSizeStore } from '../../stores/sendSizeStore'
 import { useSettingsStore } from '../../stores/settingsStore'
-import { shouldAutoCompact, autoCompactHint } from '../../lib/compact-trigger'
+import { shouldAutoCompact, autoCompactHint, resolveCompactThreshold } from '../../lib/compact-trigger'
 import { newestCompaction, isModelVisible } from '../../lib/run-compact-command'
 // Dieselbe Schreibweise wie die Klapplade darunter. Vorher stand hier
 // 8192/1000 und dort 8192/1024, also `8.2k` neben `8K` fuer eine einzige Zahl
@@ -14,6 +14,9 @@ import { formatContextWindow } from '../../lib/formatters'
 // eine geratene fuer eine Zusage gehalten.
 import { SOURCE_LABEL } from '../../lib/context-source'
 import { HINWEIS_TEXT, PUNKT_FARBE } from '../../lib/hinweis'
+import { useGenerationStore } from '../../stores/generationStore'
+import { groupCounterSpeaker } from '../../lib/group-counter'
+import { groupSpeakers } from '../../lib/group-chat'
 
 export function TokenCounter() {
   const activeConversationId = useChatStore((s) => s.activeConversationId)
@@ -24,9 +27,21 @@ export function TokenCounter() {
 
   // The denominator is the REAL context window the active model runs with —
   // provider-aware and shared with the Context dropdown so the two never drift
-  // (David: "muss immer stimmen"). Ollama = the num_ctx we send; LM Studio =
+  // (the owner: "muss immer stimmen"). Ollama = the num_ctx we send; LM Studio =
   // loaded_context_length (what it actually loaded), NOT the model's max.
-  const ctx = useActiveContextWindow()
+  // GH #167: in a group chat the counter belongs to one speaker, the one
+  // answering now or the one opening the next round, and says which. Its
+  // window, its own usage anchor, its name (lib/group-counter.ts).
+  const conversation = conversations.find((c) => c.id === activeConversationId)
+  const generating = useGenerationStore((s) => !!(activeConversationId && s.generating[activeConversationId]))
+  const personas = useSettingsStore((s) => s.personas)
+  const speaker = groupCounterSpeaker(
+    conversation?.messages ?? [],
+    conversation?.groupModels,
+    generating,
+    conversation?.groupModels ? groupSpeakers(conversation.groupModels, conversation.groupPersonas, personas) : undefined,
+  )
+  const ctx = useActiveContextWindow(0, speaker?.model)
   // MUSS vor dem fruehen `return null` weiter unten stehen. Als dieser Hook
   // dort unten bei seiner Verwendung stand, hatte die Komponente vier Hooks im
   // leeren Chat und fuenf im gefuellten — React 19 wirft dann beim Uebergang
@@ -34,9 +49,9 @@ export function TokenCounter() {
   // Absturz, kein Warnhinweis. Der Weg dorthin ist alltaeglich: neuer Chat mit
   // einem Cloud-Modell (ContextDropdown rendert die Kinder auch, wenn das
   // Fenster nicht verstellbar ist), erste Nachricht — fertig.
-  const autoSchwelle = useSettingsStore((s) => s.settings.autoCompactThreshold)
+  const autoAn = useSettingsStore((s) => s.settings.autoCompact)
+  const autoSchwelleEingestellt = useSettingsStore((s) => s.settings.autoCompactThreshold)
 
-  const conversation = conversations.find((c) => c.id === activeConversationId)
   const messages = conversation?.messages || []
 
   // Context fill = what the NEXT request will roughly send, anchored on the
@@ -45,7 +60,7 @@ export function TokenCounter() {
   // (`thinking`) is never resent, so it is never counted — the old
   // conversation-high-water over totalTokens pinned this counter at "16.5k"
   // forever after one looping cloud reasoner burned its whole 16,384-token
-  // completion budget, while the next real prompt cost 65 tokens (David,
+  // completion budget, while the next real prompt cost 65 tokens (the owner,
   // 2026-07-12). An honest dip after compaction beats a sticky wrong maximum.
   // Messages PLUS the tool catalog: both are the request, both are billed, and
   // the catalog is the bigger half of what a fresh coding step costs. Leaving
@@ -53,23 +68,27 @@ export function TokenCounter() {
   // coding run, worst exactly where it is otherwise near zero.
   const fill = computeContextFill(
     messages,
-    sent
+    sent && !speaker
       ? { tokens: sent.tokens + sent.toolsTokens, atMessageCount: sent.atMessageCount }
       : undefined,
+    speaker ? { anchorModelId: speaker.model } : undefined,
   )
   const rawUsed = fill.used
 
   if (!activeConversationId || messages.length === 0) return null
+  // No window known yet (the very first probe of this model in this session):
+  // no number rather than a made-up one. A 16384 stand-in read as a real "16K"
+  // (Gegenprobe 01.10.2026).
+  if (ctx.sendWindow <= 0 && ctx.contextWindow <= 0) return null
 
-  // Resolved real context window; fall back to the VRAM-safe default only while
-  // the provider probe is still in flight (ctx not resolved yet). On a paid
-  // provider the denominator is the SEND window, not the model window: a
+  // The resolved real context window (known here, see the return above). On a
+  // paid provider the denominator is the SEND window, not the model window: a
   // 262k-context model whose steps are capped at 64k would otherwise sit quiet
   // at 25 percent forever, the red warning would never fire, and every support
   // case would arrive with a healthy meter next to a drained wallet (plan A2,
   // meter honesty).
   const window = ctx.sendWindow > 0 ? ctx.sendWindow : ctx.contextWindow
-  const maxTokens = window > 0 ? window : 16384
+  const maxTokens = window
   // Cap the numerator at the active window: a long chat carried onto a
   // smaller-context model shows "8.0k/8.0k" (full), not "20k/8k".
   const usedTokens = Math.min(rawUsed, maxTokens)
@@ -128,18 +147,23 @@ export function TokenCounter() {
   // die spaeter auch entscheidet, ist der einzige Weg, bei dem Anzeige und
   // Verhalten nicht auseinanderlaufen koennen.
   const sichtbareAnzahl = messages.filter(isModelVisible).length
-  const autoUrteil = autoSchwelle
+  // Dieselbe Aufloesung wie im Ausloeser: aus, feste Zahl, oder passend zum
+  // Fenster (seit 3.0.7 der Normalfall).
+  const autoSchwelle = resolveCompactThreshold(
+    { autoCompact: autoAn, autoCompactThreshold: autoSchwelleEingestellt },
+    maxTokens,
+    // Die 32K-Regel gilt fuer das Modellfenster, nicht fuer das Sendefenster.
+    ctx.contextWindow > 0 ? ctx.contextWindow : maxTokens,
+  )
+  const autoUrteil = autoSchwelle !== null
     ? shouldAutoCompact({
         used: rawUsed,
         window: maxTokens,
         source: fill.source,
         real: fill.real,
-        // `maxTokens > 0` war immer wahr — auch fuer den 16384er-Notnagel
-        // weiter oben, den es nur gibt, solange die Anbieter-Abfrage laeuft.
-        // Der Zaehler behauptete damit sekundenlang ein bekanntes Fenster:
-        // 14k belegt auf einem 128k-Modell las sich als "triggers on the next
-        // message", bis die Antwort kam. `window` ist die Zahl VOR dem
-        // Notnagel und damit die ehrliche Auskunft.
+        // Ein unbekanntes Fenster kommt hier nicht mehr an (frueher stand
+        // dafuer ein 16384er-Notnagel, und 14k auf einem 128k-Modell las sich
+        // sekundenlang als "triggers on the next message").
         windowIsTrue: window > 0,
         messageCount: sichtbareAnzahl,
         threshold: autoSchwelle,
@@ -147,13 +171,14 @@ export function TokenCounter() {
       })
     : null
   const autoHinweis = autoCompactHint(autoUrteil)
+  const speakerTitle = speaker ? `${speaker.label}, the speaker this counter follows. ${title}` : title
 
   // `span`, nicht `div`, und ohne eigenes Padding: seit D-S06 ist dieser
   // Fuellstand die Beschriftung INNERHALB des Kontextfenster-Knopfes
   // (`ContextDropdown`). Ein `div` im `<button>` ist kein gueltiges
   // Phrasing-Content, und das Padding kam sonst zweimal.
   return (
-    <span className={`inline-flex items-center gap-1.5 ${color}`} title={autoHinweis ? `${title}. ${autoHinweis}` : title}>
+    <span className={`inline-flex items-center gap-1.5 ${color}`} title={autoHinweis ? `${speakerTitle}. ${autoHinweis}` : speakerTitle}>
       <span className="relative block w-12 h-1 rounded-full bg-gray-200 dark:bg-white/10 overflow-hidden">
         <span
           className={`block h-full rounded-full transition-[width] duration-[var(--motion-slow)] ${barColor}`}
@@ -174,6 +199,9 @@ export function TokenCounter() {
       </span>
       {/* `font-mono tabular-nums` war dasselbe Rezept, nur an der Call-Site
           buchstabiert. `.lu-hud-num` ist die eine Stelle, an der es steht. */}
+      {speaker && (
+        <span data-testid="counter-speaker" className="text-[0.55rem] truncate max-w-[7rem]">{speaker.label}:</span>
+      )}
       <span className="text-[0.55rem] lu-hud-num">
         {formatContextWindow(usedTokens)}/{formatContextWindow(maxTokens)}
       </span>

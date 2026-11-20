@@ -1,7 +1,7 @@
 //! Test-only OS helpers — one place where "and how does that work on Windows"
 //! is answered for the whole crate.
 //!
-//! Nothing here ships: the module is `#[cfg(test)]` in `main.rs`.
+//! Nothing here ships: the module is `#[cfg(test)]` in `lib.rs`.
 //!
 //! It exists because the process-level tests — `state.rs` (the quit path),
 //! `commands/engine.rs` (the health wait) and `commands/bg_tasks.rs`
@@ -295,7 +295,20 @@ pub(crate) fn worker_descendants_of(root: u32) -> Vec<u32> {
     use sysinfo::{ProcessesToUpdate, System};
     let mut sys = System::new();
     sys.refresh_processes(ProcessesToUpdate::All, true);
+    // A parent link alone is not ownership. Windows keeps the parent pid in a
+    // process entry after the parent is gone, so a stranger whose dead creator
+    // once held the number `root` has now is listed under it as well. Such a
+    // stranger is older than `root`, and a test that took it for its own child
+    // would go on to fell it. Without a start time for `root` nothing is its.
+    let Some(root_start) = sys.process(sysinfo::Pid::from_u32(root)).map(|p| p.start_time()) else {
+        return Vec::new();
+    };
     crate::commands::shell::worker_descendants_in(&sys, root)
+        .into_iter()
+        .filter(|pid| {
+            sys.process(sysinfo::Pid::from_u32(*pid)).is_some_and(|p| p.start_time() >= root_start)
+        })
+        .collect()
 }
 
 // ── Tests for the helpers themselves ──────────────────────────────────────
@@ -338,6 +351,30 @@ pub(crate) fn reserved_port() -> (u16, std::net::TcpListener) {
     (port, listener)
 }
 
+/// A port that refuses every connection for as long as the returned socket
+/// lives: bound, never listened on.
+///
+/// Tests used to bind a port, free it and probe the number. In a parallel run
+/// the stub of a neighbour test can draw the freed number before the probe
+/// gets there, and the probe then finds a server where it expects none.
+/// macOS, 09.10.2026: 4 of 300 runs of the health module red that way.
+/// Linux, 10.10.2026: the same in `vram_release_tests`, 1 of 100 full runs.
+/// A bound socket cannot be drawn by a second `bind(0)`, so keep it in scope
+/// until the probe is back.
+pub(crate) fn refusing_port() -> (u16, socket2::Socket) {
+    let held = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
+        .expect("a TCP socket for the loopback interface");
+    let loopback: std::net::SocketAddr = "127.0.0.1:0".parse().expect("a literal address");
+    held.bind(&loopback.into()).expect("the loopback interface refused an ephemeral port");
+    let port = held
+        .local_addr()
+        .expect("a bound socket has a local address")
+        .as_socket()
+        .expect("an IPv4 socket has a socket address")
+        .port();
+    (port, held)
+}
+
 /// Path to `examples/park`, the compiled do-nothing stand-in.
 ///
 /// Why a compiled binary and not a copy of `/bin/sh`: the full argument is in
@@ -346,17 +383,22 @@ pub(crate) fn reserved_port() -> (u16, std::net::TcpListener) {
 /// so a test built on one is racing the kernel; a binary this toolchain
 /// produced is ad-hoc signed and is left alone.
 ///
-/// `cargo test` builds examples, so it is there whenever the tests are, and it
-/// lives next to the test binary: `target/<profile>/deps/<test binary>` →
-/// `target/<profile>/examples/park`.
+/// `cargo test` builds examples, so it is there whenever the tests are, and
+/// Cargo copies it to `target/<profile>/examples/park`. The test binary sits
+/// somewhere below `target/<profile>/`, but where is not stable: up to Cargo
+/// 1.99 it was `deps/<test binary>`, from 1.100 it is
+/// `build/<package>/<hash>/out/<test binary>`. So walk up from the test binary
+/// to the first directory that has `examples/park`.
 #[cfg(unix)]
 pub(crate) fn park_binary() -> PathBuf {
     let exe = std::env::current_exe().expect("current_exe");
-    let park = exe
-        .parent()
-        .and_then(|deps| deps.parent())
-        .map(|profile| profile.join("examples").join("park"))
-        .expect("no target/<profile>/ above the test binary");
+    let below = exe.parent().expect("the test binary has a directory");
+    let park = below
+        .ancestors()
+        .map(|dir| dir.join("examples").join("park"))
+        .find(|park| park.is_file())
+        // The old place, so the message below names a path worth looking at.
+        .unwrap_or_else(|| below.parent().unwrap_or(below).join("examples").join("park"));
     assert!(
         park.is_file(),
         "{} is missing. It is `src-tauri/examples/park.rs`, which `cargo test` builds \
@@ -453,9 +495,156 @@ pub(crate) fn checked_table(pid: u32) -> Result<sysinfo::System, String> {
     }
 }
 
+// ── Files that are big in name only ───────────────────────────────────────
+
+/// A file of `bytes` apparent size that takes no room on disk, on every
+/// platform.
+///
+/// The disk plans and the "is this pack complete" checks only ask for the size
+/// of a file, so their tests stand in a 10 GB download with an empty file of
+/// that length. `set_len` alone does that on APFS and ext4, where the grown
+/// part is a hole. On NTFS it is not: the bytes are allocated, and one video
+/// test left 23 GB in the scratch folder per run (Windows-Gegenprobe,
+/// 09.10.2026: the second `cargo test` ended with "disk full", and took two
+/// unrelated tests that measure free space with it). So the file is marked
+/// sparse first, which makes the grown part a hole there as well.
+pub(crate) fn sized_file(path: &Path, bytes: u64) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("the folder of a sized file");
+    }
+    let file = std::fs::File::create(path).expect("create a sized file");
+    #[cfg(windows)]
+    mark_sparse(&file);
+    file.set_len(bytes).expect("give a sized file its length");
+}
+
+#[cfg(windows)]
+fn mark_sparse(file: &std::fs::File) {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+    // Declared here and not taken from windows-sys: the crate has it behind
+    // features this build does not enable, and a test helper is no reason to
+    // widen what ships.
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn DeviceIoControl(
+            device: *mut c_void,
+            control_code: u32,
+            in_buffer: *const c_void,
+            in_size: u32,
+            out_buffer: *mut c_void,
+            out_size: u32,
+            bytes_returned: *mut u32,
+            overlapped: *mut c_void,
+        ) -> i32;
+    }
+    const FSCTL_SET_SPARSE: u32 = 0x0009_00C4;
+    let mut returned = 0u32;
+    // SAFETY: the handle belongs to `file`, which outlives the call. The
+    // control code takes no input buffer (that means "set") and writes no
+    // output, and `returned` is a valid place for the count.
+    let ok = unsafe {
+        DeviceIoControl(
+            file.as_raw_handle(),
+            FSCTL_SET_SPARSE,
+            std::ptr::null(),
+            0,
+            std::ptr::null_mut(),
+            0,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    assert!(ok != 0, "the file could not be marked sparse: {}", std::io::Error::last_os_error());
+}
+
+/// The room a file really takes on its volume, as opposed to its length.
+pub(crate) fn bytes_on_disk(path: &Path) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).expect("metadata of a file").blocks() * 512
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{GetCompressedFileSizeW, INVALID_FILE_SIZE};
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let mut high = 0u32;
+        // SAFETY: `wide` is NUL terminated and outlives the call, `high` is a
+        // valid place for the upper half of the size.
+        let low = unsafe { GetCompressedFileSizeW(wide.as_ptr(), &mut high) };
+        assert!(
+            low != INVALID_FILE_SIZE || std::io::Error::last_os_error().raw_os_error() == Some(0),
+            "the size on disk could not be read: {}",
+            std::io::Error::last_os_error()
+        );
+        (u64::from(high) << 32) | u64::from(low)
+    }
+}
+
+// ── A script the test starts itself ───────────────────────────────────────
+
+/// Put an executable script at `path`, ready to be started at once.
+///
+/// The text is written to a neighbour file and reaches `path` through `cp`, so
+/// this process never has the script itself open for writing. That is the whole
+/// point. Written here directly, the open file is copied into every child that
+/// another test thread starts in the same moment, and stays open there until
+/// that child's own exec. Starting the script inside that window fails with
+/// "Text file busy" (os error 26), and a fake interpreter that cannot start
+/// reads to the code under test as an interpreter that failed its probe. Linux
+/// only in practice; macOS does not refuse the start.
+///
+/// Measured on Linux, 09.10.2026, `commands::install::` in a loop of 300 runs
+/// before the tests in there used this: 10 red at a fake interpreter that
+/// could not start.
+#[cfg(unix)]
+pub(crate) fn write_script(path: &Path, text: impl AsRef<[u8]>) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut source = path.as_os_str().to_owned();
+    source.push(".txt");
+    std::fs::write(&source, text).expect("write the script text");
+    let copied = Command::new("cp").arg(&source).arg(path).status().expect("start cp");
+    assert!(copied.success(), "cp could not put the script at {}", path.display());
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("make the script executable");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows-Gegenprobe, 09.10.2026: a stand-in for a download of many
+    /// gigabytes has that length and takes next to nothing, on NTFS too.
+    #[test]
+    fn a_sized_file_has_its_length_and_takes_no_room() {
+        const LEN: u64 = 6_000_000_000;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("deep").join("download.safetensors");
+        sized_file(&path, LEN);
+        assert_eq!(std::fs::metadata(&path).expect("it exists").len(), LEN);
+        let taken = bytes_on_disk(&path);
+        assert!(taken < 1_000_000, "a stand-in of {LEN} bytes takes {taken} bytes of real disk");
+        // And the measure can tell: a file with content takes its room.
+        let full = dir.path().join("full.bin");
+        std::fs::write(&full, vec![7u8; 300_000]).expect("write");
+        assert!(bytes_on_disk(&full) >= 300_000, "{}", bytes_on_disk(&full));
+    }
+
+    /// The tests that stand in big files go through `sized_file`. A bare
+    /// `set_len` in one of them writes real bytes on Windows again.
+    #[test]
+    fn the_media_tests_make_their_big_files_through_sized_file() {
+        let bare = ["File::create(&path).unwrap()", ".set_len("].concat();
+        for (name, src) in [
+            ("video.rs", include_str!("commands/video.rs")),
+            ("image_mflux.rs", include_str!("commands/image_mflux.rs")),
+            ("video_ltx2mlx.rs", include_str!("commands/video_ltx2mlx.rs")),
+        ] {
+            assert!(!src.contains(&bare), "{name} grows a test file with a bare set_len");
+            assert!(src.contains("test_support::sized_file("), "{name} no longer uses sized_file");
+        }
+    }
 
     #[test]
     fn the_wsl_alias_stub_is_recognised_in_both_slash_flavours() {
@@ -583,6 +772,18 @@ mod tests {
     /// `sleeper` has one job: a child that is still there a moment later, with
     /// the pid the caller was handed.
     #[test]
+    fn a_refusing_port_refuses_and_is_not_handed_out_again_while_held() {
+        let (port, held) = refusing_port();
+        let address: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let refused = std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(5));
+        assert!(refused.is_err(), "nobody listens on a port that was only bound");
+        // The number stays taken: a second owner cannot bind it, so no stub of
+        // a neighbour test can end up behind it.
+        assert!(std::net::TcpListener::bind(address).is_err(), "port {port} was handed out twice");
+        drop(held);
+    }
+
+    #[test]
     fn the_sleeper_is_alive_under_its_own_pid_and_dies_when_killed() {
         let mut child = sleeper(30)
             .stdin(std::process::Stdio::null())
@@ -597,6 +798,12 @@ mod tests {
 
         let _ = child.kill();
         let _ = child.wait(); // reaped, so not even a zombie is left
+        // Asked until it is so: on a loaded Windows machine the process table
+        // can list the ended process for a moment after wait() has returned.
+        let gone_by = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while is_alive(pid) && std::time::Instant::now() < gone_by {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         assert!(!is_alive(pid), "a killed and reaped sleeper is not alive");
     }
 

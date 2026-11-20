@@ -1,4 +1,5 @@
-import { captureFlashGeneration, parseFlashPolicy, recordFlashResponse } from '../../lib/flash-ui'
+import { resolveMessageAttachments } from '../../lib/chat-attachments'
+import { captureFlashGeneration, chatBilling, parseFlashPolicy, recordFlashResponse } from '../../lib/flash-ui'
 
 /**
  * OpenAI-Compatible Provider
@@ -15,19 +16,34 @@ import type {
   ProviderClient, ProviderModel, ProviderConfig, ChatMessage, ChatOptions,
   ChatStreamChunk, ToolCall, ToolDefinition,
 } from './types'
-import { ProviderError } from './types'
-import { RepetitionStop } from '../../lib/repetition-stop'
+import { ProviderError, type ChatBilling, type CreditRates } from './types'
+import { LoopStop, RepetitionStop } from '../../lib/repetition-stop'
+import { singleModelSlot } from '../../lib/capabilities'
 import { parseSSEStream } from '../sse'
 import { idleAbortGuard, isStreamIdleTimeout } from '../stream-idle'
 import { sendWithTransientRetry } from './retry'
 import { repairJson } from '../../lib/tool-call-repair'
 import { signalCreditsExhausted } from '../../lib/credits-exhausted'
 import { parseRetryAfter } from '../../lib/http-status'
+import { requestLimitMessage } from '../../lib/request-limit'
 import { localFetch, localFetchStream, isPrivateOrLanHost, isDirectFetchAllowed, hostnameOf, ensureProxyAllowsHost, backendCall } from '../backend'
+import { chatBackendsBack } from '../../lib/chat-backends-gate'
+import { openAiSamplerFields } from './sampler-fields'
+import { openAiCustomFields } from '../../lib/custom-params'
+import { topPForTemperature } from '../../lib/sampling'
 import { ensureBuiltinEngineAlive, explainDeadEngine, explainEngineTransportMessage, isManagedBuiltinSlot } from '../builtin-ensure'
 import { isLocalTransportFailure, localBackendUnreachableMessage, remoteBackendUnreachableMessage } from '../../lib/local-backend-transport'
 import { applyTemplateContract } from './normalize-system'
 import { clampEffort, hasEffortLadder, DEFAULT_EFFORT } from '../../lib/effort'
+import { thinkBudgetForRequest } from '../../lib/think-budget'
+import { chatFirstReplyMs, FIRST_REPLY_TIMEOUT } from '../../lib/chat-reply-timeout'
+import {
+  applyLocalEffort, isKoboldVersion, isLmStudioV1Models, lmStudioEffortLevels, localEffortNote,
+  templateReadsEffort, templateEffortLevels, fitRungToTemplate, KOBOLD_EFFORT_LEVELS, LLAMACPP_EFFORT_LEVELS, type LocalEffortServer,
+} from '../../lib/local-effort'
+
+/** The server-wide facts cached per endpoint, see `serverFact`. */
+type ServerFactKind = 'props' | 'models' | 'kobold' | 'koboldVersion' | 'lmsV1Models'
 import {
   parseOpenAIStreamChunk, parseOpenAIChatResponse, keyForUnindexedBlock,
   isRecord, prop, asString, asNumber, asBoolean, asRecordArray,
@@ -40,6 +56,11 @@ import {
 import type { ResolvedContextWindow } from '../../lib/context-source'
 import { contextWindowKey, storedWindow, capIsDerivable } from '../../lib/context-source'
 import { useSettingsStore } from '../../stores/settingsStore'
+import { lmStudioTtlSeconds } from '../../lib/idle-unload'
+import { endpointKey, withExtraModels } from '../../lib/extra-model-ids'
+import { log } from '../../lib/logger'
+import { estimateTokens } from '../../lib/token-estimate'
+import { MOBILE_TEXT, platformText } from '../../lib/platform-text'
 
 // Transport routing lives in the `useLocalProxy` getter (below) plus the shared
 // host helpers in backend.ts. A direct webview fetch only works for hosts the
@@ -82,6 +103,7 @@ export interface OpenAIRequestMessage {
   content: string | OpenAIContentPart[]
   tool_calls?: OpenAIRequestToolCall[]
   tool_call_id?: string
+  reasoning_content?: string
 }
 
 export interface OpenAIChatRequest {
@@ -97,13 +119,33 @@ export interface OpenAIChatRequest {
    *  endpoint that 400s on unknown fields never sees it. */
   top_k?: number
   max_tokens?: number
+  /** GH #175: extra samplers, only where the backend reads them
+   *  (sampler-fields.ts). */
+  min_p?: number
+  repeat_penalty?: number
+  repetition_penalty?: number
+  presence_penalty?: number
+  frequency_penalty?: number
+  dry_multiplier?: number
   tools?: ToolDefinition[]
   tool_choice?: 'auto' | 'none' | 'required'
   /** One rung of the effort ladder ('none' and 'minimal' mean off). Stepped
    *  down, then deleted, by sendChat. */
   reasoning_effort?: string
+  /** GH #235: LM Studio's idle time in seconds, only to LM Studio and only
+   *  with a time set in Settings. */
+  ttl?: number
   chat_template_kwargs?: Record<string, unknown>
+  /** Think budget for the bundled engine only (llama-server b9949 reads it
+   *  per request, tools/server/server-common.cpp). Never sent anywhere else. */
+  thinking_budget_tokens?: number
   stream_options?: { include_usage: boolean }
+  /** Constrained output (ChatOptions.jsonSchema). Never sent to LU Cloud. */
+  response_format?: { type: 'json_schema'; json_schema: { name: string; schema: Record<string, unknown> } }
+  /** Round 10, phone only: go on inside the last message, an answer that
+   *  was cut (src-tauri/src/commands/engine_continue.rs). Never set unless
+   *  the caller asked (ChatOptions.continueFinalMessage). */
+  continue_final_message?: boolean
 }
 
 /**
@@ -123,11 +165,21 @@ type ChatFetcher = (
   },
 ) => Promise<Response>
 
+/** The route's own name of a model the app shows under its published one. */
+function catalogNameOf(m: { name?: string; native_name?: string }): string | undefined {
+  return m.native_name && m.name && m.name !== m.native_name ? m.name : undefined
+}
+
 interface OpenAIModelEntry {
   flash?: unknown
   usage_class?: unknown
   /** Gemessenes Inhaltsverhalten. Nur unsere eigene Wolke schickt das Feld. */
   unfiltered?: unknown
+  /** Die zweite Marke des Katalogs. Nur unsere eigene Wolke schickt das Feld. */
+  unrestricted?: unknown
+  /** Der echte Name eines Modells, das die Wolke auf ihrer eigenen Domain
+   *  unter einem neutralen Namen fuehrt. Die App zeigt diesen. */
+  native_name?: string
   id: string
   object: string
   created?: number
@@ -151,6 +203,14 @@ interface OpenAIModelEntry {
   // front instead of eating a mid-run 400. Absent on backends that don't send
   // it → the mapping falls back to `true` (optimistic, corrected at runtime).
   supports_tools?: boolean
+  // LU Cloud /models: may the two Create tools of the chat go to this model?
+  // The server's own rule; absent on every other endpoint and on an older
+  // LU Cloud, and absent reads as no.
+  create_in_chat?: boolean
+  // LU Cloud /models: all customers together share a small number of requests
+  // a minute on this model, so it asks for a short wait at busy times. The
+  // picker says so in a quiet note. Absent reads as no.
+  limited_capacity?: boolean
   think?: 'toggle' | 'always' | 'never'
   // The reasoning rungs this model accepts, ascending, and the one it defaults
   // to. LU Cloud sends both for every model that reasons and neither for a
@@ -159,6 +219,18 @@ interface OpenAIModelEntry {
   // missing ladder as "keep doing exactly what you did before".
   reasoning_effort_levels?: string[]
   reasoning_effort_default?: string
+  // What the model draws per one million tokens, in credits. LU Cloud sends it
+  // since 3.0.5; absent everywhere else and on an older deployment.
+  credit_rates?: CreditRates
+}
+
+/** The models route's `credit_rates`, or nothing. Both sides must be real
+ *  numbers: half a rate would print as a price list with a hole in it. */
+function parseCreditRates(raw: unknown): CreditRates | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const { input_per_million: i, output_per_million: o } = raw as Record<string, unknown>
+  const ok = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n >= 0
+  return ok(i) && ok(o) ? { inputPerMillion: i, outputPerMillion: o } : undefined
 }
 
 /**
@@ -182,9 +254,11 @@ function toModelEntry(m: Record<string, unknown>): OpenAIModelEntry {
     created: asNumber(m.created),
     owned_by: asString(m.owned_by),
     name: asString(m.name),
+    native_name: asString(m.native_name),
     flash: m.flash,
     usage_class: m.usage_class,
     unfiltered: m.unfiltered,
+    unrestricted: m.unrestricted,
     /*
      * GH #129: dieselbe Zahl, wie der jeweilige Server sie nennt, gelesen vom
      * selben Leser wie die Kaskade (context-probe). Das kostet keine einzige
@@ -201,6 +275,8 @@ function toModelEntry(m: Record<string, unknown>): OpenAIModelEntry {
       ? m.input_modalities.filter((x): x is string => typeof x === 'string')
       : undefined,
     supports_tools: asBoolean(m.supports_tools),
+    create_in_chat: asBoolean(m.create_in_chat),
+    limited_capacity: asBoolean(m.limited_capacity),
     think: think === 'toggle' || think === 'always' || think === 'never' ? think : undefined,
     // The ladder is deliberately NOT checked against a fixed list of rungs:
     // which rungs exist is the server's decision, and pinning them here would
@@ -215,7 +291,13 @@ function toModelEntry(m: Record<string, unknown>): OpenAIModelEntry {
     // becomes, and it already answers this case; a second answer here would be
     // a second place to keep right.
     reasoning_effort_default: asString(m.reasoning_effort_default),
+    credit_rates: parseCreditRates(m.credit_rates),
   }
+}
+
+/** The window a listing stated itself, for the picker's context column. */
+function declaredContextOf(m: OpenAIModelEntry): number | undefined {
+  return m.context_length && m.context_length > 0 ? m.context_length : undefined
 }
 
 /**
@@ -225,6 +307,20 @@ function toModelEntry(m: Record<string, unknown>): OpenAIModelEntry {
  */
 function asUnfiltered(u: unknown): 'full' | 'partial' | undefined {
   return u === 'full' || u === 'partial' ? u : undefined
+}
+
+/**
+ * llama.cpp's context refusal (`exceed_context_size_error`) carries its two
+ * numbers beside the sentence, and the sentence alone drops them. Keep them in
+ * the text: the Code Agent cuts its history by exactly that much and sends the
+ * step again (GH #140, hooks/codex/context-overflow.ts).
+ */
+function withContextNumbers(message: string, err: unknown): string {
+  const nCtx = prop(err, 'n_ctx')
+  const nPrompt = prop(err, 'n_prompt_tokens')
+  return typeof nCtx === 'number' && typeof nPrompt === 'number'
+    ? `${message} (request (${nPrompt} tokens), context size (${nCtx} tokens))`
+    : message
 }
 
 // ── Known context lengths for popular models ───────────────────
@@ -304,6 +400,14 @@ const catalogContext = new Map<string, number>()
  */
 const catalogTrained = new Map<string, number>()
 
+/**
+ * Models whose catalogue entry declared their own rungs. Their ladder is the
+ * server's word and the user's rung goes out as it always did; every other
+ * ladder on a local slot is one this client read from the server itself
+ * (issue 176) and waits for the user's own pick (localEffortChosen).
+ */
+const catalogEffort = new Set<string>()
+
 /** Ceiling for the optional metadata probes, see `probeInit`. */
 const CONTEXT_PROBE_TIMEOUT_MS = 2500
 
@@ -337,7 +441,7 @@ const IMAGE_TOKEN_ESTIMATE = 1500
  * the Anthropic-style `{ type: 'image', source: {...} }`, and any bare base64
  * data URL string, wherever they sit in the history.
  */
-function measurePayload(value: unknown): { chars: number; images: number } {
+function measurePayload(value: unknown): { tokens: number; images: number } {
   let images = 0
   const json = JSON.stringify(value, (_key, val) => {
     if (typeof val === 'string' && val.startsWith('data:') && val.includes(';base64,')) {
@@ -357,7 +461,9 @@ function measurePayload(value: unknown): { chars: number; images: number } {
     }
     return val
   })
-  return { chars: json ? json.length : 0, images }
+  // GH #167: the same script aware estimate as the history budget, not a
+  // flat chars / 4 that undercounted Japanese about 2.8 times.
+  return { tokens: json ? estimateTokens(json) : 0, images }
 }
 
 /** Test-only: reset the endpoint catalogue between test cases. */
@@ -368,13 +474,46 @@ export function __clearContextCatalogForTests(): void {
 
 // ── Provider Implementation ────────────────────────────────────
 
+/**
+ * Laeuft die eingebaute Engine gerade? `null` heisst: nicht zu erfahren (kein
+ * Tauri, das Kommando fehlt). Dann wird gefragt wie bisher. Mit Absicht der
+ * rohe Aufruf und nicht `bundledEngineStatus()` aus api/engine: der gleicht
+ * nebenbei den Port ab und meldet Hinweise, und das ist nicht Sache einer
+ * Kontextabfrage.
+ */
+async function builtinEngineRunning(): Promise<boolean | null> {
+  try {
+    const status = await backendCall<{ running?: unknown } | null>('bundled_engine_status')
+    return typeof status?.running === 'boolean' ? status.running : null
+  } catch {
+    return null
+  }
+}
+
+
+/**
+ * How many prompt tokens the upstream served from its cache, in either of the
+ * two spellings OpenAI-compatible servers use. 0 when the server says nothing.
+ */
+export function cachedPromptTokensOf(usage: unknown): number {
+  if (!usage || typeof usage !== 'object') return 0
+  const u = usage as { prompt_tokens_details?: { cached_tokens?: unknown }; prompt_cache_hit_tokens?: unknown }
+  const a = u.prompt_tokens_details?.cached_tokens
+  const b = u.prompt_cache_hit_tokens
+  const n = typeof a === 'number' ? a : typeof b === 'number' ? b : 0
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : 0
+}
+
 export class OpenAIProvider implements ProviderClient {
   readonly id = 'openai' as const
+  /** GitHub #173: set when this client serves an additional entry. */
+  readonly entryId?: string
 
   private readonly config: ProviderConfig
 
   constructor(config: ProviderConfig) {
     this.config = config
+    if (config.entryId) this.entryId = config.entryId
   }
 
   private catalogKey(model: string): string {
@@ -393,6 +532,7 @@ export class OpenAIProvider implements ProviderClient {
     if (m.trained_context_length && m.trained_context_length > 0) {
       catalogTrained.set(key, m.trained_context_length)
     }
+    if (Array.isArray(m.reasoning_effort_levels) && m.reasoning_effort_levels.length > 0) catalogEffort.add(key)
   }
 
   private get baseUrl(): string {
@@ -406,6 +546,11 @@ export class OpenAIProvider implements ProviderClient {
    * makes sense locally: per-model context probing and the LM Studio enhanced
    * API. Cloud endpoints must not do those (N+1 requests → rate limits).
    */
+  /** GH #175 with #173: what sampler-fields.ts decides on for this server. */
+  private get samplerTarget(): { id: ProviderConfig['id']; isLocal: boolean; managed?: boolean } {
+    return { id: this.config.id, isLocal: this.isLanBackend, managed: this.config.managed }
+  }
+
   private get isLanBackend(): boolean {
     return this.config.isLocal === true || isPrivateOrLanHost(hostnameOf(this.baseUrl))
   }
@@ -441,11 +586,12 @@ export class OpenAIProvider implements ProviderClient {
    * this template has no branch for. That is exactly the payload the
    * counter-check killed the built-in engine with.
    */
-  private templateContract(messages: ChatMessage[], nativeTools: boolean): ChatMessage[] {
+  private templateContract(messages: ChatMessage[], nativeTools: boolean, model: string): ChatMessage[] {
     const rendersTemplate = this.isLanBackend && !nativeTools
     return applyTemplateContract(messages, {
       toolRole: rendersTemplate ? 'text' : 'native',
       alternate: rendersTemplate,
+      model,
     })
   }
 
@@ -453,7 +599,7 @@ export class OpenAIProvider implements ProviderClient {
    * Run a send and, when this slot is the app's own engine, translate a
    * transport failure into a sentence about the engine. A refused connection
    * to 127.0.0.1:8127 used to surface as the raw proxy error, which is how a
-   * fresh Windows install introduced itself to applejames on 2026-08-01 before
+   * fresh Windows install introduced itself to a user on 2026-08-01 before
    * they moved to Ollama. Anything that reached an HTTP response is untouched.
    */
   private async sendOrExplain(send: () => Promise<Response>): Promise<Response> {
@@ -469,7 +615,7 @@ export class OpenAIProvider implements ProviderClient {
    * The thinking knob for this request, or undefined to leave it out.
    *
    * Toggle OFF used to send 'minimal', the least the OpenAI API itself allows.
-   * kevinmlynch traced what that means elsewhere (#112, 2026-08-13): DwarfStar
+   * A user traced what that means elsewhere (#112, 2026-08-13): DwarfStar
    * reads 'minimal' as think_mode high, so our OFF switch turned thinking ON
    * and his tool workflows paid the latency he had just disabled. Only 'none'
    * really disables it. Our own cloud proxy already translates minimal to
@@ -486,7 +632,9 @@ export class OpenAIProvider implements ProviderClient {
     options?: ChatOptions,
   ): string | undefined {
     const levels = options?.effortLevels
-    const ladder = hasEffortLadder(levels)
+    // A local ladder the user has not touched yet counts as no ladder at all,
+    // which is exactly the request every local server got before 3.0.7.
+    const ladder = hasEffortLadder(levels) && !this.localEffortWaits(model, options)
     // No wish and no declared ladder: send nothing, exactly as before. A model
     // that always reasons and a model that never does both arrive here with
     // `thinking` undefined, and on a server that does not declare rungs they
@@ -554,7 +702,7 @@ export class OpenAIProvider implements ProviderClient {
    *   chat_template_kwargs: {enable_thinking:true}  -> MARKER_THINK_ON
    *
    * and the chat request carrying reasoning_effort answered 200, so nothing
-   * ever complained. That is David's report exactly: the Think button was on,
+   * ever complained. That is the owner's report exactly: the Think button was on,
    * the model did not think, and no thinking block appeared, because nothing
    * on the wire ever asked it to.
    *
@@ -571,6 +719,203 @@ export class OpenAIProvider implements ProviderClient {
     return { enable_thinking: thinking }
   }
 
+  /**
+   * Think budget (D12), for the app's own engine only.
+   *
+   * The bundled llama-server (b9949, and b11960 since 3.0.9) reads `thinking_budget_tokens` on every
+   * chat request and ends the thought by force once that many tokens are
+   * spent (tools/server/server-common.cpp, reasoning budget sampler). Any
+   * other server in this slot is a version we do not know, and the cloud
+   * endpoints refuse unknown fields, so nobody else gets it.
+   */
+  /**
+   * GH #198: the custom sampling rows of the persona and the chat, as top
+   * level fields, under the names typed. A field LU sets itself is never
+   * taken from a row (lib/custom-params.ts). Not for LU Cloud, whose proxy
+   * refuses a field it does not know. A strict remote server may refuse one
+   * too; the person added the row for that server and sees its answer.
+   */
+  private applyCustomParams(body: OpenAIChatRequest, options?: ChatOptions): void {
+    if (this.config.id === 'lu-cloud') return
+    Object.assign(body, openAiCustomFields(options?.customParams))
+  }
+
+  private applyThinkBudget(body: OpenAIChatRequest, options?: ChatOptions): void {
+    if (this.config.managed !== true) return
+    const budget = thinkBudgetForRequest(options?.thinking, options?.thinkingBudget)
+    if (budget !== undefined) body.thinking_budget_tokens = budget
+  }
+
+  /**
+   * Which local server sits behind this slot, for the effort form (issue
+   * 176). The managed slot is the LU Engine; anything else is asked once per
+   * endpoint and five minutes through the same cache as the context probe.
+   * Order matters: KoboldCpp answers a llama.cpp style /props too.
+   */
+  private async localEffortServer(signal?: AbortSignal): Promise<LocalEffortServer> {
+    if (this.config.managed === true) return 'engine'
+    if (!this.isLanBackend || this.config.id === 'lu-cloud') return 'unknown'
+    const root = serverRoot(this.baseUrl)
+    if (isKoboldVersion(await this.serverFact('koboldVersion', `${root}/api/extra/version`, signal))) return 'kobold'
+    if (isLmStudioV1Models(await this.serverFact('lmsV1Models', `${root}/api/v1/models`, signal))) return 'lmstudio'
+    if (templateReadsEffort(await this.serverFact('props', `${root}/props`, signal))) return 'llamacpp'
+    return 'unknown'
+  }
+
+  /**
+   * The effort ladder a LAN model gets when its listing declared none, or the
+   * note that says why the control is greyed. LU Cloud on a local port
+   * declares its own and never comes here.
+   */
+  private async localEffortFor(model: string): Promise<{ levels?: string[]; note?: string }> {
+    const server = await this.localEffortServer()
+    if (server === 'kobold') return { levels: [...KOBOLD_EFFORT_LEVELS] }
+    if (server === 'llamacpp') return { levels: [...LLAMACPP_EFFORT_LEVELS] }
+    if (server === 'lmstudio') {
+      const levels = lmStudioEffortLevels(await this.serverFact('lmsV1Models', `${serverRoot(this.baseUrl)}/api/v1/models`), model)
+      return levels ? { levels } : { note: localEffortNote('lmstudio') }
+    }
+    // A server whose /props shows a template without the variable is llama.cpp
+    // all the same; the note then names the template, not the backend.
+    const props = await this.serverFact('props', `${serverRoot(this.baseUrl)}/props`)
+    return { note: localEffortNote(typeof props === 'object' && props !== null && 'chat_template' in props ? 'llamacpp' : 'unknown') }
+  }
+
+  /**
+   * Reshape the rung into the form this local server reads (issue 176). Only
+   * when the composer offered rungs for this model, so a model without them
+   * keeps exactly the request it had before.
+   */
+  /**
+   * GH #235: the idle time from Settings, as LM Studio's own TTL, so a model
+   * LM Studio loaded for this request (JIT) is unloaded after it too. Asked
+   * only with a time set, and only of a local server that is not the LU
+   * Engine (which has its own watch) or LU Cloud.
+   */
+  private async applyIdleTtl(body: OpenAIChatRequest): Promise<void> {
+    const ttl = lmStudioTtlSeconds()
+    if (!ttl || this.config.managed === true || !this.isLanBackend || this.config.id === 'lu-cloud') return
+    if (await this.localEffortServer().catch(() => 'unknown') === 'lmstudio') body.ttl = ttl
+  }
+
+  private async applyLocalEffortForm(body: OpenAIChatRequest, model: string, options?: ChatOptions): Promise<void> {
+    if (options?.thinking !== true || !hasEffortLadder(options?.effortLevels)) return
+    if (body.reasoning_effort === undefined) return
+    if (!this.isLocalEffortSlot) return
+    if (this.localEffortWaits(model, options)) return
+    applyLocalEffort(body, await this.localEffortServer(), options?.thinkingBudget)
+  }
+
+  /**
+   * E1 (3.0.9): no top-level `reasoning_effort` to the LU Engine. b9949
+   * ignored the field; b11960 reads it and writes it over the template
+   * variable (tools/server/server-common.cpp: "Parse the OAI
+   * reasoning_effort field"), after `chat_template_kwargs`. So the 'high'
+   * every Think-on request carries would set gpt-oss to High although the
+   * user never picked a rung (see localEffortWaits), Max would reach a
+   * template as 'max' instead of the 'high' applyLocalEffort chose, and
+   * 'none' would switch thinking off a second way. The rung travels where
+   * applyLocalEffort put it, the request stays the one b9949 got. Only while
+   * `chat_template_kwargs` carries the switch: where they were refused the
+   * top-level field is the one signal left (the phone engine reads it then,
+   * engine_inproc.rs `thinking_wish`).
+   */
+  private keepEffortOffEngineTopLevel(body: OpenAIChatRequest): void {
+    if (this.config.managed !== true || !body.chat_template_kwargs || body.reasoning_effort === undefined) return
+    OpenAIProvider.engineEffortHeld.set(body, body.reasoning_effort)
+    delete body.reasoning_effort
+  }
+
+  /** The top-level rung keepEffortOffEngineTopLevel took off a body, for the
+   *  retry without `chat_template_kwargs` that needs it back. */
+  private static engineEffortHeld = new WeakMap<OpenAIChatRequest, string>()
+
+  /**
+   * 3.0.11: every rung that can reach the template is fitted onto the rungs
+   * the template renders, read from /props (lib/local-effort.ts,
+   * templateEffortLevels). b11960 hands the template both
+   * `chat_template_kwargs.reasoning_effort` and a top-level
+   * `reasoning_effort`, and a template that raises on a rung kills the whole
+   * request before a token is made: "Unexpected reasoning effort high.
+   * Supported types are xhigh (default), medium, and low." (bug report on
+   * 3.0.10, LU Engine). The fixed ladder low, medium, high cannot know such
+   * a template; the server does. Runs here, after the engine is up, so
+   * /props describes the model this request goes to. The held top-level rung
+   * of the retry without kwargs is fitted too. 'none' and 'minimal' are the
+   * off switch and stay as they are.
+   */
+  private async fitEffortToTemplate(body: OpenAIChatRequest, model: string): Promise<void> {
+    if (!this.isLocalEffortSlot) return
+    const isRung = (v: unknown): v is string => typeof v === 'string' && v !== '' && v !== 'none' && v !== 'minimal'
+    const kwRung = body.chat_template_kwargs?.reasoning_effort
+    const held = OpenAIProvider.engineEffortHeld.get(body)
+    if (!isRung(body.reasoning_effort) && !isRung(kwRung) && !isRung(held)) return
+    const levels = await this.templateLevels(model)
+    if (!levels) return
+    if (isRung(body.reasoning_effort)) {
+      const fit = fitRungToTemplate(body.reasoning_effort, levels)
+      if (fit === undefined) delete body.reasoning_effort
+      else body.reasoning_effort = fit
+    }
+    if (isRung(kwRung) && body.chat_template_kwargs) {
+      const fit = fitRungToTemplate(kwRung, levels)
+      if (fit === undefined) {
+        const rest = { ...body.chat_template_kwargs }
+        delete rest.reasoning_effort
+        body.chat_template_kwargs = rest
+      } else {
+        body.chat_template_kwargs = { ...body.chat_template_kwargs, reasoning_effort: fit }
+      }
+    }
+    if (isRung(held)) {
+      const fit = fitRungToTemplate(held, levels)
+      if (fit === undefined) OpenAIProvider.engineEffortHeld.delete(body)
+      else OpenAIProvider.engineEffortHeld.set(body, fit)
+    }
+  }
+
+  /** The template rungs per endpoint and model, five minutes like the other
+   *  server facts. Keyed by model as well: /props describes the model that
+   *  is loaded, and the LU Engine swaps models behind one port. */
+  private templateLevels(model: string): Promise<string[] | undefined> {
+    const key = `${this.baseUrl}|${model}`
+    const now = Date.now()
+    const hit = OpenAIProvider.templateLevelsCache.get(key)
+    if (hit && now - hit.at < 300_000) return hit.levels
+    // No caller signal: a Stop must not leave an empty answer cached. The
+    // probe has its own short timeout (probeInit).
+    const entry = { at: now, levels: this.probeJson(`${serverRoot(this.baseUrl)}/props`).then(templateEffortLevels) }
+    // No list is asked again after 30 s instead of 5 min: an engine that
+    // was still loading must not keep a template's rungs away for long.
+    void entry.levels.then((l) => { if (!l) entry.at = now - 270_000 })
+    OpenAIProvider.templateLevelsCache.set(key, entry)
+    return entry.levels
+  }
+
+  private static templateLevelsCache = new Map<string, { at: number; levels: Promise<string[] | undefined> }>()
+
+  /** The LU Engine or a server on this machine or the LAN, LU Cloud aside. */
+  private get isLocalEffortSlot(): boolean {
+    return this.config.managed === true || (this.isLanBackend && this.config.id !== 'lu-cloud')
+  }
+
+  /**
+   * Does this model's ladder wait for the user's own pick (3.0.7, after
+   * issue 176)? The global rung defaults to 'high', and before 3.0.7 no local
+   * server ever got it in a form it reads: the LU Engine and llama.cpp
+   * ignored the top-level field, so gpt-oss ran on its template's own Medium.
+   * Sending the default as a real rung would change speed and behaviour for
+   * everyone who never touched the button. So a ladder this client read from
+   * a local server stays off the wire until the user picked a rung there,
+   * and the request is the one from before 3.0.7 (LM Studio and KoboldCpp
+   * keep their top-level 'high', the engine gets nothing in the template).
+   */
+  private localEffortWaits(model: string, options?: ChatOptions): boolean {
+    if (options?.localEffortChosen === true) return false
+    if (!this.isLocalEffortSlot) return false
+    return !catalogEffort.has(this.catalogKey(model))
+  }
+
   /** Remember a walk, for one lane and one rung only. */
   private rememberEffort(key: string, lane: 'on' | 'off', value: 'minimal' | 'omit'): void {
     const prev = OpenAIProvider.effortMemory.get(key) ?? {}
@@ -585,7 +930,7 @@ export class OpenAIProvider implements ProviderClient {
    * at the first complaint: 'none', then 'minimal', then gone. The last step
    * also drops stream_options, the other field an endpoint that predates both
    * rejects. The LU Cloud proxy deliberately passes upstream 400 AND 422
-   * (DeepInfra's bad-parameter status) through so this path can engage.
+   * (the upstream's bad-parameter status) through so this path can engage.
    *
    * Only a request that then SUCCEEDS teaches us anything. A 400 for an
    * unrelated reason (an overlong context is the common one) walks the same
@@ -619,6 +964,8 @@ export class OpenAIProvider implements ProviderClient {
     )
     const refused = (res: Response) => !res.ok && (res.status === 400 || res.status === 422)
 
+    await this.fitEffortToTemplate(body, model)
+
     const asked = body.reasoning_effort
     // 'none' and 'minimal' are the two ways of saying off; every other rung is
     // the ON lane. Reading it off the value rather than off 'high' is what lets
@@ -646,6 +993,8 @@ export class OpenAIProvider implements ProviderClient {
     // the extra round trip is paid once and not on every message.
     if (!stopped() && refused(res) && 'chat_template_kwargs' in body) {
       delete body.chat_template_kwargs
+      const held = OpenAIProvider.engineEffortHeld.get(body)
+      if (held !== undefined) body.reasoning_effort = held
       res = await post()
       if (res.ok) OpenAIProvider.templateKwargsRefused.add(this.baseUrl)
     }
@@ -702,7 +1051,7 @@ export class OpenAIProvider implements ProviderClient {
 
   /**
    * Bound `max_tokens` so prompt + completion can never exceed the model's real
-   * context window. Some cloud backends (DeepInfra) otherwise default the
+   * context window. Some cloud backends otherwise default the
    * completion budget to nearly the whole window and then 400 the moment the
    * real prompt (agent system prompt + tool definitions) tips it over,    * surfaced as "[network] inference upstream error" on tool turns (Bug 5,
    * 2026-07-11). Under-estimating the context is safe (a shorter cap); we never
@@ -720,6 +1069,16 @@ export class OpenAIProvider implements ProviderClient {
     options?: ChatOptions,
   ): Promise<void> {
     const requested = options?.maxTokens && options.maxTokens > 0 ? options.maxTokens : 0
+    // LU Cloud sizes an absent budget itself: it clamps to the room the model
+    // has, and a free Flash request gets its 8192 default. Our own fallback of
+    // up to 32768 read there as an explicit wish, so Flash reserved four times
+    // what the web reserves for the same message and fell over to credits
+    // while the day's free allowance still had room (bug hunt 01.10.2026, H5).
+    // Only the user's own number goes up.
+    if (this.config.id === 'lu-cloud' && (requested === 0 || options?.maxTokensIsDefault)) {
+      delete body.max_tokens
+      return
+    }
     let ctxLen = 0
     let derivable = false
     // Audit: the probe behind this runs on the SEND path. Without the signal a
@@ -759,15 +1118,14 @@ export class OpenAIProvider implements ProviderClient {
       return
     }
     const RESERVE = 512
-    // Audit CS-1: count characters WITHOUT the base64 image payloads and charge
+    // Audit CS-1: count the text WITHOUT the base64 image payloads and charge
     // a flat per-image rate instead, see IMAGE_TOKEN_ESTIMATE. Counting the
     // data URLs as text made one screenshot look like ~34k tokens and starved
     // max_tokens down to the 256 floor on every model with a small window.
     const msgPayload = measurePayload(body.messages || '')
     const toolPayload = measurePayload(body.tools || '')
-    const promptChars = msgPayload.chars + toolPayload.chars
     const promptTokens =
-      Math.ceil(promptChars / 4) + (msgPayload.images + toolPayload.images) * IMAGE_TOKEN_ESTIMATE
+      msgPayload.tokens + toolPayload.tokens + (msgPayload.images + toolPayload.images) * IMAGE_TOKEN_ESTIMATE
     const headroom = Math.max(256, ctxLen - promptTokens - RESERVE)
     // Audit E6: an UNSET budget used to send the whole remaining window as
     // max_tokens, six figures on a 128k model. Servers that validate
@@ -782,24 +1140,33 @@ export class OpenAIProvider implements ProviderClient {
     messages: ChatMessage[],
     options?: ChatOptions,
   ): AsyncGenerator<ChatStreamChunk> {
+    messages = await resolveMessageAttachments(messages)
     const body: OpenAIChatRequest = {
       model,
       // Bug B3: one system message, first. The built-in engine and LM Studio
       // render the model's own Jinja template, which raises "System message
       // must be at the beginning" on anything else and kills the whole turn
       // before a byte streams. See providers/normalize-system.ts.
-      messages: this.templateContract(messages, (options?.tools?.length ?? 0) > 0).map(m => this.toOpenAIMessage(m)),
+      messages: this.templateContract(messages, (options?.tools?.length ?? 0) > 0, model).map(m => this.toOpenAIMessage(m)),
       stream: true,
     }
 
     if (options?.temperature !== undefined) body.temperature = options.temperature
     if (options?.topP !== undefined) body.top_p = options.topP
+    // A33: above temperature 1 the tail is held back, or the answer is noise.
+    const heldTopP = topPForTemperature(body.temperature, body.top_p)
+    if (heldTopP !== undefined) body.top_p = heldTopP
     // F3: temperature and top_p reached the request, top_k never did,
     // the sampling popup's slider promised an effect that never happened.
     // LU Cloud is excluded on purpose: its proxy protocol genuinely has no
     // such field (sampling-reaches-the-cloud-body.test.ts), unlike a real
     // self-hosted llama.cpp/vLLM/KoboldCpp/LM-Studio/built-in-engine server.
     if (options?.topK !== undefined && this.config.id !== 'lu-cloud') body.top_k = options.topK
+    // GH #175: the extra samplers, under the names this backend reads. A
+    // server on this machine or the LAN counts as local whether its preset
+    // said so or only its address does, an additional entry (#173) included.
+    if (options) Object.assign(body, openAiSamplerFields(this.samplerTarget, options))
+    this.applyCustomParams(body, options)
     // Streaming tool turn: same wire shape as chatWithTools, but the calls
     // come back as deltas which the accumulator below already merges.
     if (options?.tools?.length) {
@@ -817,8 +1184,15 @@ export class OpenAIProvider implements ProviderClient {
     // alone leaves the built-in engine's Think button doing nothing.
     const tmplKwargs = this.templateThinkingKwargs(options?.thinking)
     if (tmplKwargs) body.chat_template_kwargs = tmplKwargs
+    this.applyThinkBudget(body, options)
+    await this.applyLocalEffortForm(body, model, options)
+    await this.applyIdleTtl(body)
+    this.keepEffortOffEngineTopLevel(body)
+    // Round 10, phone only: the caller ends the messages with a cut answer
+    // and the engine of the phone goes on inside it. Absent on every other send.
+    if (options?.continueFinalMessage) body.continue_final_message = true
     // Ask the server for REAL token usage in a final stream chunk
-    // (choices:[] + usage:{...}). OpenAI, DeepInfra (LU Cloud), Groq, vLLM and
+    // (choices:[] + usage:{...}). OpenAI, LU Cloud, Groq, vLLM and
     // LM Studio all honor stream_options; an endpoint that rejects unknown
     // params 400/422s and the retry below drops it. Real usage is what keeps
     // the TokenCounter honest, a char/4 estimate can't see the system prompt.
@@ -828,6 +1202,8 @@ export class OpenAIProvider implements ProviderClient {
     // child to free VRAM ("reloads lazily on the next message"), this is that
     // lazy reload. Restart-before-send instead of letting the fetch hit a dead
     // 127.0.0.1:8127 and look like a crashed backend.
+    // A Create render may have moved this backend's model out (vram-handoff).
+    if (this.isLanBackend) await chatBackendsBack()
     if (this.config.managed === true) await ensureBuiltinEngineAlive(model)
 
     if (this.useLocalProxy) await ensureProxyAllowsHost(this.baseUrl)
@@ -839,6 +1215,11 @@ export class OpenAIProvider implements ProviderClient {
     const guard = idleAbortGuard(options?.signal)
     const repetitionStop = this.config.managed === true ? new RepetitionStop() : undefined
     const reasoningRepetitionStop = this.config.managed === true ? new RepetitionStop() : undefined
+    // A phone runs models small enough to fall into a loop inside one answer (lib/repetition-stop.ts, LoopStop).
+    // Only there: the desktop engine keeps exactly the rule it had.
+    const watchLoops = this.config.managed === true && singleModelSlot()
+    const loopStop = watchLoops ? new LoopStop() : undefined
+    const reasoningLoopStop = watchLoops ? new LoopStop() : undefined
     let res: Response
     try {
       res = await this.sendChat(model, body, guard.signal, fetcher)
@@ -854,7 +1235,9 @@ export class OpenAIProvider implements ProviderClient {
     const toolCallAccum: Map<number, { id: string; name: string; args: string }> = new Map()
     let promptTokens = 0
     let completionTokens = 0
+    let cachedTokens = 0
     let finishReason: string | undefined
+    const billing = chatBilling(res)
     const doneChunk = (fallbackReason: string): ChatStreamChunk => {
       const toolCalls = this.flushToolCalls(toolCallAccum)
       return {
@@ -864,11 +1247,17 @@ export class OpenAIProvider implements ProviderClient {
         finishReason: finishReason ?? fallbackReason,
         promptEvalCount: promptTokens || undefined,
         evalCount: completionTokens || undefined,
+        cachedPromptCount: cachedTokens || undefined,
+        billing,
       }
     }
 
     try {
-      for await (const event of parseSSEStream(res, { onIdle: guard.abort })) {
+      // Issue 177: a local backend may read a long prompt for many minutes
+      // before its first byte, so that wait follows the setting (0 = Off).
+      // Cloud endpoints keep the fixed first chunk budget of stream-idle.ts.
+      const firstChunkMs = this.isLanBackend ? chatFirstReplyMs(useSettingsStore.getState().settings) : undefined
+      for await (const event of parseSSEStream(res, { onIdle: guard.abort, firstChunkMs })) {
         if (event.data === '[DONE]') {
           yield doneChunk('stop')
           return
@@ -893,10 +1282,16 @@ export class OpenAIProvider implements ProviderClient {
         // text-only model returns `event: error` with HTTP 200 (2026-06-21).
         const streamErr = chunk.error
         if (streamErr) {
-          throw new Error(
+          // The server's code travels with the error, so the retry ladder can
+          // tell a step it must not repeat (LU Cloud `stalled_runaway`: ten
+          // minutes of output nobody saw) from a dropped line.
+          const serverCode = typeof streamErr === 'string' ? undefined : asString(prop(streamErr, 'code')) || undefined
+          throw new ProviderError(
             typeof streamErr === 'string'
               ? streamErr
-              : (asString(prop(streamErr, 'message')) || 'Streaming error'),
+              : withContextNumbers(asString(prop(streamErr, 'message')) || 'Streaming error', streamErr),
+            'openai',
+            serverCode,
           )
         }
 
@@ -906,6 +1301,7 @@ export class OpenAIProvider implements ProviderClient {
         if (u) {
           promptTokens = u.prompt_tokens || promptTokens
           completionTokens = u.completion_tokens || completionTokens
+          cachedTokens = cachedPromptTokensOf(u) || cachedTokens
         }
 
         const choice = chunk.choices?.[0]
@@ -914,7 +1310,7 @@ export class OpenAIProvider implements ProviderClient {
         // Capture WHY the model stopped ('stop', 'length', 'content_filter').
         // 'length' with zero content is the reasoning-loop failure mode: the
         // whole token budget went into thinking and no answer was ever written
-        // (David, cloud Qwen3.6, 2026-07-12), the chat layer needs the reason
+        // (the owner, cloud Qwen3.6, 2026-07-12), the chat layer needs the reason
         // to explain the empty bubble.
         if (choice.finish_reason) finishReason = choice.finish_reason
 
@@ -922,11 +1318,15 @@ export class OpenAIProvider implements ProviderClient {
 
         // Yield native reasoning as `thinking` so the panel fills live,
         // without this the entire reasoning phase of a cloud reasoner is
-        // silently dropped and the chat sits in dead air (uselu fc55c91).
+        // silently dropped and the chat sits in dead air (the web app).
         const reasoning = choice.delta?.reasoning_content ?? choice.delta?.reasoning ?? ''
         if (repetitionStop?.push(content) || reasoningRepetitionStop?.push(reasoning)) {
           guard.abort()
-          throw new Error('Generation stopped because the local model repeated question marks continuously. Try setting GPU Layers to 0 in LU Engine settings, or verify and download the model again.')
+          throw new Error(platformText('repeatedQuestionMarks'))
+        }
+        if (loopStop?.push(content) || reasoningLoopStop?.push(reasoning)) {
+          guard.abort()
+          throw new Error(MOBILE_TEXT.repeatedOutput)
         }
         if (reasoning) {
           yield { content: '', thinking: reasoning, done: false }
@@ -955,6 +1355,8 @@ export class OpenAIProvider implements ProviderClient {
                 args: tc.function?.arguments || '',
               })
             }
+            const call = toolCallAccum.get(key)
+            if (call?.name) yield { content: '', toolProgress: { name: call.name, argsChars: call.args.length }, done: false }
           }
         }
 
@@ -973,6 +1375,9 @@ export class OpenAIProvider implements ProviderClient {
       // terminal chunk as a clean cut, so the chat layer explains it the same
       // way instead of throwing a raw error at the user.
       if (isStreamIdleTimeout(err)) {
+        // The only trace a silent cut leaves: the chat shows "disconnected",
+        // the support log says which watchdog and after how long.
+        log.warn('provider.stream_idle_timeout', { provider: this.config.id, idleMs: err.idleMs })
         yield doneChunk('disconnect')
         return
       }
@@ -995,11 +1400,12 @@ export class OpenAIProvider implements ProviderClient {
     messages: ChatMessage[],
     tools: ToolDefinition[],
     options?: ChatOptions,
-  ): Promise<{ content: string; toolCalls: ToolCall[]; promptEvalCount?: number; evalCount?: number; thinking?: string }> {
+  ): Promise<{ content: string; toolCalls: ToolCall[]; promptEvalCount?: number; evalCount?: number; cachedPromptCount?: number; thinking?: string; billing?: ChatBilling }> {
+    messages = await resolveMessageAttachments(messages)
     const body: OpenAIChatRequest = {
       model,
       // Bug B3: same invariant as chatStream, see providers/normalize-system.ts.
-      messages: this.templateContract(messages, tools.length > 0).map(m => this.toOpenAIMessage(m)),
+      messages: this.templateContract(messages, tools.length > 0, model).map(m => this.toOpenAIMessage(m)),
       stream: false,
     }
 
@@ -1010,12 +1416,18 @@ export class OpenAIProvider implements ProviderClient {
 
     if (options?.temperature !== undefined) body.temperature = options.temperature
     if (options?.topP !== undefined) body.top_p = options.topP
+    // A33: above temperature 1 the tail is held back, or the answer is noise.
+    const heldTopP = topPForTemperature(body.temperature, body.top_p)
+    if (heldTopP !== undefined) body.top_p = heldTopP
     // F3: temperature and top_p reached the request, top_k never did,
     // the sampling popup's slider promised an effect that never happened.
     // LU Cloud is excluded on purpose: its proxy protocol genuinely has no
     // such field (sampling-reaches-the-cloud-body.test.ts), unlike a real
     // self-hosted llama.cpp/vLLM/KoboldCpp/LM-Studio/built-in-engine server.
     if (options?.topK !== undefined && this.config.id !== 'lu-cloud') body.top_k = options.topK
+    // GH #175: the extra samplers, under the names this backend reads.
+    if (options) Object.assign(body, openAiSamplerFields(this.samplerTarget, options))
+    this.applyCustomParams(body, options)
     await this.applyMaxTokens(model, body, options)
     // Same reasoning_effort gate as chatStream.
     const effort = this.thinkingEffort(model, options?.thinking, options)
@@ -1023,9 +1435,18 @@ export class OpenAIProvider implements ProviderClient {
     // Same template-kwargs gate as chatStream.
     const tmplKwargs = this.templateThinkingKwargs(options?.thinking)
     if (tmplKwargs) body.chat_template_kwargs = tmplKwargs
+    this.applyThinkBudget(body, options)
+    await this.applyLocalEffortForm(body, model, options)
+    await this.applyIdleTtl(body)
+    this.keepEffortOffEngineTopLevel(body)
+    if (options?.jsonSchema && this.config.id !== 'lu-cloud') {
+      body.response_format = { type: 'json_schema', json_schema: { name: 'answer', schema: options.jsonSchema } }
+    }
 
     // Same self-heal as chatStream: agent/tool turns after a Create render
     // must revive the offloaded built-in engine before hitting its port.
+    // A Create render may have moved this backend's model out (vram-handoff).
+    if (this.isLanBackend) await chatBackendsBack()
     if (this.config.managed === true) await ensureBuiltinEngineAlive(model)
 
     if (this.useLocalProxy) await ensureProxyAllowsHost(this.baseUrl)
@@ -1057,11 +1478,31 @@ export class OpenAIProvider implements ProviderClient {
       toolCalls,
       promptEvalCount: usage?.prompt_tokens,
       evalCount: usage?.completion_tokens,
+      cachedPromptCount: usage ? cachedPromptTokensOf(usage) || undefined : undefined,
       thinking: message?.reasoning_content || message?.reasoning || undefined,
+      billing: chatBilling(res),
     }
   }
 
   async listModels(): Promise<ProviderModel[]> {
+    const listed = await this.listedModels()
+    // GitHub #112: ids this endpoint serves without listing them.
+    const extra = useSettingsStore.getState().settings.extraModelIds?.[endpointKey(this.baseUrl)] ?? []
+    const rows = withExtraModels(listed, extra, (id) => ({
+      id,
+      name: id,
+      provider: 'openai' as const,
+      providerName: this.config.name,
+      contextLength: KNOWN_CONTEXT[id] ?? guessContextFromName(id),
+      supportsTools: true,
+    }))
+    // GitHub #173: every row of an additional entry names that entry, so its
+    // picker id routes back here and not to the original slot.
+    const entryId = this.config.entryId
+    return entryId ? rows.map((m) => ({ ...m, entryId })) : rows
+  }
+
+  private async listedModels(): Promise<ProviderModel[]> {
     if (this.useLocalProxy) await ensureProxyAllowsHost(this.baseUrl)
     const fetcher = this.useLocalProxy ? localFetch : fetch
     const res = await fetcher(`${this.baseUrl}/models`, {
@@ -1102,9 +1543,15 @@ export class OpenAIProvider implements ProviderClient {
         // the composer drew no effort control at all). Measured on the 2.6.8
         // Mac bundle, 2026-09-02.
         this.rememberCatalog(m)
+        // Issue 176: a local server declares no rungs in /v1/models, so they
+        // are read from where that server keeps them (lib/local-effort.ts).
+        const localEffort = m.reasoning_effort_levels || this.config.id === 'lu-cloud'
+          ? undefined
+          : await this.localEffortFor(m.id)
         return {
           id: m.id,
-          name: m.name ?? m.id,
+          name: m.native_name ?? m.name ?? m.id,
+          catalogName: catalogNameOf(m),
           provider: 'openai' as const,
           providerName: this.config.name,
           // The declared window comes BEFORE the probe: a server that already
@@ -1121,11 +1568,18 @@ export class OpenAIProvider implements ProviderClient {
             ? lanCaps.get(m.id)!.includes('tool_use')
             : (serverTools ?? m.supports_tools ?? true),
           supportsVision: m.input_modalities?.includes('image') || undefined,
+          createInChat: m.create_in_chat,
+          limitedCapacity: m.limited_capacity === true ? true : undefined,
           thinkMode: m.think,
           flash: this.config.apiKey?.startsWith('lu_') ? undefined : parseFlashPolicy(m.flash, m.usage_class, this.catalogKey(m.id)),
           unfiltered: asUnfiltered(m.unfiltered),
-          effortLevels: m.reasoning_effort_levels,
+          unrestricted: m.unrestricted === true ? true : undefined,
+          effortLevels: m.reasoning_effort_levels ?? localEffort?.levels,
           effortDefault: m.reasoning_effort_default,
+          effortNote: m.reasoning_effort_levels ? undefined : localEffort?.note,
+          effortLocal: !m.reasoning_effort_levels && localEffort?.levels ? true : undefined,
+          declaredContext: declaredContextOf(m),
+          creditRates: m.credit_rates,
         }
       }))
     }
@@ -1137,7 +1591,8 @@ export class OpenAIProvider implements ProviderClient {
       this.rememberCatalog(m)
       return {
         id: m.id,
-        name: m.name ?? m.id,
+        name: m.native_name ?? m.name ?? m.id,
+        catalogName: catalogNameOf(m),
         provider: 'openai' as const,
         providerName: this.config.name,
         contextLength: m.context_length ?? KNOWN_CONTEXT[m.id] ?? guessContextFromName(m.id),
@@ -1147,14 +1602,19 @@ export class OpenAIProvider implements ProviderClient {
         // Fallback `true` keeps older deployments (no field) optimistic.
         supportsTools: m.supports_tools ?? true,
         supportsVision: m.input_modalities?.includes('image') || undefined,
+        createInChat: m.create_in_chat,
+        limitedCapacity: m.limited_capacity === true ? true : undefined,
         thinkMode: m.think,
         flash: this.config.apiKey?.startsWith('lu_') ? undefined : parseFlashPolicy(m.flash, m.usage_class, this.catalogKey(m.id)),
         unfiltered: asUnfiltered(m.unfiltered),
+          unrestricted: m.unrestricted === true ? true : undefined,
         // Straight through, no invention: a server that does not declare the
         // ladder leaves both undefined, and undefined is what switches the
         // whole effort feature off for this model.
         effortLevels: m.reasoning_effort_levels,
         effortDefault: m.reasoning_effort_default,
+        declaredContext: declaredContextOf(m),
+        creditRates: m.credit_rates,
       }
     })
   }
@@ -1263,6 +1723,24 @@ export class OpenAIProvider implements ProviderClient {
     let ceiling: number | null = null
     const under = (n: number | null) => Math.max(ceiling ?? 0, n ?? 0) || null
 
+    // Die eingebaute Engine ist ein llama-server, den die App selbst startet.
+    // Zwei Dinge folgen daraus (Befund vom ersten Geraetestart, r2/rust.md 3.2):
+    //   a) Solange sie nicht laeuft, gibt es niemanden zu fragen. Jede Anfrage
+    //      waere ein abgelehnter Verbindungsaufbau und eine Fehlerzeile in der
+    //      Konsole. Die leere Antwort wird NICHT abgelegt, damit die naechste
+    //      Frage nach dem Start die echte Zahl holt.
+    //   b) LM Studios und KoboldCpps Pfade und `/v1/models/<id>` kennt sie nie.
+    //      Gefragt wird `/props` (das geladene Fenster) und, wenn das nichts
+    //      sagt, die Modellliste (`meta.n_ctx`), beides llama.cpp.
+    if (this.config.managed === true) {
+      if ((await builtinEngineRunning()) === false) return { window: null, trained: null }
+      const ownProps = parseLlamaCppProps(await this.serverFact('props', `${root}/props`, signal))
+      if (ownProps) return remember(ownProps, ceiling)
+      const ownList = parseModelsListContext(await this.serverFact('models', `${v1}/models`, signal), model)
+      ceiling = under(ownList.trained)
+      return remember(ownList.window ?? null, ceiling)
+    }
+
     const lms = parseLmStudioModel(await this.probeJson(`${root}/api/v0/models/${id}`, signal))
     ceiling = under(lms.max)
     if (lms.loaded) return remember(lms.loaded, ceiling)
@@ -1301,7 +1779,7 @@ export class OpenAIProvider implements ProviderClient {
    * Werkzeugfrage aus G37: dieselbe Antwort, zwei Leser, eine Anfrage.
    */
   private async serverFact(
-    kind: 'props' | 'models' | 'kobold',
+    kind: ServerFactKind,
     url: string,
     signal?: AbortSignal,
   ): Promise<unknown> {
@@ -1324,7 +1802,7 @@ export class OpenAIProvider implements ProviderClient {
   /** Server-weite Metadaten je Endpunkt (GH #129), siehe `serverFact`. */
   private static serverFacts = new Map<
     string,
-    { at: number; asked: Partial<Record<'props' | 'models' | 'kobold', Promise<unknown>>> }
+    { at: number; asked: Partial<Record<ServerFactKind, Promise<unknown>>> }
   >()
 
   /**
@@ -1608,6 +2086,12 @@ export class OpenAIProvider implements ProviderClient {
       m.tool_call_id = msg.tool_call_id
     }
 
+    // The step's own reasoning, where the provider asks for it
+    // (lib/agent-core/reasoning-replay.ts).
+    if (this.config.replayReasoning && msg.role === 'assistant' && msg.reasoning) {
+      m.reasoning_content = msg.reasoning
+    }
+
     return m
   }
 
@@ -1677,7 +2161,7 @@ export class OpenAIProvider implements ProviderClient {
       // R5-16: der Server schickt `detail` als Geschwister von `error`, und der
       // Desktop las es nicht. Genau dort steht die Haelfte, die dem Nutzer sagt,
       // was er tun kann; uebrig blieb der blanke Satz. Das Web haengt es seit
-      // jeher an (`apps/web/api/providers/openai-provider.ts`).
+      // jeher an (the web app).
       const detail = typeof data.detail === 'string' && data.detail.trim()
         ? ` (${data.detail.slice(0, 200)})`
         : ''
@@ -1692,7 +2176,7 @@ export class OpenAIProvider implements ProviderClient {
       } else if (err && typeof err === 'object') {
         const eo = err as { message?: string; code?: string }
         if (eo.message) {
-          message = eo.message
+          message = withContextNumbers(eo.message, err)
           hasServerMessage = true
         }
         if (eo.code) code = eo.code
@@ -1712,12 +2196,18 @@ export class OpenAIProvider implements ProviderClient {
       if (!hasServerMessage) message = `Invalid API key for ${this.config.name}. Check Settings > Providers.`
     } else if (res.status === 429) {
       code = 'rate_limit'
-      if (!hasServerMessage) message = `Rate limited by ${this.config.name}. Wait a moment and try again.`
+      // The server's sentence word for word; our own only when it sent none
+      // or just the status label (lib/request-limit.ts).
+      message = requestLimitMessage({
+        said: hasServerMessage ? message : '',
+        retryAfterMs: parseRetryAfter(res),
+        nothingCharged: this.config.id === 'lu-cloud',
+      })
     } else if (res.status === 404) {
       code = 'not_found'
     }
 
-    // A tool-augmented request rejected for the tools themselves. DeepInfra /
+    // A tool-augmented request rejected for the tools themselves. LU Cloud
     // LU Cloud answer 405 for a model without function calling; some servers
     // 400/404/422 with a tool/function message. Tag it 'tools_unsupported' so
     // the chat layer shows a clean "this model can't do tool calling" note (and
@@ -1733,6 +2223,12 @@ export class OpenAIProvider implements ProviderClient {
     // honest, user-facing `error` line (already captured as `message`).
     if (serverCode === 'model_no_tools') code = 'tools_unsupported'
     else if (serverCode === 'model_no_vision') code = 'vision_unsupported'
+    // A request without streaming that LU Cloud ended after ten minutes with
+    // nothing to show; lib/http-status treats it as terminal.
+    else if (serverCode === 'stalled_runaway') code = 'stalled_runaway'
+    // Issue 177: a local server sent nothing within Chat Reply Timeout
+    // (api/backend.ts). Terminal for the agent's retry ladder.
+    else if (serverCode === FIRST_REPLY_TIMEOUT) code = FIRST_REPLY_TIMEOUT
     else if (serverCode === 'credits_exhausted') {
       // Out of credits, top-up wallet empty (HTTP 429). Raise the global
       // signal so the "Load up your credits" dialog opens on top of the

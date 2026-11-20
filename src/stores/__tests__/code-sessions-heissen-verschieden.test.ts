@@ -3,7 +3,7 @@
  *
  * ── DER BEFUND ─────────────────────────────────────────────────────────────
  *
- * David am 02.09.2026: "Code bereich heisst im Chat immer nur Coding Chat. da
+ * Am 02.09.2026: "Code bereich heisst im Chat immer nur Coding Chat. da
  * brauchen wir das selbe verhalten wie im normalen Chat, das sauber erkennbar
  * ist, welche Session, welche war."
  *
@@ -34,7 +34,7 @@
  * Remote-Chats heissen weiter 'Remote Chat 1', '… 2', '… 3'. Sie tragen eine
  * laufende Nummer, sind also bereits unterscheidbar — das war eine bewusste
  * frühere Entscheidung ("Auto-number remote chats so users can distinguish
- * sessions in the sidebar"), und Davids Auftrag nannte den Code-Bereich. Die
+ * sessions in the sidebar"), und der Auftrag nannte den Code-Bereich. Die
  * Zusicherung unten haelt das fest, damit die Auslassung als Entscheidung
  * lesbar bleibt und nicht als vergessener Fall.
  *
@@ -69,7 +69,7 @@ describe('Eine Code-Sitzung heisst nach ihrer ersten Nachricht', () => {
   })
 
   it('zwei Code-Sitzungen heissen verschieden — der eigentliche Zweck', () => {
-    // Die Zusicherung, die Davids Satz woertlich nimmt: "das sauber erkennbar
+    // Die Zusicherung, die den Satz des Inhabers woertlich nimmt: "das sauber erkennbar
     // ist, welche Session, welche war". Vorher waren beide 'Coding Agent'.
     const a = useChatStore.getState().createConversation('gemma4', '', 'codex')
     const b = useChatStore.getState().createConversation('gemma4', '', 'codex')

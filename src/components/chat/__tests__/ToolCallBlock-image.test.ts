@@ -26,10 +26,10 @@ describe('comfyViewUrlFromResult', () => {
       expect(comfyViewUrlFromResult(url)).toBe(url)
     })
 
-    // The exact bug konata hit: the web build talks to ComfyUI through the
+    // The exact bug a user hit: the web build talks to ComfyUI through the
     // Vite "/comfyui" proxy, so the result URL is RELATIVE. The old regex
     // (http://localhost only) never matched it → no image.
-    it('returns the /comfyui/view proxy path (konata regression)', () => {
+    it('returns the /comfyui/view proxy path (a user regression)', () => {
       const url = '/comfyui/view?filename=locally_uncensored_00018_.png&subfolder=&type=output'
       expect(comfyViewUrlFromResult(url)).toBe(url)
     })
@@ -93,8 +93,8 @@ describe('comfyViewUrlFromResult', () => {
       )
     })
 
-    // Web/dev (Vite proxy) shape — exactly what konata pasted on Discord.
-    it('extracts the relative proxy URL from the konata result string', () => {
+    // Web/dev (Vite proxy) shape — exactly what a user pasted on Discord.
+    it('extracts the relative proxy URL from the reported result string', () => {
       const result =
         'Image generated: locally_uncensored_00018_.png (prompt: "...")\n' +
         '/comfyui/view?filename=locally_uncensored_00018_.png&subfolder=&type=output'
@@ -131,7 +131,7 @@ describe('isInlineVideoUrl', () => {
   })
 })
 
-// David 2026-06-12: the inline image/video gets a Download button that pulls the
+// 2026-06-12: the inline image/video gets a Download button that pulls the
 // ComfyUI filename/subfolder/type back out of the /view URL.
 describe('comfyViewParams', () => {
   it('parses an absolute /view URL (drops the cache-buster)', () => {

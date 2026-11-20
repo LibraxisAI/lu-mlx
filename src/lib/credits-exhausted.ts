@@ -6,13 +6,14 @@
 // new dependencies.
 
 import { CLOUD_BASE } from '../api/cloud/config'
+import { cloudLink } from './cloud-links'
 
 export const CREDITS_EXHAUSTED_EVENT = 'lu:credits-exhausted'
 
 /** Which cap said no, drives the dialog title and copy. 'credits' = the
  *  shared pool, 'video_budget' = the monthly video sub-budget (top-ups
  *  bypass it), 'trainings' = no included run remains and the top-up wallet
- *  cannot cover the selected training. Matches apps/web/lib/credits-
+ *  cannot cover the selected training. Matches the web app-
  *  exhausted.ts, so the same server code reads the same on both apps
  *  (R5-51). */
 export type ExhaustedReason = 'credits' | 'video_budget' | 'trainings'
@@ -20,7 +21,7 @@ export type ExhaustedReason = 'credits' | 'video_budget' | 'trainings'
 /**
  * Wohin der Knopf fuehrt: auf die Preisseite, nicht in einen Kauf.
  *
- * R5-51, Entscheid David vom 12.09.2026. Der Knopf ging bis dahin auf die
+ * R5-51, Entscheid vom 12.09.2026. Der Knopf ging bis dahin auf die
  * Aufladeseite, also mitten in einen Kauf hinein, und traf damit fuer den
  * Kunden eine Entscheidung, die er noch gar nicht getroffen hatte: wer leer
  * ist, hat die Wahl zwischen einem Plan und einem Paket, und die Uebersicht
@@ -31,6 +32,11 @@ export type ExhaustedReason = 'credits' | 'video_budget' | 'trainings'
  * gegen einen lokalen Server nicht in die Live-Seite laeuft.
  */
 export const PRICING_URL = `${CLOUD_BASE}/pricing`
+
+/** The same page for the dialog's button, with where the click came from
+ *  (lib/cloud-links). The sentence in the transcript keeps the plain address:
+ *  it is read, not clicked, and a query string there is noise. */
+export const PRICING_LINK = cloudLink('/pricing', 'credits-empty')
 
 export function signalCreditsExhausted(reason: ExhaustedReason = 'credits'): void {
   if (typeof window !== 'undefined') {

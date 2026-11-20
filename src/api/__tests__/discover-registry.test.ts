@@ -423,6 +423,8 @@ describe('discover — data validation', () => {
         expect(m.downloadUrl, `${m.name}: projector without a model file`).toBeTruthy()
         expect(m.filename, `${m.name}: projector without a model filename`).toBeTruthy()
         expect(m.mmprojSizeGB, `${m.name}: projector size`).toBeGreaterThan(0)
+        // N1: LFM3 Audio's projector is a sound part (Audio, not Vision).
+        if (m.tags.includes('Audio') && !m.tags.includes('Vision')) continue
         expect(m.tags, `${m.name}: projector but no Vision tag`).toContain('Vision')
       }
     })
@@ -462,7 +464,8 @@ describe('discover — data validation', () => {
       expect(plan[0]).toEqual({ url: vision.downloadUrl, filename: vision.filename, expectedBytes: 100 })
       expect(plan[1].url).toBe(vision.mmprojUrl)
       expect(plan[1].filename).toBe(mmprojFileName(vision.filename!))
-      expect(plan[1].expectedBytes).toBe(Math.round(vision.mmprojSizeGB! * 1_073_741_824))
+      expect(plan[1].expectedBytes).toBe(vision.mmprojBytes)
+      expect(plan[1].sha256).toBe(vision.mmprojSha256)
     })
 
     it('follows the RESOLVED model name, not the catalog guess', () => {

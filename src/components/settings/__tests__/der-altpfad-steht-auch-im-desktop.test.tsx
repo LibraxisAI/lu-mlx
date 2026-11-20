@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * R5-30, Entscheid David vom 12.09.2026: der Desktop bekommt den Altpfad fuer
+ * R5-30, Entscheid vom 12.09.2026: der Desktop bekommt den Altpfad fuer
  * alte Cloud-Erinnerungen, den bis dahin nur das Web hatte.
  *
  * Vor dem heutigen Protokoll lag die Kontosammlung als EIN Blob in der Wolke.
@@ -102,7 +102,7 @@ describe('der Altpfad in den Erinnerungseinstellungen', () => {
   })
 
   it('traegt die Aufschriften des Webs, nicht mehr die alten kurzen', async () => {
-    // Paritaet mit apps/web/components/settings/MemorySettings.tsx auf
+    // Paritaet mit the web app auf
     // ef0d616a: dort heissen die zwei Knoepfe "Review previous cloud copy for
     // removal" und "Remove previous cloud copy". Der Desktop hat sie
     // abgekuerzt, und der Bericht hat trotzdem "wortgleich mit dem Web"
@@ -122,7 +122,7 @@ describe('der Altpfad in den Erinnerungseinstellungen', () => {
     // "Sync account memoriesReview previous cloud copy for removal", eine
     // einzige unterstrichene Zeile, die wie ein Link aussah. Zwei Inline-Knoepfe
     // ohne Luft dazwischen. Das Web setzt an denselben Stellen mr-3 und block
-    // (apps/web/components/settings/MemorySettings.tsx:272 und :277 auf
+    // (the web app und :277 auf
     // 224f923d). textContent allein beweist hier nichts: Klassen schreiben
     // keinen Text, der Elternknoten klebt die zwei Aufschriften in textContent
     // immer zusammen. Deshalb Elemente, Klassen und die Lesart oben.

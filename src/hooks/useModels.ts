@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo } from 'react'
 import { listModels, pullModel as pullModelApi, pullModelTauri, deleteModel as deleteModelApi } from '../api/ollama'
 import { isTauri, backendCall } from '../api/backend'
+import { isMobile } from '../lib/device-kind'
+import { singleModelSlot } from '../lib/capabilities'
 import {
   inventoryOwesRetry, refetchWhenComfyReady, type ComfyReadyStatus,
 } from '../lib/comfy-ready-retry'
@@ -13,8 +15,8 @@ import {
 import { parseNDJSONStream } from '../api/stream'
 import { log } from '../lib/logger'
 import { cloudModelRow } from '../lib/cloud-model-row'
-import { runEngineResume, engineResumeIsOwed, spendEngineResume } from '../lib/engine-resume-policy'
-import { engineStartIsWorthRetrying } from '../lib/engine-start-failure'
+import { engineResumeIsOwed, spendEngineResume } from '../lib/engine-resume-policy'
+import { applyEngineThinking, preloadChatModel } from '../lib/engine-view'
 import { commandIsUnavailable } from '../lib/engine-command-availability'
 import { dropDuplicateLuEngineRows, dropStandbyRowsServedByLuEngine, LU_ENGINE_GROUP, zeileZumEinklappen } from '../lib/lu-engine-rows'
 import { isLmStudioEntry, isBuiltinEngineEntry, type InstalledModelLike } from '../lib/lmstudio-match'
@@ -29,15 +31,17 @@ import { tryAcquireLuEngineSwap, releaseLuEngineSwap } from '../api/lu-engine-sw
 import { useModelStore } from '../stores/modelStore'
 import { errorText } from '../types/json-guards'
 import { useProviderStore } from '../stores/providerStore'
+import { syncOllamaBaseFromRust } from '../lib/ollama-host-sync'
 import { useSettingsStore } from '../stores/settingsStore'
-import { getEnabledProviders, prefixModelName, getProviderIdFromModel } from '../api/providers'
+import { getEnabledProviders, prefixModelName, getProviderIdFromModel, isOpenAISlotModel } from '../api/providers'
 import {
   listBundledModels, bundledToAIModels, activateBuiltinModel, isManagedBuiltinActive,
-  bundledEngineStatus, bundledEmbedStatus, startBundledEmbed,
+  bundledEmbedStatus, startBundledEmbed,
   isEmbeddingGgufName as isEmbeddingModel,
 } from '../api/engine'
 import type { BundledModel } from '../api/engine'
 import type { PullProgress, AIModel, ModelCategory, ImageModel, VideoModel, CloudModel, ComfyModelSource } from '../types/models'
+import { fileFormat } from '../lib/model-file-format'
 
 
 // Boot-resume for the managed built-in engine (2.5.7): the llama-server
@@ -56,7 +60,6 @@ import type { PullProgress, AIModel, ModelCategory, ImageModel, VideoModel, Clou
 // until they re-picked the model by hand. Bounded on purpose, because the
 // other failure (a model this box genuinely cannot load) must not turn into an
 // endless restart loop. The policy lives in lib/engine-resume-policy.
-const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 async function resumeBuiltinEngines(bundled: BundledModel[]) {
   // The embeddings server is a different process on a different port with a
@@ -64,42 +67,19 @@ async function resumeBuiltinEngines(bundled: BundledModel[]) {
   // attempts. Waiting its turn is how a slow chat start used to take
   // Document-Chat down with it (review S3).
   const embedResumed = resumeEmbedServer(bundled)
-  // Der letzte Wurf, damit ein aufgegebener Wiederanlauf denselben Satz sagen
-  // kann wie jeder andere Fehlstart. Vorher stand er nur im Logbuch, und der
-  // Nutzer sass vor einem Chat, der ohne ein Wort nicht antwortete.
-  let letzterFehler: unknown = null
-  const outcome = await runEngineResume({
-    status: () => bundledEngineStatus(),
-    eligible: () => {
-      const { activeModel } = useModelStore.getState()
-      return (
-        !!activeModel &&
-        getProviderIdFromModel(activeModel) === 'openai' &&
-        bundled.some((m) => prefixModelName('openai', m.name) === activeModel)
-      )
-    },
-    activate: () => activateBuiltinModel(useModelStore.getState().activeModel as string),
-    // Only a start that DIED is worth repeating. A health-budget timeout means
-    // the engine is still loading, and repeating it spends the whole budget
-    // again (up to ten minutes on a big GGUF) plus another ComfyUI cache drop
-    // and another Ollama eviction (review S3).
-    worthRetrying: engineStartIsWorthRetrying,
-    sleep: wait,
-    onError: (attempt, err) => {
-      letzterFehler = err
-      log.warn('[useModels] LU Engine resume failed', { attempt, err })
-    },
+  // The chat engine itself: lib/engine-view.ts is the ONE place that loads the
+  // chosen model ahead of the first message, at start (here) and when a chat
+  // is opened on a phone. On a desktop it runs the bounded resume that used
+  // to stand in this function, unchanged: only an engine that reports
+  // running:false is started, a start that died is repeated up to three
+  // times (lib/engine-resume-policy), and a resume that gave up says so on
+  // the standing line above the composer. On a phone it asks first whether
+  // the model fits into memory.
+  await preloadChatModel('start', {
+    installed: (activeModel) =>
+      getProviderIdFromModel(activeModel) === 'openai' &&
+      bundled.some((m) => prefixModelName('openai', m.name) === activeModel),
   })
-  log.info('[useModels] LU Engine resume', outcome)
-  // Aufgegeben heisst: die App hat es versucht, der Motor laeuft nicht, und
-  // niemand hat es angestossen. Genau dann gehoert der Satz auf die stehende
-  // Zeile ueber dem Eingabefeld, wortgleich mit dem Fehlstart aus dem Waehler
-  // (api/lu-engine-switch), samt dem Satz, den llama-server selbst geschickt
-  // hat.
-  if (outcome.outcome === 'gave-up' && letzterFehler) {
-    const gewaehlt = useModelStore.getState().activeModel
-    if (gewaehlt) announceLuEngineStartFailure(gewaehlt, letzterFehler, false)
-  }
   await embedResumed
 }
 
@@ -120,8 +100,9 @@ let comfyRetryRunning = false
  */
 function armComfyInventoryRetry(refetch: () => Promise<void>): void {
   if (comfyRetryRunning) return
-  // Mac is connect-only, not "no ComfyUI": a user instance still
-  // needs the second inventory pass when the first poll raced startup.
+  // Mac is connect-only, not "no ComfyUI": a user instance still needs the
+  // second inventory pass on desktop when the first poll raced startup.
+  if (isMobile()) return
   comfyRetryRunning = true
   useModelStore.getState().beginInventoryRefresh()
   void refetchWhenComfyReady({
@@ -160,6 +141,10 @@ export function __resetComfyInventoryRetryForTests(): void {
 let embedResumeLaeuft = false
 
 async function resumeEmbedServer(bundled: BundledModel[]) {
+  // One model slot (lib/model-slot.ts): on a phone the embedder is loaded by
+  // Document Chat when it needs it, never by a model refresh. Started here it
+  // would sit in memory beside the chat model without anyone having asked.
+  if (singleModelSlot()) return
   if (embedResumeLaeuft) return
   embedResumeLaeuft = true
   try {
@@ -224,14 +209,21 @@ export function useModels() {
     // Installed cards, and was right again five seconds later).
     useModelStore.getState().beginInventoryRefresh()
     try {
+      // Erst Rusts Ollama-Adresse (config.json > OLLAMA_HOST), dann fragen.
+      // Der erste Abruf beim Kaltstart lief sonst vor AppShells pullAndArm und
+      // las ein anderes Ollama; dessen Liste warf die gespeicherte Wahl weg.
+      // Einmal pro Fenster gemerkt, ausserhalb von Tauri sofort fertig.
+      if (useProviderStore.getState().providers.ollama.enabled) await syncOllamaBaseFromRust()
       const allModels: AIModel[] = []
       // Built-in engine (2.5.7): when the managed OpenAI-compat backend is the
       // active provider, its model list is the downloaded GGUFs (via the Tauri
       // `list_bundled_models` command), NOT `/v1/models` (which reports only the
       // single loaded model). Skip the openai client's listModels for it.
       const managedBuiltin = isManagedBuiltinActive()
+      // Only the slot itself is the engine; an additional OpenAI-compatible
+      // entry (GitHub #173) lists its own models as usual.
       const providers = getEnabledProviders().filter(
-        (p) => !(managedBuiltin && p.id === 'openai'),
+        (p) => !(managedBuiltin && p.id === 'openai' && !p.entryId),
       )
       const providerResults = await Promise.allSettled(
         providers.map(async (provider) => {
@@ -312,9 +304,9 @@ export function useModels() {
       // LU Engine model list (the downloaded GGUFs and the user's own folder).
       //
       // A14 (2.6.8): asked whether or not the LU Engine is the active chat
-      // backend. It used to be asked only while it was, so on David's Mac with
+      // backend. It used to be asked only while it was, so on the owner's Mac with
       // Ollama in front, the GGUF in his own model folder existed on disk,
-      // Model Storage promised in writing that the folder is read, and the
+      // Storage promised in writing that the folder is read, and the
       // file appeared nowhere. The command answering at all IS the presence
       // check for the engine: it is a Tauri command with no bridge route, so
       // the web and remote-bridge builds, which have no sidecar to start,
@@ -371,7 +363,9 @@ export function useModels() {
       const mayResume = backendAnswered && !inDerCloud && engineResumeIsOwed()
       if (mayResume) spendEngineResume()
       if (bundledRaw) {
-        const bundled = bundledToAIModels(bundledRaw).filter(m => !isEmbeddingModel(m.name))
+        // What the engine said about its own rows survives a fresh list: the
+        // thinking switch shows only for a model it works on (lib/engine-view).
+        const bundled = applyEngineThinking(bundledToAIModels(bundledRaw).filter(m => !isEmbeddingModel(m.name)))
         // One file, one row: with the folder pointed at ~/.lmstudio/models,
         // LM Studio lists the model over its own API and the folder walk finds
         // the same file. The row that is already serving the chat wins.
@@ -381,11 +375,14 @@ export function useModels() {
         // LM Studio den Steckplatz haelt, verschwand `Qwen3-4B-Q4_K_M`, eine
         // echte installierte Datei des Kunden von 2,3 GB, aus dem Waehler und
         // von der Models-Seite, ohne ein Wort.
-        const eigeneBleiben = dropDuplicateLuEngineRows(bundled, allModels)
+        // GitHub #173: rows of an additional entry are a backend of their own
+        // next to the slot; they never fold our engine's rows away.
+        const slotRows = allModels.filter((m) => !('providerEntry' in m && m.providerEntry))
+        const eigeneBleiben = dropDuplicateLuEngineRows(bundled, slotRows)
         eingeklappt = zeileZumEinklappen(
           bundled.length - eigeneBleiben.length,
           LU_ENGINE_GROUP,
-          allModels.find(isLmStudioEntry)?.providerName ?? null,
+          slotRows.find(isLmStudioEntry)?.providerName ?? null,
         )
         allModels.push(...eigeneBleiben)
         // Die Chat-Engine wird hoechstens EINMAL je Sitzung von hier aus
@@ -442,10 +439,11 @@ export function useModels() {
       // function (Meldung 2, R5 re-measure 2026-08-30).
       // True on the Mac and in the web build, where there is nothing to ask.
       let comfyAnswered = true
-      // Probe on every OS so a Mac with its own ComfyUI is counted. Spawn is
-      // still refused (`comfy_supported_here`); this is connect-only.
-      const comfyOk = await checkComfyConnection()
-      if (!comfyOk) comfyAnswered = false
+      // Probe on every desktop OS so a Mac with its own ComfyUI is counted.
+      // Spawn stays refused (`comfy_supported_here`); this is connect-only.
+      const desktop = !isMobile()
+      const comfyOk = desktop && (await checkComfyConnection())
+      if (desktop && !comfyOk) comfyAnswered = false
       if (comfyOk) {
         // Settled, not all: a folder ComfyUI cannot read costs that one lane,
         // never the whole list. The old code lost both to a single throw.
@@ -484,8 +482,9 @@ export function useModels() {
         // our catalogue) from every surface in the app while its three folder
         // neighbours showed up (R5 re-measure, 2026-08-30). A catalogue size
         // is a claim about the file we ship, not about the file the user has.
-        const format = (name: string) =>
-          name.toLowerCase().endsWith('.gguf') ? 'gguf' : 'safetensors'
+        // The file's own ending. Everything that was not .gguf used to be
+        // called safetensors, a .ckpt motion module too (3.0.4 Gegenprobe 8).
+        const format = (name: string) => fileFormat({ name })
         // What each file weighs, asked once for both lanes. Every ComfyUI
         // entry used to carry size 0, and the card hides a zero size, so the
         // Installed list answered "what is this costing me" with silence.
@@ -570,7 +569,7 @@ export function useModels() {
           // Auto-dismiss after 5s
           setTimeout(() => dismissPull(name), 5000)
         } catch (err) {
-          // Bug Z/a v2.5.0 — leonsk29 GH #48. Pre-v2.5.0 this catch was
+          // Bug Z/a v2.5.0 — GH #48. Pre-v2.5.0 this catch was
           // silent ("card stays visible"), which combined with the Rust-
           // side Ok(()) on stream-ended-without-success made LU flip the
           // badge to "Completed" even when Ollama returned a 400 or the
@@ -593,7 +592,7 @@ export function useModels() {
         for await (const chunk of parseNDJSONStream<PullProgress>(response)) {
           updatePullProgress(name, chunk)
           // Surface an error the NDJSON stream reports mid-pull instead of
-          // falsely flipping the card to "complete" (adhney; mirrors the
+          // falsely flipping the card to "complete" (mirrors the
           // Tauri-path Bug Z/a handling above).
           if (chunk.error) { streamError = chunk.error; break }
         }
@@ -700,7 +699,9 @@ export function useModels() {
     const vorherAktiv = useModelStore.getState().activeModel
     setActiveModel(name)
     const cfg = useProviderStore.getState().providers.openai
-    if (cfg.enabled && cfg.managed && getProviderIdFromModel(name) === 'openai') {
+    // isOpenAISlotModel: a model of an additional entry (GitHub #173) is
+    // never our engine's, even while the engine holds the slot.
+    if (cfg.enabled && cfg.managed && isOpenAISlotModel(name)) {
       // A14 third review: this used to be `.catch(() => {})`. A dead
       // llama-server then left the slot handed over, the Ollama model already
       // unloaded to make room, and one cheerful line on screen saying the chat

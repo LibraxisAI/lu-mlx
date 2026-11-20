@@ -6,8 +6,8 @@
  * three checkpoints, and two cards in "Get new" read Installed that were in
  * no list and no counter at all. Their files were on the disk and measured:
  *
- *   C:\Users\ddrob\ComfyUI\models\loras\pixel-art-xl.safetensors   163 MB
- *   C:\Users\ddrob\ComfyUI\models\vae\sdxl_vae.safetensors         319 MB
+ *   C:\Users\alice\ComfyUI\models\loras\pixel-art-xl.safetensors   163 MB
+ *   C:\Users\alice\ComfyUI\models\vae\sdxl_vae.safetensors         319 MB
  *
  * Beside them lay two more LoRAs, four text encoders and five more VAEs that
  * no surface in the app had ever mentioned. The cards told the truth; the

@@ -1,4 +1,4 @@
-// The Create surface's view of the cloud axis — same contract as uselu's
+// The Create surface's view of the cloud axis — same contract as the web app's
 // useCloudSession, but derived from the shared cloudAuthStore (fed by
 // useCloudAuth's probes) instead of its own /api/me polling.
 

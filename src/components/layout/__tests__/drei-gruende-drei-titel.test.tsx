@@ -5,8 +5,8 @@
  * server codes (credits_exhausted, video_budget_exhausted, trainings_exhausted,
  * see throttleMessage in useCloudCreate.ts) but only the first one opened the
  * dialog; the other two only printed a line the customer had no button under.
- * Matches apps/web/lib/credits-exhausted.ts and
- * apps/web/components/layout/CreditsExhaustedModal.tsx.
+ * Matches the web app and
+ * the web app.
  *
  * Run: npx vitest run src/components/layout/__tests__/drei-gruende-drei-titel.test.tsx
  */

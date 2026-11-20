@@ -4,7 +4,7 @@
  *
  * It consumes one chat stream and reports not just how fast the model ran but
  * how much it spent, how much of that went into reasoning, why it stopped, and
- * whether the answer was actually right (David 2026-08-05). The clock is
+ * whether the answer was actually right (2026-08-05). The clock is
  * injected so a test can make the timing deterministic; production passes
  * performance.now.
  */
@@ -25,7 +25,7 @@ export interface RunMeasurement {
 }
 
 /**
- * The emergency brake (ElBiggus, issue #106, RTX 5080 / Win11 25h2): a model
+ * The emergency brake (issue #106, RTX 5080 / Win11 25h2): a model
  * that derails into a loop emits two orders of magnitude more tokens than the
  * task needs and the benchmark simply stops moving, with no way to tell a
  * long run from a dead one. The longest honest answer here is fifty numbers
@@ -83,7 +83,7 @@ export async function measureRun(
 
   // Not `for await`: that parks on the pending next() and the wall clock below
   // is only ever read when a chunk arrives. A model that stops sending is
-  // exactly the case the wall clock exists for (ElBiggus: "the benchmark simply
+  // exactly the case the wall clock exists for (a user: "the benchmark simply
   // stops moving"), and it was the one case it could not catch. One deadline
   // for the whole run, raced against every step.
   const iterator = stream[Symbol.asyncIterator]()
@@ -173,7 +173,7 @@ export async function measureRun(
   }
 
   // totalTokens is the whole output, thinking included, so a model that reasons
-  // out loud and one that does not are counted the same way (David 2026-08-05:
+  // out loud and one that does not are counted the same way (2026-08-05:
   // two 9B models tied on tok/s, one spent 8975 tokens where the other spent
   // 5480 for the same answers). Ollama's evalCount already folds thinking into
   // the count; the JS fallback adds the two chunk counters to match. thinkShare

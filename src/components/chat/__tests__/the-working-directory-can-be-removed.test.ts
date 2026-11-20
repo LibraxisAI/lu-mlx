@@ -53,7 +53,7 @@ const { useUIStore } = await import('../../../stores/uiStore')
 const { useModelStore } = await import('../../../stores/modelStore')
 const { DEFAULT_SETTINGS } = await import('../../../lib/constants')
 
-const WINDOWS_PATH = 'C:\\Users\\helpslowlydying\\Documents\\My Projects'
+const WINDOWS_PATH = 'C:\\Users\\someone\\Documents\\My Projects'
 
 const show = () => render(createElement(ExplorerPanel, { onApprovePlan: () => {} }))
 const removeButton = () => screen.queryByTestId('explorer-remove-folder')
@@ -96,7 +96,7 @@ describe('the way out of a folder is on screen', () => {
 
   it('and in Local mode, the column never asked which one it was', () => {
     useModelStore.setState({ activeModel: 'ollama::qwen3:14b' })
-    act(() => useCodexStore.getState().setWorkingDirectory('/home/dave/repo'))
+    act(() => useCodexStore.getState().setWorkingDirectory('/home/alex/repo'))
     show()
     expect(removeButton()).not.toBeNull()
   })
@@ -139,13 +139,13 @@ describe('clicking it actually lets go', () => {
     // review S4: settings.defaultWorkspace beats an empty picker in the run
     // resolver, so promising ~/agent-workspace here was simply untrue.
     useSettingsStore.setState({
-      settings: { ...DEFAULT_SETTINGS, defaultWorkspace: { kind: 'folder', path: '/home/dave/default' } },
+      settings: { ...DEFAULT_SETTINGS, defaultWorkspace: { kind: 'folder', path: '/home/alex/default' } },
     })
     act(() => useCodexStore.getState().setWorkingDirectory(WINDOWS_PATH))
     show()
     fireEvent.click(removeButton()!)
     const empty = screen.getByTestId('explorer-no-folder')
-    expect(empty.textContent).toContain('/home/dave/default')
+    expect(empty.textContent).toContain('/home/alex/default')
     expect(empty.textContent).not.toContain('~/agent-workspace')
   })
 

@@ -1,5 +1,5 @@
 /**
- * GH #118 (nayffy, 2026-08-27, fresh Windows 11 install, v2.6.6): "Uncensored
+ * GH #118 (2026-08-27, fresh Windows 11 install, v2.6.6): "Uncensored
  * chat models download and state installed... If i close and reopen LU, it
  * changed from 'Installed' to 'Get', but the 'Get' button doesn't do anything
  * as the files are still downloaded." In the same report the built-in engine

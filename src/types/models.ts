@@ -30,6 +30,13 @@ export interface CloudModel {
    *  antwortet ohne Ablehnung. Fehlt das Feld, ist nichts gemessen und nichts
    *  versprochen. */
   unfiltered?: 'full' | 'partial'
+  /** Aus dem Server-Katalog (LU Cloud /models `unrestricted`): vom Hersteller
+   *  ohne Ablehnungsschicht herausgegeben, nur von einer festen Gegenstelle
+   *  ausgeliefert. Traegt die zweite Marke der Zeile (lib/unfiltered-mark). */
+  unrestricted?: boolean
+  /** The name the catalogue route itself gives the model, where the app shows
+   *  another one (ProviderModel.catalogName). Read by the phone's store build. */
+  catalogName?: string
 
   name: string
   model: string
@@ -37,18 +44,53 @@ export interface CloudModel {
   type: 'text'
   provider: ProviderId
   providerName: string
+  /** GitHub #173: the additional OpenAI-compatible entry serving this row,
+   *  absent for the original slot. The `name` carries it too. */
+  providerEntry?: string
   contextLength?: number
   supportsTools?: boolean
   supportsVision?: boolean
+  /** From the server catalogue (LU Cloud /models `create_in_chat`): may the
+   *  two Create tools of the chat go to this model? */
+  createInChat?: boolean
+  /** From the server catalogue (LU Cloud /models `limited_capacity`): little
+   *  room for all customers together, the picker notes it. */
+  limitedCapacity?: boolean
+  /** LU Engine rows only: the model's image part lies next to its GGUF. With
+   *  `supportsVision` false this is a model loaded without its part; absent
+   *  or false with a known source, the part can be added (lib/image-part). */
+  imagePartInstalled?: boolean
+  /** LU Engine rows only: LU's refusal-removal tool made this file. */
+  refusalsRemoved?: boolean
+  /** LU Engine rows only: the Hugging Face repo of the original weights,
+   *  when the file names one. The refusal-removal button needs it. */
+  sourceRepo?: string
   thinkMode?: 'toggle' | 'always' | 'never'
   /** The reasoning rungs this model accepts, ascending, and the rung it
    *  defaults to (LU Cloud /models). Absent = no effort control and the old
    *  fixed behaviour. See lib/effort.ts. */
   effortLevels?: string[]
   effortDefault?: string
+  /** Local models without rungs (issue 176): why the effort control is
+   *  greyed out. Absent = nothing to say, and no control. */
+  effortNote?: string
+  /** The rungs come from the local server itself, not from a catalogue
+   *  (issue 176). Until the user picks one the composer shows Default and the
+   *  request stays as it was before 3.0.7 (settings.localEffortChosen). */
+  effortLocal?: boolean
+  /** The context window the server stated in its listing. Absent when it
+   *  stated none; `contextLength` may then hold a table value or a guess,
+   *  which is fine for a budget and wrong for a printed figure. */
+  declaredContext?: number
+  /** Credits per one million tokens, input and output apart, as LU Cloud
+   *  states them. Shown in the picker's rate popover and nowhere else. */
+  creditRates?: import('../api/providers/types').CreditRates
   /** Friendly picker label when the server provides one (LU Cloud /models
    *  `name`) — pickers fall back to the raw id otherwise. */
   displayName?: string
+  /** A quiet line the picker prints after the name, no mark (the gate
+   *  pop-up: a model too big to run on this machine). */
+  quietNote?: string
   /** Where the file lies, for a row that IS a file: the LU Engine's GGUFs.
    *  Absent for everything served over a network API. Two rows naming one
    *  path are one model however differently the two backends spell its name,
@@ -123,7 +165,7 @@ export interface PullProgress {
   completed?: number
   // Ollama can stream an `{"error": "..."}` line mid-pull (e.g. HTTP 400 on an
   // incompatible repo). Surfaced so the pull card shows why it failed instead
-  // of falsely completing (adhney).
+  // of falsely completing.
   error?: string
 }
 

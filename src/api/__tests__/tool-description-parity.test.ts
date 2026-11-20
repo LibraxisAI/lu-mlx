@@ -210,7 +210,7 @@ describe('tool-description-parity — extraction sanity', () => {
 // the Rust /remote-api/agent-tool dispatcher.
 //   run_workflow    → needs WorkflowEngine (TS)
 //   delegate_task   → needs sub-agent runner with provider access (TS)
-//   v2.5.0 codex tools (Sprint A/B/C from uselu) — desktop-only because
+//   v2.5.0 codex tools (Sprint A/B/C from the web app) — desktop-only because
 //   their executors live in src/api/agents/*.ts and target the local
 //   developer machine, not the mobile remote-control surface:
 //     run_tests, git_*, gh_pr_create, pr_resume, project_init,
@@ -224,6 +224,9 @@ describe('tool-description-parity — extraction sanity', () => {
 //     a "desktop only" observation; video_generate isn't listed there yet).
 const MOBILE_SKIP: ReadonlySet<string> = new Set<string>([
   'run_workflow', 'delegate_task',
+  // web_research (3.1.0, P-L) runs in the phone app itself; the remote
+  // relay keeps web_search + web_fetch until its dispatcher learns it.
+  'web_research',
   // file_edit (2.5.9 surgical edit) is desktop-only: its executor lives in
   // src/api/mcp/builtin-tools.ts and the mobile remote surface has no Rust
   // dispatcher for it (same situation as the other TS-only coding tools below).
@@ -253,7 +256,7 @@ describe('tool-description-parity — name sets', () => {
 describe('tool-description-parity — description quality', () => {
   const HINT_MARKERS = ['PREFER', 'NEVER', 'DO NOT', 'USE FIRST', 'USE for', 'NOT a', 'NOT for', 'WARN']
 
-  // v2.5.0 sprint A/B/C tools (ported from uselu) have a different
+  // v2.5.0 sprint A/B/C tools (ported from the web app) have a different
   // description style — descriptive prose without the v2.4.0 Claude-Code
   // hint-marker vocabulary. They are still substantive (80+ chars) but
   // skip the marker check. Tracked in the v2.5.0 backlog for a future

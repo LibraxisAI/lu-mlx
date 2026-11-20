@@ -1,10 +1,10 @@
 /**
  * Bug B3 (2.6.7): "System message must be at the beginning".
  *
- * Discord #bug-reports, 2026-08-21. helpslowlydying diagnosed it: "the system
+ * Discord #bug-reports, 2026-08-21. diagnosed it: "the system
  * instructions or tools are being injected in the wrong order, causing the
  * Jinja template engine to crash with System message must be at the
- * beginning". platorius, who was hitting it: "the problem is only in LU",
+ * beginning". A user, who was hitting it: "the problem is only in LU",
  * with the same model and the same prompts working in other frontends.
  *
  * The local engines (bundled llama-server, LM Studio, llama.cpp, Ollama)
@@ -178,8 +178,10 @@ describe('the body that leaves for a local engine', () => {
     // instead of letting control-flow analysis collapse it to `never`.
     const captures: OllamaChatRequest[] = []
     vi.doMock('../../backend', () =>
-      backendMock((_url, init) => {
-        captures.push(captured<OllamaChatRequest>(init))
+      backendMock((url, init) => {
+        // The provider asks /api/show for the window first; only the chat
+        // request is looked at here.
+        if (url.endsWith('/chat')) captures.push(captured<OllamaChatRequest>(init))
         return new Response('{"message":{"content":"ok"},"done":true}\n')
       }),
     )
@@ -200,8 +202,10 @@ describe('the body that leaves for a local engine', () => {
     vi.resetModules()
     const captures: OllamaChatRequest[] = []
     vi.doMock('../../backend', () =>
-      backendMock((_url, init) => {
-        captures.push(captured<OllamaChatRequest>(init))
+      backendMock((url, init) => {
+        // The provider asks /api/show for the window first; only the chat
+        // request is looked at here.
+        if (url.endsWith('/chat')) captures.push(captured<OllamaChatRequest>(init))
         return new Response(JSON.stringify({ message: { content: 'ok' } }), {
           headers: { 'Content-Type': 'application/json' },
         })

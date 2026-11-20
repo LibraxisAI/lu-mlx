@@ -99,9 +99,9 @@ describe('das Abzeichen folgt der Hardware, nicht dem statischen Feld', () => {
     getMaxVramGb.mockImplementation(async () => 12)
     zeichnen()
     await waitFor(() => {
-      expect(kachelVon('Qwen 3.5 9B').textContent).toContain('Recommended')
+      expect(kachelVon('Qwen 3.5 9B Abliterated').textContent).toContain('Recommended')
     })
-    expect(kachelVon('Qwen 2.5 7B (Starter)').textContent).not.toContain('Recommended')
+    expect(kachelVon('Qwen 2.5 7B Abliterated (Starter)').textContent).not.toContain('Recommended')
     // Genau eins, nicht zwei: keine zweite Kachel wirbt gleichzeitig.
     expect(screen.getAllByText('Recommended', { exact: true })).toHaveLength(1)
   })
@@ -111,9 +111,9 @@ describe('das Abzeichen folgt der Hardware, nicht dem statischen Feld', () => {
     getSystemVRAM.mockImplementation(async () => null)
     zeichnen()
     await waitFor(() => {
-      expect(kachelVon('Qwen 2.5 7B (Starter)').textContent).toContain('Recommended')
+      expect(kachelVon('Qwen 2.5 7B Abliterated (Starter)').textContent).toContain('Recommended')
     })
-    expect(kachelVon('Qwen 3.5 9B').textContent).not.toContain('Recommended')
+    expect(kachelVon('Qwen 3.5 9B Abliterated').textContent).not.toContain('Recommended')
     expect(screen.getAllByText('Recommended', { exact: true })).toHaveLength(1)
   })
 
@@ -125,8 +125,8 @@ describe('das Abzeichen folgt der Hardware, nicht dem statischen Feld', () => {
     getMaxVramGb.mockImplementation(async () => 6)
     zeichnen()
     await waitFor(() => {
-      expect(kachelVon('Qwen 2.5 7B (Starter)').textContent).toContain('Recommended')
+      expect(kachelVon('Qwen 2.5 7B Abliterated (Starter)').textContent).toContain('Recommended')
     })
-    expect(kachelVon('Qwen 3.5 9B').textContent).not.toContain('Recommended')
+    expect(kachelVon('Qwen 3.5 9B Abliterated').textContent).not.toContain('Recommended')
   })
 })

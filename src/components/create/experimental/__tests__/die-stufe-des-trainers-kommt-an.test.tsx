@@ -53,7 +53,10 @@ vi.mock('../../../../api/trainer', async () => {
     installCharacterTrainer: vi.fn(async () => undefined),
   }
 })
-vi.mock('../../../../api/comfyui', () => ({ getLoraModels: vi.fn(async () => []) }))
+vi.mock('../../../../api/comfyui', () => ({ getLoraModels: vi.fn(async () => []), getSystemVRAM: vi.fn(async () => null) }))
+// 3.0.8 D20: the Low VRAM suggestion reads the card's memory; a 12 GB card
+// keeps this file about the step presets alone.
+vi.mock('../../../../hooks/useGraphicsMemory', () => ({ useGraphicsCardGb: () => 12 }))
 vi.mock('../../../../api/cloud/loras', () => ({ listLoras: vi.fn(async () => []), deleteLora: vi.fn() }))
 
 import { SpecialControls } from '../SpecialIntentControls'
@@ -110,7 +113,7 @@ describe('die gewaehlte Stufe steht im Hinweistext', () => {
     // der Oberflaeche nicht mehr vor.
     expect(trainStepsNote(400)).toBe('Quick, 400 steps')
     expect(quelle).not.toContain('({trainSteps} steps)')
-    expect(quelle).toContain('({trainStepsNote(trainSteps)})')
+    expect(quelle).toContain('({trainStepsNote(trainSteps, presets)})')
   })
 
   it('GEGENPFAD: eine Zahl ohne Stufe nennt keine Stufe', () => {
@@ -122,7 +125,8 @@ describe('die gewaehlte Stufe steht im Hinweistext', () => {
   it('der Waehler hat genau die drei Stufen aus der Tabelle', async () => {
     render(<SpecialControls intent="character" />)
     for (const p of TRAIN_PRESETS) await screen.findByRole('radio', { name: p.label })
-    expect(quelle).toContain('TRAIN_PRESETS.map((p) => ({ value: String(p.steps), label: p.label }))')
+    // 3.0.9 P8: die Stufen kommen aus dem Modus, Character sind TRAIN_PRESETS.
+    expect(quelle).toContain('presets.map((p) => ({ value: String(p.steps), label: p.label }))')
   })
 })
 
@@ -130,13 +134,13 @@ describe('die gewaehlte Zahl erreicht den Lauf', () => {
   it('der Auftrag an den Trainer traegt die Zahl der Stufe', async () => {
     await startCharacterTraining('t3char', 't3char', 't3char', 400)
     expect(backendCall).toHaveBeenCalledWith('start_character_training', {
-      setId: 't3char', name: 't3char', triggerWord: 't3char', steps: 400,
+      setId: 't3char', name: 't3char', triggerWord: 't3char', steps: 400, preset: null, kind: null,
     })
   })
 
   it('der Absendeweg nimmt die Zahl aus dem Store, nicht eine eigene', () => {
     const hook = readFileSync(resolve(__dirname, '../../../..', 'hooks/useCreate.ts'), 'utf8')
-    expect(hook).toContain('await startCharacterTraining(setId, trigger, trigger, state.trainSteps)')
+    expect(hook).toContain('await startCharacterTraining(setId, trigger, trigger, state.trainSteps, state.trainVramPreset, kind)')
   })
 
   it('und der Trainer legt sie auf die Befehlszeile', () => {

@@ -101,7 +101,7 @@ describe('groupModels — quant collapsing', () => {
  * langsamer". Seit dem 04.09.2026 haelt derselbe Block auch die mittlere
  * Stufe fest, und zwar aus einem NEUEN Grund.
  *
- * WARUM SICH DIE REGEL GEAENDERT HAT: David, 04.09.2026, „kein gelb mehr ohne
+ * WARUM SICH DIE REGEL GEAENDERT HAT: 04.09.2026, „kein gelb mehr ohne
  * farbe ... nicht so klotzig ueberall die fehlermeldungen und anmerkungen".
  * Damit hat die App nur noch zwei Toene, ruhig und Fehler, und Bernstein ist
  * keiner davon mehr (`src/lib/hinweis.ts`). Der Test hat vorher genau das

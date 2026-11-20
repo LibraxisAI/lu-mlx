@@ -10,13 +10,15 @@
  * valuable moment to have a current copy of the chats on disk, and it was the
  * one moment nothing asked for one.
  *
- * aldrich_ironhart, 2.6.5, Discord #general 18.08.: "has anyone lost their
+ * A user, 2.6.5, Discord #general 18.08.: "has anyone lost their
  * chats after a restart??", then "My code chats are vaporised", a coding chat
- * around 230k tokens. sockenmonster on the same build lost nothing.
+ * around 230k tokens. A user on the same build lost nothing.
  */
 import { backendCall } from '../api/backend'
 import { idbStorage, hasFailedRead, onIdbWrite } from './idbStorage'
 import { log } from './logger'
+import { isBackupHeld } from './backup-hold'
+import { isMobile } from './device-kind'
 
 /** Every store that is worth carrying across an update or a wiped WebView2
  *  profile. Order is irrelevant, presence is not: a key missing from this list
@@ -30,12 +32,36 @@ export const STORE_KEYS = [
   'chat-conversations', 'chat-settings', 'chat-models', 'lu-providers',
   'create-store', 'locally-uncensored-codex',
   'locally-uncensored-permissions', 'locally-uncensored-mcp-servers',
+  // CA K4: the commands the user allowed per folder (stores/commandRulesStore).
+  'locally-uncensored-command-rules',
   'locally-uncensored-agent-mode', 'locally-uncensored-memory',
   'locally-uncensored-agent-workflows', 'locally-uncensored-agent',
   'locally-uncensored-voice', 'lu-benchmark-store', 'lu-update-checker-v2',
-  'rag-store', 'workflow-store', 'lu-cloud-catalog',
+  'rag-store', 'workflow-store', 'lu-cloud-catalog', 'lu-cloud-gate',
   'lu_cloud_notice', 'lu_comfy_notice', 'locally-uncensored-model-health',
+  // 3.0.8: which LU Cloud outage sentence was closed (stores/cloudOutageStore).
+  'lu-cloud-outage',
+  // Neuron tweaker slider values per model and persona (3.0.9, P11).
+  'lu-neuron-tweaker',
+  // Where the Neurons window stood and whether it was folded (3.1.0).
+  'lu-neuron-window',
+  // Chat look, reading zoom and the background references per chat and
+  // persona (3.1.0, C58/C42). Also what keeps those background files alive:
+  // the attachment collector keeps every reference it finds in the backup.
+  'lu-chat-look',
+  // Watchers: the three notification switches (Settings → Agent → Watchers).
+  'lu-watcher-settings',
   'locally-uncensored-agent-goal',
+  // C59 A7: the skills the user saved, and the proposals waiting for them.
+  'lu-skills',
+  // Computer control: the switch and the always allowed apps.
+  'locally-uncensored-computer',
+  // Create in chat: the orders of every conversation, so a card and its
+  // result survive a lost WebView profile like the chat they stand in.
+  'LU-create-orders',
+  // C60 (3.1.0): what the agent changed in LU itself, with the values to undo
+  // it. Names and shown values only, no key or token.
+  'lu-settings-audit',
   // Added 2.6.8. Every one of these was persisted and none of them was listed,
   // so the NSIS/WebView2 wipe this file exists to survive destroyed them:
   //   staged-changes            approved edits that are not on disk yet — the
@@ -49,12 +75,207 @@ export const STORE_KEYS = [
   //                             re-downloading tens of GB
   'staged-changes', 'locally-uncensored-todos', 'locally-uncensored-ui',
   'lu_release_notes', 'locally-uncensored-downloads',
+  // D1 (3.0.9): the Hugging Face or CivitAI page of each downloaded model
+  // file, for "Open source page" in Models. Lost, it cannot be re-derived.
+  'locally-uncensored-model-sources',
+  // C41: the names, notes and hidden marks the user gave the LoRAs.
+  'lu-lora-notes',
   // Die lokale Modell-API (2.6.8). Sie MUSS hier stehen, denn sie traegt das
   // einzige Geheimnis in dieser Liste: das API-Token. Geht es bei einem Update
   // verloren, antwortet die API allen bereits eingerichteten Programmen des
   // Nutzers mit 401 — und die Fehlermeldung dort sagt nichts ueber ein Update.
   'lu-local-api',
+  // The phone shell (3.1). Settings that only a phone has and that live in
+  // plain localStorage keys of their own, outside src/stores, so the test
+  // that walks src/stores cannot see them: after a restore the theme, the
+  // small preferences, the list of paired desktops and the two model
+  // switches were back on their defaults. None of them carries a secret (the
+  // Remote token sits in the Keystore or Keychain under its own name and is
+  // not listed, on purpose). A desktop never has these keys, and a key that
+  // holds nothing is left out of the snapshot, so nothing changes there.
+  //   lu-mobile-theme                 System, Dark or Light
+  //   lu-mobile-settings-prefs        counter opt out, system voice, self test
+  //   lu-mobile-remote-desktops       addresses of desktops paired before
+  //   lu-mobile-resume-seen           which cut off answers were already announced
+  //   lu-mobile-download-wifi-only    model settings: ask before mobile data
+  //   lu-mobile-unload-in-background  model settings: free the model in the background
+  'lu-mobile-theme', 'lu-mobile-settings-prefs', 'lu-mobile-remote-desktops',
+  'lu-mobile-resume-seen', 'lu-mobile-download-wifi-only', 'lu-mobile-unload-in-background',
+  // C46 (3.1.0): the chats deleted on purpose, phone and desktop
+  // (lib/chat-deletions.ts). The chat archives of the backup keep them; after
+  // a lost storage this note keeps the restore from offering them back.
+  'lu-chats-deleted',
+  // A26 (3.1.0): the chats the restore hint was dismissed for
+  // (lib/chat-rescue.ts). Without it a lost storage brought the hint back
+  // for chats the user had already said no to.
+  'lu-chat-rescue-hint-dismissed',
+  // Round 3 (M8). Found missing by the review: the text of the backup says
+  // "chats and settings", and these did not come back.
+  //   lu-mobile-remote            the chats held with a paired desktop, on
+  //                               IndexedDB (see IDB_STORE_KEYS). The session
+  //                               token is NOT in this state, it sits under
+  //                               `lu-mobile-remote-token` or in the Keystore
+  //                               or Keychain (mobile/remote/tokenVault.ts)
+  //   lu-mobile-create-presets    Create settings the user saved under a name
+  //   lu-mobile-character-names   the names given to trained characters
+  //   lu-pending-cloud-jobs       paid cloud jobs that are still running, so
+  //                               their result is fetched after a restore
+  //   lu-cloud-submit-intents     a submit that was sent and not answered yet
+  // Guard: src/lib/__tests__/store-backup-covers-mobile.test.ts
+  'lu-mobile-remote', 'lu-mobile-create-presets', 'lu-mobile-character-names',
+  'lu-pending-cloud-jobs', 'lu-cloud-submit-intents',
+  // Round 39 (gap L7, mobile-docs/r39/restore.md). Phone keys that had only
+  // the IndexedDB copy of boot/settings-durable.ts, which does not help when
+  // localStorage is dropped as a whole:
+  //   lu-mobile-thinking-default-v1    the mark that thinking was switched off
+  //                                    once; without it the start switches it
+  //                                    off again over the user's choice
+  //   lu-mobile-report-queue           reports the user was told are saved and
+  //                                    sent later (at most REPORT_QUEUE_MAX,
+  //                                    each field cut, a few dozen KB at most)
+  //   lu-mobile-switched-under-answer  which answers stopped for a model switch
+  //                                    (at most SWITCHED_MAX ids)
+  // Guard: src/mobile/boot/__tests__/local-keys-backup.test.ts
+  'lu-mobile-thinking-default-v1', 'lu-mobile-report-queue', 'lu-mobile-switched-under-answer',
+  // 3.1.0 (C27): the gallery list without the cap, on IndexedDB
+  // (lib/gallery-persist.ts). The create-store blob keeps only a short copy.
+  'lu-gallery',
+  // L5, check of package 17 (mobile-docs/r41/funde.md). When the settings were
+  // last written (boot/settings-durable.ts). The start compares it with the
+  // stamp in localStorage when the copy in IndexedDB is gone, and takes the
+  // settings of this backup when they are newer. Listed last, so a snapshot
+  // reads it after the settings it stamps.
+  'lu-mobile-settings-stamp',
 ]
+
+/** The phone keys of STORE_KEYS, for the tests that hold the two lists together. */
+export const MOBILE_STORE_KEYS: readonly string[] = [
+  'lu-mobile-theme', 'lu-mobile-settings-prefs', 'lu-mobile-remote-desktops',
+  'lu-mobile-resume-seen', 'lu-mobile-download-wifi-only', 'lu-mobile-unload-in-background',
+]
+
+// ── No secrets in a phone backup ────────────────────────────────────────
+//
+// On the desktop store_backup.json is a file in the app's own data folder
+// that nothing but the app reads, and it exists to carry the stores across a
+// WebView2 wipe, API token of the local API included (see 'lu-local-api'
+// above). On a phone the same folder is what the system copies off the
+// device: the cloud backup of Android, a transfer to a new phone, an iTunes
+// or Finder backup. That makes the file one that travels, and a key must not
+// travel with it.
+//
+// What would: `lu-providers` keeps a provider key in localStorage, reversed
+// and base64 encoded, whenever the secure storage is missing or a write to it
+// failed (stores/providerStore.ts, partialize). That is obfuscation, not
+// encryption. `chat-settings` holds the Brave and Tavily keys of the web
+// search as plain text. `lu-local-api` holds a token, and an MCP server entry
+// can carry tokens in its environment. So on a phone these four are written
+// into the snapshot WITHOUT those values. A provider whose key was left out
+// keeps its entry and its address; after a restore the key is read from the
+// secure storage again, or the user types it once more.
+//
+// The desktop snapshot is byte for byte what it was.
+
+type Json = null | boolean | number | string | Json[] | { [key: string]: Json }
+
+/** Names of fields that hold a credential. Matched on the whole name, so `maxTokens` or `tokenCount` are not touched. */
+const SECRET_FIELD = /^(api[-_]?key|[a-z0-9]+api[-_]?key|token|[a-z0-9]+token|secret|[a-z0-9]+secret|password|passcode|authorization)$/i
+
+/** Blank every string in a field that is named like a credential, at any depth. Returns whether something changed. */
+function blankSecretFields(node: Json): boolean {
+  if (!node || typeof node !== 'object') return false
+  let changed = false
+  if (Array.isArray(node)) {
+    for (const item of node) if (blankSecretFields(item)) changed = true
+    return changed
+  }
+  for (const [name, value] of Object.entries(node)) {
+    if (typeof value === 'string') {
+      if (value !== '' && SECRET_FIELD.test(name)) {
+        node[name] = ''
+        changed = true
+      }
+    } else if (blankSecretFields(value)) {
+      changed = true
+    }
+  }
+  return changed
+}
+
+/** The environment of an MCP server is free text chosen by the user: every value goes. */
+function blankMcpEnvironments(node: Json): boolean {
+  if (!node || typeof node !== 'object') return false
+  let changed = false
+  if (Array.isArray(node)) {
+    for (const item of node) if (blankMcpEnvironments(item)) changed = true
+    return changed
+  }
+  for (const [name, value] of Object.entries(node)) {
+    if (name === 'env' && value && typeof value === 'object' && !Array.isArray(value)) {
+      for (const key of Object.keys(value)) {
+        if (value[key] !== '') {
+          value[key] = ''
+          changed = true
+        }
+      }
+    } else if (blankMcpEnvironments(value)) {
+      changed = true
+    }
+  }
+  return changed
+}
+
+/** The stores that can hold a credential, and how each one is cleaned. */
+const SECRET_CLEANERS: Record<string, (parsed: Json) => boolean> = {
+  'lu-providers': blankSecretFields,
+  'chat-settings': blankSecretFields,
+  'lu-local-api': blankSecretFields,
+  'locally-uncensored-mcp-servers': (parsed) => {
+    const a = blankSecretFields(parsed)
+    const b = blankMcpEnvironments(parsed)
+    return a || b
+  },
+}
+
+/** Keys of STORE_KEYS whose value is cleaned of credentials before it goes into a phone backup. */
+export const SECRET_BEARING_STORE_KEYS: readonly string[] = Object.keys(SECRET_CLEANERS)
+
+/**
+ * Pure: the value of one store as it may leave the device, credentials
+ * blanked. A store that holds none comes back as the same string, so the
+ * "did anything change" comparison of the snapshot still works on identity.
+ * A value that cannot be parsed is left OUT (null): what cannot be checked
+ * cannot be vouched for, and the Rust side keeps the previous backup of a
+ * key the snapshot does not carry.
+ */
+export function withoutSecrets(key: string, value: string): string | null {
+  const clean = SECRET_CLEANERS[key]
+  if (!clean) return value
+  let parsed: Json
+  try {
+    parsed = JSON.parse(value) as Json
+  } catch {
+    return null
+  }
+  return clean(parsed) ? JSON.stringify(parsed) : value
+}
+
+// The cleaned form is asked for every five seconds; the stores behind it
+// change a few times a day. One remembered answer per key keeps the tick at a
+// string comparison, and keeps the cleaned string the SAME object from tick
+// to tick, which is what differsFromDisk compares.
+const cleanedCache = new Map<string, { raw: string; clean: string | null }>()
+
+/** What goes into the snapshot for this key on this device. Null: leave the key out. */
+function valueForSnapshot(key: string, raw: string | null): string | null {
+  if (!raw) return null
+  if (!isMobile() || !(key in SECRET_CLEANERS)) return raw
+  const known = cleanedCache.get(key)
+  if (known && known.raw === raw) return known.clean
+  const clean = withoutSecrets(key, raw)
+  cleanedCache.set(key, { raw, clean })
+  return clean
+}
 
 /** These persist through idbStorage (IndexedDB) since 2.5.0, because the
  *  5 MB localStorage cap could not hold a real history. The snapshot has to
@@ -62,6 +283,10 @@ export const STORE_KEYS = [
  *  copy, so localStorage.getItem answers nothing. */
 export const IDB_STORE_KEYS = new Set([
   'chat-conversations', 'locally-uncensored-memory', 'staged-changes',
+  // The Remote chats of the phone shell (mobile/remote/remoteClientStore.ts).
+  'lu-mobile-remote',
+  // The gallery list (lib/gallery-persist.ts, 3.1.0).
+  'lu-gallery',
 ])
 
 /**
@@ -110,6 +335,9 @@ async function idbValueForBackup(key: string): Promise<string | null> {
   if (mirrored !== undefined) return mirrored
   const read = await Promise.resolve(idbStorage.getItem(key)).catch(() => undefined)
   if (read === undefined || hasFailedRead(key)) return null
+  // A write (including attachment migration) may finish during the initial read.
+  // Never replace its current metadata with the stale pre-migration blob.
+  if (idbMirror[key] !== undefined) return idbMirror[key]
   idbMirror[key] = read
   return read
 }
@@ -145,8 +373,8 @@ function unreadableIdbKeys(): string[] {
  *  the identical string reference (everything the mirror serves) settle on the
  *  pointer comparison. */
 function differsFromDisk(next: Record<string, string>): boolean {
-  if (!lastWritten) return true
-  const prev = lastWritten
+  const prev = pendingWrite?.body ?? activeWrite?.body ?? lastWritten
+  if (!prev) return true
   const prevKeys = Object.keys(prev)
   const nextKeys = Object.keys(next)
   if (prevKeys.length !== nextKeys.length) return true
@@ -165,9 +393,9 @@ function differsFromDisk(next: Record<string, string>): boolean {
 export async function collectStoreSnapshot(): Promise<Record<string, string>> {
   const snapshot: Record<string, string> = { __ts: new Date().toISOString() }
   for (const key of STORE_KEYS) {
-    const val = IDB_STORE_KEYS.has(key)
+    const val = valueForSnapshot(key, IDB_STORE_KEYS.has(key)
       ? await idbValueForBackup(key)
-      : localStorage.getItem(key)
+      : localStorage.getItem(key))
     if (val) snapshot[key] = val
   }
   return snapshot
@@ -178,22 +406,87 @@ export async function collectStoreSnapshot(): Promise<Record<string, string>> {
 async function collectComparableSnapshot(): Promise<Record<string, string>> {
   const body: Record<string, string> = {}
   for (const key of STORE_KEYS) {
-    const val = IDB_STORE_KEYS.has(key)
+    const val = valueForSnapshot(key, IDB_STORE_KEYS.has(key)
       ? await idbValueForBackup(key)
-      : localStorage.getItem(key)
+      : localStorage.getItem(key))
     if (val) body[key] = val
   }
   return body
 }
 
-function writeSnapshot(body: Record<string, string>): void {
-  try { localStorage.setItem('lu-restore-complete', '1') } catch { /* quota */ }
-  // Marked clean optimistically so the next tick can skip, and un-marked if the
-  // invoke fails — otherwise one failed write would make the triad believe the
-  // change is on disk and it would never be retried.
-  lastWritten = body
-  backendCall('backup_stores', { data: JSON.stringify({ __ts: new Date().toISOString(), ...body }) })
-    .catch(() => { if (lastWritten === body) lastWritten = null })
+// ── When the file was last written ──────────────────────────────────────
+//
+// "Automatic backup: today, 14:02" on the phone used to show the moment the
+// user pressed "Back up now", because nothing else was known. What the line
+// claims is the moment the file was WRITTEN, and that is known exactly here:
+// `backup_stores` resolved. Kept for the running session only. Saving it in a
+// store would change a store, which the next tick would back up, which would
+// change the time again.
+
+let lastWrittenAt: number | null = null
+const writtenListeners = new Set<() => void>()
+
+function noteWritten(): void {
+  lastWrittenAt = Date.now()
+  for (const listener of [...writtenListeners]) {
+    try { listener() } catch { /* a listener must not cost the next backup */ }
+  }
+}
+
+/** When `backup_stores` last confirmed a write in this session, ms since the epoch. Null: not yet. */
+export function lastStoreBackupAt(): number | null {
+  return lastWrittenAt
+}
+
+/** Called after every confirmed write. Returns the unsubscribe. */
+export function onStoreBackupWritten(listener: () => void): () => void {
+  writtenListeners.add(listener)
+  return () => { writtenListeners.delete(listener) }
+}
+
+interface SnapshotWrite {
+  body: Record<string, string>
+  done: Promise<boolean>
+  resolve: (ok: boolean) => void
+}
+
+// One native write and one latest snapshot. Never queue serialized histories:
+// the IPC payload itself stays live until the native command returns.
+let activeWrite: SnapshotWrite | null = null
+let pendingWrite: SnapshotWrite | null = null
+
+function dispatchWrite(job: SnapshotWrite): void {
+  activeWrite = job
+  const complete = (ok: boolean) => {
+    if (ok) lastWritten = job.body
+    if (ok) noteWritten()
+    activeWrite = null
+    job.resolve(ok)
+    const next = pendingWrite
+    pendingWrite = null
+    if (next) dispatchWrite(next)
+  }
+  try {
+    try { localStorage.setItem('lu-restore-complete', '1') } catch { /* quota must not block the file backup */ }
+    const data = JSON.stringify({ __ts: new Date().toISOString(), ...job.body })
+    void backendCall('backup_stores', { data }).then(() => complete(true), () => complete(false))
+  } catch {
+    complete(false)
+  }
+}
+
+function writeSnapshot(body: Record<string, string>): Promise<boolean> {
+  if (pendingWrite) {
+    // All callers waiting for a queued snapshot wait for its newest version.
+    pendingWrite.body = body
+    return pendingWrite.done
+  }
+  let resolve!: (ok: boolean) => void
+  const done = new Promise<boolean>(r => { resolve = r })
+  const job = { body, done, resolve }
+  if (activeWrite) pendingWrite = job
+  else dispatchWrite(job)
+  return done
 }
 
 /**
@@ -208,6 +501,9 @@ function writeSnapshot(body: Record<string, string>): void {
  * a written one.
  */
 export async function backupStoresIfChanged(): Promise<'written' | 'unchanged' | 'held-back'> {
+  // A store is about to shrink (lib/backup-hold.ts). The file on disk keeps
+  // the previous snapshot meanwhile, so waiting costs nothing.
+  if (isBackupHeld()) return 'held-back'
   const body = await collectComparableSnapshot()
   const blind = unreadableIdbKeys()
   if (blind.length > 0) {
@@ -222,16 +518,20 @@ export async function backupStoresIfChanged(): Promise<'written' | 'unchanged' |
     })
   }
   if (!differsFromDisk(body)) return 'unchanged'
-  writeSnapshot(body)
+  void writeSnapshot(body)
   return 'written'
 }
 
 /**
  * beforeunload's flush. Synchronous on purpose: an await during page teardown
  * means the trailing `backup_stores` invoke may never fire, so this reads the
- * localStorage stores directly and the IndexedDB ones from the mirror.
+ * localStorage stores directly and the IndexedDB ones from the mirror. If a
+ * native write is still running, its successor is queued without another IPC
+ * allocation. Delivery during teardown remains best effort; update-time backup
+ * explicitly awaits that queue before restart.
  */
 export function flushSyncStoreBackup(): 'written' | 'unchanged' | 'held-back' {
+  if (isBackupHeld()) return 'held-back'
   try {
     // The mirror is the only IndexedDB value reachable without awaiting, and
     // before the first async backup has filled it there is no way to tell
@@ -244,11 +544,11 @@ export function flushSyncStoreBackup(): 'written' | 'unchanged' | 'held-back' {
     // seconds for nothing.
     const body: Record<string, string> = {}
     for (const key of STORE_KEYS) {
-      const val = IDB_STORE_KEYS.has(key) ? (idbMirror[key] ?? null) : localStorage.getItem(key)
+      const val = valueForSnapshot(key, IDB_STORE_KEYS.has(key) ? (idbMirror[key] ?? null) : localStorage.getItem(key))
       if (val) body[key] = val
     }
     if (!differsFromDisk(body)) return 'unchanged'
-    writeSnapshot(body)
+    void writeSnapshot(body)
     return 'written'
   } catch {
     return 'held-back' // best-effort: the window is going away either way
@@ -256,12 +556,30 @@ export function flushSyncStoreBackup(): 'written' | 'unchanged' | 'held-back' {
 }
 
 /**
+ * Write the backup now and resolve true only when the file on disk holds
+ * `value` under `key` (the phone journal, mobile/lib/store-journal.ts).
+ * False when the backup is held (a store is about to shrink), when the
+ * snapshot carries something else under the key (a newer value took over,
+ * and it is written by its own path), or when the write failed.
+ */
+export async function backupStoresHolding(key: string, value: string): Promise<boolean> {
+  if (isBackupHeld()) return false
+  try {
+    const body = await collectComparableSnapshot()
+    const wanted = valueForSnapshot(key, value)
+    if (wanted === null || body[key] !== wanted) return false
+    return await writeSnapshot(body)
+  } catch {
+    return false
+  }
+}
+
+/**
  * Build a snapshot and write it, and resolve only once the file is on disk.
  *
- * The triad's own backup is fire and forget on purpose, it must never hold up
- * a render. This one is awaited, because its whole reason to exist is the
- * caller that is about to end the process. It ignores the dirty check for the
- * same reason: an update is the one moment worth paying for a redundant write.
+ * All callers share the same bounded write queue. This one awaits the native
+ * completion because its caller is about to end the process. It ignores the
+ * dirty check for the same reason: an update is the one moment worth paying for a redundant write.
  *
  * Returns whether the file was written. Never throws: a backup that fails is
  * not a reason to refuse an update the user already agreed to.
@@ -280,14 +598,9 @@ export async function backupStoresNow(): Promise<boolean> {
         keys: blind,
       })
     }
-    localStorage.setItem('lu-restore-complete', '1')
-    await backendCall('backup_stores', { data: JSON.stringify(snapshot) })
-    // Same body the dirty check compares against, so the tick right after an
-    // update-time backup does not rewrite the identical file.
     const body: Record<string, string> = { ...snapshot }
     delete body.__ts
-    lastWritten = body
-    return true
+    return await writeSnapshot(body)
   } catch {
     return false
   }

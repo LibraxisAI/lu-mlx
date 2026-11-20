@@ -1,7 +1,7 @@
 /**
- * DATA LOSS, aldrich_ironhart on 2.6.5 (Discord #general 18.08. 12:59 "has
+ * DATA LOSS, a user on 2.6.5 (Discord #general 18.08. 12:59 "has
  * anyone lost their chats after a restart??", 16:12 "My code chats are
- * vaporised", a coding chat around 230k tokens). sockenmonster on the same
+ * vaporised", a coding chat around 230k tokens). A user on the same
  * build lost nothing, weeks old chats included, so this is not a plain
  * regression in how LU writes: the persistence layer is unchanged between
  * 2.6.4 and 2.6.5.

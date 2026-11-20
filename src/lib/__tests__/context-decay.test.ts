@@ -14,6 +14,9 @@ import {
   buildRequestMessages,
   decayRestoredToolResult,
   pairToolCalls,
+  pruneOldScreenLooks,
+  KEEP_SCREEN_LOOKS,
+  OLD_SCREEN_LOOK_NOTE,
   restoreBudgetFor,
   DECAY_RESULT_CHARS,
   RESTORE_RESULT_CHARS,
@@ -270,5 +273,66 @@ describe('A1: the whole builder, in the binding order', () => {
     const on = buildRequestMessages(history, { budgetTokens: 64000 })
     const off = buildRequestMessages(history, { budgetTokens: 64000, enabled: false })
     expect(off.promptTokens).toBeGreaterThan(on.promptTokens * 2)
+  })
+})
+
+describe('older looks at the screen do not ride along', () => {
+  const look = (n: number) =>
+    `Clicked at ${n}, ${n} in Notepad.\nScreenshot [screen frame ${n}]: 1568x882 pixels of display 1. Coordinates are 0 to 1000 on both axes.\nIn front: Notepad.\nPointer at ${n}, ${n}.\nOpen windows:\n<screen_data>\nwindow 1: Notepad, "Untitled" (in front)\n</screen_data>`
+  const screenStep = (n: number) => ({ name: 'computer_use', args: { action: 'click', x: n, y: n }, result: look(n) })
+
+  it('all but the newest keep only the line that says what was done', () => {
+    const history = historyOf([1, 2, 3, 4, 5].map(screenStep))
+    const { messages, prunedCount, savedChars } = pruneOldScreenLooks(history)
+    const results = messages.filter((m) => m.role === 'tool').map((m) => m.content as string)
+    expect(prunedCount).toBe(5 - KEEP_SCREEN_LOOKS)
+    expect(results[0]).toBe(`Clicked at 1, 1 in Notepad.\n${OLD_SCREEN_LOOK_NOTE}`)
+    expect(results[2]).toBe(`Clicked at 3, 3 in Notepad.\n${OLD_SCREEN_LOOK_NOTE}`)
+    expect(results[3]).toBe(look(4))
+    expect(results[4]).toBe(look(5))
+    expect(savedChars).toBeGreaterThan(500)
+    // The input is never touched.
+    expect(history[3].content).toBe(look(1))
+  })
+
+  it('is final: a second pass over its own output changes nothing, and one more step moves one more result', () => {
+    const five = pruneOldScreenLooks(historyOf([1, 2, 3, 4, 5].map(screenStep))).messages
+    expect(pruneOldScreenLooks(five).messages).toEqual(five)
+    const six = pruneOldScreenLooks(historyOf([1, 2, 3, 4, 5, 6].map(screenStep))).messages
+    // Everything up to the result that crossed the line is byte for byte the same.
+    expect(six.slice(0, 9)).toEqual(five.slice(0, 9))
+  })
+
+  it('a refusal keeps its reason, and results of other tools are left alone', () => {
+    const history = historyOf([
+      { name: 'computer_use', args: { action: 'click', x: 1, y: 1 }, result: 'Error: Another window came to the front just before the action. Take a new screenshot first.' },
+      { name: 'file_read', args: { path: 'a.ts' }, result: 'line one\nline two\nline three' },
+      screenStep(2), screenStep(3), screenStep(4),
+    ])
+    const results = pruneOldScreenLooks(history).messages.filter((m) => m.role === 'tool').map((m) => m.content as string)
+    expect(results[0]).toBe('Error: Another window came to the front just before the action. Take a new screenshot first.')
+    expect(results[1]).toBe('line one\nline two\nline three')
+    expect(results[2]).toContain(OLD_SCREEN_LOOK_NOTE)
+  })
+
+  it('the Hermes transport keeps its tag around the shortened result', () => {
+    const history: DecayMessage[] = [{ role: 'user', content: 'go' }]
+    for (const n of [1, 2, 3]) {
+      history.push({ role: 'assistant', content: `<tool_call>\n{"name": "computer_use", "arguments": {"action": "click"}}\n</tool_call>` })
+      history.push({ role: 'user', content: `<tool_response>\n${look(n)}\n</tool_response>` })
+    }
+    const out = pruneOldScreenLooks(history).messages
+    expect(out[2].content).toBe(`<tool_response>\nClicked at 1, 1 in Notepad.\n${OLD_SCREEN_LOOK_NOTE}\n</tool_response>`)
+    expect(out[6].content).toBe(history[6].content)
+  })
+
+  it('the request builder does it, and a run of 25 steps stays far below the window', () => {
+    const history = historyOf(Array.from({ length: 25 }, (_, i) => screenStep(i + 1)))
+    const plain = buildRequestMessages(history, { budgetTokens: 26000, pruneScreenLooks: false })
+    const built = buildRequestMessages(history, { budgetTokens: 26000 })
+    expect(built.prunedScreenLooks).toBe(25 - KEEP_SCREEN_LOOKS)
+    expect(built.promptTokens).toBeLessThan(plain.promptTokens * 0.6)
+    // Off with the decay switch, like everything else in the builder.
+    expect(buildRequestMessages(history, { budgetTokens: 26000, enabled: false }).prunedScreenLooks).toBe(0)
   })
 })

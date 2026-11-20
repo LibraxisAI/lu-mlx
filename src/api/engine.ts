@@ -11,7 +11,8 @@
  * `backendCall` maps camelCase args → snake_case Rust params (Tauri).
  */
 
-import { backendCall, isLinux } from './backend'
+import { backendCall } from './backend'
+import { pathsFoldCase } from '../lib/capabilities'
 import { syncBuiltinEnginePort } from './builtin-ensure'
 import { trackEngineSwap } from './engine-swap-gate'
 import { prefixModelName } from './providers/model-name'
@@ -20,7 +21,9 @@ import { useSettingsStore } from '../stores/settingsStore'
 import type { CloudModel } from '../types/models'
 import type { BuiltinEngineTuning } from '../types/settings'
 import { LU_ENGINE_NAME } from '../lib/engine-name'
+import { customModelDirs } from '../lib/custom-model-dirs'
 import { announceEngineCpuFallback } from '../lib/engine-offload'
+import { ENGINE_EFFORT_LEVELS } from '../lib/local-effort'
 
 /** The user's Built-in Engine expert tuning (settings-backed). Injected into
  * every start/swap below, so Onboarding, Discover, the model picker and the
@@ -47,8 +50,21 @@ export interface BundledModel {
    * vision projector sits next to the GGUF, which is the same file Rust turns
    * into `--mmproj` at start (engine.rs model_can_see_images). Absent when the
    * installed backend predates the field, and the callers then fall back to
-   * the model-name heuristic exactly as before. */
+   * the model-name heuristic exactly as before. For the model that is loaded
+   * this is a fact about the running process: false when it was started
+   * without its image part (no room on the card), even with the part on disk. */
   vision?: boolean
+  /** The image part lies next to the GGUF. False for a model that has none
+   * installed, which is what the offer to add it is decided on. Absent on an
+   * older backend. */
+  imagePart?: boolean
+  /** LU made this file with its refusal-removal tool (`general.description`
+   * of the GGUF). Absent on an older backend. */
+  refusalsRemoved?: boolean
+  /** The Hugging Face repo of the original weights, as the GGUF header (or
+   * LU's short list) names it. The tool's button shows only where there is
+   * one. Absent or null when nothing points anywhere. */
+  sourceRepo?: string | null
 }
 
 /** What a start / swap answers. `port` is the port the engine ACTUALLY came
@@ -93,6 +109,22 @@ export interface EngineStatus {
    * as the sentence the user is shown (engine_sanity.rs). Null on every
    * ordinary start. Outlives the start call on purpose, see lib/engine-offload. */
   sanityNote?: string | null
+  /** Why the loaded model came up without its image part, as the sentence the
+   * user is shown (engine.rs). Null when it has its part or has none. */
+  imageNote?: string | null
+  /** How the model fits the card and the RAM, with numbers (3.0.8, A25,
+   *  Rust vram_plan.rs). Null when everything fits with room. */
+  memoryNote?: string | null
+  /** The buttons under `memoryNote` ("Context 16K", "KV q8_0"). */
+  fitActions?: import('../lib/engine-fit').FitAction[] | null
+  /** MoE layers whose experts stay on the processor (`--n-cpu-moe`). */
+  cpuMoe?: number | null
+  /** C81 (3.1.0): while no engine runs, what the last one died of when it
+   *  died on its own (exit code or signal, and the likely cause). */
+  lastExit?: string | null
+  /** The context the start asked for; `ctx` is what the VRAM plan gave a
+   *  context nobody chose (3.0.8, A25). */
+  ctxRequested?: number | null
 }
 
 /** Loopback base URL of the managed embeddings server (P5). Mirrors the Rust
@@ -104,8 +136,19 @@ export interface EngineStatus {
 export const ENGINE_PORT = 8127
 
 export const EMBED_PORT = 8128
+
+/** The port the embeddings server really holds. On a phone it walks to
+ *  another one when 8128 is taken (engine.rs, embed_port_candidates; iOS
+ *  check of package 17, N-1), and every start and status answer names it. A
+ *  desktop always answers 8128. */
+let embedPort = EMBED_PORT
+
+function syncEmbedPort(port: unknown): void {
+  if (typeof port === 'number' && Number.isInteger(port) && port > 0 && port < 65536) embedPort = port
+}
+
 export function embedBaseUrl(): string {
-  return `http://127.0.0.1:${EMBED_PORT}/v1`
+  return `http://127.0.0.1:${embedPort}/v1`
 }
 
 // name → absolute GGUF path, populated by listBundledModels(). Lets callers
@@ -157,12 +200,23 @@ export async function startBundledEngine(modelPath: string, tuning?: BuiltinEngi
 /** Delete an LU Engine row's file(s): the GGUF, or every part of a split.
  *  The backend refuses the loaded model, so the caller stops the engine first
  *  when the row is the active one. */
-export async function deleteBundledModel(path: string): Promise<{ deleted: number; bytes: number }> {
+export async function deleteBundledModel(path: string, opts: { trash?: boolean } = {}): Promise<{ deleted: number; bytes: number }> {
   const res = await backendCall<{ deleted?: number; bytes?: number }>('delete_bundled_model', {
     path,
     extraDirs: customModelDirs(),
+    ...(opts.trash ? { trash: true } : {}),
   })
   return { deleted: res?.deleted ?? 0, bytes: res?.bytes ?? 0 }
+}
+
+/** C17: the files Delete takes for an LU Engine row (all parts, the image
+ *  part), with their sizes, before anything is deleted. */
+export async function bundledModelDeletePlan(path: string): Promise<{ files: { path: string; bytes: number }[]; bytes: number }> {
+  const res = await backendCall<{ files?: { path: string; bytes: number }[]; bytes?: number }>('bundled_model_delete_plan', {
+    path,
+    extraDirs: customModelDirs(),
+  })
+  return { files: res?.files ?? [], bytes: res?.bytes ?? 0 }
 }
 
 export function stopBundledEngine() {
@@ -208,8 +262,10 @@ export async function swapBundledModel(modelPath: string, tuning?: BuiltinEngine
 
 /** Start the built-in embeddings server (P5) with a specific embedding GGUF.
  * Idempotent for the same model. Runs on EMBED_PORT, separate from chat. */
-export function startBundledEmbed(modelPath: string) {
-  return backendCall('start_bundled_embed', { modelPath })
+export async function startBundledEmbed(modelPath: string) {
+  const res = await backendCall<{ port?: unknown } | null>('start_bundled_embed', { modelPath })
+  syncEmbedPort(res?.port)
+  return res
 }
 
 /** Stop the managed embeddings server if one is running. */
@@ -218,8 +274,11 @@ export function stopBundledEmbed() {
 }
 
 /** Embeddings-server health + which model is loaded on which port. */
-export function bundledEmbedStatus() {
-  return backendCall<EngineStatus>('bundled_embed_status')
+export async function bundledEmbedStatus() {
+  const status = await backendCall<EngineStatus>('bundled_embed_status')
+  // Only a running server says where it is; a stopped one answers the default.
+  if (status?.running) syncEmbedPort(status.port)
+  return status
 }
 
 // Embedding-model GGUFs: never offered in the chat dropdown, and the
@@ -232,7 +291,7 @@ export function isEmbeddingGgufName(name: string): boolean {
 }
 
 // Coalesce concurrent RAG calls into one status-probe/restart.
-let embedEnsureInflight: Promise<void> | null = null
+let embedEnsureInflight: Promise<string | null> | null = null
 
 /**
  * Revive the bundled embeddings server after a VRAM offload stopped it —
@@ -241,24 +300,31 @@ let embedEnsureInflight: Promise<void> | null = null
  * reload (the chat half lives in `builtin-ensure.ts`); RAG awaits it before
  * hitting :8128. Best-effort: a real start failure surfaces on the embeddings
  * request itself with the server's honest error.
+ *
+ * Resolves to the words of the failure when a start was tried and failed,
+ * else null. The phone needs them: "address already in use" is not "no free
+ * memory", and only the words tell the two apart (iOS check of package 17, N-1).
  */
-export async function ensureBundledEmbedAlive(): Promise<void> {
+export async function ensureBundledEmbedAlive(): Promise<string | null> {
   if (embedEnsureInflight) return embedEnsureInflight
   embedEnsureInflight = (async () => {
     try {
       const status = await bundledEmbedStatus()
-      if (status?.healthy) return
+      if (status?.healthy) return null
       const models = await listBundledModels()
       const embed = models.find((m) => isEmbeddingGgufName(m.name))
       if (embed) await startBundledEmbed(embed.path)
-    } catch {
+      return null
+    } catch (err) {
       /* best-effort — embedViaBuiltin reports the real error */
+      return err instanceof Error ? err.message : typeof err === 'string' ? err : String(err)
     } finally {
       embedEnsureInflight = null
     }
   })()
   return embedEnsureInflight
 }
+
 
 /**
  * Can the bundled lane actually embed right now.
@@ -285,19 +351,7 @@ export async function bundledEmbedLaneReady(): Promise<boolean> {
   }
 }
 
-/**
- * Every folder the GGUF scan walks: the app models dir (Rust adds that one)
- * plus the folder the user named under Settings → Model Storage.
- *
- * GH #122 (zrmdsxa, 2026-08-28): that setting was a download TARGET and
- * nothing else. A GGUF already sitting in it was never looked at, so the
- * Models tab stayed empty next to a folder full of models. Empty setting →
- * empty list, which is exactly the shipped single-folder scan.
- */
-export function customModelDirs(): string[] {
-  const dir = useSettingsStore.getState().settings.hfDownloadPathOverride?.trim() || ''
-  return dir ? [dir] : []
-}
+export { customModelDirs }
 
 /** How one scanned folder fared. `truncated` is a real answer: the walk has a
  *  wall-clock deadline and an entry budget per folder, because `fetchModels`
@@ -313,7 +367,7 @@ export interface ScannedDir {
 }
 
 // The folders the LAST listing walked, app dir first. Kept here rather than
-// returned, so no call site has to change to ignore it; Model Storage is the
+// returned, so no call site has to change to ignore it; Storage is the
 // one surface that asks.
 let lastDirs: ScannedDir[] = []
 
@@ -330,10 +384,10 @@ export function lastScanDirs(): ScannedDir[] {
  *  and macOS and NOT on Linux: `/mnt/Models` and `/mnt/models` really are two
  *  folders on ext4, and folding them here would let this answer a question
  *  about one folder with the verdict about the other. */
-function samePath(a: string, b: string): boolean {
+export function samePath(a: string, b: string): boolean {
   // The mirror of Rust's `!cfg!(target_os = "linux")` in bundled_scan_dirs,
   // spelled the same way round so the two cannot drift apart.
-  const fold = !isLinux()
+  const fold = pathsFoldCase()
   const key = (p: string) => {
     const normalised = String(p ?? '').replace(/\\/g, '/').replace(/\/+$/, '')
     return fold ? normalised.toLowerCase() : normalised
@@ -389,13 +443,64 @@ export interface ImportCandidate {
  * GGUFs, so bringing them along is a hard link, not a second download.
  */
 export async function listImportableModels(): Promise<ImportCandidate[]> {
-  const res = await backendCall<{ candidates: ImportCandidate[] }>('list_importable_models')
+  const res = await backendCall<{ candidates: ImportCandidate[] }>('list_importable_models', { destDir: importDestDir() })
   return res?.candidates ?? []
 }
 
-/** Link one candidate into the app models dir. Errors come back user-readable. */
+/**
+ * The LU Engine folder set under Storage, or null for the app's own
+ * models dir. The import links there, so the cross drive error's advice (set
+ * that folder on the drive of the file) is a way out that works.
+ */
+function importDestDir(): string | null {
+  return customModelDirs()[0] ?? null
+}
+
+/** Link one candidate into the LU Engine folder. Errors come back user-readable. */
 export async function importLocalModel(path: string, name: string): Promise<void> {
-  await backendCall('import_local_model', { path, name })
+  await backendCall('import_local_model', { path, name, destDir: importDestDir() })
+}
+
+/** Shard tail of a split GGUF: `<base>-00001-of-00003.gguf`. */
+const SPLIT_GGUF = /-\d{5}-of-\d{5}\.gguf$/i
+
+/** The model name a loose GGUF is imported under: its file name without the
+ *  folder and without `.gguf`. */
+export function ggufImportName(path: string): string {
+  const leaf = path.split(/[\\/]/).pop() ?? path
+  return leaf.replace(/\.gguf$/i, '')
+}
+
+/** Why a picked file cannot be a chat model on its own, or null when it can.
+ *  The image part of a vision model and one part of a split model both load
+ *  nothing by themselves. */
+export function ggufPickProblem(path: string): string | null {
+  const leaf = (path.split(/[\\/]/).pop() ?? path).toLowerCase()
+  if (!leaf.endsWith('.gguf')) return 'That is not a GGUF file. Pick a file that ends in .gguf.'
+  if (leaf.includes('mmproj')) {
+    return 'This is the image part of a vision model, not the model. Pick the model file next to it; LU brings the image part along.'
+  }
+  if (SPLIT_GGUF.test(leaf)) {
+    return 'This model is split into several files. Put all parts into the LU Engine folder (Settings, AI Backends, Storage) and LU lists it from there.'
+  }
+  return null
+}
+
+/**
+ * D17 (Discord): use a GGUF that sits anywhere on the drive. The system file
+ * dialog picks it, then the same link as the Ollama and LM Studio import puts
+ * it into the LU Engine folder, image part included when it sits next to it.
+ * Null when the dialog was cancelled; the model name otherwise. Throws a
+ * readable message when the file cannot be used.
+ */
+export async function addGgufFile(): Promise<string | null> {
+  const path = await backendCall<string | null>('pick_gguf_file')
+  if (!path) return null
+  const problem = ggufPickProblem(path)
+  if (problem) throw new Error(problem)
+  const name = ggufImportName(path)
+  await importLocalModel(path, name)
+  return name
 }
 
 /**
@@ -410,6 +515,13 @@ export function bundledToAIModels(models: BundledModel[]): CloudModel[] {
     type: 'text' as const,
     provider: 'openai' as const,
     providerName: LU_ENGINE_NAME,
+    // Issue 176: the engine takes effort through the template variable and
+    // the Think budget, so every model offers Low, Medium and High. The
+    // button itself only shows while Think is on (lib/local-effort.ts).
+    effortLevels: [...ENGINE_EFFORT_LEVELS],
+    // Read from the engine, not from a catalogue: sent only once the user
+    // picked a rung (settings.localEffortChosen), otherwise as before 3.0.7.
+    effortLocal: true,
     // Carried through since 2.6.8 (A14): the row IS a file, and the Installed
     // list needs the path to tell "the same GGUF, seen twice" from "two
     // downloads of the same model". A file under LM Studio's own store is the
@@ -420,6 +532,11 @@ export function bundledToAIModels(models: BundledModel[]): CloudModel[] {
     // Deliberately left absent (not false) when the backend did not report it,
     // so an older sidecar keeps the old heuristic instead of losing vision.
     ...(typeof m.vision === 'boolean' ? { supportsVision: m.vision } : {}),
+    // Whether the image part is on disk, which is not the same question: a
+    // model loaded without its part has it installed and cannot see.
+    ...(typeof m.imagePart === 'boolean' ? { imagePartInstalled: m.imagePart } : {}),
+    ...(m.refusalsRemoved ? { refusalsRemoved: true } : {}),
+    ...(m.sourceRepo ? { sourceRepo: m.sourceRepo } : {}),
   }))
 }
 

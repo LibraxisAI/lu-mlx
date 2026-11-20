@@ -1,4 +1,7 @@
 import type { Persona, Settings } from '../types/settings'
+import { DEFAULT_SEND_WINDOW_TOKENS } from './send-window'
+import { sharedMemoryWording } from './shared-memory-wording'
+import { IMAGE_PART } from '../api/image-parts'
 
 // Feature flags — flip to true when ready to ship
 export const FEATURE_FLAGS = {
@@ -23,22 +26,35 @@ export const DEFAULT_SETTINGS: Settings = {
   // kam gar nicht erst zum Zug.
   personasEnabled: false,
   thinkingEnabled: true,
+  // Emoticons to emojis in the chat composer (3.0.7), as chat apps do.
+  emojiAutoReplace: true,
+  // GH #202: Enter sends, as it always did, until the user picks "new line".
+  enterKey: 'send',
+  // REA plugin (3.0.7): a local MCP server, off until the user turns it on.
+  reaPluginEnabled: false,
+  neuronsPluginEnabled: false,
   // Reasoning effort (2.6.8). 'high' is not a taste, it is the rung this
   // client has always sent for thinking ON. Any other default would move every
   // existing customer's token bill on update without them touching anything.
   reasoningEffort: 'high',
+  // Local models get their rung only once the user picked one there (3.0.7,
+  // after issue 176). Until then a local request stays as it was before.
+  localEffortChosen: false,
+  // Think budget (D12). 0 = auto, the request every backend got before.
+  thinkingBudget: 0,
   // Small-Model Mode (v2.5.0) — lean profile for 3B-8B local models.
   // Default OFF: big models behave exactly as before until the user flips it.
   smallModelMode: false,
-  // Chat-Tools (v2.5.3) — curated web/file/image/video tools in plain chat.
-  // Default ON so the capabilities "just work" without the Agent toggle; only
-  // tool-worthy messages route through the executor (see chat-tool-intent.ts).
-  chatToolsEnabled: true,
   cavemanMode: 'off',
   searchProvider: 'auto',
   braveApiKey: '',
   tavilyApiKey: '',
-  // Agent budget — bumped in v2.5.0 (uselu live-test 2026-05-25, commit
+  exaApiKey: '',
+  // D16: empty = each free search tier keeps its own User-Agent.
+  searchUserAgent: '',
+  braveKeyStored: false,
+  tavilyKeyStored: false,
+  // Agent budget — bumped in v2.5.0 (the web app live-test 2026-05-25, commit
   // 1af958b2): on a real scaffold-install-fix-verify loop with a 35B
   // local model, 25 iterations / 50 tool calls fired the cap while the
   // model still had useful work to do. 200 / 400 is roomy enough for
@@ -46,6 +62,10 @@ export const DEFAULT_SETTINGS: Settings = {
   // surfaces in finite wall-clock.
   agentMaxToolCalls: 400,
   agentMaxIterations: 200,
+  agentLoopGuard: true,
+  // CA (14.11.2026, AG10): the agent's shell stays in its folder (lib/shell-scope.ts).
+  agentShellOutsideFolder: false,
+  agentCompactAuto: true,
   // Die heutigen festen Werte aus sub-agent.ts, unveraendert uebernommen:
   // wer nichts einstellt, bekommt exakt das Verhalten von 2.6.7.
   subAgentMaxToolCalls: 10,
@@ -53,9 +73,18 @@ export const DEFAULT_SETTINGS: Settings = {
   // Unlimited by design — see the note on the type.
   loopMaxPasses: 0,
   hfDownloadPathOverride: '',
+  downloadLimitMBps: 0,
+  engineIdleUnloadMinutes: 0,
+  extraModelIds: {},
   // Generation timeouts (Bug P v2.4.7)
   imageGenTimeoutMinutes: 20,
   videoGenTimeoutMinutes: 60,
+  // Issue 177: the wait for the first byte of a chat answer, 0 = Off.
+  chatFirstReplyTimeoutSeconds: 600,
+  // GitHub #19: empty means the page keeps its own name, AI Terminal.
+  remotePageTitle: '',
+  // Shared chats: new chats are not shared with the phone unless asked.
+  shareNewChatsWithPhone: false,
   // Bug AA v2.5.0 — Ollama num_ctx override. 0 = use Ollama default (2048
   // on most builds). Users with RAG / long chats can bump this up.
   contextWindowOverride: 0,
@@ -64,16 +93,21 @@ export const DEFAULT_SETTINGS: Settings = {
   // 2.6.6 plan A1/A2: age decay and the paid-provider send cap. ON by
   // default; the switch is the support way back without a rollback release.
   contextDecay: true,
-  codexSendWindowTokens: 64000,
-  // 2.6.8: auto-compact is OFF until someone sets a threshold. 0 is the
-  // switch, not a tuning value — see the field's comment in types/settings.ts.
-  // No STORE_VERSION bump for this key: settingsStore's migrate merges
-  // additively ({...DEFAULT_SETTINGS, ...stored}), and a profile already at
-  // the current version simply reads `undefined` here, which usableThreshold
-  // already answers with "off". A version bump that buys nothing costs a full
-  // state loss on downgrade (lib/persist-version.ts, DOWNGRADE-KONTRAKT).
+  codexSendWindowTokens: DEFAULT_SEND_WINDOW_TOKENS,
+  cloudSendWindowByModel: {},
+  // 3.0.7: auto-compact is ON by default, and 0 as the threshold means "fit
+  // the model's context window" (lib/compact-trigger.ts). No STORE_VERSION
+  // bump: a profile already at the current version is swapped in wholesale,
+  // so the rehydration guard in settingsStore turns a missing `autoCompact`
+  // into true. A version bump that buys nothing costs a full state loss on
+  // downgrade (lib/persist-version.ts, DOWNGRADE-KONTRAKT).
+  autoCompact: true,
+  chatRecall: false,
   autoCompactThreshold: 0,
-  // R5-27, Entscheid David vom 12.09.2026: die automatische Erinnerungs-
+  // GH #171: 0 = an attached file takes what the model's context allows.
+  // Additive like the key above, no version bump.
+  attachmentTokenLimit: 0,
+  // R5-27, Entscheid vom 12.09.2026: die automatische Erinnerungs-
   // Extraktion steht ab Werk AN, auch auf LU Cloud. Bis dahin stand sie im
   // Desktop still auf aus und im Web still auf an, und im Desktop gab es
   // keinen Schalter, der sie je eingeschaltet haette: der Kunde bekam eine
@@ -110,26 +144,33 @@ export const DEFAULT_SETTINGS: Settings = {
   // 'auto' = evict the local text model only when it wouldn't co-exist with the
   // ComfyUI model in VRAM. Safest default (no eviction on unknown sizes).
   exclusiveVramMode: 'auto',
+  // 3.0.9 (B27): ComfyUI's memory goes back five minutes after the last render.
+  freeAfterRender: 'idle',
+  // 3.0.8 (A2): long generations from the chat go on in the background.
+  backgroundMediaTools: true,
+  // 3.0.8 (A2): no card per service until the user picks one.
+  gpuRoles: { chat: null, comfy: null },
   // ComfyUI GPU device policy (rhodium92 AMD RX 6600 XT, 2026-07-01). 'auto' =
   // NVIDIA fast-path, else probe the comfy python's torch and use the GPU if it
   // is a ROCm/ZLUDA build, otherwise CPU. Existing NVIDIA users are unaffected.
   comfyGpuMode: 'auto',
-  // ── v2.5.0 Codex sprint A/B/C defaults (ported from uselu) ──────
+  // ── v2.5.0 Codex sprint A/B/C defaults (ported from the web app) ──────
   codexArchitectMode: false,
   codexArchitectModel: '',
   // Local-first by default — explicit opt-in required for cloud arch.
   codexArchitectAllowCloud: false,
   codexRepoMapEnabled: false,
   codexRepoMapLimit: 20,
-  codexStageMode: false,
   codexAutoApply: false,
   codexReviewMode: false,
   // H2 security gate. OFF by default = the autonomous coding agent keeps
   // running shell/code unattended; ON pauses each exec for a confirm.
   codexConfirmShell: false,
+  // P-L: ask before a web address the model made up (lib/web-url-provenance.ts).
+  webStrictUrls: true,
   // Cloud arm of the same gate, now an opt-in. OFF = a cloud model follows the
   // same rule as a local one, so Bypass and permission level auto run
-  // unattended (David 2026-08-22, replacing the ON default of 2.5.9/G15a).
+  // unattended (2026-08-22, replacing the ON default of 2.5.9/G15a).
   // ON = shell/code confirms on LU Cloud in every mode, Bypass included.
   codexCloudConfirmOptIn: false,
   defaultWorkspace: null,
@@ -363,6 +404,15 @@ export interface OnboardingModel {
   sizeGB: number         // Download size in GB
   expectedBytes?: number
   sha256?: string
+  /** `description` for a machine with one memory pool (a Mac), where the PC
+   *  sentence names VRAM or the card a number was measured on. Read through
+   *  `onboardingModelCopy`, never directly. */
+  sharedDescription?: string
+  // The image part of a model with image input, fetched with it as one
+  // download (api/image-parts.ts). Absent on a text model.
+  mmprojUrl?: string
+  mmprojBytes?: number
+  mmprojSha256?: string
 }
 
 const HF_OB = (repo: string, file: string) => `https://huggingface.co/${repo}/resolve/main/${file}`
@@ -375,6 +425,12 @@ export const ONBOARDING_EMBED_MODEL = {
   downloadUrl: HF_OB('nomic-ai/nomic-embed-text-v1.5-GGUF', 'nomic-embed-text-v1.5.Q4_K_M.gguf'),
   filename: 'nomic-embed-text-v1.5.Q4_K_M.gguf',
   sizeGB: 0.084,
+  // What the host states for this file (`x-linked-size`, read 09.10.2026) and its SHA-256. `sizeGB`
+  // above is the rounded figure and gives 90,194,313 bytes: a card that showed it said "86.0 MB" next
+  // to a progress line that said "80.2 MB" (acceptance on the large iPhone, G7). The phone sends these
+  // two with the download; the desktop start is unchanged.
+  sizeBytes: 84106624,
+  sha256: 'd4e388894e09cf3816e8b0896d81d265b55e7a9fff9ab03fe8bf4ef5e11295ac',
 }
 
 // See the comment on the 'qwen3.5-9b' entry below for where this number
@@ -392,26 +448,30 @@ export const ONBOARDING_MODELS: OnboardingModel[] = [
   // under 9B is recommended to run locally: the small ones lose the thread
   // on the second tool call." The flag here is the same curation call, not
   // the wire-format check, so it stays false at 7B.
-  { name: 'qwen2.5-7b', label: 'Qwen 2.5 7B (Starter)', description: '7B chat model, Q4_K_M. Allow additional memory for context and the operating system. Download time and response speed depend on your hardware.', size: '4.4 GiB', vram: 'about 6 GB for GPU offload, context-dependent', vramGB: 6, recommended: true, agent: false, downloadUrl: HF_OB('bartowski/Qwen2.5-7B-Instruct-GGUF', 'Qwen2.5-7B-Instruct-Q4_K_M.gguf'), filename: 'Qwen2.5-7B-Instruct-Q4_K_M.gguf', sizeGB: 4683074240 / 1_073_741_824, expectedBytes: 4683074240, sha256: '65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423' },
+  // Both onboarding picks are abliterated (2026-10-01, after hollow7896
+  // on Discord 2026-09-30: the recommended 9B refused requests). Same base
+  // models, same Q4_K_M quant, so the measured VRAM still holds; size and
+  // SHA-256 are the repo's own LFS metadata, read on 2026-10-01.
+  { name: 'qwen2.5-7b', label: 'Qwen 2.5 7B Abliterated (Starter)', description: '7B chat model without refusals, Q4_K_M. Allow additional memory for context and the operating system. Download time and response speed depend on your hardware.', size: '4.4 GiB', vram: 'about 6 GB for GPU offload, context-dependent', vramGB: 6, recommended: true, agent: false, downloadUrl: HF_OB('QuantFactory/Qwen2.5-7B-Instruct-abliterated-v2-GGUF', 'Qwen2.5-7B-Instruct-abliterated-v2.Q4_K_M.gguf'), filename: 'Qwen2.5-7B-Instruct-abliterated-v2.Q4_K_M.gguf', sizeGB: 4683073920 / 1_073_741_824, expectedBytes: 4683073920, sha256: 'da9272f09cd51d27aaadf37c1a2a3e079763682688aa1601d7406062b0caa5aa' },
   // Second onboarding pick, above the 9B floor getRecommendedAgentModels()
   // names as where tool calls start holding together. Same repo/filename as
-  // the Discover catalog entry (api/discover.ts, getMainstreamTextModels,
-  // name 'Qwen 3.5 9B'); src/lib/__tests__/onboarding-chat-minimum.test.ts
+  // the Discover catalog entry (api/discover.ts, getUncensoredTextModels,
+  // name 'Qwen 3.5 9B Abliterated'); src/lib/__tests__/onboarding-chat-minimum.test.ts
   // pins the two together so they cannot drift apart.
   //
-  // NINE_B_VRAM_GB is measured, not guessed: lu-box, RTX 3060 12 GB, all 32
+  // NINE_B_VRAM_GB is measured, not guessed: a Windows test machine, RTX 3060 12 GB, all 32
   // layers offloaded to the GPU (lu-301/STAND-BAU.md:258, "32 Schichten auf
   // GPU, 6,1 GB VRAM"; corroborated by lu-301/e2e/box-modelle/MODELL-UND-
   // SKRIPT.md, nvidia-smi read 6149 MiB of 12288 MiB right after load). The
   // number lives here once; the `vram` and `description` text below read it
   // back rather than repeating a hand-typed copy.
   //
-  // expectedBytes/sha256 come from the same box run: HuggingFace's own LFS
-  // metadata (api/models/unsloth/Qwen3.5-9B-GGUF/tree/main, lfs.size /
-  // lfs.oid for Qwen3.5-9B-Q4_K_M.gguf) and the file Get-FileHash'd on the
-  // box after download agree on both numbers (re-checked against the live
-  // HF API on 2026-09-20, unchanged).
-  { name: 'qwen3.5-9b', label: 'Qwen 3.5 9B', description: `Better for agents and tools. Needs about ${NINE_B_VRAM_GB} GB VRAM, measured on an RTX 3060 with full GPU offload.`, size: '5.3 GiB', vram: `about ${NINE_B_VRAM_GB} GB for GPU offload, context-dependent`, vramGB: NINE_B_VRAM_GB, agent: true, downloadUrl: HF_OB('unsloth/Qwen3.5-9B-GGUF', 'Qwen3.5-9B-Q4_K_M.gguf'), filename: 'Qwen3.5-9B-Q4_K_M.gguf', sizeGB: 5680522464 / 1_073_741_824, expectedBytes: 5680522464, sha256: '03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8' },
+  // NINE_B_VRAM_GB was measured on the stock Qwen3.5-9B Q4_K_M; the
+  // abliterated build is the same architecture and quant, 53 MB smaller.
+  // expectedBytes/sha256: HuggingFace's own LFS metadata
+  // (api/models/mradermacher/Qwen3.5-9B-abliterated-GGUF/tree/main, lfs.size /
+  // lfs.oid for Qwen3.5-9B-abliterated.Q4_K_M.gguf), read on 2026-10-01.
+  { name: 'qwen3.5-9b', label: 'Qwen 3.5 9B Abliterated', description: `Better for agents and tools, without refusals. Needs about ${NINE_B_VRAM_GB} GB VRAM, measured on an RTX 3060 with full GPU offload.`, size: '5.2 GiB', vram: `about ${NINE_B_VRAM_GB} GB for GPU offload, context-dependent`, vramGB: NINE_B_VRAM_GB, sharedDescription: `Better for agents and tools, without refusals. Needs about ${NINE_B_VRAM_GB} GB of free memory.`, agent: true, downloadUrl: HF_OB('mradermacher/Qwen3.5-9B-abliterated-GGUF', 'Qwen3.5-9B-abliterated.Q4_K_M.gguf'), filename: 'Qwen3.5-9B-abliterated.Q4_K_M.gguf', sizeGB: 5627045216 / 1_073_741_824, expectedBytes: 5627045216, sha256: '19fadda28b2f4bd939fb4590db978acf8f0d6da274ac7ea8f7f2cdc92f1470a4', ...IMAGE_PART['unsloth/Qwen3.5-9B-GGUF/mmproj-F16.gguf'] },
 ]
 
 /**
@@ -438,6 +498,30 @@ export function recommendedOnboardingModelName(
     }
   }
   return models.find((m) => m.recommended)?.name
+}
+
+/**
+ * The two lines of text under an onboarding model, for the machine reading
+ * them.
+ *
+ * The entries above are written from a PC: "VRAM", "GPU offload", "measured
+ * on an RTX 3060". An Apple Silicon Mac has none of the three; it has one
+ * memory pool, and a model needs its share of that pool free. With `shared`
+ * false this returns the entry's own text, so a PC reads what it always read.
+ * With `shared` true the description is the entry's `sharedDescription`, or
+ * its ordinary one run through the same rewrite the Model Manager uses
+ * (lib/shared-memory-wording.ts), and the memory line is built from `vramGB`,
+ * the one number the entry already carries.
+ */
+export function onboardingModelCopy(
+  model: OnboardingModel,
+  shared: boolean,
+): { description: string; memory: string } {
+  if (!shared) return { description: model.description, memory: `VRAM: ${model.vram}` }
+  return {
+    description: model.sharedDescription ?? sharedMemoryWording(model.description, true),
+    memory: `Memory: about ${model.vramGB} GB free, context-dependent`,
+  }
 }
 
 /**

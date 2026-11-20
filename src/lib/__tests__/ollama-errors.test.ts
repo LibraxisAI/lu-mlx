@@ -79,12 +79,12 @@ describe('parseOllamaError', () => {
     expect(parsed.raw).toBe('request failed')
   })
 
-  // Bug C (v2.4.5 — Anson192 GH #39): "unable to load model: <blob-path>"
+  // Bug C (v2.4.5 — GH #39): "unable to load model: <blob-path>"
   // means the manifest references a blob that isn't on disk. Classified as
   // missing-blob so the Lichtschalter offers a one-click `ollama pull` repair.
-  it('detects missing-blob error from Anson192 GH Discussion #39', async () => {
+  it('detects missing-blob error from GH Discussion #39', async () => {
     const body = JSON.stringify({
-      error: 'unable to load model: C:\\Users\\yipan.ollama\\models\\blobs\\sha256-4974d885253dceff1f68b81592f515796d1eb7cfb2cb7775e0df193e96251e2a',
+      error: 'unable to load model: C:\\Users\\alice.ollama\\models\\blobs\\sha256-4974d885253dceff1f68b81592f515796d1eb7cfb2cb7775e0df193e96251e2a',
     })
     const res = new Response(body, { status: 500 })
     const parsed = await parseOllamaError(res, 'HTTP 500', 'qwen3:8b')

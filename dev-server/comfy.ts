@@ -79,7 +79,7 @@ export function isComfyRunning(): Promise<boolean> {
 }
 
 /**
- * K8 (GH #134, eloieloie): dev-mode proxy for the Rust side's
+ * K8 (GH #134): dev-mode proxy for the Rust side's
  * `is_comfyui_install_complete` (process.rs): same QUESTION ("can this
  * install actually run, or is it a half-cloned carcass"), a simpler answer.
  * The real check walks candidate python prefixes looking for an installed
@@ -108,7 +108,7 @@ let comfyLogs: string[] = []
 
 // Mirror the Rust launcher (process.rs): prefer a venv python so ComfyUI runs
 // inside the env pip installed torch into. Checks both the classic `venv` and
-// the modern `.venv` (issue #51, adhney). Dev-mode only.
+// the modern `.venv` (issue #51). Dev-mode only.
 const getComfyPython = (comfyPath: string): string => {
   const isWin = process.platform === 'win32'
   for (const v of ['venv', '.venv']) {
@@ -138,7 +138,7 @@ const startComfy = (comfyPath: string): { status: string; path: string } => {
     windowsHide: true,
     // Mirror the Rust launcher (process.rs): force UTF-8 I/O so ComfyUI's
     // Unicode progress glyphs don't crash on a non-UTF-8 Windows codepage
-    // (plum133 'charmap' codec UnicodeEncodeError, Discord 2026-06-07).
+    // (a user 'charmap' codec UnicodeEncodeError, Discord 2026-06-07).
     env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
   })
 
@@ -328,6 +328,11 @@ export function registerComfyInstallRoutes(routes: RouteMount, comfy: ComfyLaunc
         console.log(`[CustomNode] Installing ${nodeName} from ${repoUrl}...`)
         try {
           execFileSync('git', ['clone', repoUrl, targetDir], { timeout: 120000 })
+          // A pinned pack goes onto its tested commit (model-bundles.ts).
+          const commit = bodyString(body, 'commit') ?? ''
+          if (/^[0-9a-f]{40}$/i.test(commit)) {
+            execFileSync('git', ['checkout', '--detach', commit], { cwd: targetDir, timeout: 60000 })
+          }
           // Try pip install if requirements.txt exists
           const reqFile = join(targetDir, 'requirements.txt')
           if (existsSync(reqFile)) {

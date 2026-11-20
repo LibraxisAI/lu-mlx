@@ -12,18 +12,13 @@ vi.mock('../../api/providers', () => ({
   getProviderForModel: vi.fn(),
   getProviderIdFromModel: vi.fn(),
 }))
-vi.mock('../agent-num-ctx', () => ({
-  resolveAgentNumCtx: vi.fn(),
-}))
 
 import { runCompactSummary, COMPACT_TEMPERATURE, COMPACT_MAX_TOKENS } from '../compact-run'
 import { getProviderForModel, getProviderIdFromModel } from '../../api/providers'
-import { resolveAgentNumCtx } from '../agent-num-ctx'
 import { COMPACT_OPEN, renderCompactSummary } from '../compact-summary'
 
 const providerFor = getProviderForModel as unknown as ReturnType<typeof vi.fn>
 const providerId = getProviderIdFromModel as unknown as ReturnType<typeof vi.fn>
-const numCtx = resolveAgentNumCtx as unknown as ReturnType<typeof vi.fn>
 
 /** Was der falsche Anbieter beim naechsten Aufruf zurueckgibt. */
 let antwort: string | (() => never)
@@ -57,7 +52,6 @@ describe('runCompactSummary', () => {
     verzoegerungMs = 0
     gesehen = null
     providerId.mockReset(); providerId.mockReturnValue('ollama')
-    numCtx.mockReset(); numCtx.mockResolvedValue(32768)
     providerFor.mockReset()
     providerFor.mockImplementation((name: string) => ({
       modelId: name.includes('::') ? name.split('::').slice(1).join('::') : name,
@@ -96,19 +90,14 @@ describe('runCompactSummary', () => {
     expect((gesehen!.messages[0] as { role: string }).role).toBe('user')
   })
 
-  // Falle 4: ohne num_ctx wirft Ollama die KV-Belegung des Chats weg und
-  // laedt das Modell neu — gemessen an der ausgelieferten exe.
-  it('reicht dasselbe num_ctx durch wie der Chat', async () => {
-    await runCompactSummary({ turns: verlauf, activeModel: 'qwen:4b', contextWindowOverride: 0 })
-    expect(numCtx).toHaveBeenCalled()
-    expect(gesehen!.options.contextWindow).toBe(32768)
-  })
-
-  it('laeuft weiter, wenn die num_ctx-Aufloesung scheitert', async () => {
-    numCtx.mockRejectedValue(new Error('ollama weg'))
-    const r = await runCompactSummary({ turns: verlauf, activeModel: 'qwen:4b' })
-    expect(r.ok).toBe(true)
-    expect(gesehen!.options.contextWindow).toBeUndefined()
+  // Falle 4: a window of its own would make Ollama throw away the allocation
+  // the chat paid for and load the model again, measured on the shipped exe.
+  // The call names none; the provider sends the one the model was last sent
+  // (api/ollama.ts, proven on the wire in one-window-per-ollama-model.test.ts).
+  it('names no window of its own', async () => {
+    await runCompactSummary({ turns: verlauf, activeModel: 'qwen:4b' })
+    expect(gesehen!.options).not.toHaveProperty('window')
+    expect(gesehen!.options).not.toHaveProperty('contextWindow')
   })
 
   // Falle 5: mit `{}` als Optionen sieht der Abbruch die laufende Anfrage nie.

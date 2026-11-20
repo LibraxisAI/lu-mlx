@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { resolveApprovalLevel, BACKGROUND_AGENT_TOOLS } from '../agent-approval-policy'
+import { resolveApprovalLevel, BACKGROUND_AGENT_TOOLS, WORKSPACE_READ_TOOLS } from '../agent-approval-policy'
 import type { FrontDecision } from '../agent-approval-policy'
 
 /**
@@ -25,7 +25,7 @@ const code = (over: Partial<FrontDecision> = {}): FrontDecision => ({
 
 describe('Hintergrundagenten fragen nicht mehr nach', () => {
   it('delegate_task laeuft, obwohl seine Kategorie auf confirm steht', () => {
-    // Das ist Davids Fall: drei Delegationen waren drei Dialoge, weil
+    // Das ist der gemeldete Fall: drei Delegationen waren drei Dialoge, weil
     // delegate_task in 'workflow' liegt und 'workflow' auf 'confirm' steht.
     expect(resolveApprovalLevel('delegate_task', chat({ categoryLevel: 'confirm' }))).toBe('auto')
   })
@@ -40,6 +40,25 @@ describe('Hintergrundagenten fragen nicht mehr nach', () => {
   it('aendert nichts an einem Werkzeug, das wirklich etwas anfasst', () => {
     expect(resolveApprovalLevel('file_write', chat({ categoryLevel: 'confirm' }))).toBe('confirm')
     expect(resolveApprovalLevel('shell_execute', chat({ categoryLevel: 'confirm' }))).toBe('confirm')
+  })
+})
+
+describe('Lesen im eigenen Ordner fragt nicht (Gegenprobe 01.10.2026)', () => {
+  it('file_read, file_list und file_search laufen, obwohl filesystem auf confirm steht', () => {
+    for (const name of WORKSPACE_READ_TOOLS) {
+      expect(resolveApprovalLevel(name, chat({ categoryLevel: 'confirm' }))).toBe('auto')
+    }
+    expect([...WORKSPACE_READ_TOOLS].sort()).toEqual(['file_list', 'file_read', 'file_search'])
+  })
+
+  it('Schreiben in derselben Kategorie fragt weiter', () => {
+    expect(resolveApprovalLevel('file_write', chat({ categoryLevel: 'confirm' }))).toBe('confirm')
+    expect(resolveApprovalLevel('file_edit', chat({ categoryLevel: 'confirm' }))).toBe('confirm')
+  })
+
+  it('abgeschaltet bleibt abgeschaltet, eine Einzelregel des Nutzers gewinnt', () => {
+    expect(resolveApprovalLevel('file_read', chat({ categoryLevel: 'blocked' }))).toBe('blocked')
+    expect(resolveApprovalLevel('file_read', chat({ categoryLevel: 'confirm', override: 'confirm' }))).toBe('confirm')
   })
 })
 

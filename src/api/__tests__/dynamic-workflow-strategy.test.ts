@@ -52,7 +52,7 @@ describe('dynamic-workflow — determineStrategy', () => {
       expect(result.strategy).toBe('unet_zimage')
     })
 
-    // K9 (GH #136, eloieloie): Krea 2 checkpoints classified 'unknown' fell
+    // K9 (GH #136): Krea 2 checkpoints classified 'unknown' fell
     // back to CheckpointLoaderSimple without a CLIP loader ("clip input is
     // invalid: None"). krea2 now has its own branch, same shape as flux/flux2.
     it('krea2 model -> unet_krea2 strategy', () => {
@@ -278,7 +278,7 @@ describe('dynamic-workflow — determineStrategy', () => {
     // No install hint for the three closed lanes. An install hint says "your
     // setup is missing something"; here the builder was the broken part, and
     // sending people off to install a wrapper is precisely the wrong turn D#88
-    // sent bob80817-dev down.
+    // sent a user down.
     it('pyramidflow unavailable -> no installHint', () => {
       const nodes = makeNodes({ samplers: ['KSampler'] })
       const result = determineStrategy('pyramidflow', true, nodes, makeModels())
@@ -305,7 +305,7 @@ describe('dynamic-workflow — determineStrategy', () => {
 // ── FramePack length wiring (source verification) ────────────────────────
 // buildDynamicWorkflow needs a live ComfyUI connection, so we verify the
 // frame→duration wiring at the source level (same pattern as ernie-image).
-// David 2026-06-04: FramePack ignored the requested length because the sampler
+// 2026-06-04: FramePack ignored the requested length because the sampler
 // read a non-existent `params.numFrames` (VideoParams only has `frames`).
 describe('FramePack length wiring (source verification)', () => {
   it('total_second_length is driven by params.frames, not the dead params.numFrames', () => {

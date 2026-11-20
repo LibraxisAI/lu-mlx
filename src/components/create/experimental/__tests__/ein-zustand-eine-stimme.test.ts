@@ -86,7 +86,21 @@ describe('D-S31: die Regel gibt es genau einmal', () => {
   })
 
   it('der Balken haengt an ihr', () => {
-    expect(CREATE).toMatch(/setupCardOwnsStage \? null : modelLoadError/)
+    // 3.1.0: the Mac's 3D tab runs its own engine and is silent too (threeDOwnEngine).
+    expect(CREATE).toMatch(/setupCardOwnsStage \|\| comfyStarting \|\| threeDOwnEngine \? null : modelLoadError/)
+  })
+
+  it('schweigt, waehrend ComfyUI startet (Gegenprobe 8, 02.10.)', () => {
+    // "is not running" in Rot neben "is starting up" sagte zweimal Gegensaetzliches.
+    const b = CREATE.match(/const banner = ([^\n]+)/)
+    expect(b![1]).toContain('comfyStarting || threeDOwnEngine ? null')
+  })
+
+  it('schweigt im Cloud-Modus: dort rendert nichts lokal (12.10.2026)', () => {
+    // Die lokale Modellliste wird in jedem Modus geholt. Ohne laufendes
+    // ComfyUI stand "ComfyUI is not running." rot ueber dem Cloud-Reiter.
+    const b = CREATE.match(/const banner = ([^\n]+)/)
+    expect(b![1]).toMatch(/^error \?\? \(backend === 'cloud' \? null : /)
   })
 
   it('echte Laufzeitfehler bleiben unberuehrt', () => {
@@ -125,6 +139,9 @@ describe('D-S31: die Regel selbst', () => {
 
   it('meldet ein nicht erreichbares ComfyUI', () => {
     expect(stageShowsSetupCard({ ...basis, connected: false })).toBe(true)
+    // Gegenprobe 02.10.2026: while ComfyUI is starting, the probe says false
+    // and the models are already on disk. No 6.5 GB offer in that window.
+    expect(stageShowsSetupCard({ ...basis, connected: false, comfyStarting: true })).toBe(false)
   })
 
   it('meldet eine leere Spur', () => {

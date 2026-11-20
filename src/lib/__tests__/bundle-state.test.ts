@@ -1,5 +1,5 @@
 /**
- * GH #113, JonnFlauty (Windows 11, RTX 5070 Ti, "unfiltered models doesn't
+ * GH #113 (Windows 11, RTX 5070 Ti, "unfiltered models doesn't
  * shown as installed, even if the downloaded model has a checkmark and say's
  * installed").
  *
@@ -113,7 +113,7 @@ describe('a bundle reads its own rows, not its neighbours', () => {
 
   it('Clear leaves a card that offers Install again', () => {
     // clearBundle dismisses every row of the bundle. Nothing then claims this
-    // bundle is half anything, which is what the_mr_pickles needed.
+    // bundle is half anything, which is what a user needed.
     expect(bundleHasErrors(RAPID, {}, false)).toBe(false)
     expect(bundleIsComplete(RAPID, {}, false)).toBe(false)
   })

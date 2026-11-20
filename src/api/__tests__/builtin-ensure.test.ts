@@ -77,7 +77,7 @@ describe('ensureBuiltinEngineAlive', () => {
   it('never starts our engine for a model that is not one of ours, and says why', async () => {
     mockEngine({ healthy: false })
     // The slot is managed, so the send is about to hit our own port with
-    // nothing behind it. Returning quietly here is what handed applejames a
+    // nothing behind it. Returning quietly here is what handed a user a
     // raw "proxy_localhost_stream_chunked" on a fresh install (2026-08-01), so
     // the guard still refuses to start anything, but it no longer pretends
     // the send will work.

@@ -7,9 +7,8 @@
  * vor (`lib/run-lanes.ts`'s Kopfkommentar: eine Schranke bei fremder
  * Kapazitaet waere reine Bremse ohne Gegenwert), sondern die bestehende
  * Transient-Retry-Leiter (`api/providers/retry.ts`, 3 Versuche) plus die
- * bestehende, saubere Fehlerzeile in `openai-provider.ts`
- * ("Rate limited by <Anbieter>. Wait a moment and try again."), wenn der
- * Server selbst keinen eigenen Text mitschickt.
+ * bestehende, saubere Fehlerzeile aus `lib/request-limit.ts`, wenn der
+ * Server selbst keinen eigenen Satz mitschickt.
  *
  * Dieser Test belegt, dass das im echten Sendeweg (useChat.ts) tatsaechlich
  * so ankommt: zwei Cloud-Unterhaltungen senden GLEICHZEITIG (die Cloud-Spur
@@ -72,7 +71,7 @@ beforeEach(() => {
   useGenerationStore.setState({ generating: {}, aborters: {}, runs: {} })
   useModelStore.setState({ models: [], activeModel: MODEL })
   useSettingsStore.setState({
-    settings: { ...DEFAULT_SETTINGS, appMode: 'cloud', cavemanMode: 'off', chatToolsEnabled: false },
+    settings: { ...DEFAULT_SETTINGS, appMode: 'cloud', cavemanMode: 'off' },
   })
   useProviderStore.setState((s) => ({
     providers: { ...s.providers, 'lu-cloud': { ...s.providers['lu-cloud'], enabled: true } },
@@ -146,8 +145,7 @@ describe('zwei Cloud-Unterhaltungen, eine bekommt dauerhaft busy (429)', () => {
 
     // B gets a clean, honest "busy" sentence in its OWN conversation, not a
     // silent hang and not a raw "429" status line.
-    expect(answerB).toMatch(/rate limited by lu cloud/i)
-    expect(answerB).toMatch(/wait a moment and try again/i)
+    expect(answerB.trim()).toBe('The server is limiting requests right now. Please wait a moment, then send your message again. Nothing was charged.')
     // Never reads as an exhausted-wallet message (different code path,
     // different dialog): a mislabel here would pop the top-up dialog for a
     // transient busy instead of the truth.

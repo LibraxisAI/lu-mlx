@@ -210,7 +210,6 @@ describe('die Leinwand hat einen Namen bekommen', () => {
     expect(rest).toEqual([
       'components/create/experimental/CreateExperimental.tsx',
       'components/create/experimental/MaskEditor.tsx',
-      'components/layout/Sidebar.tsx',
     ])
   })
 
@@ -286,10 +285,10 @@ describe('die Leinwand hat einen Namen bekommen', () => {
     // Das ist die Sperrklinke hinter der Loeschung. Sie faellt, wenn jemand
     // eine sechste Stufe erfindet, ohne sie zu benutzen — und ebenso, wenn
     // jemand `bg-lu-irgendwas` schreibt, das es nicht gibt.
-    const stufen = [...CSS_CODE.matchAll(/--color-lu-(canvas|base|panel|raised|overlay|pane):/g)]
+    const stufen = [...CSS_CODE.matchAll(/--color-lu-(canvas|base|panel|raised|overlay|pane|sheet):/g)]
       .map((m) => m[1])
       .sort()
-    expect(stufen, 'die Flaechenleiter hat sich veraendert').toEqual(['base', 'canvas', 'overlay', 'panel'])
+    expect(stufen, 'die Flaechenleiter hat sich veraendert').toEqual(['base', 'canvas', 'overlay', 'panel', 'sheet'])
 
     for (const stufe of stufen) {
       const direkt = new RegExp(`(?<![\\w-])(?:[a-z-]+:)*(?:bg|text|border|ring)-lu-${stufe}(?![\\w-])`)

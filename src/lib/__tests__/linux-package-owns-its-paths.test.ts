@@ -2,7 +2,7 @@
  * The Linux packages may only claim paths that belong to us, and they have to
  * name every system library the bundled engine actually links against.
  *
- * GitHub #120 (AnnSdf1969, Ubuntu 26.04, 2026-08-28): dpkg refused the whole
+ * GitHub #120 (Ubuntu 26.04, 2026-08-28): dpkg refused the whole
  * install with "trying to overwrite '/usr/bin/llama-server', which is also in
  * package llama.cpp-tools". Tauri's deb and rpm bundlers copy every
  * `externalBin` straight into /usr/bin under its plain name, so the file name

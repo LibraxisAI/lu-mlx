@@ -204,7 +204,7 @@ describe('Punkt 4 — die Ausnahme steht AN der Regel, nicht gegen sie', () => {
   /**
    * Die Entscheidung vom 21.09.2026, und die Sperrklinke dahinter.
    *
-   * David, 05.09.2026, am Windows-Bau: „wenn man in das nachrichten feld
+   * 05.09.2026, am Windows-Bau: „wenn man in das nachrichten feld
    * klickt kommt eine starke lila umrandung, die soll komplett weg." Am
    * 21.09.2026 derselbe Satz fuer die Preset-Werkstatt („der lila balken um
    * das prompt fenster geht garnicht") und auf Nachfrage fuer die ganze App:
@@ -300,6 +300,9 @@ describe('Punkt 4 — die Ausnahme steht AN der Regel, nicht gegen sie', () => {
   const AM_KASTEN: Record<string, string> = {
     'chat/ChatInput.tsx': 'chat/ChatInput.tsx',
     'create/ui/PromptField.tsx': 'create/experimental/Composer.tsx',
+    // GH #197: the search box and the text of the large editor, each in a
+    // box with focus-within:border-.
+    'ui/LongTextField.tsx': 'ui/LongTextField.tsx',
   }
 
   it('`lu-fokus-am-kasten` haengt an genau diesen Feldern und sonst nirgends', () => {
@@ -406,7 +409,7 @@ describe('Punkt 2 — das Press-Feedback ist eine Regel, keine 489 Call-Sites', 
 //    als Ende der Hausregel dahinter. `indexOf` fand die erste, und der Test
 //    meldete "die Hausregel liegt im Utilities-Layer" ueber eine Regel, die
 //    richtig stand. Die Utility hatte nicht einmal eine Call-Site — sie
-//    entstand aus einer Zeile Fliesstext in AUDIT-COVERAGE.md, weil Tailwind
+//    entstand aus einer Zeile Fliesstext in einer Markdown-Datei, weil Tailwind
 //    das ganze Projektverzeichnis als Text las (siehe der Scan-Bereich am
 //    Kopf von index.css und `keine-klasse-aus-prosa.test.ts`).
 //

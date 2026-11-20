@@ -3,7 +3,7 @@ import { useCloudAuthStore } from '../stores/cloudAuthStore'
 /**
  * Das Etikett der Freimengenmarke, an genau einer Stelle.
  *
- * David am 12.09.2026: die Marke heisst wieder "No credits". "Included" sagte
+ * Am 12.09.2026: die Marke heisst wieder "No credits". "Included" sagte
  * nicht, was der Kunde davon hat, sondern nur, dass etwas dabei ist, und das
  * steht an jedem zweiten Tarif im Netz. Dass die Marke am KONTO haengt und
  * nicht am Modell, traegt die Logik daneben (sie zeichnet nur bei laufendem

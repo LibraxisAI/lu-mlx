@@ -2,7 +2,7 @@
  * @vitest-environment jsdom
  *
  * A9: "There's no document tab in cloud chat to add documents and audio clips"
- * (aldrich_ironhart, Discord #general, 2026-09-01).
+ * (Discord #general, 2026-09-01).
  *
  * He was right. ChatView hid the Docs button on `appMode !== 'cloud'`, on the
  * belief that Document Chat needs a local backend. It needs a local EMBEDDING
@@ -36,7 +36,7 @@ import type { EmbedLaneInfo } from '../../../api/embed-availability'
 
 const BUNDLED: EmbedLaneInfo = { lane: 'bundled', endpoint: null }
 const OLLAMA_LOCAL: EmbedLaneInfo = { lane: 'ollama-local', endpoint: null }
-const OLLAMA_REMOTE: EmbedLaneInfo = { lane: 'ollama-remote', endpoint: 'http://192.168.0.54:11434' }
+const OLLAMA_REMOTE: EmbedLaneInfo = { lane: 'ollama-remote', endpoint: 'http://192.168.1.54:11434' }
 const NONE: EmbedLaneInfo = { lane: 'none', endpoint: null }
 
 afterEach(() => cleanup())
@@ -87,7 +87,7 @@ describe('the rule that decides the Docs button', () => {
 
   it('cloud on a REMOTE Ollama names the host instead of promising the opposite (B2)', () => {
     const a = docsAvailability('cloud', OLLAMA_REMOTE)
-    expect(a.title).toContain('http://192.168.0.54:11434')
+    expect(a.title).toContain('http://192.168.1.54:11434')
     expect(a.title).toContain('whole documents are sent there')
     // Negative control on the wording: the comfortable lie must be absent.
     expect(a.title).not.toContain('stay on this computer')

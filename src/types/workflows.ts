@@ -34,6 +34,9 @@ export interface ParameterMap {
   // I2I / I2V source image
   inputImage?: ParameterMapping
 
+  // Motion Control: the driving clip (LoadVideo or VHS_LoadVideo)
+  inputVideo?: ParameterMapping
+
   // Video-specific
   frames?: ParameterMapping
   fps?: ParameterMapping
@@ -51,4 +54,18 @@ export interface WorkflowTemplate {
   parameterMap: ParameterMap
   installedAt: number
   thumbnailUrl?: string
+  /** Where a workflow installed from the chat came from and what its check
+   *  said (C60-S5). A later update compares `sha256`. */
+  provenance?: WorkflowProvenance
+}
+
+export interface WorkflowProvenance {
+  source: 'lu' | 'comfy-template' | 'civitai' | 'github' | 'user-link' | 'user-file'
+  url?: string
+  /** SHA-256 of the workflow JSON as it was read. */
+  sha256: string
+  checkedAt: number
+  light: 'green' | 'yellow' | 'red'
+  /** The check's findings, LU's own sentences. */
+  findings: string[]
 }

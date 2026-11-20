@@ -57,7 +57,7 @@ describe('formatProgressLine', () => {
 })
 
 describe('friendlyDownloadError', () => {
-  it('translates the raw reqwest text David actually hit', () => {
+  it('translates the raw reqwest text the owner actually hit', () => {
     const msg = friendlyDownloadError('Stream error: error decoding response body', FILE.filename)
     expect(msg).toContain('The connection dropped')
     expect(msg).toContain('kept')
@@ -117,7 +117,7 @@ describe('downloadBundleFiles', () => {
     expect(keepTrayLive).toHaveBeenCalled()
   })
 
-  it('resumes a dropped transfer instead of failing the bundle (Davids 1.2 GB of 4.3 GB death)', async () => {
+  it('resumes a dropped transfer instead of failing the bundle (the 1.2 GB of 4.3 GB death)', async () => {
     let call = 0
     const d = deps([], {
       progress: vi.fn(async () => {

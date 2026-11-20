@@ -169,7 +169,7 @@ describe('stripMatchedCalls', () => {
 })
 
 describe('stripToolCallText — keep raw tool-call JSON out of the visible bubble', () => {
-  it('strips a bare {"name","arguments"} object, keeps the prose (David 2026-06-04 leak)', () => {
+  it('strips a bare {"name","arguments"} object, keeps the prose (2026-06-04 leak)', () => {
     const txt = 'Hier ist dein Bild.\n{ "name": "image_generate", "arguments": { "prompt": "eine katze" } }'
     const out = stripToolCallText(txt, KNOWN)
     expect(out).toContain('Hier ist dein Bild.')

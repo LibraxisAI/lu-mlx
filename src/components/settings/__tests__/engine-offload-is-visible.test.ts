@@ -37,7 +37,7 @@ vi.mock('../../../api/backend', () => ({
   secretDelete: vi.fn(),
 }))
 
-const { engineOffloadLine, announceEngineCpuFallback, ENGINE_CPU_ONLY_NOTE, __resetEngineCpuFallbackNote } =
+const { engineOffloadLine, announceEngineCpuFallback, engineStandingNote, engineCpuFallbackKey, ENGINE_CPU_ONLY_NOTE, __resetEngineCpuFallbackNote } =
   await import('../../../lib/engine-offload')
 const { bundledEngineStatus } = await import('../../../api/engine')
 const { useLuEngineSwitchStore } = await import('../../../stores/luEngineSwitchStore')
@@ -218,5 +218,56 @@ describe('the standing line above the composer', () => {
     } finally {
       useUIStore.setState({ currentView: 'chat' })
     }
+  })
+})
+
+/** Sentence as Rust writes it (engine.rs IMAGE_PART_NO_ROOM_NOTE). */
+const NO_ROOM = 'Loaded without image input: the graphics memory has no room for the image part next to the model. A smaller context makes room.'
+
+describe('a model that came up without its image part', () => {
+  it('says so in the standing line, on a card that otherwise runs as usual', () => {
+    announceEngineCpuFallback({ ...AUF_DER_KARTE, imageNote: NO_ROOM })
+    expect(useLuEngineSwitchStore.getState().note).toBe(NO_ROOM)
+  })
+
+  it('stands beside the sentence about where the engine computes', () => {
+    expect(engineStandingNote({ ...AUF_DEM_PROZESSOR, imageNote: NO_ROOM })).toBe(`${ENGINE_CPU_ONLY_NOTE} ${NO_ROOM}`)
+  })
+
+  it('asks the model lists to fetch again when the answer changes, and only then', () => {
+    const refreshed = vi.fn()
+    window.addEventListener('lu-models-refresh', refreshed)
+    try {
+      announceEngineCpuFallback(AUF_DER_KARTE)
+      expect(refreshed).not.toHaveBeenCalled()
+      announceEngineCpuFallback({ ...AUF_DER_KARTE, imageNote: NO_ROOM })
+      announceEngineCpuFallback({ ...AUF_DER_KARTE, imageNote: NO_ROOM })
+      expect(refreshed).toHaveBeenCalledTimes(1)
+      // Loaded again with the part: the lists have to learn that as well.
+      announceEngineCpuFallback(AUF_DER_KARTE)
+      expect(refreshed).toHaveBeenCalledTimes(2)
+    } finally {
+      window.removeEventListener('lu-models-refresh', refreshed)
+    }
+  })
+})
+
+// Discord (21.10.2026): a 31B model took the whole RAM of a 32 GB PC and
+// nothing had said it would. Rust weighs the model against the RAM at the
+// start (engine.rs memory_fit_note) and the line carries the sentence.
+describe('a model that leaves the computer little RAM', () => {
+  const TIGHT = 'Tight fit: about 12.7 GB of this model stay in RAM because the graphics card holds only about 7.5 GB of it, and this PC has 16 GB of RAM, so other programs get little room while it is loaded. A smaller version of the model, or a shorter context, leaves more.'
+
+  it('says so in the standing line, on a card that otherwise runs as usual', () => {
+    announceEngineCpuFallback({ ...AUF_DER_KARTE, memoryNote: TIGHT })
+    expect(useLuEngineSwitchStore.getState().note).toBe(TIGHT)
+  })
+
+  it('comes last, after where the engine computes and what the model sees', () => {
+    expect(engineStandingNote({ ...AUF_DEM_PROZESSOR, imageNote: 'No eyes.', memoryNote: TIGHT })).toBe(`${ENGINE_CPU_ONLY_NOTE} No eyes. ${TIGHT}`)
+  })
+
+  it('says nothing for a model that leaves room', () => {
+    expect(engineCpuFallbackKey({ ...AUF_DER_KARTE, memoryNote: null })).toBeNull()
   })
 })

@@ -6,12 +6,40 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g. v1.2.1)'
+        description: 'Release tag (e.g. v1.2.1). In a dry run it is a label only: no tag is checked out and no release is touched.'
         required: true
         default: 'v1.3.0'
+      # The Mac lane alone, from the branch the run was started on, with no
+      # release involved: see "DRY RUN" in the header of build-tauri-macos.
+      mac_dry_run:
+        description: 'Mac dry run: build, sign, notarize and verify the Mac app from the selected branch and keep it as a workflow artifact. No release is touched, Windows and Linux are not built, the tag above is ignored.'
+        type: boolean
+        required: false
+        default: false
+      # Every platform, from the branch the run was started on, with no release
+      # involved: see "FULL DRY RUN" above the `gate` job.
+      dry_run:
+        description: 'Full dry run: build the Windows and Linux installers from the selected branch and keep them as workflow artifacts. No release is touched, nothing is code signed for Windows, the updater of these builds points at an address that never answers.'
+        type: boolean
+        required: false
+        default: false
+      # Its own tick, because a macOS minute of a private repository is billed
+      # as ten: the Mac build joins a full dry run only when asked to.
+      dry_run_mac:
+        description: 'Only with the full dry run: also build, sign, notarize and verify the Mac app (needs the six Apple secrets).'
+        type: boolean
+        required: false
+        default: false
+      mac_only:
+        description: 'Mac only, for a release that already has its Windows and Linux files: build, sign, notarize and attach the Mac app to the release of the tag above, and add darwin-aarch64 to its latest.json. The gate, Windows and Linux are not run again and their files are not touched. The Mac lane has to be switched on for releases.'
+        type: boolean
+        required: false
+        default: false
 
+# Read only for the workflow; each job that writes to the release names its
+# own right below (OpenSSF Scorecard, Token-Permissions, 3.1.0).
 permissions:
-  contents: write
+  contents: read
 
 # Third-party actions are pinned to a full commit SHA (not a moving tag) so a
 # compromised or retagged upstream release can't run with our signing secrets
@@ -20,14 +48,22 @@ permissions:
 #
 # Sidecar: every platform must build the bundled llama.cpp `llama-server`
 # BEFORE tauri-action runs — tauri-build hard-fails on a missing externalBin.
-# The build is cached on (hash of scripts/build-llama.sh × triple); it only
-# recompiles when the script (tag pin or cmake flags) changes.
+# The build is cached on (hash of scripts/build-llama.sh and LU's llama.cpp
+# patches in scripts/llama-patches × triple); it only recompiles when the
+# script (tag pin or cmake flags) or a patch changes. A patch outside the key
+# would hit the old cache and stop in assert_patched_tree (E1).
 env:
   # Vulkan SDK pin for the GGML_VULKAN sidecar builds: the Windows lane uses
   # the full installer version, the Linux lane derives the 3-part family for
   # LunarG's jammy apt repo. Bump together with the llama.cpp tag; LunarG
   # keeps old versions up.
   VULKAN_SDK_VERSION: '1.4.313.2'
+  # sha256 of the Windows installer of exactly that version. The installer is
+  # run on the build machine, so it is checked before it starts. Read from
+  # the publisher's own list on 2026-10-10:
+  #   https://sdk.lunarg.com/sdk/sha/1.4.313.2/windows/vulkansdk-windows-X64-1.4.313.2.exe.txt
+  # Bump it with the version, in the same three files.
+  VULKAN_SDK_SHA256: '34a921d951858274ca8e470e9d0a3b7624db41216b3908ccea9f73c8a1b7500e'
 
   # BLOCKER A1 (review-integ.md, Teil (a)): the boot-smoke steps below used to
   # pull this file from `resolve/main`, a moving pointer, with no hash check,
@@ -47,6 +83,22 @@ env:
   # both values together, from that same page, when the pin needs to move.
   STORIES260K_REVISION: '499bc8821c6b12b4e53c5bffcb21ec206f212d81'
   STORIES260K_SHA256: '270cba1bd5109f42d03350f60406024560464db173c0e387d91f0426d3bd256d'
+
+  # Windows code signing (Azure Artifact Signing), used only when the signing
+  # secrets exist: the SignTool plug-in Microsoft publishes as the NuGet package
+  # Microsoft.ArtifactSigning.Client, pinned by version and by the sha256 of the
+  # .nupkg file, both read from api.nuget.org on 2026-10-08. Bump both together:
+  #   https://api.nuget.org/v3-flatcontainer/microsoft.artifactsigning.client/index.json
+  # Reviewed MSVC toolset for the Windows llama.cpp sidecar (3.1.2): the
+  # windows-latest image defaults to 14.52 since 19.11.2026, which
+  # verify-sidecar-isa.sh does not trust (WINDOWS_REVIEWED_LINKER_VERSIONS).
+  # 14.44 is reviewed and still installed on the image
+  # (Microsoft.VisualStudio.Component.VC.14.44.17.14.x86.x64). Read only by
+  # scripts/build-llama.sh for x86_64-pc-windows-msvc. Same value in
+  # release.yml and sidecar-windows.yml.
+  LLAMA_MSVC_TOOLSET: 'v143,version=14.44'
+  ARTIFACT_SIGNING_CLIENT_VERSION: '1.0.146'
+  ARTIFACT_SIGNING_CLIENT_SHA256: '7761e5d8f31e54b764da21d33cd8b0a2940e1b05526c7dfcb5e94b0431426f70'
 
 jobs:
   # The Latest flag comes off FIRST, before anything is gated or built.
@@ -77,6 +129,9 @@ jobs:
   demote-on-arrival:
     if: github.event_name == 'release'
     runs-on: ubuntu-22.04
+    # Keeps the right it had from the workflow (OpenSSF Scorecard, 3.1.0).
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -90,6 +145,12 @@ jobs:
           PUBLISHED_TAG: ${{ github.event.release.tag_name }}
         run: node scripts/enforce-prerelease.mjs
 
+  # Code signing on Windows is opt-in by secrets: the two Windows lanes inside
+  # build-tauri switch on when their values are entered and stay off without
+  # them (scripts/signing-config.sh windows). The Mac build is not switched by
+  # secrets but by the repository variable LU_MAC_RELEASE; why, see the header
+  # of build-tauri-macos below.
+
   # A build is not a decision — and neither is a green master. Until this job
   # existed, `release.yml` typechecked nothing, ran no test and no lint: any
   # commit that happened to sit on master when someone clicked "Publish release"
@@ -99,13 +160,60 @@ jobs:
   # then held to EXACTLY the checks master is held to, and a check added to CI
   # can never silently skip the release path. `ref` pins the gate to the tagged
   # commit, so what is verified and what is built are the same bytes.
+  #
+  # FULL DRY RUN
+  # ------------
+  # `workflow_dispatch` with `dry_run: true` builds what a release builds and
+  # publishes none of it. Job by job:
+  #
+  #   demote-on-arrival   does not run: the trigger is not a release.
+  #   gate                skipped. A dry run is a rehearsal of the build lane,
+  #                       not a verdict on the commit, and the gate would
+  #                       spend its minutes on a build nobody ships.
+  #   build-tauri         runs although the gate was skipped, checks out the
+  #                       commit the run was started on, and takes the dry run
+  #                       branch of its steps: no signing lane for Windows, a
+  #                       plain `tauri build` in place of tauri-action, and
+  #                       the installers as a workflow artifact per platform.
+  #   build-tauri-macos   only with `dry_run_mac`, and then in the dry run
+  #                       mode it already had (see "DRY RUN" in its header).
+  #   enforce-prerelease  does not run: there is no release to hold back.
+  #
+  # What keeps such a build harmless once somebody installs it is described
+  # in scripts/release-dry-run.mjs: the updater endpoint is moved to an
+  # address that cannot answer and the pubkey to a key made in the job, both
+  # before the build, and the built programs are searched for the public
+  # address afterwards.
+  #
+  # No step of a dry run talks to the release API, to a signing service for
+  # Windows or to any other outside party; what it downloads is what every
+  # build downloads (toolchains, the Vulkan SDK, the smoke model, crates and
+  # npm packages). The Mac build, when asked for, does talk to Apple: it is
+  # notarized, as in its own dry run.
+  #
+  # `mac_dry_run` is the older, narrower switch and is unchanged: the Mac
+  # lane alone. With both ticked the run is a full dry run with the Mac in it.
   gate:
+    # Skipped in either dry run. In a Mac dry run build-tauri is skipped with
+    # it; in a full dry run build-tauri goes ahead without it (see there).
+    # `inputs` is empty on the `release` trigger, so this is true there.
+    if: ${{ !inputs.mac_dry_run && !inputs.dry_run && !inputs.mac_only }}
+    # ci.yml only reads.
+    permissions:
+      contents: read
     uses: ./.github/workflows/ci.yml
     with:
       ref: ${{ github.event.release.tag_name || github.event.inputs.tag }}
 
   build-tauri:
     needs: gate
+    # `!cancelled()` takes the place of the implicit `success()`, which would
+    # skip this job whenever the gate was skipped. So the condition asks for
+    # the gate's result itself: a release builds after a green gate and after
+    # nothing else (a failed, cancelled or skipped gate is not 'success'), and
+    # the one run that may build past a skipped gate is the full dry run. A
+    # Mac dry run skips the gate too and has no `dry_run`, so it stops here.
+    if: ${{ !cancelled() && (needs.gate.result == 'success' || (inputs.dry_run && needs.gate.result == 'skipped')) }}
     # BLOCKER A1 (review-integ.md): this job had no ceiling of its own, so it
     # ran up to GitHub's 360-minute default. ci.yml's own tauri-build job
     # (comment right above its identical timeout) already carries this exact
@@ -115,7 +223,21 @@ jobs:
     # signs the bundle and builds every installer target (NSIS, MSI, deb,
     # AppImage) that ci.yml's own tauri-build does not, so its ceiling is
     # wider than that job's 60 minutes rather than equal to it.
-    timeout-minutes: 90
+    #
+    # The SignPath lane (Windows only) waits for no person: it submits the
+    # app binary and ends, and the approvals are picked up later by
+    # windows-signpath.yml. That leg builds llama.cpp from source instead of
+    # restoring it from the cache, so it gets 120 minutes. The signing policy
+    # is the last of the SignPath values to be entered, the one that switches
+    # the lane on for releases; without it the expression is 90 for every
+    # leg, as before.
+    timeout-minutes: ${{ matrix.platform == 'windows-latest' && vars.SIGNPATH_SIGNING_POLICY_SLUG != '' && 120 || 90 }}
+    # contents: write as for the whole workflow (the release). actions: read
+    # for the SignPath lane: SignPath fetches the uploaded binary with this
+    # job's token, and the lane reads the state artifacts of earlier runs.
+    permissions:
+      contents: write
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -128,9 +250,11 @@ jobs:
             args: ''
             rust_targets: ''
             sidecar_triple: x86_64-pc-windows-msvc
-          # No macOS lane: LU ships Windows + Linux only (the 2.5.7 mac assets
-          # were unsigned/ad-hoc and pulled post-release). Re-add a macos-14
-          # entry here once Apple Developer ID signing creds land as secrets.
+          # No macOS entry in THIS matrix, on purpose. The Mac build is its own
+          # job, build-tauri-macos below: it has to be skippable as a whole
+          # while the Apple Developer ID secrets do not exist (the 2.5.7 mac
+          # assets were unsigned/ad-hoc and pulled post-release), and a matrix
+          # entry cannot be skipped at job level.
 
     runs-on: ${{ matrix.platform }}
 
@@ -145,7 +269,13 @@ jobs:
           # the one thing a release tag is for (and AGPL-3.0 §6: the
           # "corresponding source" must be the source the binary was made from).
           # If fixes land after tagging, move the tag; do not silently ship past it.
-          ref: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+          #
+          # A dry run: the commit the run was started on, as in the Mac lane,
+          # since there is no tag to build.
+          ref: ${{ inputs.dry_run && github.sha || github.event.release.tag_name || github.event.inputs.tag }}
+          # A release keeps the default (true). A dry run uses the token for
+          # nothing, so the build scripts get none to find.
+          persist-credentials: ${{ !inputs.dry_run }}
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -182,6 +312,7 @@ jobs:
             libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev \
             libxdo-dev \
+            libxkbcommon-dev \
             build-essential \
             curl \
             wget \
@@ -190,13 +321,25 @@ jobs:
 
       # ── llama.cpp sidecar ────────────────────────────────────────────────
       - name: Sidecar build cache
+        # Not on the Windows leg that SignPath signs. The cache holds a finished
+        # llama-server.exe, and SignPath asks that a signed release restores no
+        # built binary from a cache: everything in the signed installer is
+        # built in this run (agreed with SignPath, 2026-10-14). The Rust cache
+        # above may stay, it keeps dependencies and drops the app's own build:
+        # at the pinned commit of swatinem/rust-cache, src/save.ts lines 39-54
+        # clean the target directory with the packages outside the workspace
+        # only (workspace crates join only with cache-workspace-crates, off
+        # here), and src/cleanup.ts lines 13-31 and 58-75 delete every file of
+        # target/ and of target/release, keep build/, .fingerprint/ and deps/,
+        # and inside those only what belongs to those packages.
+        if: ${{ !(matrix.platform == 'windows-latest' && vars.SIGNPATH_SIGNING_POLICY_SLUG != '' && !inputs.dry_run) }}
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           # Must match LLAMA_BUILD_CACHE below, or Windows caches an empty
           # ./.llama-build while the real build sits in D:/lb — every run then
           # recompiles llama.cpp from scratch (~20 min) on a "cache hit".
           path: ${{ matrix.platform == 'windows-latest' && 'D:/lb' || '.llama-build' }}
-          key: llama-${{ hashFiles('scripts/build-llama.sh') }}-${{ matrix.sidecar_triple }}-v1
+          key: llama-${{ hashFiles('scripts/build-llama.sh', 'scripts/llama-patches/**') }}-${{ matrix.sidecar_triple }}-v1
 
       - name: Install Vulkan SDK (Windows)
         if: matrix.platform == 'windows-latest'
@@ -207,6 +350,8 @@ jobs:
           curl.exe -fL --retry 3 -o "$env:RUNNER_TEMP\VulkanSDK-Installer.exe" `
             "https://sdk.lunarg.com/sdk/download/${env:VULKAN_SDK_VERSION}/windows/vulkansdk-windows-X64-${env:VULKAN_SDK_VERSION}.exe"
           if ($LASTEXITCODE -ne 0) { throw "Vulkan SDK download failed" }
+          $got = (Get-FileHash -Algorithm SHA256 "$env:RUNNER_TEMP\VulkanSDK-Installer.exe").Hash.ToLower()
+          if ($got -ne $env:VULKAN_SDK_SHA256) { throw "Vulkan SDK installer has sha256 $got, expected $env:VULKAN_SDK_SHA256. It was not run." }
           & "$env:RUNNER_TEMP\VulkanSDK-Installer.exe" --accept-licenses --default-answer --confirm-command install
           Add-Content $env:GITHUB_ENV "VULKAN_SDK=C:\VulkanSDK\${env:VULKAN_SDK_VERSION}"
 
@@ -245,6 +390,13 @@ jobs:
           case "${{ matrix.sidecar_triple }}" in
             *-windows-*) test -f "src-tauri/bin/lu-llama-server-${{ matrix.sidecar_triple }}.exe" ;;
             *)           test -x "src-tauri/bin/lu-llama-server-${{ matrix.sidecar_triple }}" ;;
+          esac
+          # The Neuron tweaker's vector tool (3.0.9, P11) ships on every
+          # desktop platform (FEHLER-P11 #7): without it the ready-made and
+          # own sliders cannot be computed, so a build without it is not one.
+          case "${{ matrix.sidecar_triple }}" in
+            *-windows-*) test -f "src-tauri/bin/lu-llama-cvector-generator-${{ matrix.sidecar_triple }}.exe" ;;
+            *)           test -x "src-tauri/bin/lu-llama-cvector-generator-${{ matrix.sidecar_triple }}" ;;
           esac
           ls -la src-tauri/bin/
 
@@ -414,6 +566,64 @@ jobs:
           esac
           echo "OK: sidecar boots from $moved, loads a real model, /health answers, and has a libggml-cpu-*.so from $moved/llama mapped, nowhere near the build directory it was compiled in"
 
+      # FEHLER-P11 #7, E1: the vector tool is an exe of the server build and
+      # loads the same ggml modules (build-llama.sh cvector_ships_for); the
+      # app starts it the way it starts the server (cwd and LD_LIBRARY_PATH
+      # on the companions directory, engine.rs prepare_tool_command). Same
+      # moved-directory proof as above, with a real run: two example lines
+      # each way through the tiny model, the control vector it writes must
+      # be there, and it must load the ggml-cpu variants from the moved
+      # directory (a baseline-only tool took hours on 9B models).
+      - name: "Vector tool computes from a moved directory (P11)"
+        if: matrix.sidecar_triple == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          moved="$RUNNER_TEMP/moved-cvector"
+          rm -rf "$moved"
+          mkdir -p "$moved"
+          cp "src-tauri/bin/lu-llama-cvector-generator-${{ matrix.sidecar_triple }}" "$moved/"
+          cp -r "src-tauri/resources/llama/${{ matrix.sidecar_triple }}" "$moved/llama"
+          chmod +x "$moved/lu-llama-cvector-generator-${{ matrix.sidecar_triple }}"
+          export LD_LIBRARY_PATH="$moved/llama${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          model="$RUNNER_TEMP/stories260K.gguf"
+          if [ ! -f "$model" ]; then
+            curl -fsSL --retry 3 --max-time 60 -o "$model" \
+              "https://huggingface.co/ggml-org/models/resolve/${STORIES260K_REVISION}/tinyllamas/stories260K.gguf"
+          fi
+          echo "${STORIES260K_SHA256}  $model" | sha256sum -c - \
+            || { echo "FAIL: stories260K.gguf did not match the pinned sha256" >&2; exit 1; }
+          printf 'Once upon a time there was a happy dog.\nThe sun was bright and everyone smiled.\n' > "$moved/more.txt"
+          printf 'Once upon a time there was a sad dog.\nThe rain fell and everyone cried.\n' > "$moved/less.txt"
+          # LD_DEBUG=files: glibc names every library it loads; the tool logs
+          # nothing about ggml's backend loading itself.
+          ( cd "$moved/llama" && LD_DEBUG=files "$moved/lu-llama-cvector-generator-${{ matrix.sidecar_triple }}" -m "$model" \
+              --positive-file "$moved/more.txt" --negative-file "$moved/less.txt" \
+              -o "$moved/direction.gguf" --method mean -c 256 ) >/tmp/cvector.log 2>&1 || {
+            cat /tmp/cvector.log
+            echo "FAIL: lu-llama-cvector-generator exited non-zero from $moved" >&2
+            exit 1
+          }
+          [ -s "$moved/direction.gguf" ] || { cat /tmp/cvector.log; echo "FAIL: no control vector written" >&2; exit 1; }
+          grep -E "file=$moved/llama/libggml-cpu-[a-z0-9_]+\.so .*dynamically loaded by" /tmp/cvector.log \
+            || { cat /tmp/cvector.log; echo "FAIL: the vector tool did not load a ggml-cpu variant from $moved/llama" >&2; exit 1; }
+          # LU patches 0003 and 0004 (P11): the progress line the app reads,
+          # and the measuring mode single-neuron doses are counted in.
+          grep -q 'Evaluating prompt\[2/2\]' /tmp/cvector.log \
+            || { cat /tmp/cvector.log; echo "FAIL: no progress line for the last prompt (patch 0003)" >&2; exit 1; }
+          ( cd "$moved/llama" && LU_LAYER_NORMS=1 "$moved/lu-llama-cvector-generator-${{ matrix.sidecar_triple }}" -m "$model" \
+              --positive-file "$moved/more.txt" --negative-file "$moved/less.txt" \
+              -o "$moved/norms.gguf" --method mean -c 256 ) >/tmp/cvector-norms.log 2>&1 || {
+            cat /tmp/cvector-norms.log
+            echo "FAIL: the vector tool's measuring mode (LU_LAYER_NORMS, patch 0004) exited non-zero" >&2
+            exit 1
+          }
+          norms="$(grep -cE '^LU norm [0-9]+ [0-9]+\.[0-9]{6}$' /tmp/cvector-norms.log || true)"
+          [ "$norms" -ge 1 ] && [ ! -e "$moved/norms.gguf" ] \
+            || { cat /tmp/cvector-norms.log; echo "FAIL: LU_LAYER_NORMS printed $norms 'LU norm' lines (want at least 1) or wrote a vector" >&2; exit 1; }
+          echo "OK: the vector tool computes a control vector from $moved on a ggml-cpu variant from there, nowhere near the build directory, and measures $norms layer lengths"
+
       # Nachbesserung N5 (review-sidecar.md, Runde 2): before this step,
       # release.yml had no real model-load proof for EITHER platform (the
       # only place that existed was sidecar-windows.yml, a different
@@ -494,16 +704,193 @@ jobs:
           }
           Write-Host "OK - sidecar boots from the resource layout, loads a model, answers /health, and has a ggml-cpu-*.dll from $runDir mapped"
 
+      # E1, P11: the vector tool is an exe of the server build (LU patch 0002)
+      # and the app starts it from the companions directory like the server
+      # (engine.rs prepare_tool_command). A real run on the tiny model: it
+      # writes a control vector, prints the progress line the app reads (patch
+      # 0003) and measures the layer lengths single-neuron doses are counted
+      # in (LU_LAYER_NORMS, patch 0004).
+      - name: "Vector tool computes from the resource layout (P11)"
+        if: matrix.sidecar_triple == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $tool = (Resolve-Path "src-tauri\bin\lu-llama-cvector-generator-${{ matrix.sidecar_triple }}.exe").Path
+          $runDir = (Resolve-Path "src-tauri\resources\llama\${{ matrix.sidecar_triple }}").Path
+          $model = "$env:RUNNER_TEMP\stories260K.gguf"
+          if (-not (Test-Path $model)) { throw "the boot smoke's model is missing: $model" }
+          $work = "$env:RUNNER_TEMP\cvector"
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+          Set-Content -Path "$work\more.txt" -Value 'Once upon a time there was a happy dog.', 'The sun was bright and everyone smiled.'
+          Set-Content -Path "$work\less.txt" -Value 'Once upon a time there was a sad dog.', 'The rain fell and everyone cried.'
+          Push-Location $runDir
+          & $tool -m $model --positive-file "$work\more.txt" --negative-file "$work\less.txt" -o "$work\direction.gguf" --method mean -c 256 *> "$work\cvector.log"
+          $vectorExit = $LASTEXITCODE
+          $env:LU_LAYER_NORMS = '1'
+          & $tool -m $model --positive-file "$work\more.txt" --negative-file "$work\less.txt" -o "$work\norms.gguf" --method mean -c 256 *> "$work\cvector-norms.log"
+          $normsExit = $LASTEXITCODE
+          Remove-Item Env:\LU_LAYER_NORMS
+          Pop-Location
+          Get-Content "$work\cvector.log", "$work\cvector-norms.log"
+          if ($vectorExit -ne 0) { throw "lu-llama-cvector-generator exited $vectorExit (run from $runDir)" }
+          if (-not (Test-Path "$work\direction.gguf")) { throw "no control vector written" }
+          if (-not (Select-String -Path "$work\cvector.log" -Pattern 'Evaluating prompt[2/2]' -SimpleMatch -Quiet)) { throw "no progress line for the last prompt (patch 0003)" }
+          if ($normsExit -ne 0) { throw "the measuring mode (LU_LAYER_NORMS, patch 0004) exited $normsExit" }
+          $norms = @(Select-String -Path "$work\cvector-norms.log" -Pattern '^LU norm [0-9]+ [0-9]+\.[0-9]{6}$').Count
+          if ($norms -lt 1 -or (Test-Path "$work\norms.gguf")) { throw "LU_LAYER_NORMS printed $norms 'LU norm' lines (want at least 1) or wrote a vector" }
+          Write-Host "OK - the vector tool computes a control vector from $runDir and measures $norms layer lengths"
+
       # ── App build ────────────────────────────────────────────────────────
       - name: Install npm dependencies
         run: npm ci
 
+      # ── Dry run: its own updater key, its own endpoint, a plain build ────
+      # Not the release key: one that exists for this run only, made the way
+      # the Mac lane and the Windows signing probe make theirs. bash on both
+      # runners, so one script serves both. The key is one line of base64, so
+      # one mask covers it.
+      - name: "Dry run: generate a throwaway updater key"
+        id: dry-run-key
+        if: ${{ inputs.dry_run }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/lu-dry-run"
+          npx tauri signer generate --ci -w "$RUNNER_TEMP/lu-dry-run/dry-run-updater.key" > /dev/null
+          key="$(cat "$RUNNER_TEMP/lu-dry-run/dry-run-updater.key")"
+          [ -n "$key" ] || { echo "::error::no throwaway updater key was written"; exit 1; }
+          echo "::add-mask::$key"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+
+      # Before the build, because the endpoint and the pubkey are compiled
+      # into the program. Why, and what the script refuses: its header.
+      - name: "Dry run: point the updater at an address that never answers"
+        if: ${{ inputs.dry_run }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release-dry-run.mjs rewrite-updater \
+            "$RUNNER_TEMP/lu-dry-run/dry-run-updater.key.pub" "$RUNNER_TEMP/lu-dry-run/receipt.json"
+          # An empty bundle directory, so that what is judged and kept below
+          # can only be what this build made.
+          rm -rf src-tauri/target/release/bundle
+
+      # What tauri-action runs further down, without the action: the same
+      # `tauri build` with the same overlay and the same arguments, and so the
+      # same installers (NSIS and MSI, deb and AppImage) and updater files. It
+      # is handed the throwaway key and nothing else: no token, no release
+      # key, no signing secret. No `shell:` on purpose: the runner's default
+      # (PowerShell on Windows) is the environment the action builds in, and
+      # the one line is the same in both shells.
+      - name: "Dry run: build the installers (no release, no upload)"
+        if: ${{ inputs.dry_run }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ steps.dry-run-key.outputs.key }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+          # K1-18, as on the release step below.
+          LD_LIBRARY_PATH: ${{ matrix.platform == 'ubuntu-22.04' && format('{0}/src-tauri/resources/llama/{1}', github.workspace, matrix.sidecar_triple) || '' }}
+        run: npx tauri build --config src-tauri/tauri.release.conf.json ${{ matrix.args }}
+
+      # The configuration that counts is the one inside the program. This
+      # reads the built binaries and fails when one still carries the public
+      # endpoint or the release pubkey, and when none carries the dry run
+      # endpoint. The private half of the throwaway key goes here as well:
+      # nothing after the build signs.
+      - name: "Dry run: the built app must not know the public update address"
+        if: ${{ inputs.dry_run }}
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          rm -f "$RUNNER_TEMP/lu-dry-run/dry-run-updater.key"
+          node scripts/release-dry-run.mjs check-binaries "$RUNNER_TEMP/lu-dry-run/receipt.json" src-tauri/target/release
+
+      # D10: the NSIS installer now carries Microsoft's WebView2 bootstrapper
+      # (bundle.windows.webviewInstallMode embedBootstrapper). tauri build
+      # fetches it from go.microsoft.com and checks nothing, because the file
+      # has no fixed version or hash. What can be checked is Microsoft's
+      # Authenticode signature on the copy that went into the installer.
+      - name: "Dry run: the embedded WebView2 bootstrapper is signed by Microsoft"
+        if: ${{ inputs.dry_run }}
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          # The condition stays `inputs.dry_run` alone (release-dry-run.test.ts);
+          # Linux has no NSIS installer and so nothing to check.
+          if (-not $IsWindows) { 'no NSIS installer on this platform'; exit 0 }
+          $found = @(Get-ChildItem -Path src-tauri/target, "$env:LOCALAPPDATA\tauri" -Recurse -Filter MicrosoftEdgeWebview2Setup.exe -ErrorAction SilentlyContinue)
+          if ($found.Count -eq 0) { throw "no MicrosoftEdgeWebview2Setup.exe after the build" }
+          foreach ($f in $found) {
+            $sig = Get-AuthenticodeSignature $f.FullName
+            "{0}  {1:N0} bytes  {2}  {3}" -f $f.FullName, $f.Length, $sig.Status, $sig.SignerCertificate.Subject
+            if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+              throw "$($f.FullName) is not validly signed by Microsoft"
+            }
+          }
+
+      # ── Windows code signing, only with the secrets of one lane ──────────
+      # Two lanes, and at most one of them signs a release:
+      #   - Azure Artifact Signing signs inside `tauri build`.
+      #   - SignPath signs uploaded artifacts after the build, so that lane
+      #     replaces the build step below with its own (see the action).
+      # Without the values of either lane the detect step answers false twice,
+      # every signing step is skipped, and the build below gets the same
+      # arguments it always got: unsigned installers, as before. With both
+      # lanes complete the detect step fails the run.
+      #
+      # A dry run signs nothing for Windows, whatever the repository holds:
+      # the detect step does not run, so it reads no signing secret and both
+      # of its answers stay empty, and every signing step below says so in its
+      # own condition as well.
+      - name: Which Windows signing secrets are present
+        id: signcfg
+        if: matrix.platform == 'windows-latest' && !inputs.dry_run
+        shell: bash
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.ARTIFACT_SIGNING_ENDPOINT }}
+          ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.ARTIFACT_SIGNING_ACCOUNT }}
+          ARTIFACT_SIGNING_PROFILE: ${{ secrets.ARTIFACT_SIGNING_PROFILE }}
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          SIGNPATH_SIGNING_POLICY_SLUG: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+        run: bash scripts/signing-config.sh windows
+
+      - name: Configure Windows code signing (Azure Artifact Signing)
+        id: winsign
+        if: matrix.platform == 'windows-latest' && steps.signcfg.outputs.windows == 'true' && !inputs.dry_run
+        shell: pwsh
+        timeout-minutes: 5
+        env:
+          ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.ARTIFACT_SIGNING_ENDPOINT }}
+          ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.ARTIFACT_SIGNING_ACCOUNT }}
+          ARTIFACT_SIGNING_PROFILE: ${{ secrets.ARTIFACT_SIGNING_PROFILE }}
+        run: ./scripts/windows-signing-setup.ps1
+
       - name: Build and release Tauri app
+        # Every leg, except Windows when SignPath signs: that lane cannot let
+        # this step publish, because the installers it would attach, and the
+        # updater signatures over them, are the unsigned ones. On Linux the
+        # detect step is skipped and its output is empty, so this is true.
+        # Never in a dry run: this is the step that creates the release,
+        # attaches to it and writes latest.json, and the one that is handed
+        # the release's updater key. The dry run has built by then, in its own steps right after `npm ci`.
+        if: ${{ !inputs.dry_run && (matrix.platform != 'windows-latest' || steps.signcfg.outputs.signpath != 'true') }}
         uses: tauri-apps/tauri-action@51a9f1156b33df106d827c3a78f8f894946c5faa # v0.5.25
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Read by SignTool's Artifact Signing plug-in at signing time, and by
+          # nothing else. Empty without the secrets, and then nothing asks for
+          # them: no signCommand is configured (see the winsign step above).
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
           # K1-18 (lu-301/e2e/linux/BERICHT.md, section "K1-18"): measured on a
           # real Ubuntu 24.04 box, `tauri build --bundles appimage` on this
           # project's Linux config makes linuxdeploy resolve
@@ -522,12 +909,35 @@ jobs:
         with:
           tagName: ${{ github.event.release.tag_name || github.event.inputs.tag || 'v1.3.0' }}
           releaseName: 'LU ${{ github.event.release.tag_name || github.event.inputs.tag }}'
+          # The Mac paragraph hangs on the same switch as the Mac lane
+          # (vars.LU_MAC_RELEASE, see build-tauri-macos). Off, the expression
+          # at the end of the Linux line is the empty string and the text names
+          # no Mac file. On, it adds
+          # one blank line and the paragraph; `fromJSON('"\n"')` is how an
+          # expression spells a line break. The sentence promises a signature
+          # and a notarization, which is why it must not appear without the
+          # lane that makes them. If the Mac job then fails, the paragraph
+          # names an asset that is not there: take it out of the release text
+          # by hand (RELEASE-CHECKLISTE-MAC.md, A7). Like every input of this
+          # step it only applies when this run creates the release.
+          # The head every release page opens with (funnel 3.1.0, Nr. 7): which
+          # file is for whom, the SmartScreen box, and one line on LU Cloud.
+          # .github/RELEASE-NOTES-HEAD.md is the same text for a release that is
+          # created by hand, where this input does not apply.
           releaseBody: |
-            ## Download
+            ## Which file do I need?
 
-            **Windows:** Download the `.exe` installer. During setup, choose "Install for current user only" for a portable/no-install experience. Or use the `.msi` for system-wide installation.
+            **Windows 10 and 11:** the file ending in `_x64-setup.exe`. The `.msi` is the same app for a system wide install.
 
-            **Linux:** Download the `.AppImage`, make it executable (`chmod +x`), and run. No installation needed.
+            **Linux:** the `.AppImage` runs on most distributions: make it executable (`chmod +x`) and start it. The `.deb` is for Ubuntu and Debian, the `.rpm` for Fedora.${{ vars.LU_MAC_RELEASE == '1' && format('{0}{0}**macOS (Apple Silicon only, macOS 14 or newer):** the `.dmg`. Open it and drag LU to Applications. The app is signed with an Apple Developer ID and notarized by Apple. Intel Macs are not supported.', fromJSON('"\n"')) || '' }}
+
+            **Android 7.0 or newer (arm64):** the file ending in `-Android.apk`. Allow installs from your browser or file app when Android asks.
+
+            The other files (`.sig`, `.zip`, `.tar.gz`, `.cdx.json`, `latest.json`) are for the automatic update and for checks. You do not need them.
+
+            **Windows shows "Windows protected your PC"?** The installer has no code signing certificate yet, so SmartScreen does not know it. Click **More info**, then **Run anyway**. It is built by GitHub Actions from the public source: [how to check it](https://github.com/PurpleDoubleD/locally-uncensored/blob/master/SECURITY.md#antivirus--browser-false-positives).
+
+            **No GPU, or a model too big for yours?** Run it in LU Cloud from the same app: a credit pack for €15 with no subscription, or Hosted for €19 a month. [Plans and packs](https://lu-labs.ai/pricing?src=github&utm_source=github&utm_medium=release)
 
             > All versions are portable-friendly, no admin rights required. LU by LU Labs.
           releaseDraft: false
@@ -556,7 +966,78 @@ jobs:
           # for signed artefacts cannot be built by anyone who lacks the key
           # (a0030ad2, the exit-1-after-bundling defect of v2.6.7). The overlay
           # is merged on top of the checked-in config by `tauri build`.
-          args: --config src-tauri/tauri.release.conf.json ${{ matrix.args }}
+          #
+          # The last expression is empty unless Windows signing is configured;
+          # then it is a second --config, the overlay that sets
+          # bundle.windows.signCommand (scripts/windows-signing-setup.ps1).
+          args: --config src-tauri/tauri.release.conf.json ${{ matrix.args }} ${{ steps.winsign.outputs.config_args }}
+
+      # A configured signCommand that signed nothing must not pass for a signed
+      # release. Skipped on the unsigned path, like the setup step.
+      - name: Verify the Windows signatures
+        id: winverify
+        if: matrix.platform == 'windows-latest' && steps.signcfg.outputs.windows == 'true' && !inputs.dry_run
+        shell: pwsh
+        timeout-minutes: 10
+        run: ./scripts/windows-signing-verify.ps1 -SignTool "${{ steps.winsign.outputs.signtool }}"
+
+      # ── Windows code signing with SignPath, only with its values ─────────
+      # Stage 1 of 3: builds the app, keeps the build output, and submits the
+      # app binary to SignPath without waiting for the approval. Stages 2 and
+      # 3 (installers, then publish with the publisher check and latest.json)
+      # run later in windows-signpath.yml on the same tag; see the header of
+      # the action for the order and for why it takes two signing requests.
+      # Until stage 3 is through, this release has no Windows assets.
+      # SignPath signs for this project only from a run on a release tag
+      # (refs/tags/v<major>.<minor>.<patch>), the pattern its signing policy
+      # names. A run started by hand from a branch carries that branch as its
+      # ref even when it checks out the tag, so SignPath would refuse it after
+      # an hour of building. It stops here instead, before the build, and never
+      # falls back to unsigned installers.
+      - name: SignPath signs a release tag only
+        if: matrix.platform == 'windows-latest' && steps.signcfg.outputs.signpath == 'true' && !inputs.dry_run
+        shell: bash
+        env:
+          RUN_REF: ${{ github.ref }}
+        run: |
+          if [[ ! "$RUN_REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::SignPath signs runs on a release tag (refs/tags/vX.Y.Z) only. This run is on $RUN_REF. Publish the GitHub release for the tag; that starts the run on the tag."
+            exit 1
+          fi
+
+      - name: Build the app and submit it to SignPath (stage 1)
+        id: signpath
+        if: matrix.platform == 'windows-latest' && steps.signcfg.outputs.signpath == 'true' && startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run
+        uses: ./.github/actions/windows-signpath
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          label: ${{ github.ref_name }}
+
+      - name: Say on the run page whether this Windows build is signed
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        env:
+          AZURE: ${{ steps.signcfg.outputs.windows }}
+          AZURE_PUBLISHER: ${{ steps.winverify.outputs.publisher }}
+          SIGNPATH: ${{ steps.signcfg.outputs.signpath }}
+          SIGNPATH_APP_REQUEST: ${{ steps.signpath.outputs.app-signing-request }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Windows installers: unsigned (dry run, both signing lanes are switched off)." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$AZURE" = "true" ]; then
+            echo "Windows installers: signed with Azure Artifact Signing, publisher \`$AZURE_PUBLISHER\`." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$SIGNPATH" = "true" ]; then
+            {
+              echo "Windows installers: not attached yet. SignPath stage 1 is through: the [app binary]($SIGNPATH_APP_REQUEST) waits for approval in SignPath."
+              echo "Stages 2 and 3 follow after the approvals; the SignPath section of this page says how."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Windows installers: unsigned (no signing lane is configured)." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       # K1-18 (lu-301/e2e/linux/BERICHT.md): the LD_LIBRARY_PATH fix above
       # only proves linuxdeploy did not hard-fail; K1-18 itself measured that
@@ -601,6 +1082,35 @@ jobs:
           done
           [ "$missing" -eq 0 ] || exit 1
           echo "OK: every staged sidecar companion is present inside the built AppImage ($extracted_llama_dir)"
+          for exe in lu-llama-server lu-llama-cvector-generator; do
+            [ -x "$workdir/squashfs-root/usr/bin/$exe" ] \
+              || { echo "FAIL: usr/bin/$exe is missing from the built AppImage (FEHLER-P11 #7)" >&2; exit 1; }
+          done
+          echo "OK: lu-llama-server and lu-llama-cvector-generator are in the AppImage's usr/bin"
+          # GH #191: .DirIcon and the .desktop file at the AppImage's root are
+          # symlinks, and they must be RELATIVE. The bundler before
+          # @tauri-apps/cli 2.11.4 wrote the build machine's absolute path
+          # into them, which dangles once the image is mounted, and AppImage
+          # installers such as AppManager refuse the whole file over it.
+          for link in "$workdir/squashfs-root/.DirIcon" "$workdir"/squashfs-root/*.desktop; do
+            [ -L "$link" ] || continue
+            target="$(readlink "$link")"
+            case "$target" in
+              /*) echo "FAIL: $(basename "$link") points at the absolute path $target (GH #191)" >&2; exit 1 ;;
+            esac
+            [ -e "$link" ] || { echo "FAIL: $(basename "$link") -> $target does not resolve inside the AppImage (GH #191)" >&2; exit 1; }
+          done
+          echo "OK: .DirIcon and the .desktop link are relative and resolve (GH #191)"
+          # GH #204: 3.0.8 shipped without the tray library, and on a system
+          # without it the app aborted at start. @tauri-apps/cli adds it only
+          # when it sees `tray-icon` on the FIRST `tauri` entry of Cargo.toml,
+          # and since 3.0.8 that sits in the desktop target block, so
+          # tauri.linux.conf.json now names it. It has to be here, and so do
+          # the libraries it needs that linuxdeploy pulls in after it.
+          for lib in libayatana-appindicator3.so.1 libayatana-indicator3.so.7 libayatana-ido3-0.4.so.0 libdbusmenu-glib.so.4 libdbusmenu-gtk3.so.4; do
+            [ -e "$workdir/squashfs-root/usr/lib/$lib" ] || { echo "FAIL: usr/lib/$lib is missing from the built AppImage; without it the tray cannot be built (GH #204)" >&2; exit 1; }
+          done
+          echo "OK: the AppImage carries libayatana-appindicator3 and what it needs (GH #204)"
 
       # SKEPTIKER-LINUX-WEB-K1.md: the AppImage check above proves nothing
       # about the .deb, a completely different bundler (dpkg-deb, not
@@ -640,13 +1150,994 @@ jobs:
           done
           [ "$missing" -eq 0 ] || exit 1
           echo "OK: every staged sidecar companion is present inside the built .deb ($extracted_llama_dir)"
+          for exe in lu-llama-server lu-llama-cvector-generator; do
+            [ -x "$workdir/usr/bin/$exe" ] \
+              || { echo "FAIL: usr/bin/$exe is missing from the built .deb (FEHLER-P11 #7)" >&2; exit 1; }
+          done
+          echo "OK: lu-llama-server and lu-llama-cvector-generator are in the .deb's usr/bin"
+
+      # ── Dry run: the judged files, and no release ────────────────────────
+      # Last, so that only a build that passed every check above is handed
+      # over. The script copies the installers, the updater archives and
+      # their .sig files into one folder, requires the kinds a release ships,
+      # puts DRY-RUN-NOT-FOR-RELEASE.txt next to them and writes one sha256
+      # line per file into the job summary. Short retention, as for the Mac:
+      # an artifact can be downloaded by everyone who can read the repository.
+      - name: "Dry run: collect the installers and mark them as not for release"
+        if: ${{ inputs.dry_run }}
+        shell: bash
+        env:
+          DRY_RUN_PLATFORM: ${{ matrix.platform == 'windows-latest' && 'windows' || 'linux' }}
+        run: |
+          set -euo pipefail
+          node scripts/release-dry-run.mjs collect "$DRY_RUN_PLATFORM" \
+            src-tauri/target/release/bundle "$RUNNER_TEMP/lu-dry-run-artifact" "$RUNNER_TEMP/lu-dry-run/receipt.json"
+
+      - name: "Dry run: keep the installers as a workflow artifact"
+        if: ${{ inputs.dry_run }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lu-${{ matrix.platform == 'windows-latest' && 'windows' || 'linux' }}-dry-run-${{ github.run_id }}
+          path: ${{ runner.temp }}/lu-dry-run-artifact
+          if-no-files-found: error
+          retention-days: 3
+
+  # ── macOS (Apple Silicon) ──────────────────────────────────────────────────
+  #
+  # WHY A JOB OF ITS OWN, AND WHY A SWITCH
+  # --------------------------------------
+  # The Mac build may only ship signed with a Developer ID and notarized. An
+  # ad-hoc signed .app that arrives through a browser is refused by Gatekeeper
+  # ("LU is damaged and can't be opened" on Apple Silicon), which is why the
+  # 2.5.7 mac assets were pulled. Until the Apple secrets exist this lane must
+  # therefore not run at all, and it must not turn the release red either.
+  #
+  # The skip is a repository VARIABLE, `LU_MAC_RELEASE` set to `1`
+  # (Settings, Secrets and variables, Actions, Variables), read in the job's
+  # `if:`. Three reasons for a switch over "run when the secrets are there":
+  #
+  #   1. GitHub does not offer the `secrets` context in a job level `if:`, so
+  #      testing for a secret would need a probe job and an output, a second
+  #      moving part for the same answer.
+  #   2. Six secrets arrive one by one. With "run when present" a half filled
+  #      set starts the lane, and tauri then signs but silently SKIPS the
+  #      notarization ("Warn skipping app notarization"): a green job and a
+  #      .dmg Gatekeeper rejects. With the switch, "on" has one meaning, and
+  #      the first step below fails loudly if any of the six is missing.
+  #   3. A skipped job shows as skipped. Nobody can read it as a passed check,
+  #      and the lane can be parked again without deleting a secret.
+  #
+  # Off (the variable unset or anything but `1`): the job is skipped, the
+  # release is Windows and Linux exactly as before, latest.json carries no
+  # darwin key and no Mac asset is attached.
+  #
+  # WHY IT WAITS FOR build-tauri
+  # ----------------------------
+  # tauri-action writes latest.json by reading the asset from the release,
+  # adding its own platform keys, deleting the asset and uploading the merged
+  # file (upload-version-json.ts at the pinned SHA; no lock, no retry on the
+  # read). Two jobs doing that at the same moment can drop each other's keys.
+  # Windows and Linux already share that risk inside one matrix; this job does
+  # not add a third racer. It runs after both have attached their assets, so
+  # the Mac key is merged into a file that is complete, and the last step
+  # below proves the Windows and Linux keys survived. Side effect, intended:
+  # if the Windows or Linux build fails, no Mac build is attached to a broken
+  # release.
+  #
+  # Not in the build-tauri matrix: the two guards that read `- platform:`
+  # entries (release-build-gate.test.ts, kein-mac-fix-gilt-als-ausgeliefert
+  # .test.ts) keep describing the unconditional platforms. The conditional
+  # lane has its own guard, mac-release-lane.test.ts, and its own keyless
+  # gate in ci.yml (macos-gate, same switch).
+  #
+  # DRY RUN
+  # -------
+  # `workflow_dispatch` with `mac_dry_run: true` runs this job and nothing
+  # else: `gate` is skipped by its own condition, build-tauri because gate
+  # was, demote-on-arrival because the trigger is not a release, and
+  # enforce-prerelease by its condition. The job then checks out the commit
+  # the run was started on (not a tag), builds, signs, notarizes and judges
+  # exactly as a release would, and stops before the release: the two steps
+  # that hold a token for it are skipped, and the .dmg, the updater archive
+  # and its signature are kept as a workflow artifact instead. It does not
+  # need LU_MAC_RELEASE, so the first signed build can be judged before the
+  # switch is thrown. It needs the six Apple secrets and nothing else: the
+  # updater archive of a dry run is signed with a key made in the job, and
+  # the artifact carries a file that says so (DRY-RUN-NOT-FOR-RELEASE.txt).
+  #
+  # The same mode is what a full dry run (`dry_run`, see above the `gate`
+  # job) asks of this job when `dry_run_mac` is ticked. "Dry run" below means
+  # either way in, and one value says so for the whole job: MAC_DRY_RUN in
+  # the job's `env`, 'true' or 'false', read by the step conditions as
+  # `env.MAC_DRY_RUN` and by the scripts as `$MAC_DRY_RUN`. The job's own
+  # `if:` cannot read `env` and spells the two ways out once more.
+  #
+  # One thing the full dry run adds and the Mac dry run does not have: the
+  # updater endpoint and pubkey of the build are replaced, as on Windows and
+  # Linux (scripts/release-dry-run.mjs). A Mac dry run builds the checked-in
+  # updater configuration, as it always did.
+  #
+  # The condition spelled out, because `!cancelled()` takes the place of the
+  # implicit `success()`: a dry run goes ahead whatever became of build-tauri
+  # (skipped in a Mac dry run, built or failed in a full one); a release goes
+  # ahead only with the switch on AND build-tauri green. `!inputs.dry_run`
+  # stands in the release branch because build-tauri is green in a full dry
+  # run too: without it, a full dry run without `dry_run_mac` in a repository
+  # with the switch on would start this job in release mode.
+  #
+  # VERIFICATION LIMIT, stated on purpose: this job has never run. No Actions
+  # run was permitted. Checked are the syntax (actionlint, shellcheck), the
+  # structure (the guard above) and, by hand on a Mac, the parts of
+  # scripts/macos-release-signing.sh that need no private key.
+  build-tauri-macos:
+    needs: build-tauri
+    # Keeps the right it had from the workflow (OpenSSF Scorecard, 3.1.0).
+    permissions:
+      contents: write
+    # mac_only is the fourth way in: a release whose Windows and Linux files
+    # are attached and checked already (the step after the secret check
+    # proves that), and whose Mac half failed. build-tauri is skipped then,
+    # not green, because the gate is not run again for a tag it passed.
+    if: ${{ !cancelled() && (inputs.mac_dry_run || (inputs.dry_run && inputs.dry_run_mac) || (!inputs.dry_run && vars.LU_MAC_RELEASE == '1' && (needs.build-tauri.result == 'success' || (inputs.mac_only && needs.build-tauri.result == 'skipped')))) }}
+    # macos-15 is an Apple Silicon image (arm64). macos-14 is deprecated and
+    # macos-latest moves; a pinned label keeps the toolchain a decision.
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      # Dry run or release, for every step of this job (see "DRY RUN" above).
+      # `inputs` is empty on the `release` trigger, which makes this 'false'.
+      MAC_DRY_RUN: ${{ (inputs.mac_dry_run || (inputs.dry_run && inputs.dry_run_mac)) && 'true' || 'false' }}
+      # 'true' only for a Mac-only run on an existing release (input mac_only).
+      MAC_ONLY: ${{ inputs.mac_only && 'true' || 'false' }}
+      # The oldest macOS LU supports (VOICE.md, bundle.macOS
+      # .minimumSystemVersion in tauri.macos.conf.json). Without it cmake
+      # stamps the llama-server sidecar with the RUNNER's OS version as its
+      # minimum (measured on a local build: `minos 26.0`), and the sidecar
+      # then refuses to start on every older Mac. Checked after the build.
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
+      SIDECAR_TRIPLE: aarch64-apple-darwin
+      RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+      # Apple's "Developer ID Certification Authority" (G2), the issuer of the
+      # Developer ID Application certificate. The .p12 does not carry it, and
+      # the job does not rely on the runner image to. Pinned by the sha256 of
+      # the DER file, taken on 2026-10-09 from this address and compared with
+      # the copy Apple serves at the leaf's own AIA address
+      # (http://certs.apple.com/devidg2.der, same bytes). Subject
+      # "CN=Developer ID Certification Authority, OU=G2, O=Apple Inc., C=US",
+      # issued by "Apple Root CA", valid until 2031-09-17. If Apple replaces
+      # the file the keychain step turns red and names both hashes.
+      DEVELOPER_ID_G2_URL: 'https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer'
+      DEVELOPER_ID_G2_SHA256: 'f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a'
+
+    steps:
+      # A release with the switch on, or a dry run, says "make a signed Mac
+      # build". Anything less than the full set is a configuration error and
+      # has to be red BEFORE 30 minutes of build, not a quiet unsigned or
+      # un-notarized artefact after them. Values are never printed, only the
+      # names of the missing ones.
+      #
+      # Six Apple secrets: the certificate pair, the team, and an App Store
+      # Connect API key for the notary service (key ID, issuer ID, the .p8).
+      # There is no Apple ID and no app-specific password in this lane.
+      # TAURI_SIGNING_PRIVATE_KEY is the updater key the other lanes use. A
+      # release requires it. A dry run does not read it at all: it signs its
+      # updater archive with a key made for that run (see the step before
+      # the build), so the dry run can live in a repository that never held
+      # the release key.
+      - name: Require every signing secret
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ env.MAC_DRY_RUN != 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_TEAM_ID \
+                      APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_P8 TAURI_SIGNING_PRIVATE_KEY; do
+            # The one name a dry run does without.
+            if [ "$name" = TAURI_SIGNING_PRIVATE_KEY ] && [ "$MAC_DRY_RUN" = true ]; then
+              continue
+            fi
+            if [ -z "${!name:-}" ]; then
+              echo "::error::The Mac lane is on, but the secret $name is empty or missing."
+              missing=$((missing + 1))
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          # Shapes only, never a value. The certificate secret is the base64
+          # text of the exported .p12, on one line or wrapped.
+          if ! printf '%s' "$APPLE_CERTIFICATE" | base64 --decode >/dev/null 2>&1; then
+            echo "::error::APPLE_CERTIFICATE is not valid base64. It must be the output of: base64 -i developer-id.p12"
+            exit 1
+          fi
+          if ! [[ "$APPLE_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]; then
+            echo "::error::APPLE_TEAM_ID is not ten characters of A-Z and 0-9 (the value in brackets at the end of the certificate name)."
+            exit 1
+          fi
+          # The two that get swapped: the key ID is short, the issuer ID is a
+          # UUID. A warning, not a verdict; the notary service gives that a
+          # few steps further down, still before the build.
+          if ! [[ "$APPLE_API_ISSUER" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+            echo "::warning::APPLE_API_ISSUER does not look like an issuer ID (a UUID). Were key ID and issuer ID swapped?"
+          fi
+          if ! [[ "$APPLE_API_KEY" =~ ^[A-Z0-9]{8,12}$ ]]; then
+            echo "::warning::APPLE_API_KEY does not look like a key ID (about ten characters of A-Z and 0-9). It is the ID, not the content of the .p8."
+          fi
+          [ "$(uname -m)" = "arm64" ] || { echo "::error::this runner is not Apple Silicon ($(uname -m))"; exit 1; }
+          if [ "$MAC_DRY_RUN" = true ]; then
+            echo "OK: the six Apple secrets are set, the runner is arm64. Dry run: the updater key is made in this job."
+          else
+            echo "OK: the six Apple secrets and the updater key are set, the runner is arm64."
+          fi
+
+      # A Mac-only run adds to a release, it does not make one. The release
+      # has to exist, be published, and carry the Windows and Linux files and
+      # a latest.json of its own version, or there is nothing to add to: the
+      # gate that would otherwise judge the tag is not run in this mode. Read
+      # through the public API, without a token (no step before the upload
+      # holds one).
+      - name: "Mac only: the release is there, with its Windows and Linux files"
+        if: ${{ env.MAC_ONLY == 'true' && env.MAC_DRY_RUN != 'true' }}
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          rel="$RUNNER_TEMP/release.json"
+          curl -fsSL --retry 3 "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" -o "$rel" \
+            || { echo "::error::no published release for $RELEASE_TAG; mac_only adds to an existing release" >&2; exit 1; }
+          node - "$rel" "$RELEASE_TAG" <<'JS'
+          const fs = require('fs')
+          const [file, tag] = process.argv.slice(2)
+          const rel = JSON.parse(fs.readFileSync(file, 'utf8'))
+          const names = (rel.assets || []).map((a) => a.name)
+          const fail = (m) => { console.error('::error::' + m); process.exit(1) }
+          if (rel.draft) fail(tag + ' is a draft')
+          for (const [what, re] of [['the Windows installer', /_x64-setup\.exe$/], ['the AppImage', /_amd64\.AppImage$/], ['latest.json', /^latest\.json$/]]) {
+            if (!names.some((n) => re.test(n))) fail(tag + ' has no ' + what + '; run the whole release, not mac_only')
+          }
+          if (names.some((n) => /_aarch64\.dmg$/.test(n))) console.log('::warning::' + tag + ' already has a disk image; this run replaces the Mac files')
+          // What must still be there, unchanged, after the upload: every file
+          // but the Mac ones and latest.json, by GitHub's own sha256.
+          const keep = (rel.assets || []).filter((a) => !/(_aarch64\.dmg|\.app\.tar\.gz(\.sig)?|^latest\.json)$/.test(a.name))
+          for (const a of keep) if (!/^sha256:[0-9a-f]{64}$/.test(a.digest || '')) fail(a.name + ' has no sha256 digest to compare against')
+          fs.writeFileSync(process.env.RUNNER_TEMP + '/mac-only-before.json', JSON.stringify(Object.fromEntries(keep.map((a) => [a.name, a.digest])), null, 1))
+          console.log('OK: ' + tag + ' is published with ' + names.length + ' files; the Mac app is added to it. Kept as they are: ' + keep.length)
+          JS
+          json="$RUNNER_TEMP/mac-only-latest-before.json"
+          curl -fsSL --retry 3 "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/latest.json" -o "$json"
+          node -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const want=process.argv[2].replace(/^v/,"");if(d.version!==want){console.error("::error::latest.json of "+process.argv[2]+" says version "+d.version);process.exit(1)}console.log("OK: latest.json is version "+d.version+" with "+Object.keys(d.platforms||{}).join(", "))' "$json" "$RELEASE_TAG"
+
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # A release: the tag, and only the tag, same reasoning as in
+          # build-tauri. A dry run: the commit the run was started on, since
+          # there is no tag to build.
+          ref: ${{ env.MAC_DRY_RUN == 'true' && github.sha || github.event.release.tag_name || github.event.inputs.tag }}
+          # No step of this job talks to the repository through git, and the
+          # build runs third-party build scripts: they get no token to find.
+          persist-credentials: false
+
+      # ── Apple credentials, proven before anything is compiled ────────────
+      # Why the import happens here and not inside `tauri build`: header of
+      # scripts/macos-release-signing.sh. In short, the bundler's own
+      # keychain cannot be given the intermediate certificate, and it would
+      # report a broken chain only after the compile.
+      - name: "Signing keychain: certificate, Apple's intermediate, one valid identity"
+        id: keychain
+        shell: bash
+        timeout-minutes: 5
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bash scripts/macos-release-signing.sh keychain
+
+      - name: "Notarization key: write the .p8 and ask Apple whether it is accepted"
+        shell: bash
+        timeout-minutes: 5
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          bash scripts/macos-release-signing.sh notary-key
+          bash scripts/macos-release-signing.sh notary-check
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      # ── llama.cpp sidecar ────────────────────────────────────────────────
+      # One static binary with Metal embedded (scripts/build-llama.sh), no
+      # companion libraries, so there is no resources/llama directory and no
+      # ISA guard on this platform: the guard is about x86-64 dispatch.
+      - name: Sidecar build cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .llama-build
+          # The deployment target is part of the key: a cached binary built
+          # for another minimum OS must not be reused.
+          key: llama-${{ hashFiles('scripts/build-llama.sh', 'scripts/llama-patches/**') }}-aarch64-apple-darwin-min${{ env.MACOSX_DEPLOYMENT_TARGET }}-v1
+
+      - name: Build llama-server sidecar
+        shell: bash
+        env:
+          BUILD_JOBS: 3
+        run: bash scripts/build-llama.sh "$SIDECAR_TRIPLE"
+
+      - name: Assert sidecar exists and runs on the oldest supported macOS
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="src-tauri/bin/lu-llama-server-$SIDECAR_TRIPLE"
+          test -x "$bin"
+          # The Neuron tweaker's vector tool ships here too (FEHLER-P11 #7).
+          test -x "src-tauri/bin/lu-llama-cvector-generator-$SIDECAR_TRIPLE"
+          ls -la src-tauri/bin/
+          file "$bin" | grep -q 'arm64' || { echo "FAIL: the sidecar is not an arm64 binary" >&2; exit 1; }
+          minos="$(otool -l "$bin" | awk '/LC_BUILD_VERSION/{f=1} f && /minos/ && !done {print $2; done=1}')"
+          echo "sidecar minos: $minos (deployment target $MACOSX_DEPLOYMENT_TARGET)"
+          [ -n "$minos" ] || { echo "FAIL: could not read the sidecar's minimum OS" >&2; exit 1; }
+          if [ "${minos%%.*}" -gt "${MACOSX_DEPLOYMENT_TARGET%%.*}" ]; then
+            echo "FAIL: the sidecar needs macOS $minos, LU promises $MACOSX_DEPLOYMENT_TARGET" >&2
+            exit 1
+          fi
+          # A static binary must not depend on anything outside the system.
+          if otool -L "$bin" | tail -n +2 | awk '{print $1}' | grep -vE '^(/usr/lib/|/System/Library/)'; then
+            echo "FAIL: the sidecar links a library that is not part of macOS (listed above)" >&2
+            exit 1
+          fi
+
+      # A40 (GH #259, 3.1.2): minos above says the binary STARTS on macOS 14.
+      # It does not say the shaders compile there: the sidecar embeds its
+      # Metal code as source, and the user's own macOS compiles it at the
+      # first model load. b11960 shipped in 3.0.9 to 3.1.1 with two bfloat
+      # casts the compiler of macOS 14 and 15 refuses, so no model loaded on
+      # those Macs while every check here was green. This step asks the
+      # compiler of THIS runner (macos-15) through the same call llama.cpp
+      # makes. metal-shaders.yml asks the same on every change to the build
+      # script or the patches. GitHub offers no macos-14 image any more.
+      - name: "Metal shaders compile on this runner's macOS"
+        shell: bash
+        run: bash scripts/check-metal-shaders.sh ".llama-build/build-$SIDECAR_TRIPLE/ggml/src/ggml-metal/autogenerated"
+
+      # Same proof shape as the Windows and Linux lanes: a real model load and
+      # /health, not `--version`. `-ngl 0` keeps the layers on the processor:
+      # hosted runners are virtual machines, and whether their paravirtual GPU
+      # carries a Metal compute load is not something this step should bet a
+      # release on. It proves that the binary starts and serves, not that
+      # Metal works; Metal is checked by hand on a real Mac (checklist).
+      - name: "Boot-smoke: real model load plus /health"
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          bin="$PWD/src-tauri/bin/lu-llama-server-$SIDECAR_TRIPLE"
+          model="$RUNNER_TEMP/stories260K.gguf"
+          curl -fsSL --retry 3 --max-time 60 -o "$model" \
+            "https://huggingface.co/ggml-org/models/resolve/${STORIES260K_REVISION}/tinyllamas/stories260K.gguf"
+          echo "${STORIES260K_SHA256}  $model" | shasum -a 256 -c - \
+            || { echo "FAIL: stories260K.gguf did not match the pinned sha256" >&2; exit 1; }
+          log="$RUNNER_TEMP/boot-smoke.log"
+          ( cd "$RUNNER_TEMP" && exec "$bin" --host 127.0.0.1 --port 8129 -ngl 0 -m "$model" >"$log" 2>&1 ) &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          ok=""
+          for _ in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:8129/health" >/dev/null 2>&1; then ok=1; break; fi
+            sleep 0.5
+          done
+          kill "$pid" 2>/dev/null || true
+          trap - EXIT
+          if [ -z "$ok" ]; then
+            cat "$log" || true
+            echo "FAIL: llama-server /health never came up" >&2
+            exit 1
+          fi
+          echo "OK: the sidecar starts outside its build directory, loads a model and answers /health"
+
+      # P11: a real run of the vector tool on the tiny model, as on Linux and
+      # Windows: it writes a control vector, prints the progress line the app
+      # reads (LU patch 0003) and measures the layer lengths single-neuron
+      # doses are counted in (LU_LAYER_NORMS, patch 0004). `-ngl 0` for the
+      # reason the boot smoke above gives.
+      - name: "Vector tool computes outside its build directory (P11)"
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          tool="$PWD/src-tauri/bin/lu-llama-cvector-generator-$SIDECAR_TRIPLE"
+          model="$RUNNER_TEMP/stories260K.gguf"
+          echo "${STORIES260K_SHA256}  $model" | shasum -a 256 -c - \
+            || { echo "FAIL: the boot smoke's stories260K.gguf is missing or does not match the pinned sha256" >&2; exit 1; }
+          work="$RUNNER_TEMP/cvector"
+          rm -rf "$work"
+          mkdir -p "$work"
+          printf 'Once upon a time there was a happy dog.\nThe sun was bright and everyone smiled.\n' > "$work/more.txt"
+          printf 'Once upon a time there was a sad dog.\nThe rain fell and everyone cried.\n' > "$work/less.txt"
+          ( cd "$work" && "$tool" -m "$model" --positive-file more.txt --negative-file less.txt \
+              -o direction.gguf --method mean -ngl 0 -c 256 ) >"$work/cvector.log" 2>&1 || {
+            cat "$work/cvector.log"
+            echo "FAIL: lu-llama-cvector-generator exited non-zero" >&2
+            exit 1
+          }
+          [ -s "$work/direction.gguf" ] || { cat "$work/cvector.log"; echo "FAIL: no control vector written" >&2; exit 1; }
+          grep -q 'Evaluating prompt\[2/2\]' "$work/cvector.log" \
+            || { cat "$work/cvector.log"; echo "FAIL: no progress line for the last prompt (patch 0003)" >&2; exit 1; }
+          ( cd "$work" && LU_LAYER_NORMS=1 "$tool" -m "$model" --positive-file more.txt --negative-file less.txt \
+              -o norms.gguf --method mean -ngl 0 -c 256 ) >"$work/cvector-norms.log" 2>&1 || {
+            cat "$work/cvector-norms.log"
+            echo "FAIL: the vector tool's measuring mode (LU_LAYER_NORMS, patch 0004) exited non-zero" >&2
+            exit 1
+          }
+          norms="$(grep -cE '^LU norm [0-9]+ [0-9]+\.[0-9]{6}$' "$work/cvector-norms.log" || true)"
+          [ "$norms" -ge 1 ] && [ ! -e "$work/norms.gguf" ] \
+            || { cat "$work/cvector-norms.log"; echo "FAIL: LU_LAYER_NORMS printed $norms 'LU norm' lines (want at least 1) or wrote a vector" >&2; exit 1; }
+          echo "OK: the vector tool computes a control vector outside its build directory and measures $norms layer lengths"
+
+      # ── App build, signing, notarization: nothing is uploaded yet ────────
+      - name: Install npm dependencies
+        run: npm ci
+
+      # Not the release key: one that exists for this run only, made the way
+      # the Windows signing probe makes its own. The key is one line of
+      # base64, so one mask covers it; it lives in the signing directory the
+      # cleanup step removes. The public half is kept for the marker file of
+      # the artifact.
+      - name: "Dry run: generate a throwaway updater key"
+        id: dry-run-key
+        if: ${{ env.MAC_DRY_RUN == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/lu-signing"
+          npx tauri signer generate --ci -w "$RUNNER_TEMP/lu-signing/dry-run-updater.key" > /dev/null
+          key="$(cat "$RUNNER_TEMP/lu-signing/dry-run-updater.key")"
+          [ -n "$key" ] || { echo "::error::no throwaway updater key was written"; exit 1; }
+          echo "::add-mask::$key"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          cp "$RUNNER_TEMP/lu-signing/dry-run-updater.key.pub" "$RUNNER_TEMP/dry-run-updater.key.pub"
+
+      # Only in a full dry run, where this build stands next to the Windows
+      # and Linux ones and is to behave like them once installed: the updater
+      # asks an address that never answers and trusts the throwaway key alone
+      # (scripts/release-dry-run.mjs). Before the build, because both values
+      # are compiled into the program. Nothing the steps below judge reads
+      # the updater section: the bundle check takes resources, version and
+      # identifier from this file, and the archive check says itself that it
+      # does not compare the .sig with the pubkey.
+      - name: "Full dry run: point the updater at an address that never answers"
+        if: ${{ inputs.dry_run }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release-dry-run.mjs rewrite-updater \
+            "$RUNNER_TEMP/dry-run-updater.key.pub" "$RUNNER_TEMP/dry-run-updater-receipt.json"
+
+      # BUILD FIRST, JUDGE, THEN UPLOAD
+      # -------------------------------
+      # tauri-action builds and uploads in one step. Used that way here, the
+      # Mac assets and the `darwin-aarch64` key of latest.json were attached
+      # to the release BEFORE anything had looked at the signature, and a red
+      # verification left them hanging on the prerelease for somebody to
+      # remove by hand. So the build is a plain `tauri build` in this step,
+      # the verification steps follow, and tauri-action comes last and only
+      # uploads (see there).
+      #
+      # The command is the one tauri-action ran before: `npm run tauri build`
+      # with the release overlay, and TAURI_BUNDLER_DMG_IGNORE_CI=true, which
+      # the action sets on macOS so that the bundler lays out the .dmg window
+      # through the Finder even though CI=true.
+      #
+      # The tauri bundler does the Apple side by itself from these variables
+      # (read at tauri-cli 2.10.1, tauri-bundler bundle/macos/sign.rs):
+      #   APPLE_SIGNING_IDENTITY   overrides `signingIdentity: "-"` (ad hoc)
+      #                            from tauri.conf.json. Here: the SHA-1 of
+      #                            the certificate the keychain step proved,
+      #                            which codesign takes in place of a name.
+      #   APPLE_API_KEY            the key ID
+      #   APPLE_API_ISSUER         the issuer ID
+      #   APPLE_API_KEY_PATH       the .p8 on disk; with these three the
+      #                            bundler runs notarytool submit --wait on
+      #                            the .app and staples the ticket.
+      # What it must NOT see: APPLE_CERTIFICATE (it would import the .p12 a
+      # second time into a keychain of its own, without the intermediate),
+      # and APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID (it tests those first,
+      # for "is set", and would try an Apple ID login). They are not passed,
+      # and unset below in case the runner's environment carries one.
+      # Hardened Runtime is the bundler's default and Entitlements.plist is
+      # applied to the app and to the sidecar. Targets are `all`, which on
+      # macOS means .app and .dmg; the overlay adds LU.app.tar.gz and its
+      # .sig for the updater. The bundler signs the .dmg and does not
+      # notarize it; that is the step after the app was judged.
+      #
+      # The updater key: a release signs LU.app.tar.gz with the key every
+      # installed LU trusts. A dry run signs it with the throwaway key of the
+      # step before this one, which has no password, hence the empty one.
+      - name: Build, sign and notarize the Mac app (no upload)
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ env.MAC_DRY_RUN == 'true' && steps.dry-run-key.outputs.key || secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ env.MAC_DRY_RUN != 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ steps.keychain.outputs.identity }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/lu-signing/AuthKey.p8
+          TAURI_BUNDLER_DMG_IGNORE_CI: 'true'
+        run: |
+          set -euo pipefail
+          unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+          # Without an identity the bundler falls back to the ad hoc one from
+          # tauri.conf.json and skips the notarization with a warning.
+          [[ "${APPLE_SIGNING_IDENTITY:-}" =~ ^[0-9A-F]{40}$ ]] \
+            || { echo "::error::the keychain step handed over no signing identity"; exit 1; }
+          [ -s "$APPLE_API_KEY_PATH" ] \
+            || { echo "::error::the notarization key file is missing"; exit 1; }
+          [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] \
+            || { echo "::error::no updater key reached the build"; exit 1; }
+          # A dry run must have signed with the key of this job, whatever the
+          # repository holds: the marker file below says so to whoever opens
+          # the artifact, and this keeps it true.
+          if [ "$MAC_DRY_RUN" = true ]; then
+            [ "$TAURI_SIGNING_PRIVATE_KEY" = "$(cat "$RUNNER_TEMP/lu-signing/dry-run-updater.key")" ] \
+              || { echo "::error::the dry run was not handed its own throwaway updater key"; exit 1; }
+          fi
+          # An empty bundle directory, so that what is judged and uploaded
+          # below can only be what this build made.
+          rm -rf src-tauri/target/release/bundle
+          npm run tauri build -- --config src-tauri/tauri.release.conf.json
+
+      # What the bundle IS, with no certificate involved: arm64 and nothing
+      # else in every Mach-O file, the minimum OS of every binary, the main
+      # program and the sidecar, every file of bundle.resources under
+      # Contents/Resources, and the Info.plist (minimum system, version,
+      # identifier, usage descriptions). The same script runs keyless in
+      # ci.yml's macos-gate; here it runs WITHOUT --allow-stub-sidecar.
+      - name: Verify the bundle (architecture, minimum OS, resources, Info.plist)
+        shell: bash
+        timeout-minutes: 5
+        run: bash scripts/verify-mac-bundle.sh src-tauri/target/release/bundle/macos/LU.app
+
+      # The other half of the rewrite before the build: the programs in the
+      # bundle are read, and one that still carries the public endpoint or
+      # the release pubkey fails the run.
+      - name: "Full dry run: the built app must not know the public update address"
+        if: ${{ inputs.dry_run }}
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          node scripts/release-dry-run.mjs check-binaries "$RUNNER_TEMP/dry-run-updater-receipt.json" \
+            src-tauri/target/release/bundle/macos/LU.app/Contents/MacOS
+
+      - name: Verify signature, Hardened Runtime and notarization
+        shell: bash
+        timeout-minutes: 10
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          app="src-tauri/target/release/bundle/macos/LU.app"
+          [ -d "$app" ] || { echo "FAIL: $app does not exist" >&2; exit 1; }
+
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+          # $2 is `runtime` where the Hardened Runtime is demanded: the
+          # bundle and every executable. A library carries none.
+          check_signed() {
+            local path="$1" want_runtime="${2:-}" info
+            info="$(codesign -dvv "$path" 2>&1)" \
+              || { echo "FAIL: $path carries no signature at all" >&2; return 1; }
+            echo "---- $path"
+            echo "$info" | grep -E '^(Authority|TeamIdentifier|CodeDirectory|Timestamp)' || true
+            echo "$info" | grep -q '^Authority=Developer ID Application: ' \
+              || { echo "FAIL: $path is not signed with a Developer ID Application certificate" >&2; return 1; }
+            echo "$info" | grep -q "^TeamIdentifier=${APPLE_TEAM_ID}\$" \
+              || { echo "FAIL: $path is signed by another team than APPLE_TEAM_ID" >&2; return 1; }
+            if [ "$want_runtime" = runtime ]; then
+              echo "$info" | grep -E '^CodeDirectory' | grep -q 'runtime' \
+                || { echo "FAIL: $path is signed without the Hardened Runtime" >&2; return 1; }
+            fi
+            if echo "$info" | grep -E '^CodeDirectory' | grep -q 'adhoc'; then
+              echo "FAIL: $path is ad hoc signed" >&2; return 1
+            fi
+            echo "$info" | grep -q '^Timestamp=' \
+              || { echo "FAIL: $path carries no secure timestamp (the notary service requires one)" >&2; return 1; }
+          }
+          check_signed "$app" runtime
+          check_signed "$app/Contents/MacOS/lu-llama-server" runtime
+          # And every other Mach-O file in the bundle, whatever a later
+          # change puts there: the notary service judges each one, and a
+          # file that misses a mark is named here and not in Apple's log.
+          machos=0
+          while IFS= read -r -d '' file_path; do
+            kind="$(file -b "$file_path")"
+            case "$kind" in
+              *Mach-O*executable*) check_signed "$file_path" runtime ;;
+              *Mach-O*) check_signed "$file_path" ;;
+              *) continue ;;
+            esac
+            machos=$((machos + 1))
+          done < <(find "$app" -type f -print0)
+          [ "$machos" -ge 2 ] || { echo "FAIL: found $machos Mach-O files in the bundle, expected at least the app and the sidecar" >&2; exit 1; }
+          echo "Mach-O files judged: $machos"
+
+          # The entitlements that reach the user are the ones in the
+          # signature, not the ones in the repository.
+          ent="$(codesign -d --entitlements - --xml "$app" 2>/dev/null | plutil -convert json -o - - 2>/dev/null || true)"
+          echo "entitlements: $ent"
+          echo "$ent" | grep -q '"com.apple.security.device.audio-input":true' \
+            || { echo "FAIL: the signed app has no microphone entitlement; Voice and dictation would be denied without a prompt" >&2; exit 1; }
+          if echo "$ent" | grep -q 'get-task-allow'; then
+            echo "FAIL: get-task-allow is set; the notary service rejects it" >&2; exit 1
+          fi
+
+          # The ticket is stapled to the app, so the first start works offline.
+          # Retried: stapler asks Apple's CloudKit, see stapler_retry.
+          bash scripts/macos-release-signing.sh stapler validate "$app"
+
+          # The same question put to the signature itself: the requirement
+          # `notarized` holds only for code Apple has a ticket for. Unlike
+          # spctl below it does not depend on a Gatekeeper setting of the
+          # runner, so it is always judged.
+          codesign --verify --deep --strict -R='notarized' --check-notarization --verbose=2 "$app" \
+            || { echo "FAIL: the app does not satisfy the requirement 'notarized'" >&2; exit 1; }
+
+          # Gatekeeper's own verdict, where the runner still has assessments
+          # switched on. With them off, spctl accepts everything and proves
+          # nothing, so it is then reported and not judged.
+          if spctl --status 2>&1 | grep -q 'assessments enabled'; then
+            verdict="$(spctl --assess --type execute -vv "$app" 2>&1 || true)"
+            echo "$verdict"
+            echo "$verdict" | grep -q 'source=Notarized Developer ID' \
+              || { echo "FAIL: Gatekeeper does not accept the app as Notarized Developer ID" >&2; exit 1; }
+          else
+            echo "::warning::Gatekeeper assessments are disabled on this runner; spctl was not judged. stapler validate above is the notarization proof."
+          fi
+
+          echo "OK: Developer ID, Hardened Runtime, timestamp, stapled ticket and entitlements all check out."
+
+      # The file a customer downloads. The bundler signed it and left it
+      # there; this gives it a ticket of its own (notarytool submit --wait
+      # with the API key, stapler staple, stapler validate, and Gatekeeper's
+      # verdict with `spctl -a -t open --context context:primary-signature`).
+      # It runs after the app was judged, so a disk image is only sent to
+      # Apple around an app that passed, and before the upload, so the file
+      # that reaches the release is the stapled one. latest.json does not
+      # name the disk image (the updater takes the .app.tar.gz), so stapling
+      # it changes no updater signature.
+      - name: Notarize and staple the disk image
+        shell: bash
+        timeout-minutes: 45
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+          count="$(find src-tauri/target/release/bundle/dmg -type f -name '*.dmg' | wc -l | tr -d ' ')"
+          [ "$count" -eq 1 ] || { echo "FAIL: expected exactly one .dmg, found $count" >&2; exit 1; }
+          dmg="$(find src-tauri/target/release/bundle/dmg -type f -name '*.dmg' -print -quit)"
+          bash scripts/macos-release-signing.sh notarize-dmg "$dmg"
+          {
+            echo "### Mac build"
+            echo "- \`$(basename "$dmg")\`: Developer ID signed, notarized, stapled"
+            echo "- sha256 \`$(shasum -a 256 "$dmg" | awk '{print $1}')\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The updater does not install the .app that was just judged, it
+      # installs what is inside LU.app.tar.gz. This unpacks the archive and
+      # asks the same two questions of that copy, so an archive that was
+      # packed before the ticket was stapled, or from another build, cannot
+      # reach a customer's Mac as an update Gatekeeper then refuses.
+      - name: Verify the updater archive holds the same signed, stapled app
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          dir="src-tauri/target/release/bundle/macos"
+          archive="$dir/LU.app.tar.gz"
+          [ -s "$archive" ] || { echo "FAIL: $archive is missing; the updater overlay (tauri.release.conf.json) did not apply" >&2; exit 1; }
+          [ -s "$archive.sig" ] || { echo "FAIL: $archive.sig is missing; the updater would reject the archive" >&2; exit 1; }
+          out="$RUNNER_TEMP/updater-archive"
+          rm -rf "$out"; mkdir -p "$out"
+          tar -xzf "$archive" -C "$out"
+          [ -d "$out/LU.app" ] || { echo "FAIL: the updater archive does not unpack to LU.app" >&2; ls -la "$out" >&2; exit 1; }
+          codesign --verify --deep --strict --verbose=2 "$out/LU.app"
+          bash scripts/macos-release-signing.sh stapler validate "$out/LU.app"
+          built="$(codesign -dvvv "$dir/LU.app" 2>&1 | awk -F= '/^CDHash=/{print $2}')"
+          packed="$(codesign -dvvv "$out/LU.app" 2>&1 | awk -F= '/^CDHash=/{print $2}')"
+          echo "CDHash built: $built, in the archive: $packed"
+          [ -n "$built" ] && [ "$built" = "$packed" ] \
+            || { echo "FAIL: the app in the updater archive is not the app that was verified above" >&2; exit 1; }
+          # What this step does NOT ask, in either mode: whether the .sig
+          # verifies against plugins.updater.pubkey of tauri.conf.json. In a
+          # release the key comes from the secrets and the first real update
+          # is that proof; in a dry run the .sig is from a throwaway key and
+          # cannot verify against it by design.
+          echo "OK: the updater archive carries the verified app, signed and stapled."
+
+      # Nothing below signs or notarizes. The keychain and the .p8 go now,
+      # whatever happened above, and before any step that holds a token for
+      # the release starts.
+      - name: Remove the signing keychain and the notarization key
+        if: always()
+        shell: bash
+        run: |
+          # `always()` also means "the secret check failed before the
+          # checkout": then there is no script and nothing to remove.
+          if [ -f scripts/macos-release-signing.sh ]; then
+            bash scripts/macos-release-signing.sh cleanup
+          fi
+
+      # ── Dry run: the judged files, and no release ────────────────────────
+      # The same three files the release would get. An artifact of a public
+      # repository can be downloaded by anyone who is signed in to GitHub,
+      # for as long as it is kept, hence the short retention.
+      # The .dmg in this artifact is the real thing: Developer ID signed,
+      # notarized, stapled. The updater archive is not: its .sig comes from
+      # the throwaway key, and no installed LU would accept it. The marker
+      # file sits next to the files and says so.
+      - name: "Dry run: mark the artifact as not for release"
+        if: ${{ env.MAC_DRY_RUN == 'true' }}
+        shell: bash
+        env:
+          FULL_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          {
+            echo "DRY RUN, NOT FOR RELEASE"
+            echo
+            echo "These files come from a Mac dry run of the release workflow."
+            echo "Commit: $GITHUB_SHA"
+            echo "Run:    $GITHUB_RUN_ID"
+            echo
+            echo "macos/LU.app.tar.gz.sig was made with a THROWAWAY updater key that"
+            echo "existed for this run only. It does not verify against the public"
+            echo "key built into LU, and no installed LU accepts this archive as an"
+            echo "update. Never attach LU.app.tar.gz or its .sig to a release and"
+            echo "never put them into latest.json."
+            echo
+            echo "The .dmg is signed with the Developer ID and notarized by Apple."
+            echo "It is a test build of an unreleased state, not a release."
+            echo
+            if [ "$FULL_DRY_RUN" = true ]; then
+              echo "This app asks for updates at https://dry-run.invalid/latest.json, an"
+              echo "address that never answers, and trusts the throwaway key alone. It"
+              echo "never asks the public latest.json and accepts no real update, so it"
+              echo "does not update itself: remove it after the test."
+              echo
+            fi
+            echo "Public half of the throwaway key:"
+            cat "$RUNNER_TEMP/dry-run-updater.key.pub"
+            echo
+          } > src-tauri/target/release/bundle/DRY-RUN-NOT-FOR-RELEASE.txt
+
+      - name: "Dry run: keep the judged build as a workflow artifact"
+        if: ${{ env.MAC_DRY_RUN == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lu-mac-dry-run-${{ github.run_id }}
+          path: |
+            src-tauri/target/release/bundle/DRY-RUN-NOT-FOR-RELEASE.txt
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/macos/LU.app.tar.gz
+            src-tauri/target/release/bundle/macos/LU.app.tar.gz.sig
+          if-no-files-found: error
+          retention-days: 3
+
+      # ── Upload, only now ─────────────────────────────────────────────────
+      # tauri-action, at the same pin as the Windows and Linux lanes, so the
+      # asset names and the merge into latest.json are the same code on all
+      # three platforms. It is given `tauriScript: /usr/bin/true`: the action
+      # runs `<tauriScript> build <args>` and then collects the artefacts from
+      # the bundle directory by name (build.ts at the pinned commit), so with
+      # a command that does nothing it builds nothing and uploads what the
+      # steps above built and judged: the .dmg, LU.app.tar.gz and its .sig,
+      # and the `darwin-aarch64` key in latest.json. `args` stays, the action
+      # reads the app's name and version through the same overlay. It needs
+      # no Apple secret and no signing key and gets none: nothing is signed
+      # here. Release name, body and prerelease are deliberately NOT passed:
+      # the release exists by now (build-tauri made or reused it) and this
+      # job only attaches to it.
+      - name: Attach the verified Mac app to the release
+        if: ${{ env.MAC_DRY_RUN != 'true' }}
+        uses: tauri-apps/tauri-action@51a9f1156b33df106d827c3a78f8f894946c5faa # v0.5.25
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+          tauriScript: /usr/bin/true
+          args: --config src-tauri/tauri.release.conf.json
+
+      # The one check that can only run after the upload. A red step here
+      # means: the Mac assets hang on the prerelease, do not flip it to
+      # Latest, and take them off by hand (RELEASE-CHECKLISTE-MAC.md, A7).
+      #
+      # The updater on a Mac asks latest.json for `darwin-aarch64`
+      # (tauri-plugin-updater: <os>-<arch>). This reads the file the release
+      # now serves and requires that key, with a signature and the updater
+      # archive as its url, AND the key of every other platform whose updater
+      # files hang on the release: the merge must not drop it. Windows signed
+      # through SignPath attaches its installers and writes its key later
+      # (stage 3 in windows-signpath.yml, after an approval), so until then
+      # it is not asked for here; the log says it is not there yet.
+      - name: Verify latest.json carries darwin-aarch64 and kept the other platforms
+        if: ${{ env.MAC_DRY_RUN != 'true' }}
+        shell: bash
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/latest-json"
+          rm -rf "$dir"; mkdir -p "$dir"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir "$dir"
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' > "$dir/assets.txt"
+          cat "$dir/assets.txt"
+          node - "$dir/latest.json" "$dir/assets.txt" <<'NODE'
+          const fs = require('node:fs')
+          const json = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
+          const assets = fs.readFileSync(process.argv[3], 'utf8').split('\n').filter(Boolean)
+          const fail = (m) => { console.error('FAIL: ' + m); process.exit(1) }
+          const keys = Object.keys(json.platforms || {})
+          console.log('version ' + json.version + ', platforms: ' + keys.join(', '))
+          const mac = json.platforms?.['darwin-aarch64']
+          if (!mac) fail('latest.json has no darwin-aarch64 entry; a Mac would never be offered this update')
+          if (!mac.signature) fail('darwin-aarch64 has no signature')
+          if (!/\.app\.tar\.gz$/.test(mac.url || '')) fail('darwin-aarch64 does not point at an .app.tar.gz: ' + mac.url)
+          const file = decodeURIComponent(mac.url.split('/').pop())
+          if (!assets.includes(file)) fail('darwin-aarch64 points at ' + file + ', which is not an asset of this release')
+          // A platform counts once its signed updater files are attached.
+          const lanes = {
+            'windows-x86_64': /_x64.*\.(exe|msi)(\.zip)?\.sig$/,
+            'linux-x86_64': /\.AppImage(\.tar\.gz)?\.sig$/,
+          }
+          const later = []
+          for (const [need, files] of Object.entries(lanes)) {
+            if (!assets.some((n) => files.test(n))) { later.push(need); continue }
+            if (!json.platforms[need]) fail(need + ' is gone from latest.json: the merge dropped a platform, do NOT flip this release to Latest')
+          }
+          if (!assets.some((n) => /\.dmg$/.test(n))) fail('no .dmg is attached to the release')
+          if (later.length) console.log('NOTE: not attached yet: ' + later.join(', ') + '. Do not flip this release to Latest before they are.')
+          console.log('OK: darwin-aarch64 -> ' + file + ', every attached platform kept its key, .dmg attached')
+          NODE
+          # A Mac-only run adds to a release that was checked without the Mac.
+          # Proof that it added and changed nothing else: every other file has
+          # the digest it had before, and every latest.json entry that was
+          # there is the same, with only darwin keys new.
+          if [ "$MAC_ONLY" = true ]; then
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$dir/release-after.json"
+            node - "$RUNNER_TEMP/mac-only-before.json" "$dir/release-after.json" "$RUNNER_TEMP/mac-only-latest-before.json" "$dir/latest.json" <<'NODE'
+          const fs = require('node:fs')
+          const read = (f) => JSON.parse(fs.readFileSync(f, 'utf8'))
+          const [before, rel, jsonBefore, jsonAfter] = process.argv.slice(2).map(read)
+          const fail = (m) => { console.error('FAIL: ' + m + '. Do NOT flip this release to Latest.'); process.exit(1) }
+          const now = Object.fromEntries(rel.assets.map((a) => [a.name, a.digest]))
+          for (const [name, digest] of Object.entries(before)) {
+            if (!(name in now)) fail(name + ' is gone from the release')
+            if (now[name] !== digest) fail(name + ' changed: ' + digest + ' -> ' + now[name])
+          }
+          if (jsonAfter.version !== jsonBefore.version) fail('latest.json version changed: ' + jsonBefore.version + ' -> ' + jsonAfter.version)
+          // Same keys, same values; the order of keys inside an entry is not
+          // a change.
+          const same = (x) => JSON.stringify(x && Object.keys(x).sort().map((k) => [k, x[k]]))
+          for (const [key, entry] of Object.entries(jsonBefore.platforms || {})) {
+            if (same(jsonAfter.platforms?.[key]) !== same(entry)) fail('latest.json entry ' + key + ' changed')
+          }
+          const added = Object.keys(jsonAfter.platforms || {}).filter((k) => !(k in (jsonBefore.platforms || {})))
+          if (added.some((k) => !k.startsWith('darwin-'))) fail('latest.json gained a platform that is not a Mac: ' + added.join(', '))
+          console.log('OK: ' + Object.keys(before).length + ' files unchanged by digest, ' + Object.keys(jsonBefore.platforms || {}).length + ' latest.json entries unchanged, added: ' + added.join(', '))
+          NODE
+          fi
+
+  # Software bill of materials and checksums, attached to the release once the
+  # installers are. Three CycloneDX files, one per ecosystem that ends up on a
+  # user's machine: the npm packages bundled into the front end (no
+  # devDependencies), the Rust crates of the desktop binary (no build-only
+  # crates), and the Python packages the voice sidecar installs from its lock.
+  # SHA256SUMS.txt covers every asset on the release at that moment, the SBOMs
+  # included, so `sha256sum -c SHA256SUMS.txt --ignore-missing` checks a
+  # download. An asset added by hand later (the Android APK) is not in it;
+  # rerun this job with workflow_dispatch after such an upload. Not in a dry
+  # run of either kind: there is no release to attach to. Mac may be skipped
+  # or have failed; the sums then cover what is there, and a rerun replaces
+  # the files (--clobber).
+  sbom-and-checksums:
+    needs: [build-tauri, build-tauri-macos]
+    # Keeps the right it had from the workflow (OpenSSF Scorecard, 3.1.0).
+    permissions:
+      contents: write
+    if: ${{ always() && !inputs.mac_dry_run && !inputs.dry_run && (needs.build-tauri.result == 'success' || (inputs.mac_only && needs.build-tauri-macos.result == 'success')) }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+      MAC_ONLY: ${{ inputs.mac_only && 'true' || 'false' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: '.nvmrc'
+
+      - name: Setup Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Install cargo-cyclonedx
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: cargo-cyclonedx@0.5.9
+
+      - name: Generate the SBOMs (CycloneDX JSON)
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/sbom"; mkdir -p "$out"
+          v="${RELEASE_TAG#v}"
+          npx --yes @cyclonedx/cyclonedx-npm@6.0.1 --package-lock-only --omit dev \
+            --output-format JSON --output-file "$out/locally-uncensored-$v-npm.cdx.json"
+          (cd src-tauri && cargo cyclonedx --format json --spec-version 1.5 --no-build-deps \
+            --override-filename sbom-rust.cdx)
+          mv src-tauri/sbom-rust.cdx.json "$out/locally-uncensored-$v-rust.cdx.json"
+          python -m pip install --quiet cyclonedx-bom==7.1.0
+          cyclonedx-py requirements src-tauri/resources/voice_loop/requirements.txt \
+            --of JSON -o "$out/locally-uncensored-$v-voice-python.cdx.json"
+          for f in "$out"/*.cdx.json; do
+            node -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1]));if(!d.bomFormat||!(d.components||[]).length){console.error("FAIL: empty SBOM "+process.argv[1]);process.exit(1)}console.log(process.argv[1]+": "+d.components.length+" components")' "$f"
+          done
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber "$out"/*.cdx.json
+
+      - name: SHA256SUMS.txt over every release asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/assets"; rm -rf "$dir"; mkdir -p "$dir"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$dir"
+          rm -f "$dir/SHA256SUMS.txt"
+          (cd "$dir" && sha256sum -- * | sort -k2 > "$RUNNER_TEMP/SHA256SUMS.txt")
+          cat "$RUNNER_TEMP/SHA256SUMS.txt"
+          if [ "$MAC_ONLY" = true ]; then
+            grep -qE ' [^ ]+_aarch64\.dmg$' "$RUNNER_TEMP/SHA256SUMS.txt" || { echo "FAIL: SHA256SUMS.txt lists no .dmg" >&2; exit 1; }
+            grep -qE ' [^ ]+\.app\.tar\.gz$' "$RUNNER_TEMP/SHA256SUMS.txt" || { echo "FAIL: SHA256SUMS.txt lists no updater archive" >&2; exit 1; }
+          fi
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber "$RUNNER_TEMP/SHA256SUMS.txt"
 
   # The promise above, made real for every trigger. Runs after the binaries are
   # attached, so a release published as a full release is put back before
   # anyone is offered it, and never touches the release that is already Latest.
+  # It waits for the macOS job too, which may be skipped; `always()` covers
+  # that case as it covers a failed lane. Not in a dry run of either kind:
+  # that run belongs to no release, and its `tag` input is not a tag anyone
+  # meant.
   enforce-prerelease:
-    needs: build-tauri
-    if: always()
+    needs: [build-tauri, build-tauri-macos]
+    # Keeps the right it had from the workflow (OpenSSF Scorecard, 3.1.0).
+    permissions:
+      contents: write
+    if: ${{ always() && !inputs.mac_dry_run && !inputs.dry_run }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1

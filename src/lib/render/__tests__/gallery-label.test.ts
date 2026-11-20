@@ -1,12 +1,12 @@
 /**
  * Wie ein Eintrag der Galerie heisst.
  *
- * Befund von David, 19.09.2026: "Danach kommt nur noch Cloud-Videos. Man kann
+ * Befund von 19.09.2026: "Danach kommt nur noch Cloud-Videos. Man kann
  * gar nicht mehr identifizieren, welches Video denn was ist." Zwei Ursachen,
  * beide hier festgenagelt: ein Eintrag ohne Prompt hatte ueberhaupt keinen
  * Namen, und ein Preset-Ergebnis sagte nicht, aus welchem Preset es kam.
  *
- * Port aus uselu apps/web/lib/render/__tests__/gallery-label.test.ts.
+ * Port aus the web app.
  */
 import { describe, expect, it } from 'vitest'
 import { galleryLabel, galleryLabelShort } from '../gallery-label'

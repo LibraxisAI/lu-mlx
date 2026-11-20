@@ -1,7 +1,7 @@
 /**
  * Wo die Anleitung zum Malen der Maske steht.
  *
- * Entscheid von David, 19.09.2026: "Bei Edit Image will ich, dass du die
+ * Entscheid des Inhabers, 19.09.2026: "Bei Edit Image will ich, dass du die
  * Meldung 'Paint a mask on the image above' zu einer einmal wegklickbaren Info
  * machst, wenn man die Paint Mask oeffnet. Komplett raus aus dem Promptfenster."
  *
@@ -41,6 +41,8 @@ describe('the mask instruction', () => {
 
   it('lives in the mask editor now, and can be dismissed for good', () => {
     expect(MASK_EDITOR).toContain('Apply mask when you are done, then describe the edit below')
+    // Erase has no prompt field, so its hint ends at Create.
+    expect(MASK_EDITOR).toContain("'Apply mask when you are done, then hit Create.'")
     // Kein zweiter Aufguss der Fusszeile: die sagt schon dauerhaft, was Rot
     // bedeutet und wo gemalt wird.
     expect(MASK_EDITOR).toContain('Red = will be regenerated.')

@@ -3,10 +3,21 @@
 <!-- Tauri v2 auto-merges this file into the generated bundle Info.plist
      (the bundler looks for an Info.plist next to tauri.conf.json). Without
      NSMicrophoneUsageDescription macOS TCC denies getUserMedia outright, so
-     dictation/voice never even shows the permission prompt. -->
+     dictation/voice never even shows the permission prompt.
+
+     NSLocalNetworkUsageDescription: from macOS 15 on the system asks before
+     an app reaches another device on the local network, and shows this
+     sentence in the prompt. LU does that when Ollama or ComfyUI is set to an
+     address on another machine (Settings), and it serves Remote Access and
+     the local API to devices on the network when the user switches them on.
+     Everything on 127.0.0.1 (the built-in engine, the media engines) never
+     triggers the prompt. scripts/verify-mac-bundle.sh requires both keys in
+     the built bundle. -->
 <plist version="1.0">
 <dict>
     <key>NSMicrophoneUsageDescription</key>
     <string>Voice chat and dictation transcribe your speech locally on this device.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>LU connects to AI engines you run on other devices on your network, and to phones and apps you pair with it.</string>
 </dict>
 </plist>

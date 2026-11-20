@@ -1,7 +1,7 @@
 /**
  * English frames for text we did not write.
  *
- * David, 2026-08-22, from the box: the app showed a failure that was half
+ * 2026-08-22, from the box: the app showed a failure that was half
  * German. The Rust side is fixed at the source now (src-tauri/src/os_error.rs),
  * so what the backend hands us is English again. This file is about the other
  * half, the text that is not ours to fix.

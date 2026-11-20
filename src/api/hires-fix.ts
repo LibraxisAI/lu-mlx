@@ -5,6 +5,8 @@ import {
   nodeInput,
   type ComfyApiGraph,
   type ComfyApiNode,
+  type ComfyInputValue,
+  type ComfyNodeInputs,
 } from '../types/comfy-graph'
 import { propPath } from '../types/json-guards'
 
@@ -22,6 +24,12 @@ export interface NativeHiresFixOptions {
   denoise: number
   steps: number
   upscaleMethod: HiresUpscaleMethod
+  /**
+   * How many pixels one latent cell of this model covers (`latentDownscale`).
+   * It only names the result and keeps the 4096 limit: the node scales the
+   * latent the first pass made by `scale`, whatever its grid.
+   */
+  latentDownscale?: number
 }
 
 /**
@@ -51,6 +59,11 @@ export class NativeHiresFixError extends Error {
 
 const IMAGE_OUTPUT_NODES = new Set(['SaveImage', 'PreviewImage'])
 const IMAGE_DECODE_NODES = new Set(['VAEDecode', 'VAEDecodeTiled'])
+// A latent that carries a painted mask. A second pass over a larger copy of it
+// would refine only the masked part and leave the rest as a stretched latent,
+// and InpaintModelConditioning's concat image stays at the old size, so the
+// pass is refused for these instead of making a worse picture.
+const MASKED_LATENT_NODES = new Set(['VAEEncodeForInpaint', 'InpaintModelConditioning', 'SetLatentNoiseMask'])
 const UPSCALE_METHODS: ReadonlySet<HiresUpscaleMethod> = new Set([
   'nearest-exact',
   'bilinear',
@@ -84,14 +97,37 @@ function nextNodeId(workflow: ComfyApiGraph): string {
   return String(candidate)
 }
 
-function snapToLatentGrid(value: number): number {
-  return Math.max(64, Math.round(value / 8) * 8)
+/**
+ * Pixels per latent cell, per model family: `spacial_downscale_ratio` of the
+ * latent format ComfyUI 0.38.0 gives each model (comfy/latent_formats.py and
+ * supported_models.py, read on the box 22.10.2026). Qwen-Image 2.1 (and Noct
+ * Q, its finetune), FLUX 2 and ERNIE-Image compress 16x, Wan 2.2 TI2V-5B too.
+ * Every other family LU draws pictures with is 8x: SDXL, SD 1.5, FLUX 1 and
+ * Krea 1, Krea 2 and Qwen-Image 1 (Wan 2.1 VAE), Chroma, HiDream, SD 3.5,
+ * Lumina 2, Z-Image and Wan 2.1/2.2 14B.
+ */
+export function latentDownscale(modelType: string | undefined): number {
+  return modelType === 'qwenimage' || modelType === 'flux2' || modelType === 'ernie_image' || modelType === 'wan22' ? 16 : 8
+}
+
+/** Python's round(): halves go to the even neighbour (LatentUpscaleBy). */
+function roundHalfEven(value: number): number {
+  const down = Math.floor(value)
+  if (value - down !== 0.5) return Math.round(value)
+  return down % 2 === 0 ? down : down + 1
+}
+
+/** One side after the pass: the first pass's latent side times the factor,
+ *  rounded as LatentUpscaleBy rounds it, back in pixels. */
+function upscaledSide(base: number, scale: number, grid: number): number {
+  return Math.max(1, roundHalfEven(Math.floor(base / grid) * scale)) * grid
 }
 
 export function nativeHiresFinalSize(
   baseWidth: number,
   baseHeight: number,
   scale: number,
+  latentGrid = 8,
 ): { width: number; height: number } {
   if (!Number.isFinite(baseWidth) || !Number.isFinite(baseHeight) || baseWidth < 64 || baseHeight < 64) {
     throw new NativeHiresFixError('Native HiRes needs a valid base width and height of at least 64 px.')
@@ -100,8 +136,9 @@ export function nativeHiresFinalSize(
     throw new NativeHiresFixError('Native HiRes scale must be greater than 1.0 and no more than 3.0.')
   }
 
-  const width = snapToLatentGrid(baseWidth * scale)
-  const height = snapToLatentGrid(baseHeight * scale)
+  const grid = Number.isInteger(latentGrid) && latentGrid > 0 ? latentGrid : 8
+  const width = upscaledSide(baseWidth, scale, grid)
+  const height = upscaledSide(baseHeight, scale, grid)
 
   if (width > 4096 || height > 4096) {
     throw new NativeHiresFixError(
@@ -113,9 +150,74 @@ export function nativeHiresFinalSize(
 }
 
 /**
+ * The KSampler a SamplerCustomAdvanced stands for, when it is fed by a
+ * CFGGuider, a RandomNoise and a KSamplerSelect (the Qwen-Image 2.1 Turbo
+ * chain). Its own sigmas cover a full run from noise, so the refinement pass
+ * takes the simple scheduler at the pass's own steps and denoise. Undefined
+ * for any other feed, which keeps the refusal below.
+ */
+function customAsKSampler(workflow: ComfyApiGraph, custom: ComfyApiNode): ComfyApiNode | undefined {
+  const fed = (key: string, type: string): ComfyApiNode | undefined => {
+    const ref = nodeInput(custom, key)
+    const node = isComfyLinkRef(ref) ? nodeAt(workflow, String(ref[0])) : undefined
+    return node?.class_type === type ? node : undefined
+  }
+  const guider = fed('guider', 'CFGGuider')
+  const noise = fed('noise', 'RandomNoise')
+  const sampler = fed('sampler', 'KSamplerSelect')
+  if (!guider || !noise || !sampler) return undefined
+  const read: Record<string, ComfyInputValue | undefined> = {
+    model: nodeInput(guider, 'model'),
+    positive: nodeInput(guider, 'positive'),
+    negative: nodeInput(guider, 'negative'),
+    latent_image: nodeInput(custom, 'latent_image'),
+    seed: nodeInput(noise, 'noise_seed'),
+    steps: 1,
+    cfg: nodeInput(guider, 'cfg'),
+    sampler_name: nodeInput(sampler, 'sampler_name'),
+    scheduler: 'simple',
+    denoise: 1,
+  }
+  // A missing input stays out, so the check for the four links below names it.
+  const inputs: ComfyNodeInputs = {}
+  for (const [key, value] of Object.entries(read)) if (value !== undefined) inputs[key] = value
+  return { class_type: 'KSampler', inputs }
+}
+
+/** The parts of a SamplerCustomAdvanced on a DualCFGGuider (the Edit
+ *  strength of a Qwen edit at a CFG above 1), or undefined for any other. */
+function dualGuided(workflow: ComfyApiGraph, custom: ComfyApiNode) {
+  const ref = (key: string) => {
+    const r = nodeInput(custom, key)
+    return isComfyLinkRef(r) ? r : undefined
+  }
+  const guider = ref('guider')
+  const guiderNode = guider ? nodeAt(workflow, String(guider[0])) : undefined
+  if (guiderNode?.class_type !== 'DualCFGGuider') return undefined
+  const noise = ref('noise')
+  const sampler = ref('sampler')
+  const latent = ref('latent_image')
+  const model = nodeInput(guiderNode, 'model')
+  if (!guider || !noise || !sampler || !latent || !isComfyLinkRef(model)) return undefined
+  const sigmas = ref('sigmas')
+  const schedule = sigmas ? nodeAt(workflow, String(sigmas[0])) : undefined
+  const scheduler = schedule?.class_type === 'BasicScheduler' ? nodeInput(schedule, 'scheduler') : undefined
+  return { guider, noise, sampler, latent, model, scheduler: typeof scheduler === 'string' ? scheduler : 'simple' }
+}
+
+/**
  * Adds a native latent-upscale refinement pass to a simple image workflow:
  *
- *   KSampler → LatentUpscale → KSampler (low denoise) → VAEDecode → SaveImage
+ *   KSampler → LatentUpscaleBy → KSampler (low denoise) → VAEDecode → SaveImage
+ *
+ * The latent is scaled BY the factor, never TO a pixel size. ComfyUI's
+ * LatentUpscale divides the pixel size by 8 whatever the model, so on a
+ * model whose latent covers 16 pixels a cell it made the latent twice the
+ * asked size on each side, and the picture came out at four times the base
+ * (Discord #bug-reports 22.10.2026, Qwen-Image 2.1 and Noct Q: 768×1360 at
+ * 2x gave 3072×5440 with doubled faces). LatentUpscaleBy reads the latent it
+ * gets, so the same graph is right on every grid, Create and Edit alike (an
+ * edit's canvas follows the source, lib/edit-hires).
  *
  * The transform deliberately targets the terminal image decode rather than
  * assuming fixed node IDs, so it works with LU's dynamic/legacy image builders
@@ -147,6 +249,7 @@ export function applyNativeHiresFix(
     options.baseWidth,
     options.baseHeight,
     options.scale,
+    options.latentDownscale,
   )
   const workflow = cloneWorkflow(sourceWorkflow)
 
@@ -184,28 +287,50 @@ export function applyNativeHiresFix(
   }
 
   const firstSamplerId = String(samplesRef[0])
-  const firstSampler = nodeAt(workflow, firstSamplerId)
-  if (!firstSampler || firstSampler.class_type !== 'KSampler') {
+  const found = nodeAt(workflow, firstSamplerId)
+  // Qwen-Image 2.1 Turbo's chain (lib/render/qwen21-turbo) ends in a
+  // SamplerCustomAdvanced; its pass reads the same model, prompt, CFG, seed
+  // and sampler off the CFGGuider, RandomNoise and KSamplerSelect.
+  // A Qwen edit below Edit strength 1 at a CFG above 1 (B46 / D8) samples
+  // through DualCFGGuider, which no KSampler can say; its pass reuses that
+  // guider, the noise and the sampler.
+  const dual = found?.class_type === 'SamplerCustomAdvanced' ? dualGuided(workflow, found) : undefined
+  const firstSampler = dual ? undefined : found?.class_type === 'SamplerCustomAdvanced' ? customAsKSampler(workflow, found) : found
+  if (!dual && (!firstSampler || firstSampler.class_type !== 'KSampler')) {
     throw new NativeHiresFixError(
-      `Native HiRes currently requires a core KSampler before the final decode; this workflow uses ${firstSampler?.class_type ?? 'an unknown node'}.`,
+      `Native HiRes currently requires a core KSampler before the final decode; this workflow uses ${found?.class_type ?? 'an unknown node'}.`,
     )
   }
 
-  const requiredInputs = ['model', 'positive', 'negative', 'latent_image']
-  const missing = requiredInputs.filter((key) => nodeInput(firstSampler, key) === undefined)
-  if (missing.length > 0) {
-    throw new NativeHiresFixError(`The final KSampler is missing required inputs: ${missing.join(', ')}.`)
+  if (firstSampler) {
+    const requiredInputs = ['model', 'positive', 'negative', 'latent_image']
+    const missing = requiredInputs.filter((key) => nodeInput(firstSampler, key) === undefined)
+    if (missing.length > 0) {
+      throw new NativeHiresFixError(`The final KSampler is missing required inputs: ${missing.join(', ')}.`)
+    }
+  }
+
+  const latentRef = dual ? dual.latent : nodeInput(firstSampler, 'latent_image')
+  let latentSource = isComfyLinkRef(latentRef) ? nodeAt(workflow, String(latentRef[0])) : undefined
+  // An edit batch (api/edit-batch) repeats the source latent; the mask is
+  // the one of the latent it repeats.
+  if (latentSource?.class_type === 'RepeatLatentBatch') {
+    const repeated = nodeInput(latentSource, 'samples')
+    latentSource = isComfyLinkRef(repeated) ? nodeAt(workflow, String(repeated[0])) : undefined
+  }
+  if (latentSource && MASKED_LATENT_NODES.has(latentSource.class_type)) {
+    throw new NativeHiresFixError(
+      'Native HiRes runs on edits of the whole picture. Clear the mask, or turn Native HiRes off for this edit.',
+    )
   }
 
   const upscaleNodeId = nextNodeId(workflow)
   const upscaleNode: HiresNode = {
-    class_type: 'LatentUpscale',
+    class_type: 'LatentUpscaleBy',
     inputs: {
       samples: [firstSamplerId, samplesRef[1]],
       upscale_method: options.upscaleMethod,
-      width,
-      height,
-      crop: 'disabled',
+      scale_by: options.scale,
     },
     _meta: {
       title: 'LU Native HiRes — latent upscale',
@@ -214,20 +339,36 @@ export function applyNativeHiresFix(
   }
   workflow[upscaleNodeId] = upscaleNode
 
-  const samplerNodeId = nextNodeId(workflow)
-  const refinementNode: HiresNode = {
-    class_type: 'KSampler',
-    inputs: {
-      ...firstSampler.inputs,
-      latent_image: [upscaleNodeId, 0],
-      steps: Math.floor(options.steps),
-      denoise: options.denoise,
-    },
-    _meta: {
-      title: 'LU Native HiRes — refinement pass',
-      luNativeHiresFix: true,
-    },
+  let refinementNode: HiresNode
+  if (dual) {
+    const scheduleId = nextNodeId(workflow)
+    const scheduleNode: HiresNode = {
+      class_type: 'BasicScheduler',
+      inputs: { model: dual.model, scheduler: dual.scheduler, steps: Math.floor(options.steps), denoise: options.denoise },
+      _meta: { title: 'LU Native HiRes — refinement steps', luNativeHiresFix: true },
+    }
+    workflow[scheduleId] = scheduleNode
+    refinementNode = {
+      class_type: 'SamplerCustomAdvanced',
+      inputs: { noise: dual.noise, guider: dual.guider, sampler: dual.sampler, sigmas: [scheduleId, 0], latent_image: [upscaleNodeId, 0] },
+      _meta: { title: 'LU Native HiRes — refinement pass', luNativeHiresFix: true },
+    }
+  } else {
+    refinementNode = {
+      class_type: 'KSampler',
+      inputs: {
+        ...firstSampler!.inputs,
+        latent_image: [upscaleNodeId, 0],
+        steps: Math.floor(options.steps),
+        denoise: options.denoise,
+      },
+      _meta: {
+        title: 'LU Native HiRes — refinement pass',
+        luNativeHiresFix: true,
+      },
+    }
   }
+  const samplerNodeId = nextNodeId(workflow)
   workflow[samplerNodeId] = refinementNode
 
   decode.inputs = {

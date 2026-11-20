@@ -126,7 +126,7 @@ describe('die Tatsachen, am echten Speicher gelesen', () => {
         ...s.providers,
         openai: {
           id: 'openai', name: 'LM Studio', enabled: true,
-          baseUrl: 'http://192.168.0.54:1234/v1', apiKey: '', isLocal: true, managed: false,
+          baseUrl: 'http://192.168.1.54:1234/v1', apiKey: '', isLocal: true, managed: false,
         },
       },
     }))
@@ -135,7 +135,7 @@ describe('die Tatsachen, am echten Speicher gelesen', () => {
   })
 
   it('ein Ollama im Netz ist cloud, eines auf 127.0.0.1 nicht', () => {
-    setOllamaBase('http://192.168.0.54:11434')
+    setOllamaBase('http://192.168.1.54:11434')
     expect(currentLaneFacts().ollamaBaseIsLocal).toBe(false)
     expect(laneOf('ollama::qwen3:8b', currentLaneFacts())).toBe('cloud')
 
@@ -151,7 +151,7 @@ describe('DER UNTERSCHIED ZUR VERTRAULICHKEITSFRAGE', () => {
     // Wer sie zusammenlegt, und das sieht wie Aufraeumen aus, macht eine
     // von beiden falsch. Der Fall steht deshalb als Zahlenpaar da und nicht
     // nur als Kommentar.
-    setOllamaBase('http://192.168.0.54:11434')
+    setOllamaBase('http://192.168.1.54:11434')
     expect(isLocalModelByName('ollama::qwen3:8b')).toBe(true)
     expect(laneOf('ollama::qwen3:8b', currentLaneFacts())).toBe('cloud')
   })

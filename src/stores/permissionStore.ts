@@ -2,8 +2,9 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { safeJSONStorage } from '../lib/storage-quota'
 import type { PermissionMap, PermissionLevel, ToolCategory } from '../api/mcp/types'
-import { DEFAULT_PERMISSIONS } from '../api/mcp/types'
+import { defaultPermissionsForDevice } from '../api/mcp/types'
 import { isRecord, prop, asString } from '../types/json-guards'
+import { turnCaps } from '../lib/remote-turn-caps'
 
 /** Per-tool override: takes precedence over the tool's category default. */
 export type ToolOverrides = Record<string, PermissionLevel>
@@ -14,7 +15,7 @@ export type ToolOverrides = Record<string, PermissionLevel>
  * agent code can serve a read-only "chat" scope, an edit-capable "edit"
  * scope, or the full "agent" scope.
  *
- *   chat  → no filesystem-write, no terminal, no image_generate, no workflow
+ *   chat  → no filesystem-write, no terminal, no image_generate, no workflow, no MCP
  *   edit  → filesystem + web only (no shell, no codegen, no comfy)
  *   agent → everything (current default behaviour)
  */
@@ -54,7 +55,7 @@ interface PermissionState {
 export const usePermissionStore = create<PermissionState>()(
   persist(
     (set, get) => ({
-      globalPermissions: { ...DEFAULT_PERMISSIONS },
+      globalPermissions: defaultPermissionsForDevice(),
       conversationOverrides: {},
       perToolOverrides: {},
       modeScope: 'agent',
@@ -63,12 +64,20 @@ export const usePermissionStore = create<PermissionState>()(
         const global = get().globalPermissions
         if (!conversationId) return global
         const overrides = get().conversationOverrides[conversationId]
-        if (!overrides) return global
-        return { ...global, ...overrides }
+        // A turn from the paired phone: what its rights leave out is off,
+        // whatever else is set (lib/remote-turn-caps).
+        const capped = turnCaps(conversationId)
+        if (!overrides && !capped) return global
+        return { ...global, ...overrides, ...capped }
       },
 
       getEffectivePermissionForTool: (toolName, toolCategory, conversationId?) => {
+        const cap = turnCaps(conversationId)?.[toolCategory]
+        if (cap === 'blocked') return 'blocked'
         const perTool = get().perToolOverrides[toolName]
+        // A watcher's cap says 'auto' for what the user allowed when they
+        // made it; a tool the user blocked by name stays blocked.
+        if (cap && perTool !== 'blocked') return cap
         if (perTool) return perTool
         const categoryMap = get().getEffectivePermissions(conversationId)
         return categoryMap[toolCategory]
@@ -111,7 +120,7 @@ export const usePermissionStore = create<PermissionState>()(
 
       resetToDefaults: () =>
         set({
-          globalPermissions: { ...DEFAULT_PERMISSIONS },
+          globalPermissions: defaultPermissionsForDevice(),
           conversationOverrides: {},
           perToolOverrides: {},
           modeScope: 'agent',
@@ -120,7 +129,7 @@ export const usePermissionStore = create<PermissionState>()(
     {
       name: 'locally-uncensored-permissions',
       storage: safeJSONStorage(),
-      version: 3,
+      version: 4,
       migrate: migratePermissionState,
     }
   )
@@ -137,7 +146,7 @@ export function migratePermissionState(persisted: unknown, version: number): Per
   // write persists the empty default over the blob.
   const globals = prop(persisted, 'globalPermissions')
   if (version < 2 && isRecord(globals) && globals.video === 'blocked') {
-    globals.video = DEFAULT_PERMISSIONS.video
+    globals.video = defaultPermissionsForDevice().video
   }
   // v3 (2.6.6 tool merge): the typed shell wrappers are gone, their calls run
   // through shell_execute now. A per-tool override on a retired name would be
@@ -171,6 +180,24 @@ export function migratePermissionState(persisted: unknown, version: number): Per
       }
     }
   }
+  // v4 (B12, 28.10.2026): external MCP tools left 'workflow' for a category
+  // of their own. They used to follow the Workflows row, so a user with
+  // Workflows on Auto ran every MCP tool unattended, a shell server included.
+  // Carrying that Auto over would keep exactly the hole this closes, so the
+  // new row starts at Ask First. Only Blocked carries over, globally and per
+  // chat: whoever switched Workflows off also switched MCP tools off and must
+  // not find them back on.
+  if (version < 4) {
+    if (isRecord(globals) && asString(globals.mcp) === undefined) {
+      globals.mcp = globals.workflow === 'blocked' ? 'blocked' : 'confirm'
+    }
+    const perChat = prop(persisted, 'conversationOverrides')
+    if (isRecord(perChat)) {
+      for (const chat of Object.values(perChat)) {
+        if (isRecord(chat) && chat.workflow === 'blocked' && chat.mcp === undefined) chat.mcp = 'blocked'
+      }
+    }
+  }
   // zustand types migrate as returning the FULL store, but a blob only ever
   // carries the partialized slice and `merge` puts the actions back.
   return persisted as PermissionState
@@ -187,7 +214,7 @@ export const MODE_SCOPE_ALLOWED_CATEGORIES: Record<ModeScope, ReadonlyArray<Tool
   // Editing: adds filesystem writes. No shell, no codegen, no ComfyUI.
   edit: ['filesystem', 'web', 'system'],
   // Full agent: everything.
-  agent: ['filesystem', 'terminal', 'desktop', 'web', 'system', 'image', 'video', 'workflow'],
+  agent: ['filesystem', 'terminal', 'desktop', 'web', 'system', 'image', 'video', 'workflow', 'mcp'],
 }
 
 /**

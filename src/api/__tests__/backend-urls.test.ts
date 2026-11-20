@@ -370,7 +370,7 @@ describe('backend — URL helpers', () => {
     })
   })
 
-  // ─── comfyAbsoluteFallback (konata web video-gallery fix, 2026-06-25) ───
+  // ─── comfyAbsoluteFallback (web video-gallery fix, 2026-06-25) ───
 
   describe('comfyAbsoluteFallback', () => {
     it('rewrites a relative /comfyui/view path to an absolute host URL', () => {

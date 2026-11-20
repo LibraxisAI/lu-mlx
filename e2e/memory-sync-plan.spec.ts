@@ -1,10 +1,11 @@
 import { expect, test } from '@playwright/test'
+import { appModules, type AppWindow } from './support/ui'
 
 test('browser WebCrypto plans conflicts and forgetting without retaining private copies', async ({ page }) => {
   await page.goto('/e2e/memory-sensitive-proof.html')
+  await appModules(page, ['/src/lib/memory-sync-plan.ts'])
   const result = await page.evaluate(async () => {
-    const modulePath = '/src/lib/memory-sync-plan.ts'
-    const { planMemorySync, syncMemoryHash } = await import(modulePath)
+    const { planMemorySync, syncMemoryHash } = (window as unknown as AppWindow).__APP__['/src/lib/memory-sync-plan.ts']
     const memory = { id: 'one', type: 'user', title: 'Fact', description: '', content: 'Original', tags: [], source: 'manual', createdAt: 1, updatedAt: 1 }
     const baseline = { one: { revision: 1, hash: await syncMemoryHash(memory) } }
     const local = { ...memory, content: 'Private local edit' }

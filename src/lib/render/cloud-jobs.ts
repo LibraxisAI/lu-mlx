@@ -8,13 +8,15 @@
 // type-only import back to createStore here would close that into a module
 // cycle (`npm run cycles`, madge, counts type-only edges too). The two sets
 // must be kept in sync by hand; CreateIntent in stores/createStore.ts is the
-// source of truth.
-type CreateIntentLike =
+// source of truth. Exported for create-studio.ts, which createStore imports
+// too and which therefore cannot name CreateIntent either.
+export type CreateIntentLike =
   | 'image' | 'edit' | 'removebg' | 'video' | 'animate' | 'upscale' | 'eraser'
-  | 'character' | 'lipsync' | 'music' | 'extend' | 'motion'
+  | 'character' | 'lipsync' | 'music' | 'extend' | 'motion' | '3d' | 'swap_character'
 
-export type RenderKind = 'image' | 'video' | 'audio'
-// 'upscale'/'eraser' are WaveSpeed utility endpoints (super-resolution /
+// '3d' (3.1.0): a GLB model. Cloud 3D runs as op 'studio' only.
+export type RenderKind = 'image' | 'video' | 'audio' | '3d'
+// 'upscale'/'eraser' are hosted utility endpoints (super-resolution /
 // masked object removal) — cloud-only intents in the Create UI since 2.5.7.
 // 2.5.8 adds the specialized ops behind the new Create categories: 'lipsync'
 // (talking character), 'extend' (continue a clip), 'motion' (motion transfer,
@@ -27,9 +29,9 @@ export type RenderOp =
   | 'studio' | 'lipsync' | 'extend' | 'motion' | 'music' | 'tts' | 'lora-train'
 
 // One shared compute-credit wallet — text + media draw from the same budget
-// (server shape: uselu /api/jobs/quota).
+// (server shape: the web app /api/jobs/quota).
 //
-// `topup`, `video` and `trainings` have been on the wire since migration 0029;
+// `topup`, `video` and `trainings` have been on the wire for a long time;
 // they are optional here because an older server does not send them, and the
 // meter must read an absent field as "uncapped" rather than as zero. See
 // credits-meter.ts for the rule both the chip and the Create gate follow.
@@ -48,6 +50,13 @@ export interface CloudQuota {
   /** Monthly included character-training count. A wallet with at least the
    *  cost of the selected trainer unlocks an additional metered run. */
   trainings?: { limit: number; used: number; remaining: number }
+}
+
+/** The flat fallback price of the quota a kind is counted under when the
+ *  server sent no own price. Audio and 3D have none in `costs` and count as an
+ *  image; a 3D run is a studio pick and always carries a server quote. */
+export function quotaCostKind(kind: RenderKind): 'image' | 'video' {
+  return kind === 'video' ? 'video' : 'image'
 }
 
 /** Which queue kind + workflow op a Create intent renders as.
@@ -77,6 +86,13 @@ export function intentToJob(intent: CreateIntentLike): { kind: RenderKind; op: R
     case 'extend':
       return { kind: 'video', op: 'extend' }
     case 'motion':
+      return { kind: 'video', op: 'motion' }
+    case '3d':
+      // Every cloud 3D model is a studio model (C3D 2.5): no op of its own.
+      return { kind: '3d', op: 'studio' }
+    // Swap Character runs studio models only (op 'studio' at submit). The op
+    // here says which inputs are gathered: a video, as for Motion.
+    case 'swap_character':
       return { kind: 'video', op: 'motion' }
     default:
       return { kind: 'image', op: 'generate' }

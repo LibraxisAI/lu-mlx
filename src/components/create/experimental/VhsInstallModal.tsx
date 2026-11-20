@@ -1,6 +1,7 @@
 import { Download } from 'lucide-react'
 import { useCreateStore } from '../../../stores/createStore'
 import { Modal } from '../../ui/Modal'
+import { ModalActions, ModalButton } from '../../ui/ModalActions'
 
 /**
  * Bug A (v2.4.5) + #72 (bob): one-click install of VHS_VideoCombine so video
@@ -45,30 +46,21 @@ export function VhsInstallModal() {
           >
             Kosinkadink/ComfyUI-VideoHelperSuite
           </a>
-          {' '}(~5 MB) into your <code className="font-mono bg-white/5 px-1 rounded">ComfyUI/custom_nodes/</code> folder, runs <code className="font-mono bg-white/5 px-1 rounded">pip install</code> for its requirements, and restarts ComfyUI. Takes about 30 seconds.
+          {' '}(~5 MB) into your <code className="font-mono bg-white/5 px-1 rounded">ComfyUI/custom_nodes/</code> folder, runs <code className="font-mono bg-white/5 px-1 rounded">pip install</code> for its requirements, and restarts ComfyUI. This can take a few minutes.
         </div>
 
-        <div className="flex flex-col gap-2 pt-1">
-          <button
-            onClick={() => choose('install')}
-            className="w-full px-4 py-2 rounded-lg bg-blue-500/20 hover:bg-blue-500/30 border border-blue-500/30 text-blue-200 text-sm font-medium transition-colors flex items-center justify-center gap-2"
-          >
+        <ModalActions stack>
+          <ModalButton variant="primary" onClick={() => choose('install')}>
             <Download size={14} />
             Install VHS_VideoCombine + continue
-          </button>
-          <button
-            onClick={() => choose('webp')}
-            className="w-full px-4 py-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 text-xs font-medium transition-colors"
-          >
+          </ModalButton>
+          <ModalButton onClick={() => choose('webp')}>
             Continue anyway with animated .webp
-          </button>
-          <button
-            onClick={() => choose('cancel')}
-            className="w-full px-4 py-1.5 rounded-lg hover:bg-white/5 text-gray-500 hover:text-gray-300 text-xs transition-colors"
-          >
+          </ModalButton>
+          <ModalButton variant="quiet" onClick={() => choose('cancel')}>
             Cancel generation
-          </button>
-        </div>
+          </ModalButton>
+        </ModalActions>
       </div>
     </Modal>
   )

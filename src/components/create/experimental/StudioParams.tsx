@@ -9,13 +9,24 @@ import { SlidersHorizontal } from 'lucide-react'
 import { useCreateStore } from '../../../stores/createStore'
 import { SchemaControl, isCompactField, studioFieldsInOrder } from './SchemaControl'
 import { modelHint, modelLabel } from '../../../lib/render/preset-models'
+import { studioShownValue } from '../../../lib/render/create-studio'
+import { STUDIO_MODELS } from '../../../lib/render/studio-contract'
+import { musicText } from '../../../lib/render/music-ui'
+import { swapPanelFields } from '../../../lib/render/swap'
 
 export function StudioParams({ model }: { model: string }) {
   const options = useCreateStore((s) => s.cloudStudioOptions)
   const setOptions = useCreateStore((s) => s.setCloudStudioOptions)
   const isGenerating = useCreateStore((s) => s.isGenerating)
-  const fields = studioFieldsInOrder(model)
+  // Swap Character shows a role per person and the resolution in its own
+  // panel, and fixes the mode (lib/render/swap.ts): none of them twice here.
+  const intent = useCreateStore((s) => s.intent())
+  const inPanel = swapPanelFields(intent)
+  const fields = studioFieldsInOrder(model).filter(([key]) => !inPanel.includes(key))
   const hint = modelHint(model)
+  // Mureka Song calls its style field "prompt" while the prompt field carries
+  // the lyrics. The control is named for what it does.
+  const styleOption = STUDIO_MODELS[model]?.kind === 'audio' ? musicText(model).second : null
   return (
     <div className="px-1 py-3">
       {/* Eine Ueberschrift, damit die Klappe sagt, wessen Einstellungen das
@@ -32,8 +43,9 @@ export function StudioParams({ model }: { model: string }) {
           <div key={key} className={isCompactField(schema) ? undefined : 'col-span-2'}>
             <SchemaControl
               name={key}
+              title={styleOption?.option === key ? (styleOption.is === 'style' ? 'Style' : 'Lyrics') : undefined}
               schema={schema}
-              value={options[key]}
+              value={studioShownValue(model, options, key)}
               disabled={isGenerating}
               onChange={(v) => setOptions({ ...options, [key]: v })}
             />

@@ -19,7 +19,7 @@ export function registerSystemRoutes(routes: RouteMount): void {
   // API: System health (mirrors the Rust `system_health` command so the
   // Settings → Troubleshoot "Re-probe" button works under `npm run dev`
   // too. The plain dev server previously had no /local-api/system-health,
-  // so the button errored (konata-session 2026-06-07). Dev-only — the
+  // so the button errored (2026-06-07). Dev-only — the
   // packaged app uses the real Rust probe.
   routes.use('/local-api/system-health', async (_req, res) => {
     const probe = async (url: string, endpoint: string) => {

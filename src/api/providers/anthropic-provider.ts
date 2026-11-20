@@ -1,3 +1,4 @@
+import { resolveMessageAttachments } from '../../lib/chat-attachments'
 /**
  * Anthropic Provider — Claude API
  *
@@ -13,10 +14,13 @@ import type {
   ChatStreamChunk, ToolCall, ToolDefinition,
 } from './types'
 import { ProviderError } from './types'
+import { userTurnFirst } from './normalize-system'
 import { parseSSEWithEvents } from '../sse'
 import { idleAbortGuard, isStreamIdleTimeout } from '../stream-idle'
 import { sendWithTransientRetry } from './retry'
 import { parseRetryAfter } from '../../lib/http-status'
+import { requestLimitMessage } from '../../lib/request-limit'
+import { thinkBudgetForRequest, ANTHROPIC_MIN_THINK_BUDGET } from '../../lib/think-budget'
 import {
   localFetch, localFetchStream, isPrivateOrLanHost, isDirectFetchAllowed,
   hostnameOf, ensureProxyAllowsHost,
@@ -291,7 +295,12 @@ export class AnthropicProvider implements ProviderClient {
     if (options?.thinking !== true) return
 
     const ceiling = body.max_tokens
-    const budget = Math.max(1024, Math.min(DEFAULT_THINKING_BUDGET, Math.floor(ceiling / 2)))
+    // Think budget (D12): the user's own count wins over the automatic one,
+    // raised to the API minimum. Auto (0) keeps the rule above unchanged.
+    const wish = thinkBudgetForRequest(options.thinking, options.thinkingBudget)
+    const budget = wish !== undefined
+      ? Math.max(ANTHROPIC_MIN_THINK_BUDGET, wish)
+      : Math.max(ANTHROPIC_MIN_THINK_BUDGET, Math.min(DEFAULT_THINKING_BUDGET, Math.floor(ceiling / 2)))
     body.thinking = { type: 'enabled', budget_tokens: budget }
     // max_tokens covers thinking AND the answer, so it must have room for both.
     body.max_tokens = Math.max(ceiling, budget + MIN_ANSWER_TOKENS)
@@ -305,6 +314,7 @@ export class AnthropicProvider implements ProviderClient {
     messages: ChatMessage[],
     options?: ChatOptions,
   ): AsyncGenerator<ChatStreamChunk> {
+    messages = await resolveMessageAttachments(messages)
     const { system, anthropicMessages } = this.convertMessages(messages)
 
     const body: MessagesBody = {
@@ -315,7 +325,8 @@ export class AnthropicProvider implements ProviderClient {
     }
 
     if (system) body.system = system
-    if (options?.temperature !== undefined) body.temperature = options.temperature
+    // The Messages API takes 0 to 1 and answers anything above with a 400 (A33).
+    if (options?.temperature !== undefined) body.temperature = Math.min(1, options.temperature)
     if (options?.topP !== undefined) body.top_p = options.topP
     if (options?.topK !== undefined) body.top_k = options.topK
     // Claude Extended Thinking (Sonnet 3.7+, Opus 4). Opt-in: only when the
@@ -432,6 +443,7 @@ export class AnthropicProvider implements ProviderClient {
                 name: data.content_block.name || '',
                 input: '',
               })
+              if (data.content_block.name) yield { content: '', toolProgress: { name: data.content_block.name, argsChars: 0 }, done: false }
             }
             break
           }
@@ -450,7 +462,10 @@ export class AnthropicProvider implements ProviderClient {
               // gefuellt wird — dieselbe Regel wie oben, dieselbe Funktion.
               const key = data.index ?? keyForUnindexedBlock(toolUseBlocks)
               const block = toolUseBlocks.get(key)
-              if (block) block.input += delta.partial_json
+              if (block) {
+                block.input += delta.partial_json
+                if (block.name) yield { content: '', toolProgress: { name: block.name, argsChars: block.input.length }, done: false }
+              }
             }
             break
           }
@@ -514,6 +529,7 @@ export class AnthropicProvider implements ProviderClient {
     tools: ToolDefinition[],
     options?: ChatOptions,
   ): Promise<{ content: string; toolCalls: ToolCall[]; promptEvalCount?: number; evalCount?: number }> {
+    messages = await resolveMessageAttachments(messages)
     const { system, anthropicMessages } = this.convertMessages(messages)
 
     const body: MessagesBody = {
@@ -523,7 +539,8 @@ export class AnthropicProvider implements ProviderClient {
     }
 
     if (system) body.system = system
-    if (options?.temperature !== undefined) body.temperature = options.temperature
+    // The Messages API takes 0 to 1 and answers anything above with a 400 (A33).
+    if (options?.temperature !== undefined) body.temperature = Math.min(1, options.temperature)
     if (options?.topP !== undefined) body.top_p = options.topP
     if (options?.topK !== undefined) body.top_k = options.topK
     // Same extended-thinking gate as chatStream.
@@ -624,7 +641,9 @@ export class AnthropicProvider implements ProviderClient {
     let system = ''
     const anthropicMessages: AnthropicRequestMessage[] = []
 
-    for (const msg of messages) {
+    // The API wants a user turn first; a character card chat opens on the
+    // greeting (see userTurnFirst).
+    for (const msg of userTurnFirst(messages)) {
       if (msg.role === 'system') {
         // Anthropic: system goes in a separate parameter
         system += (system ? '\n\n' : '') + msg.content
@@ -734,6 +753,7 @@ export class AnthropicProvider implements ProviderClient {
   private async parseError(res: Response): Promise<ProviderError> {
     let message = 'Anthropic: Request failed'
     let code: string = 'network'
+    let serverMessage: string | undefined
 
     try {
       const data: unknown = await res.json()
@@ -745,7 +765,7 @@ export class AnthropicProvider implements ProviderClient {
       // not running said nothing but "Request failed" (counter-check
       // 2026-09-04).
       const err = prop(data, 'error')
-      const serverMessage = asString(prop(err, 'message')) ?? asString(err)
+      serverMessage = asString(prop(err, 'message')) ?? asString(err)
       if (serverMessage) message = serverMessage
     } catch { /* use default */ }
 
@@ -754,7 +774,7 @@ export class AnthropicProvider implements ProviderClient {
       message = 'Invalid Anthropic API key. Check Settings > Providers.'
     } else if (res.status === 429) {
       code = 'rate_limit'
-      message = 'Rate limited by Anthropic. Wait a moment and try again.'
+      message = requestLimitMessage({ said: serverMessage, retryAfterMs: parseRetryAfter(res) })
     } else if (res.status === 404) {
       code = 'not_found'
     } else if (res.status === 529) {

@@ -20,7 +20,7 @@ describe('builtinModelNameFromPath', () => {
 
   it('reads the picker id off a windows path, which is what Rust hands us there', () => {
     expect(
-      builtinModelNameFromPath('C:\\Users\\ddrob\\AppData\\Roaming\\lu\\models\\mlabonne_gemma-3-4b-it-abliterated-Q4_K_M.gguf'),
+      builtinModelNameFromPath('C:\\Users\\alice\\AppData\\Roaming\\lu\\models\\mlabonne_gemma-3-4b-it-abliterated-Q4_K_M.gguf'),
     ).toBe('mlabonne_gemma-3-4b-it-abliterated-Q4_K_M')
   })
 

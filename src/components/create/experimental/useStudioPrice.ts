@@ -35,7 +35,9 @@
 // die Quote unmittelbar davor bestaetigt.
 
 import { useEffect, useRef, useState } from 'react'
-import { createStudioCost, pricesByInput } from '../../../lib/render/create-studio'
+import { createStudioCost, pricesByInput, startImageCount } from '../../../lib/render/create-studio'
+import { studioRequiredParams } from '../../../lib/render/studio-roles'
+import { useCloudCatalogStore } from '../../../stores/cloudCatalogStore'
 import { studioQuote } from '../../../api/cloud/studio'
 import { StudioQuoteChangedError } from '../../../api/cloud/studio'
 import { CloudJobError } from '../../../api/cloud/client'
@@ -95,24 +97,40 @@ export function useStudioPrice(
   options: Record<string, unknown>,
   prompt: string,
   seconds: number | undefined,
+  /** Fotos der Referenzleiste neben dem Standbild. */
+  extraPhotos = 0,
+  /** Bilder, die einzeln kosten (price.perReference, Swap Character). */
+  referenceCount = 0,
 ): StudioPrice | null {
+  // Die Bildzahl, die der Start wirklich schickt: der Anbieter rechnet sie ein
+  // (MiniMax H3 Reference, je Bild). Ohne sie bliebe der Vorab-Preis aus.
+  const images = model ? startImageCount(model, extraPhotos) : undefined
+  // Ein Modell, das ein Pflichtbild liest, laesst sich vor dem Hochladen nur bei
+  // einem Server bepreisen, der `quote_images` kennt (studio-quote, 02.10.2026).
+  // Dass ein Server das kann, sagt er selbst: sein Katalog fuehrt Stufen. Ein
+  // aelterer Server wuerde ohne Datei mit 400 antworten, und das sperrte den
+  // Startknopf. Dort steht die Formel-Vorschau, und die Buchung holt ihre
+  // bestaetigte Zahl nach dem Hochladen (useCloudCreate), wie bei den Modellen,
+  // die nach der Dateilaenge abrechnen.
+  const quotesImages = useCloudCatalogStore((s) => s.models.some((m) => m.tier !== undefined))
+  const needsUpload = model ? images !== undefined && studioRequiredParams(model).length > 0 : false
   const [live, setLive] = useState<{ key: string; credits: number } | null>(null)
   const [error, setError] = useState<{ key: string; message: string } | null>(null)
   const abort = useRef<AbortController | null>(null)
   const debouncedPromptLen = useDebouncedValue(prompt.length, PROMPT_DEBOUNCE_MS)
-  const key = model ? JSON.stringify([model, options, debouncedPromptLen, seconds]) : ''
+  const key = model ? JSON.stringify([model, options, debouncedPromptLen, seconds, images, quotesImages, referenceCount]) : ''
 
   useEffect(() => {
     abort.current?.abort()
     // Kein Modell (lokale Spur, oder Wolke ohne Studio-Wahl): kein Abruf.
     // Ein Modell, dessen Preis an einer hochgeladenen Datei haengt, wird erst
     // MIT der Datei gebucht (useCloudCreate), hier reicht die Formel.
-    if (!model || pricesByInput(model)) { setLive(null); setError(null); return }
+    if (!model || pricesByInput(model) || (needsUpload && !quotesImages)) { setLive(null); setError(null); return }
     const controller = new AbortController()
     abort.current = controller
     const timer = setTimeout(async () => {
       try {
-        const res = await studioQuote(model, prompt, { op: 'studio', studio_options: options })
+        const res = await studioQuote(model, prompt, { op: 'studio', studio_options: options }, quotesImages ? images : undefined)
         if (controller.signal.aborted) return
         setLive({ key, credits: res.credits })
         setError(null)
@@ -160,8 +178,8 @@ export function useStudioPrice(
 
   if (!model) return null
   if (error && error.key === key) {
-    return { credits: createStudioCost(model, options, Array.from(prompt).length, seconds), live: false, error: error.message }
+    return { credits: createStudioCost(model, options, Array.from(prompt).length, seconds, images ?? 1, referenceCount), live: false, error: error.message }
   }
   if (live && live.key === key) return { credits: live.credits, live: true }
-  return { credits: createStudioCost(model, options, Array.from(prompt).length, seconds), live: false }
+  return { credits: createStudioCost(model, options, Array.from(prompt).length, seconds, images ?? 1, referenceCount), live: false }
 }

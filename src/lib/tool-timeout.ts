@@ -15,7 +15,9 @@
 
 /** Default args.timeout the loops inject for the exec tools (ms). Building an
  * app (npm install, cargo/gradle) routinely runs minutes; the old 30 s
- * default + 60 s JS cap killed every real build (David 2026-06-04). */
+ * default + 60 s JS cap killed every real build (2026-06-04). */
+import { hasMlx } from './capabilities'
+
 export const SHELL_EXECUTE_DEFAULT_TIMEOUT_MS = 600_000
 
 const LONG_RUNNING = new Set([
@@ -53,10 +55,66 @@ export const NO_PRACTICAL_CAP_MS = 2_147_483_000
  */
 const AGENT_LOOP_TOOLS = new Set(['delegate_task', 'run_workflow'])
 
+/**
+ * `computer_use` and `computer_task` wait for a person: every call can stop
+ * at a question (allow this app, confirm this action) that the user answers
+ * whenever they look at the screen, and a screen task runs up to its own
+ * step and time limit (TASK_MAX_STEPS, TASK_TIME_LIMIT_MS in
+ * api/computer-task.ts). Both end through their own Stop (the bar, the
+ * shortcut, the chat's Stop through the run signal). Under the generic 60 s
+ * default a question nobody answered within a minute failed the call, and
+ * the abort that followed was shown as "The user stopped computer control".
+ */
+const HUMAN_PACED_TOOLS = new Set(['computer_use', 'computer_task', 'set_setting'])
+
+/**
+ * P-L (3.1.0): web tools that may stop for the user's yes before an address
+ * (lib/web-url-provenance.ts). The page itself has its own deadline in Rust
+ * (20 s for a fetch, 30 s for a browser load), so a long cap here only waits
+ * for a person, never for a hung connection.
+ */
+export const URL_CARD_TOOLS = new Set(['web_fetch', 'browser_open', 'browser_click_link'])
+export const URL_CARD_CAP_MS = 10 * 60_000
+
 export interface ToolTimeoutSettings {
   imageGenTimeoutMinutes?: number
   videoGenTimeoutMinutes?: number
+  /** 'cloud' renders on the server; anything else is this machine. */
+  appMode?: string
 }
+
+/**
+ * How long a Create render may go without any life sign from ComfyUI before
+ * it is called stalled, in ms. Reads the same two settings as the tool cap
+ * (Settings, Generation timeout); 20 min for images and 60 min for video
+ * when they are unset or not a number. D27: useCreate used to hard code the
+ * defaults, so raising the setting never reached the Create tab.
+ */
+export function renderStallLimitMs(kind: 'image' | 'video', settings: ToolTimeoutSettings): number {
+  const minutes = kind === 'video'
+    ? Number(settings.videoGenTimeoutMinutes) || 60
+    : Number(settings.imageGenTimeoutMinutes) || 20
+  return Math.max(1, minutes) * 60_000
+}
+
+/** The sentence a stalled Create render ends with: "1 minute", "20 minutes". */
+export function renderStallMessage(limitMs: number): string {
+  const minutes = Math.max(1, Math.round(limitMs / 60_000))
+  return `Generation stalled: no progress from ComfyUI for ${minutes} ${minutes === 1 ? 'minute' : 'minutes'}.`
+}
+
+/**
+ * What one media call spends outside its render budget, at most (A13). The
+ * render's own clock grants the first load of a checkpoint up to 10 minutes
+ * and a render seconds from done one more minute (lib/render-budget); before
+ * it come a ComfyUI cold start of up to 90 s (twice: before and after the
+ * VRAM hand-off), the model picker's 90 s, and freeing the chat model. The
+ * cap used to be the budget plus two minutes, so it fired in the middle of a
+ * render the inner clock still allowed and told the model "timed out" for a
+ * render that went on. The cap now sits behind all of that and only catches
+ * a call that hangs; the render ends by its own budget, with its own words.
+ */
+export const MEDIA_CALL_OVERHEAD_MS = 18 * 60_000
 
 /** The JS race ceiling for one tool call, in ms. */
 export function toolCallCapMs(
@@ -65,14 +123,22 @@ export function toolCallCapMs(
   settings: ToolTimeoutSettings,
 ): number {
   if (name === 'image_generate') {
-    return Math.max(1, Number(settings.imageGenTimeoutMinutes) || 20) * 60_000 + 120_000
+    // C71: a local image on a Mac runs on MLX, and Rust ends it the moment it
+    // stops moving (commands/mlx.rs, the Image timeout; the second engine has
+    // its own hour per image). A wall clock here would cut a long render that
+    // is still making steps, Chroma1-HD at 40 steps on an M1 Max among them.
+    // Stop still ends it.
+    if (settings.appMode !== 'cloud' && hasMlx()) return NO_PRACTICAL_CAP_MS
+    return renderStallLimitMs('image', settings) + MEDIA_CALL_OVERHEAD_MS
   }
-  if (name === 'video_generate') {
-    return Math.max(1, Number(settings.videoGenTimeoutMinutes) || 60) * 60_000 + 120_000
-  }
+  if (name === 'video_generate') return renderStallLimitMs('video', settings) + MEDIA_CALL_OVERHEAD_MS
   if (AGENT_LOOP_TOOLS.has(name) && args?.background !== true) {
     return NO_PRACTICAL_CAP_MS
   }
+  if (HUMAN_PACED_TOOLS.has(name)) {
+    return NO_PRACTICAL_CAP_MS
+  }
+  if (URL_CARD_TOOLS.has(name)) return URL_CARD_CAP_MS
   if (LONG_RUNNING.has(name)) {
     const own = Number(args?.timeout)
     return Number.isFinite(own) && own > 0 ? own + 15_000 : SHELL_EXECUTE_DEFAULT_TIMEOUT_MS + 15_000

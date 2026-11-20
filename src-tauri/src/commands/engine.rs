@@ -1,4 +1,6 @@
 use crate::os_error;
+// Spawning the sidecar is desktop only, a phone runs the engine in-process.
+#[cfg(desktop)]
 use super::process::tie_child_to_app_lifetime;
 
 // P1 — Built-in inference engine (bundled llama.cpp `llama-server`).
@@ -15,6 +17,7 @@ use super::process::tie_child_to_app_lifetime;
 // lives in `AppState.bundled_engine` and is killed in `shutdown_subprocesses`.
 
 use std::path::{Path, PathBuf};
+#[cfg_attr(mobile, allow(unused_imports))]
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -22,6 +25,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::state::{AppState, BundledEngine};
+#[cfg(desktop)]
 use super::engine_sanity;
 
 #[cfg(target_os = "windows")]
@@ -56,7 +60,7 @@ const PORT_SEARCH_SPAN: u16 = 20;
 /// `externalBin: ["bin/lu-llama-server"]` inside the bundled app (target
 /// triple suffix stripped, `.exe` on Windows).
 ///
-/// GitHub #120 (AnnSdf1969, Ubuntu 26.04, 2026-08-28): the file used to be
+/// GitHub #120 (Ubuntu 26.04, 2026-08-28): the file used to be
 /// called `llama-server`, and Tauri's deb bundler copies every external
 /// binary straight into `/usr/bin`. Debian ships its own `llama.cpp-tools`
 /// package that owns `/usr/bin/llama-server`, so dpkg refused the whole
@@ -108,10 +112,28 @@ pub struct EngineTuning {
     /// GPU layers to offload. <0 = all (999, today's behavior); >=0 explicit
     /// (0 = CPU-only is a valid expert choice on RAM-starved boxes).
     pub gpu_layers: i32,
-    /// Pin model in RAM (`--mlock`).
+    /// Pin model in RAM (`--load-mode mlock`, see `load_mode`).
     pub mlock: bool,
-    /// Disable mmap (`--no-mmap`): slower load, fewer pageouts.
+    /// Disable mmap (`--load-mode none`): slower load, fewer pageouts. On Windows
+    /// a start with layers on the card has it off anyway (`mmap_off`).
     pub no_mmap: bool,
+    /// The person chose `ctx` (Settings or the chat's context menu, GH #129
+    /// `ctxChosen`). A chosen context is never changed by the VRAM plan; the
+    /// default one may be raised while everything fits (vram_plan.rs).
+    pub ctx_chosen: bool,
+    /// Set by the VRAM plan for one start, never read from settings:
+    /// `--n-cpu-moe`, the MoE layers whose experts stay on the processor.
+    #[serde(skip)]
+    pub plan_cpu_moe: u32,
+    /// Set by the VRAM plan: `--cache-ram` in MiB when RAM is tight.
+    #[serde(skip)]
+    pub plan_cache_ram_mib: Option<u64>,
+    /// Set at the start from the Neuron tweaker (3.0.9, P11), never read
+    /// from settings: the one mixed control vector file for this model
+    /// (`--control-vector`). Only a file inside LU's own neuron folder gets
+    /// here (`neuron::control_vector_for`).
+    #[serde(skip)]
+    pub control_vector: Option<String>,
 }
 
 impl Default for EngineTuning {
@@ -125,6 +147,10 @@ impl Default for EngineTuning {
             gpu_layers: -1,
             mlock: false,
             no_mmap: false,
+            ctx_chosen: false,
+            plan_cpu_moe: 0,
+            plan_cache_ram_mib: None,
+            control_vector: None,
         }
     }
 }
@@ -138,6 +164,15 @@ pub(crate) fn effective_ctx(tuning: &EngineTuning) -> u32 {
     if tuning.ctx == 0 { 8192 } else { tuning.ctx }
 }
 
+/// A GGUF file name without its extension, whatever case the extension is in.
+fn gguf_stem(file_name: &str) -> &str {
+    let at = file_name.len().saturating_sub(".gguf".len());
+    match file_name.get(at..) {
+        Some(ext) if ext.eq_ignore_ascii_case(".gguf") => &file_name[..at],
+        _ => file_name,
+    }
+}
+
 /// Name a vision projector gets on disk: `<model stem>.mmproj.gguf`, written
 /// next to the model. Mirrors `mmprojFileName` in src/api/discover.ts, which is
 /// what the downloader writes. Derived from the model name rather than kept
@@ -145,11 +180,7 @@ pub(crate) fn effective_ctx(tuning: &EngineTuning) -> u32 {
 /// models in it would otherwise both claim one `mmproj-F16.gguf`.
 pub(crate) fn mmproj_sibling_path(model_path: &str) -> PathBuf {
     let p = Path::new(model_path);
-    let stem = p
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(|s| s.strip_suffix(".gguf").or_else(|| s.strip_suffix(".GGUF")).unwrap_or(s))
-        .unwrap_or("");
+    let stem = p.file_name().and_then(|s| s.to_str()).map(gguf_stem).unwrap_or("");
     p.with_file_name(format!("{stem}.mmproj.gguf"))
 }
 
@@ -157,32 +188,168 @@ pub(crate) fn mmproj_sibling_path(model_path: &str) -> PathBuf {
 /// projectors out of the model picker: they are GGUFs in the same folder, so
 /// the plain "every .gguf is a model" scan would offer them as chat models and
 /// llama-server would refuse to load them. Covers our own `.mmproj.gguf`
-/// convention and the upstream `mmproj-*.gguf` names a user may drop in by hand.
+/// convention and the upstream names a user may drop in by hand, which carry
+/// `mmproj` in front (`mmproj-F16.gguf`) or as a word of its own further back
+/// (`<model>.mmproj-Q8_0.gguf`, `<model>-mmproj-f16.gguf`).
 pub(crate) fn is_projector_file(file_name: &str) -> bool {
     let lower = file_name.to_ascii_lowercase();
-    let stem = lower.strip_suffix(".gguf").unwrap_or(&lower);
-    stem.ends_with(".mmproj") || stem.starts_with("mmproj")
+    let stem = gguf_stem(&lower);
+    stem.starts_with("mmproj") || stem.split(['-', '.']).any(|word| word == "mmproj")
+}
+
+/// The last word of a GGUF name when it says how the weights are stored
+/// (`Q4_K_M`, `IQ4_XS`, `f16`) and not which model it is. Lowercase in.
+fn is_quant_word(word: &str) -> bool {
+    let digit_after = |prefix: &str| {
+        word.strip_prefix(prefix)
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(|c| c.is_ascii_digit())
+    };
+    digit_after("q")
+        || digit_after("iq")
+        || matches!(word, "f16" | "f32" | "bf16" | "fp16" | "fp32" | "int4" | "int8")
+}
+
+/// A lowercase GGUF stem without its trailing quant word, if it has one.
+fn without_quant_word(stem: &str) -> &str {
+    match stem.rfind(['-', '.']) {
+        Some(at) if is_quant_word(&stem[at + 1..]) => &stem[..at],
+        _ => stem,
+    }
+}
+
+/// Which model a lowercase model stem is, whatever quant it was saved in:
+/// `foo-bar-q4_k_m`, `foo-bar.q8_0` and `foo-bar.i1-q4_k_m` (the imatrix
+/// builds of the same weights) are all `foo-bar`.
+fn model_base(stem: &str) -> &str {
+    let base = without_quant_word(stem);
+    base.strip_suffix(".i1").or_else(|| base.strip_suffix("-i1")).unwrap_or(base)
+}
+
+/// The model an upstream projector names in its own file name, lowercase stem
+/// in. These are the three shapes the big GGUF publishers use:
+/// `mmproj-<model>-f16`, `<model>.mmproj-Q8_0` and `<model>-mmproj-f16`. None
+/// for a projector that names nothing (`mmproj-F16`) and for one in our own
+/// `<file>.mmproj` shape, which belongs to exactly that file and no other.
+fn projector_names_model(stem: &str) -> Option<&str> {
+    if stem.ends_with(".mmproj") {
+        return None;
+    }
+    let named = without_quant_word(stem);
+    named
+        .strip_prefix("mmproj-")
+        .or_else(|| named.strip_suffix(".mmproj"))
+        .or_else(|| named.strip_suffix("-mmproj"))
+        .filter(|model| !model.is_empty())
+}
+
+/// Pick the projector of `model_name` out of the GGUF file names in its folder.
+/// The one rule for every folder, ours and another tool's alike:
+///
+/// 1. `<model file>.mmproj.gguf`, the name our own downloads write.
+/// 2. An upstream projector that carries this model's name. Two of them (an
+///    f16 and a Q8_0 of the same projector) are a choice we do not make.
+/// 3. A projector that names nothing or names something else, but only when it
+///    is the single projector in a folder that holds this one model and no
+///    other (several quants of it count as one). That is a repo folder as
+///    LM Studio keeps it, or a models folder with one model in it.
+///
+/// Anything else is a guess, and a guess is worse than none: the models folder
+/// is flat, so one stray `mmproj-F16.gguf` would otherwise hang itself on every
+/// text model in it and the app would call them all able to see.
+fn pick_projector<'a>(model_name: &str, gguf_names: &'a [String]) -> Option<&'a str> {
+    let model = gguf_stem(model_name).to_ascii_lowercase();
+    let stems: Vec<(&'a str, String)> = gguf_names
+        .iter()
+        .map(|name| (name.as_str(), gguf_stem(name).to_ascii_lowercase()))
+        .collect();
+    let only = |mut found: Vec<&'a str>| if found.len() == 1 { found.pop() } else { None };
+
+    let own = format!("{model}.mmproj");
+    let ours: Vec<&str> = stems.iter().filter(|(_, stem)| *stem == own).map(|(name, _)| *name).collect();
+    if !ours.is_empty() {
+        return only(ours);
+    }
+
+    let base = model_base(&model);
+    let projectors: Vec<&(&str, String)> = stems.iter().filter(|(name, _)| is_projector_file(name)).collect();
+    let named: Vec<&str> = projectors
+        .iter()
+        .filter(|(_, stem)| projector_names_model(stem) == Some(base))
+        .map(|(name, _)| *name)
+        .collect();
+    if !named.is_empty() {
+        return only(named);
+    }
+
+    let models: Vec<&String> = stems
+        .iter()
+        .filter(|(name, _)| !is_projector_file(name))
+        .map(|(_, stem)| stem)
+        .collect();
+    let one_model = models.contains(&&model) && models.iter().all(|stem| model_base(stem) == base);
+    match projectors.as_slice() {
+        [(name, stem)] if one_model && !stem.ends_with(".mmproj") => Some(name),
+        _ => None,
+    }
 }
 
 /// Absolute path of the projector belonging to `model_path`, if it is on disk.
-/// Absence is the normal case (text-only model) and never an error.
+/// Absence is the normal case (text-only model) and never an error. Which file
+/// belongs is `pick_projector`'s rule; the folder is only read when the name
+/// our own downloads write is not there.
 pub(crate) fn existing_mmproj(model_path: &str) -> Option<String> {
-    let p = mmproj_sibling_path(model_path);
-    p.is_file().then(|| p.to_string_lossy().to_string())
+    let exact = mmproj_sibling_path(model_path);
+    if exact.is_file() {
+        return Some(exact.to_string_lossy().to_string());
+    }
+    let model = Path::new(model_path);
+    let dir = model.parent()?;
+    let gguf_names: Vec<String> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|entry| entry.path().is_file())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| gguf_stem(name).len() < name.len())
+        .collect();
+    let picked = pick_projector(model.file_name()?.to_str()?, &gguf_names)?;
+    Some(dir.join(picked).to_string_lossy().to_string())
 }
 
 /// Can this GGUF read images once the built-in engine loads it?
 ///
 /// Exactly the question `existing_mmproj` answers when the server is started:
 /// llama-server sees images only with `--mmproj`, and that flag rides the argv
-/// only when the projector file sits next to the model. Reported with the
-/// model list so the frontend stops guessing from the model NAME. Nebenbefund
-/// N3 of the D1 counter-check (Windows build, 2026-08-29): a text-only
+/// only when `existing_mmproj` finds the projector next to the model. Reported
+/// with the model list so the frontend stops guessing from the model NAME.
+/// Nebenbefund N3 of the D1 counter-check (Windows build, 2026-08-29): a text-only
 /// gemma-3-4b conversion is a gemma3 by name, the app fed it the picture it
 /// had just generated, and the run ended on a red "This model can't read
 /// images" line under a picture that came out fine.
+///
+/// N1, 30.10.2026: a projector is not always an image part. llama.cpp b11960
+/// loads audio encoders through the same `--mmproj`, and the projector of
+/// LiquidAI/LFM3-Audio-2B-GGUF carries `clip.has_audio_encoder` and no vision
+/// encoder at all (Omni carries both, VL only vision). Such a model hears and
+/// does not see, and an image sent to it ends on a 501 from the engine. The
+/// projector's own head says which; a head without the flag (older and
+/// hand-made projectors, the dummies in the tests below) stays a vision part,
+/// as every projector was before audio ones existed.
 pub(crate) fn model_can_see_images(model_path: &str) -> bool {
-    existing_mmproj(model_path).is_some()
+    existing_mmproj(model_path).is_some_and(|p| projector_sees_images(&p))
+}
+
+/// `clip.has_vision_encoder` of a projector. A head without it is a vision
+/// part unless it names an audio encoder instead (LFM3 Audio writes only
+/// `clip.has_audio_encoder`); an unreadable head stays a vision part.
+pub(crate) fn projector_sees_images(projector_path: &str) -> bool {
+    use crate::commands::gguf::{read_model_head, Meta};
+    let Some(head) = read_model_head(projector_path) else { return true };
+    let flag = |key: &str| match head.keys.get(key) {
+        Some(Meta::Int(n)) => Some(*n != 0),
+        _ => None,
+    };
+    flag("clip.has_vision_encoder").unwrap_or_else(|| flag("clip.has_audio_encoder") != Some(true))
 }
 
 // ── How much of a model a card can actually hold (3.0.0 list, bugs u and a) ──
@@ -210,49 +377,13 @@ pub(crate) fn model_can_see_images(model_path: &str) -> bool {
 // no longer asked by default to take all of it, and the log now says what the
 // engine was told to do.
 
-/// One MiB, for the reserves below and the numbers in the log line.
-const MIB: u64 = 1024 * 1024;
 
-/// Graphics memory that is spoken for before a single weight is loaded: the
-/// driver's own context plus llama.cpp's compute buffers. A CUDA context alone
-/// runs to a few hundred MiB and the compute buffer adds a few hundred more at
-/// the default batch sizes, so 512 MiB is the round number above both.
-///
-/// This is the reserve for a MEASURED-free reading (`nvidia-smi`'s
-/// `memory.free`, `VramReading.free == true`): the number already excludes
-/// whatever else is running, so only the driver and the compute buffers are
-/// left to hold back.
-const VRAM_OVERHEAD_BYTES: u64 = 512 * MIB;
-
-/// R1-3: the reserve for a reading that is NOT known to be free, the
-/// `detect_gpus` fallback (`VramReading.free == false`) reports the card's
-/// TOTAL size, not what is currently unused. A desktop compositor, a browser
-/// and whatever Create last rendered can all be sitting in that total already,
-/// same as the free-memory case this file's own header comment describes for
-/// `engine_vram_reading`. 512 MiB on top of a total-capacity number plans as
-/// if the card were otherwise empty; this takes a bigger, still round, bite
-/// out of it instead, so a start on this weaker signal fails toward "fewer
-/// layers than would have fit" rather than toward a start that dies.
-const VRAM_OVERHEAD_BYTES_UNMEASURED: u64 = 2048 * MIB;
-
-/// KV cache per offloaded layer per 1024 tokens of context.
-///
-/// 4 MiB is the f16 figure for a modern grouped query model: K and V, 1024
-/// key and value dimensions, two bytes each, is 4 KiB per token per layer. A
-/// model with wider key and value heads needs more than this and will be given
-/// fewer layers than it could have held. That error costs speed. The opposite
-/// error costs the start, which is the failure this whole block exists to
-/// prevent.
-const KV_BYTES_PER_LAYER_PER_1K_CTX: u64 = 4 * MIB;
-
-/// The layer count assumed when the GGUF header does not carry one.
-///
-/// Deliberately LOW. The count only ever multiplies the fraction of the model
-/// that fits, so a guess BELOW the real block count can only ask for fewer
-/// layers than would have fit, never for more, and fewer layers is the
-/// direction in which a start survives. 16 is under the block count of every
-/// chat GGUF this app offers.
-const ASSUMED_BLOCK_COUNT: u32 = 16;
+// 3.0.8 (A25): what the start takes, layer by layer, is worked out from the
+// GGUF head in vram_plan.rs, and the reserves are explained there. Until
+// 3.0.7 this block priced every model's cache at 4 MiB per layer per 1K of
+// context and the weights at the file size over the layer count, which was
+// 6.5 GiB too high for gemma-4-31B at 64K and 2.2 GiB too low at 8K
+// (Discord 22.10.2026).
 
 /// What `-ngl` carries when every layer is wanted.
 ///
@@ -262,115 +393,328 @@ const ASSUMED_BLOCK_COUNT: u32 = 16;
 /// would be printing the sentinel.
 const ALL_LAYERS: u32 = 999;
 
-/// The numbers an offload decision is made from. Plain values, so the
-/// arithmetic can be checked without a graphics card in the machine.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct OffloadInputs {
-    /// The GGUF on disk. Its size is the honest proxy for what the weights
-    /// take in graphics memory at full offload, and the app already treats it
-    /// as one (`modelBytes` in `bundled_engine_status`, GH #85).
-    pub model_bytes: u64,
-    /// `<arch>.block_count` from the header, when it could be read.
-    pub block_count: Option<u32>,
-    /// Free graphics memory where a probe measured it, the card's total where
-    /// it could not, `None` where nothing measured a card at all.
-    pub vram_bytes: Option<u64>,
-    /// The context this start will ask for, which is what the KV cache is
-    /// sized from.
-    pub ctx: u32,
-    /// R1-3: whether `vram_bytes` is a measured-free reading (`nvidia-smi`)
-    /// or a card's total capacity (`detect_gpus`, `VramReading.free`).
-    /// Meaningless when `vram_bytes` is `None`. Drives both the reserve
-    /// (`VRAM_OVERHEAD_BYTES` vs `VRAM_OVERHEAD_BYTES_UNMEASURED`) and the
-    /// wording of `why`: "are free" is simply false of a total-capacity
-    /// number, and the log line that started every start read that way
-    /// regardless of which kind of number backed it.
-    pub free: bool,
+/// What `-ngl` carries when the engine decides the layer count itself (GH
+/// #156). Written into argv as `auto`, read back as this number, so the retry
+/// and the restart ladder below see "layers on the card" and keep handing the
+/// same word on. Never shown to anyone: `gpu_layers_reported` drops it like
+/// `ALL_LAYERS`.
+const ENGINE_DECIDES: u32 = 998;
+
+/// Whether the auto default goes to llama-server's own fit instead of the plan
+/// below (GH #156).
+///
+/// A reading that is not free memory is a card's total from `detect_gpus`:
+/// every AMD and Intel card on Windows and Linux, which run the Vulkan build.
+/// The plan has to guess the rest from that total (a 2 GiB reserve and a
+/// fixed cache size per layer). GH #156 reports "-1" running as slow as the
+/// processor on a Navi 10 card where a typed 99 was fast, and this guess is
+/// the only place where the two differ (no log of that machine was seen, so
+/// the layer count it got is not known). The pinned llama-server measures the
+/// memory of the device it really uses (`-ngl auto` with `--fit`, on by
+/// default), so where LU cannot measure, the engine does. A measured-free
+/// reading (`nvidia-smi`) keeps the plan, and so does the Mac, whose unified
+/// memory the plan has always handled.
+pub(crate) fn engine_fits_layers(card: Option<&crate::commands::gpu::VramReading>, mac: bool) -> bool {
+    card.is_some_and(|c| !c.free) && !mac
 }
 
-/// What the start should send as `-ngl`, and the sentence that explains it.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct OffloadPlan {
-    /// `None` means "ask for all layers": what this app has always sent, and
-    /// what a machine with room and a machine nothing could measure both keep
-    /// getting.
-    pub layers: Option<u32>,
-    /// One English clause for the log line, naming the numbers it decided on.
-    /// Without it the log would carry a layer count nobody could argue with.
-    pub why: String,
+/// The model as the plan sees it: read from its head, or, when the head
+/// cannot be read as a model (an architecture the plan does not know the
+/// keys of, a damaged file), roughly from its size and layer count the way
+/// 3.0.7 planned every model.
+pub(crate) fn model_shape(model_path: &str) -> crate::commands::vram_plan::ModelShape {
+    use crate::commands::{gguf, vram_plan::ModelShape};
+    let head = gguf::read_model_head(model_path);
+    let bytes = gguf::model_file_bytes_of(model_path, head.as_ref());
+    head.and_then(|h| ModelShape::from_head(&h, bytes))
+        .unwrap_or_else(|| ModelShape::rough(bytes, gguf::read_header(model_path).block_count))
 }
 
-fn mib(bytes: u64) -> u64 {
-    bytes / MIB
+/// The settings, in the terms of the plan.
+pub(crate) fn plan_request(tuning: &EngineTuning) -> crate::commands::vram_plan::Request {
+    use crate::commands::vram_plan::{CacheConfig, Request};
+    Request {
+        cache: CacheConfig::new(effective_ctx(tuning), &tuning.cache_type_k, &tuning.cache_type_v, &tuning.flash_attn),
+        // An unmarked context above what the plan would ever raise to is a
+        // choice too: profiles from before GH #129 carry no mark. Unmarked
+        // values up to 32K are the house default or the agent mode's own
+        // raise (frontend `ensureBuiltinAgentCtx`), which the plan may raise
+        // further and never lowers.
+        ctx_chosen: tuning.ctx_chosen || effective_ctx(tuning) > crate::commands::vram_plan::AUTO_CTX_CAP,
+        typed_layers: (tuning.gpu_layers >= 0).then_some(tuning.gpu_layers as u32),
+    }
 }
 
-/// Decide how many layers go on the card.
-///
-/// Three outcomes, and two of them are the old behaviour:
-///
-///   * Nothing measured a card: all layers, exactly as before, and the log
-///     says the probe came back empty.
-///   * The model and its cache fit with the reserve: all layers, exactly as
-///     before.
-///   * They do not fit: `floor(usable / per_layer)`, where `per_layer` is the
-///     file size divided by the block count plus that layer's share of the KV
-///     cache, and `usable` is the measured memory minus the driver reserve.
-///
-/// Pure. No file is read and no card is asked; the caller collects the inputs
-/// so this can be checked against hardware nobody here owns.
-pub(crate) fn plan_offload(input: &OffloadInputs) -> OffloadPlan {
-    let Some(vram) = input.vram_bytes else {
-        return OffloadPlan {
-            layers: None,
-            why: "no probe measured graphics memory on this machine, so every layer is requested exactly as before".to_string(),
-        };
-    };
-    // A header that answers zero is a header that answered nothing.
-    let read_from_header = input.block_count.filter(|b| *b > 0);
-    let blocks = read_from_header.unwrap_or(ASSUMED_BLOCK_COUNT);
-    // Round the context UP to whole thousands: a 6000 token context pays for
-    // six, because the error has to point at reserving too much.
-    let ctx_k = (input.ctx.max(1) as u64).div_ceil(1024);
-    let kv_per_layer = KV_BYTES_PER_LAYER_PER_1K_CTX * ctx_k;
-    // R1-3: a total-capacity reading is not a free-memory reading, and the
-    // reserve taken out of it has to be bigger for the same reason the
-    // sentence below has to say something different.
-    let overhead = if input.free { VRAM_OVERHEAD_BYTES } else { VRAM_OVERHEAD_BYTES_UNMEASURED };
-    let vram_clause = if input.free {
-        format!("{} MiB are free", mib(vram))
+/// The fit advice of the engine that runs, with the model it is about. Kept
+/// beside the slot rather than in it: it is a reading taken at the start and
+/// changes nothing about the process.
+static FIT_NOTE: std::sync::Mutex<Option<(String, crate::commands::vram_plan::FitAdvice)>> = std::sync::Mutex::new(None);
+
+fn remember_fit_note(model_path: &str, advice: Option<crate::commands::vram_plan::FitAdvice>) {
+    let mut slot = FIT_NOTE.lock().unwrap_or_else(|e| e.into_inner());
+    *slot = advice.map(|a| (model_path.to_string(), a));
+}
+
+/// The fit advice for the model that is loaded now, if it has one.
+pub(crate) fn fit_note_for(model_path: &str) -> Option<crate::commands::vram_plan::FitAdvice> {
+    let slot = FIT_NOTE.lock().unwrap_or_else(|e| e.into_inner());
+    slot.as_ref().filter(|(path, _)| path == model_path).map(|(_, a)| a.clone())
+}
+
+/// The memory sentence for the model that is loaded now, if it has one.
+pub(crate) fn memory_note_for(model_path: &str) -> Option<String> {
+    fit_note_for(model_path).map(|a| a.text)
+}
+
+/// The context the start of the running engine was ASKED for, before the
+/// plan set the one it runs with (3.0.8, A25). A context nobody chose is the
+/// plan's to pick (`vram_plan::auto_ctx`), so the engine may run with more or
+/// less than was asked, and a later request for the same is still the same
+/// request: the agent mode asks for 32K on every turn, and an engine the
+/// plan gave 16K must not be restarted for it each time.
+static REQUESTED_CTX: std::sync::Mutex<Option<(String, u32)>> = std::sync::Mutex::new(None);
+
+fn remember_requested_ctx(model_path: &str, ctx: u32) {
+    let mut slot = REQUESTED_CTX.lock().unwrap_or_else(|e| e.into_inner());
+    *slot = Some((model_path.to_string(), ctx));
+}
+
+pub(crate) fn requested_ctx_for(model_path: &str) -> Option<u32> {
+    let slot = REQUESTED_CTX.lock().unwrap_or_else(|e| e.into_inner());
+    slot.as_ref().filter(|(path, _)| path == model_path).map(|(_, c)| *c)
+}
+
+// ── The check after a start (3.0.8, A25) ──────────────────────────────────
+//
+// The plan is arithmetic; llama-server prints what it really allocated
+// (`-lv 4`, see `server_args`). After every start the two are put side by side
+// in the log, and when the plan came out more than 128 MiB low on the card the
+// gap is kept and added to the next plan of the same model with the same
+// settings. nvidia-smi before and after the start also tells what the engine
+// took beyond its buffers (driver context, cuBLAS): that is kept per machine
+// and raises the reserve when it is larger than the plan's.
+
+/// What the check after a start needs from the plan.
+struct PlanCheck {
+    plan: Option<crate::commands::vram_plan::Split>,
+    /// Free graphics memory before the start, when nvidia-smi measured it.
+    free_before: Option<u64>,
+    key: String,
+}
+
+/// What earlier starts taught: for this model and settings, and for the
+/// machine.
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct Learned {
+    pub model: crate::commands::vram_plan::Calibration,
+    pub machine: crate::commands::vram_plan::Calibration,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct CalibrationFile {
+    machine: crate::commands::vram_plan::Calibration,
+    models: std::collections::BTreeMap<String, crate::commands::vram_plan::Calibration>,
+}
+
+/// More lessons than this and the file starts over: it is a cache, not a
+/// record, and an entry for a model long deleted helps nobody.
+const MAX_CALIBRATIONS: usize = 64;
+
+fn calibration_path() -> Option<PathBuf> {
+    crate::os_paths::builtin_models_dir().parent().map(|p| p.join("engine-memory.json"))
+}
+
+/// The model file (name and size, so a re-download of another quant under
+/// the same name is a new entry) and the settings that change its memory.
+fn calibration_key(model_path: &str, tuning: &EngineTuning) -> String {
+    let name = Path::new(model_path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let size = std::fs::metadata(model_path).map(|m| m.len()).unwrap_or(0);
+    format!(
+        "{name}|{size}|{}|{}|{}|{}",
+        effective_ctx(tuning),
+        tuning.cache_type_k,
+        tuning.cache_type_v,
+        tuning.flash_attn
+    )
+}
+
+fn read_calibrations() -> CalibrationFile {
+    calibration_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+pub(crate) fn load_calibration(key: &str) -> Learned {
+    let file = read_calibrations();
+    Learned { model: file.models.get(key).copied().unwrap_or_default(), machine: file.machine }
+}
+
+fn save_calibration(key: &str, lesson: crate::commands::vram_plan::Calibration) {
+    let Some(path) = calibration_path() else { return };
+    let mut file = read_calibrations();
+    if lesson.extra > 0 {
+        if file.models.len() >= MAX_CALIBRATIONS {
+            file.models.clear();
+        }
+        file.models.insert(key.to_string(), crate::commands::vram_plan::Calibration { extra: lesson.extra, overhead: 0 });
     } else {
-        format!("the card holds {} MiB in total (actual free memory was not measured)", mib(vram))
-    };
-    let whole = input.model_bytes + kv_per_layer * blocks as u64 + overhead;
-    if whole <= vram {
-        return OffloadPlan {
-            layers: None,
-            why: format!(
-                "the model and its cache need about {} MiB and {vram_clause}, so every layer is requested",
-                mib(whole)
-            ),
-        };
+        file.models.remove(key);
     }
-    let usable = vram.saturating_sub(overhead);
-    let per_layer = input.model_bytes / blocks as u64 + kv_per_layer;
-    // A layer that costs nothing cannot be divided into the budget, so that
-    // case answers 0 layers instead of dividing by zero.
-    let layers = usable
-        .checked_div(per_layer)
-        .map_or(0, |fit| fit.min(blocks as u64) as u32);
-    let counted = match read_from_header {
-        Some(b) => format!("{b} layers the GGUF header names"),
-        None => format!("{ASSUMED_BLOCK_COUNT} layers assumed, because the GGUF header carries no block count"),
-    };
-    OffloadPlan {
-        layers: Some(layers),
-        why: format!(
-            "the model and its cache need about {} MiB but {vram_clause}, so {layers} of {counted} go on the card, at about {} MiB per layer and {} MiB held back for the driver and the compute buffers",
-            mib(whole),
-            mib(per_layer),
-            mib(overhead)
-        ),
+    if lesson.overhead > 0 {
+        file.machine.overhead = lesson.overhead;
     }
+    if let Ok(text) = serde_json::to_string_pretty(&file) {
+        let _ = std::fs::write(path, text);
+    }
+}
+
+/// Put the plan beside what llama-server says it allocated, and keep what
+/// it teaches.
+fn check_plan(check: &PlanCheck, startup: &str) {
+    use crate::commands::vram_plan::{compare_sentence, learn, parse_engine_report, MIB};
+    let Some(report) = parse_engine_report(startup) else {
+        tracing::info!(target: "engine", "plan check: llama-server printed no buffer sizes, nothing to compare");
+        return;
+    };
+    if let Some((on, of)) = report.offloaded {
+        tracing::info!(
+            target: "engine",
+            card_mib = report.card.total() / MIB,
+            ram_mib = report.host.total() / MIB,
+            image_part_mib = report.image_part / MIB,
+            "llama.cpp put {on} of {of} layers on the card"
+        );
+    }
+    let Some(plan) = check.plan.as_ref() else { return };
+    let free_after = check
+        .free_before
+        .and_then(|_| crate::commands::gpu::engine_vram_reading())
+        .filter(|r| r.free)
+        .map(|r| r.bytes);
+    let lesson = learn(plan, &report, check.free_before, free_after);
+    tracing::info!(
+        target: "engine",
+        overhead_mib = lesson.overhead / MIB,
+        "{}",
+        compare_sentence(plan, &report)
+    );
+    if lesson.extra > 0 {
+        tracing::warn!(
+            target: "engine",
+            extra_mib = lesson.extra / MIB,
+            "the plan was low on the card, the next start of this model with these settings plans that much more"
+        );
+    }
+    save_calibration(&check.key, lesson);
+}
+
+/// `iogpu.wired_limit_mb`: what a Mac lets the graphics use when someone set
+/// it (0 when not, which is the default).
+fn mac_wired_limit_mb() -> u64 {
+    if !cfg!(target_os = "macos") {
+        return 0;
+    }
+    let mut cmd = crate::process_util::foreign_system_command("sysctl");
+    cmd.args(["-n", "iogpu.wired_limit_mb"]);
+    crate::commands::shell::output_bounded(cmd, Duration::from_secs(2))
+        .and_then(|out| out.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Said when a model came up without its image part because the card has no
+/// room for it. Shown as it is, in the model menu and on the Models page.
+pub(crate) const IMAGE_PART_NO_ROOM_NOTE: &str =
+    "Loaded without image input: the graphics memory has no room for the image part next to the model. A smaller context makes room.";
+
+/// Said when the engine refused the image part and the model was started
+/// again without it.
+pub(crate) const IMAGE_PART_REFUSED_NOTE: &str =
+    "Loaded without image input: the engine could not load this model's image part.";
+
+/// Did llama-server die on the image part and not on the model?
+///
+/// The part is loaded AFTER the model, by its own code path, and that path
+/// names itself when it fails: `clip_init: failed to load model`,
+/// `mtmd_init_from_file: error:`, `failed to load multimodal model`. A line
+/// that only mentions the part, like the one reporting that it was loaded,
+/// does not count; the line has to name the part and a failure together.
+///
+/// NOT PROVEN ON A REAL FAILURE. The pinned llama.cpp loads every part this
+/// was tried with, so the markers come from reading its source, and the
+/// arithmetic is proven by the tests below. What it buys: a catalog model
+/// whose part the engine does not understand still starts and answers, and
+/// says that it cannot see, where it used to not start at all.
+pub(crate) fn stderr_blames_the_image_part(stderr: &str) -> bool {
+    const NAMES: &[&str] = &["mmproj", "mtmd", "clip_", "multimodal"];
+    const FAILS: &[&str] = &["fail", "error", "unsupported", "not supported", "unknown", "invalid"];
+    stderr.lines().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        NAMES.iter().any(|n| lower.contains(n)) && FAILS.iter().any(|f| lower.contains(f))
+    })
+}
+
+/// GH #190: the KV-slot folder as `--slot-save-path` can take it, or `None`
+/// to start without slot save/restore.
+///
+/// On Windows llama.cpp turns its argv into UTF-8 (`make_utf8_argv`), and
+/// then checks this one flag with `fs_is_directory`, which builds a
+/// `std::filesystem::path` from that narrow string. MSVC reads a narrow
+/// string in the ANSI code page, not UTF-8, so a folder under
+/// `C:\Users\Şaban Yılmaz\...` turns into mojibake, "not a directory", and
+/// the engine never starts. `-m` and `--mmproj` open through UTF-16
+/// (`ggml_fopen`, `open_ifstream_binary`), and so do the slot files
+/// themselves, so it is only this check that fails (read in b9949:
+/// common/arg.cpp, common/common.cpp; unchanged in b11960, arg.cpp still
+/// calls `fs_is_directory` on it).
+///
+/// An ASCII path passes the check in every code page. A path that is not
+/// ASCII gets its 8.3 short name, when Windows made an ASCII one; a volume
+/// without short names, or a short name that is still not ASCII, gets no
+/// flag at all. Slot save is a speed-up for the VRAM
+/// handoff, the engine itself must start.
+fn slot_save_dir_arg(dir: &Path) -> Option<String> {
+    if SLOT_DIR_REFUSED.load(std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
+    let long = dir.to_string_lossy().to_string();
+    #[cfg(windows)]
+    {
+        let picked = ascii_slot_dir(long, || get_short_path_name(dir).map(|p| p.to_string_lossy().to_string()));
+        if picked.is_none() {
+            tracing::warn!(target: "engine", dir = %dir.display(), "the KV-slot folder has no ASCII name, the LU Engine starts without slot save");
+        }
+        picked
+    }
+    #[cfg(not(windows))]
+    {
+        // Narrow paths are UTF-8 on macOS and Linux, nothing to translate.
+        Some(long)
+    }
+}
+
+/// The pure decision behind `slot_save_dir_arg` on Windows, testable on
+/// every host: the long path if it is ASCII, else the short one if THAT is.
+#[cfg(any(windows, test))]
+fn ascii_slot_dir(long: String, short: impl FnOnce() -> Option<String>) -> Option<String> {
+    if long.is_ascii() {
+        return Some(long);
+    }
+    short().filter(|s| s.is_ascii())
+}
+
+/// Set once llama.cpp has refused the slot folder for a reason the check
+/// above did not foresee. From then on every start leaves the flag out, so
+/// the idempotence key and the running engine agree and a healthy engine is
+/// not restarted on every call.
+static SLOT_DIR_REFUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Did the child die on `--slot-save-path` (GH #190: `error while handling
+/// argument "--slot-save-path": not a directory: ...`).
+pub(crate) fn stderr_blames_the_slot_dir(stderr: &str) -> bool {
+    stderr.contains("\"--slot-save-path\"")
 }
 
 /// The `-ngl` value in a finished argv.
@@ -378,8 +722,18 @@ pub(crate) fn plan_offload(input: &OffloadInputs) -> OffloadPlan {
 /// The retry reads the number back OUT of the arguments instead of working it
 /// out a second time, so the decision it makes can never disagree with what
 /// the first attempt was actually told.
+///
+/// `auto` reads back as `ENGINE_DECIDES`: layers are meant for the card, the
+/// engine picks how many.
 pub(crate) fn gpu_layers_in(args: &[String]) -> Option<u32> {
-    args.windows(2).find(|w| w[0] == "-ngl").and_then(|w| w[1].parse().ok())
+    args.windows(2).find(|w| w[0] == "-ngl").and_then(|w| {
+        if w[1] == "auto" { Some(ENGINE_DECIDES) } else { w[1].parse().ok() }
+    })
+}
+
+/// The `-ngl` word for an argv: a count, or `auto` for `ENGINE_DECIDES`.
+fn ngl_arg(layers: u32) -> String {
+    if layers == ENGINE_DECIDES { "auto".into() } else { layers.to_string() }
 }
 
 /// The layer count a surface may show the user, `None` when the start asked
@@ -390,15 +744,21 @@ pub(crate) fn gpu_layers_in(args: &[String]) -> Option<u32> {
 /// decided against the card (or the user typed one), which is the only case
 /// worth a line on screen.
 pub(crate) fn gpu_layers_reported(args: &[String]) -> Option<u32> {
-    gpu_layers_in(args).filter(|n| *n != ALL_LAYERS)
+    gpu_layers_in(args).filter(|n| *n != ALL_LAYERS && *n != ENGINE_DECIDES)
 }
 
-/// The argv with the `-ngl <n>` pair removed, for the idempotence check.
+/// The argv with the `-ngl <n>` pair removed, for the idempotence check, and
+/// with what else the VRAM plan measured (`--n-cpu-moe`, `--cache-ram`).
 pub(crate) fn argv_without_gpu_layers(args: &[String]) -> Vec<String> {
+    argv_without(args, &["-ngl", "--n-cpu-moe", "--cache-ram"])
+}
+
+/// The argv with these flags and their values removed.
+fn argv_without(args: &[String], flags: &[&str]) -> Vec<String> {
     let mut out = Vec::with_capacity(args.len());
     let mut i = 0;
     while i < args.len() {
-        if args[i] == "-ngl" && i + 1 < args.len() {
+        if flags.contains(&args[i].as_str()) && i + 1 < args.len() {
             i += 2;
             continue;
         }
@@ -406,6 +766,71 @@ pub(crate) fn argv_without_gpu_layers(args: &[String]) -> Vec<String> {
         i += 1;
     }
     out
+}
+
+/// `--n-cpu-moe` in a finished argv, 0 when it carries none.
+pub(crate) fn cpu_moe_in(args: &[String]) -> u32 {
+    args.windows(2).find(|w| w[0] == "--n-cpu-moe").and_then(|w| w[1].parse().ok()).unwrap_or(0)
+}
+
+/// `--ctx-size` in a finished argv.
+fn ctx_in(args: &[String]) -> Option<u32> {
+    args.windows(2).find(|w| w[0] == "--ctx-size").and_then(|w| w[1].parse().ok())
+}
+
+/// Whether a running engine already answers a request, when the layer count
+/// and the context of both may have been measured.
+///
+/// The plan may raise a context nobody chose (3.0.8, A25), so an engine
+/// running with 32K answers a request for the 8K default, while a request
+/// for MORE than it runs with (the agent mode raising for its turns) or any
+/// chosen context has to match exactly.
+pub(crate) fn same_measured_request(running: &[String], requested: &[String], ctx_flexible: bool, running_asked: Option<u32>) -> bool {
+    if !ctx_flexible {
+        return argv_without_gpu_layers(running) == argv_without_gpu_layers(requested);
+    }
+    let flags = ["-ngl", "--n-cpu-moe", "--cache-ram", "--ctx-size"];
+    let asked = ctx_in(requested).unwrap_or(u32::MAX);
+    argv_without(running, &flags) == argv_without(requested, &flags)
+        && (ctx_in(running).unwrap_or(0) >= asked || running_asked == Some(asked))
+}
+
+/// Whether a start goes without mmap (`--load-mode none`, see `load_mode`).
+///
+/// Discord (21.10.2026): with gemma-4-31b-it-q4_k_m on a 32 GB Windows PC
+/// all memory was in use right after the start, while the engine's own
+/// private memory was 5.7 GB. The rest was the model file, mapped into the
+/// process. llama.cpp hands the layers that go to the card back to the
+/// system after it copied them, on Linux and macOS, but its Windows mapping
+/// cannot release a part of itself, so every page that was read for the card
+/// stays in RAM next to the copy in graphics memory. Measured on Windows with
+/// an RTX 3060 (qwen3:4b, 2.33 GB, every layer on the card): 2,990 MB less
+/// available memory with mmap, about 500 MB without; on that machine an
+/// 18 GB model would hold 18 GB of RAM it does not use.
+///
+/// Without mmap llama.cpp reads the file once, sends the card's layers to the
+/// card and keeps only the processor's layers in RAM. So on Windows mmap is
+/// off whenever layers go to the card. A start with every layer on the
+/// processor (`-ngl 0`) keeps mmap: there the mapping IS the model, and
+/// reading it into a second copy would only cost the time.
+pub(crate) fn mmap_off(tuning: &EngineTuning, ngl: &str, windows: bool) -> bool {
+    tuning.no_mmap || (windows && ngl != "0")
+}
+
+/// The `--load-mode` value for the two load settings, `None` for neither.
+///
+/// 3.0.9 (E1): llama.cpp b11960 removed `--mlock` and `--no-mmap` (upstream
+/// #20834 folded them into `--load-mode`, #28334 dropped the old spellings),
+/// and an argument the server does not know ends it before it loads. Same
+/// meaning as before: `mlock` alone kept the mapping and pinned it, both
+/// together read the file into memory and pinned that.
+pub(crate) fn load_mode(mlock: bool, no_mmap: bool) -> Option<&'static str> {
+    match (mlock, no_mmap) {
+        (false, false) => None,
+        (false, true) => Some("none"),
+        (true, false) => Some("mmap+mlock"),
+        (true, true) => Some("mlock"),
+    }
 }
 
 /// Build the `llama-server` argv for a chat engine.
@@ -425,6 +850,26 @@ pub(crate) fn argv_without_gpu_layers(args: &[String]) -> Vec<String> {
 /// is exactly the silent failure the Discover download avoids by fetching the
 /// projector with the model.
 pub(crate) fn build_server_args(model_path: &str, tuning: &EngineTuning, port: u16, slot_save_dir: Option<&str>, mmproj: Option<&str>, auto_ngl: Option<u32>) -> Vec<String> {
+    server_args(model_path, tuning, port, slot_save_dir, mmproj, auto_ngl, cfg!(target_os = "windows"))
+}
+
+/// `build_server_args` for a named platform, so both answers can be checked
+/// on any machine. `windows` only decides mmap (`mmap_off`).
+pub(crate) fn server_args(
+    model_path: &str,
+    tuning: &EngineTuning,
+    port: u16,
+    slot_save_dir: Option<&str>,
+    mmproj: Option<&str>,
+    auto_ngl: Option<u32>,
+    windows: bool,
+) -> Vec<String> {
+    let ngl = if tuning.gpu_layers < 0 {
+        ngl_arg(auto_ngl.unwrap_or(ALL_LAYERS))
+    } else {
+        tuning.gpu_layers.to_string()
+    };
+    let no_mmap = mmap_off(tuning, &ngl, windows);
     let mut args: Vec<String> = vec![
         "-m".into(),
         model_path.into(),
@@ -435,11 +880,14 @@ pub(crate) fn build_server_args(model_path: &str, tuning: &EngineTuning, port: u
         "--ctx-size".into(),
         effective_ctx(tuning).to_string(),
         "-ngl".into(),
-        if tuning.gpu_layers < 0 {
-            auto_ngl.unwrap_or(ALL_LAYERS).to_string()
-        } else {
-            tuning.gpu_layers.to_string()
-        },
+        ngl,
+        // 3.0.8 (A25): the buffer sizes llama.cpp allocated (model, KV cache,
+        // work buffers, per device) are printed at log level 4 only, and the
+        // check after the start reads them (vram_plan.rs,
+        // `parse_engine_report`). Level 4 adds about twenty lines per
+        // request, token counts and timings, never the text.
+        "-lv".into(),
+        "4".into(),
     ];
     if matches!(tuning.flash_attn.as_str(), "on" | "off") {
         args.push("-fa".into());
@@ -457,17 +905,38 @@ pub(crate) fn build_server_args(model_path: &str, tuning: &EngineTuning, port: u
         args.push("-t".into());
         args.push(tuning.threads.to_string());
     }
-    if tuning.mlock {
-        args.push("--mlock".into());
+    if let Some(mode) = load_mode(tuning.mlock, no_mmap) {
+        args.push("--load-mode".into());
+        args.push(mode.into());
     }
-    if tuning.no_mmap {
-        args.push("--no-mmap".into());
+    // 3.0.8 (A25): what the VRAM plan decided beyond the layer count. The
+    // experts of the first layers of an MoE model stay on the processor
+    // instead of whole layers (meaningless with every layer there), and the
+    // prompt cache in RAM is capped when the model already holds most of it.
+    if tuning.plan_cpu_moe > 0 && ngl_on_card(&args) {
+        args.push("--n-cpu-moe".into());
+        args.push(tuning.plan_cpu_moe.to_string());
+    }
+    if let Some(mib) = tuning.plan_cache_ram_mib {
+        args.push("--cache-ram".into());
+        args.push(mib.to_string());
     }
     if let Some(path) = mmproj {
         args.push("--mmproj".into());
         args.push(path.into());
+        // Qwen's image tower takes an image at a resolution of its own
+        // choosing, and by default so small that a button on a full screen
+        // is a handful of pixels. A floor of 1024 tokens per image is what
+        // makes its clicks land (model card, and llama.cpp's own note for
+        // grounding with Qwen). Other families ignore the flag or have a
+        // fixed size, so it is set for Qwen alone.
+        let stem = Path::new(model_path).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if stem.contains("qwen") {
+            args.push("--image-min-tokens".into());
+            args.push("1024".into());
+        }
     }
-    // GH #85 (I-Am-LongXi): enable llama-server's slot save/restore API so the
+    // GH #85: enable llama-server's slot save/restore API so the
     // VRAM handoff can serialize the KV cache to disk before evicting the
     // engine for a render, and restore it after the reload instead of
     // re-processing the whole conversation. The flag only enables the
@@ -479,7 +948,19 @@ pub(crate) fn build_server_args(model_path: &str, tuning: &EngineTuning, port: u
         args.push("--slot-save-path".into());
         args.push(dir.into());
     }
+    // 3.0.9 (P11): the Neuron tweaker's sliders, mixed into one file. Part of
+    // the argv, so a changed slider is a different request and restarts the
+    // engine, and an unchanged one keeps it.
+    if let Some(path) = &tuning.control_vector {
+        args.push("--control-vector".into());
+        args.push(path.clone());
+    }
     args
+}
+
+/// Whether an argv puts any layer on the card.
+fn ngl_on_card(args: &[String]) -> bool {
+    gpu_layers_in(args).is_some_and(|n| n > 0)
 }
 
 /// The whole `llama-server` invocation as one line, for the log file.
@@ -600,7 +1081,7 @@ pub(crate) struct ScanRoot<'a> {
     pub max_depth: usize,
 }
 
-/// How one root fared. The Model Storage panel reads this, because "no models"
+/// How one root fared. The Storage panel reads this, because "no models"
 /// and "I could not finish looking" are different answers and the user is the
 /// only one who can act on the difference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -684,7 +1165,7 @@ impl ScanBudget {
 
 /// The same scan over SEVERAL folders, in priority order.
 ///
-/// GH #122 (zrmdsxa, 2026-08-28): the folder the user names under Model
+/// GH #122 (2026-08-28): the folder the user names under Model
 /// Storage was a download target and nothing else. A GGUF that was already
 /// sitting in `G:\AI\Models`, or one an earlier LU download had put there,
 /// was never looked at, so the Models tab stayed empty and the file could not
@@ -754,7 +1235,7 @@ pub(crate) fn scan_gguf_roots(roots: &[ScanRoot]) -> ScanOutcome {
 /// How far below the app models dir the scan walks. 0 alone was the shipped
 /// behaviour and it is still where every model the app writes today lands.
 ///
-/// GH #118 (nayffy, 2026-08-27): before the download-routing fix, a chat model
+/// GH #118 (2026-08-27): before the download-routing fix, a chat model
 /// installed on a fresh box was written to `<models>/<user>/<repo>/x.gguf`,
 /// the LM Studio layout. The routing is fixed, but the boxes that already ran
 /// the broken build have multi-gigabyte files sitting in those folders. Two
@@ -763,7 +1244,7 @@ pub(crate) fn scan_gguf_roots(roots: &[ScanRoot]) -> ScanOutcome {
 /// buys nothing and only costs directory reads.
 pub(crate) const MAX_SCAN_DEPTH: usize = 2;
 
-/// How far the scan walks below a folder the USER named under Model Storage.
+/// How far the scan walks below a folder the USER named under Storage.
 /// Deeper than the app dir on purpose: a grown model library is filed by hand
 /// (`G:\AI\Models\Text Generation\<author>\<repo>\file.gguf` in GH #122's
 /// screenshots), and two levels stop one folder short of exactly that.
@@ -873,51 +1354,311 @@ fn scan_gguf_dir(
 pub fn builtin_models_dir() -> Result<PathBuf, String> {
     let dir = match crate::os_paths::configured_models_root() {
         Some(root) => root.join("builtin-models"),
-        None => crate::os_paths::builtin_models_dir(),
+        None => {
+            // A phone has no HOME and no XDG folders, so `dirs` answers None there
+            // and this check would refuse every model command. The phone folder
+            // comes from the app handle through `os_paths`.
+            #[cfg(desktop)]
+            dirs::data_dir().ok_or("Cannot resolve app data directory")?;
+            crate::os_paths::builtin_models_dir()
+        }
     };
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("Create LU Engine models folder: {}", os_error::english(&e)))?;
     Ok(dir)
 }
 
+// ── Sidecars a dead app left behind (macOS) ──────────────────────────────────
+//
+// Fehlerkontrolle Mac 2, Fund 9. On Windows a kill-on-close job object takes
+// every sidecar down with the app, however the app ends. macOS has nothing of
+// the kind: no job object, and no parent-death signal (Linux's
+// `PR_SET_PDEATHSIG` does not exist here). After a crash or a "Force Quit"
+// the llama-server stays, reparented to launchd, holding a whole model in the
+// shared memory until the user finds it in Activity Monitor.
+//
+// The ways to close that, and why this one:
+//
+//   * a watcher thread in the app (kqueue `NOTE_EXIT`) dies with the app, so
+//     it watches nothing in exactly the case that matters;
+//   * the sidecar watching its parent itself needs a flag in the sidecar, and
+//     llama-server has none (no "parent" option among the strings of
+//     `bin/lu-llama-server-aarch64-apple-darwin`);
+//   * a separate guardian process would be one more binary to build, sign and
+//     notarise, for a rare event;
+//   * so the next start cleans up. It cannot free the memory while the app is
+//     gone, and that is the stated limit of it; it does make the leftover end
+//     the moment the user opens the app again, which is what a user does
+//     after a crash, and it needs nothing that could itself be orphaned.
+//
+// What counts as ours to kill is deliberately narrow, because the name alone
+// is not ownership: the process runs the very file this app would start, AND
+// its parent is launchd (pid 1), which is where the kernel puts a process
+// whose parent died. A sidecar of a running app still has that app as parent
+// and is never touched, and neither is a llama-server of another install,
+// another worktree or the user's own.
+
+/// One process, reduced to what the orphan rule reads.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ProcRow {
+    pub pid: u32,
+    pub parent: Option<u32>,
+    pub exe: Option<PathBuf>,
+}
+
+/// The pids in `rows` that are sidecars of ours without a living app.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn orphaned_sidecars(rows: &[ProcRow], ours: &Path) -> Vec<u32> {
+    // A temp or bundle path can be reached under two names (/var and
+    // /private/var), so both sides are resolved before they are compared.
+    let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let ours = real(ours);
+    rows.iter()
+        .filter(|row| row.parent == Some(1))
+        .filter(|row| row.exe.as_deref().map(real).as_deref() == Some(ours.as_path()))
+        .map(|row| row.pid)
+        .collect()
+}
+
+/// The process table with executable paths. `refresh_processes` alone leaves
+/// `exe()` empty for processes it has not been asked about, the same trap
+/// `process_util::process_table_with_cmdlines` documents for `cmd()`.
+#[cfg(target_os = "macos")]
+fn process_rows() -> Vec<ProcRow> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
+    );
+    sys.processes()
+        .iter()
+        .map(|(pid, process)| ProcRow {
+            pid: pid.as_u32(),
+            parent: process.parent().map(|p| p.as_u32()),
+            exe: process.exe().map(Path::to_path_buf),
+        })
+        .collect()
+}
+
+/// End every orphaned sidecar that runs `ours` and return their pids.
+#[cfg(target_os = "macos")]
+pub(crate) fn reap_orphaned_sidecars_of(ours: &Path) -> Vec<u32> {
+    let found = orphaned_sidecars(&process_rows(), ours);
+    for pid in &found {
+        // SIGTERM first, SIGKILL after the grace: llama-server unloads on
+        // SIGTERM, and a wedged one must not survive this either.
+        crate::process_util::kill_pid_tree(*pid);
+    }
+    found
+}
+
+/// Called once at app start on a Mac, off the main thread.
+#[cfg(target_os = "macos")]
+pub fn reap_orphaned_sidecars(app: &AppHandle) {
+    let Some(binary) = resolve_engine_binary(app) else { return };
+    let ended = reap_orphaned_sidecars_of(&binary);
+    if !ended.is_empty() {
+        tracing::warn!(target: "engine", pids = ?ended, "ended sidecars orphaned by a previous run");
+    }
+}
+
 // ── Sidecar resolution ───────────────────────────────────────────────────────
 
-/// Locate the bundled `llama-server` binary. Prod: next to the main
-/// executable (where Tauri copies `externalBin`). Dev: the target-triple
-/// artifact `scripts/build-llama.sh` drops into `src-tauri/bin/`.
-fn resolve_engine_binary(app: &AppHandle) -> Option<PathBuf> {
-    // 1. Bundled: same dir as the running app binary.
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join(sidecar_binary_name());
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-    }
+/// What a sidecar file on disk is.
+///
+/// GH #207: a build from source with the 0-byte stubs ci.yml creates for
+/// `cargo check` (`touch src-tauri/bin/lu-llama-server-<triple>.exe`) found the
+/// stub, because the lookup asked only `exists()`. Windows then refused to run
+/// it with "os error 193" (not a valid Win32 application), an answer that says
+/// nothing about the cause. A file is only the engine when it starts like a
+/// program of this platform.
+#[derive(Debug, PartialEq, Eq)]
+enum SidecarFile {
+    Missing,
+    /// There, but empty or not a program (its size in bytes).
+    NotAProgram(u64),
+    Program,
+}
 
-    // 2. Resource dir (belt-and-suspenders for platforms that stage it there).
+/// The first bytes of an executable on this platform: PE (`MZ`), ELF, or
+/// Mach-O (thin in both byte orders, and universal).
+fn starts_like_a_program(head: &[u8]) -> bool {
+    if cfg!(target_os = "windows") {
+        head.starts_with(b"MZ")
+    } else if cfg!(target_os = "macos") {
+        [[0xcf, 0xfa, 0xed, 0xfe], [0xce, 0xfa, 0xed, 0xfe], [0xfe, 0xed, 0xfa, 0xcf], [0xfe, 0xed, 0xfa, 0xce], [0xca, 0xfe, 0xba, 0xbe]]
+            .iter()
+            .any(|m| head.starts_with(m))
+    } else {
+        head.starts_with(b"\x7fELF")
+    }
+}
+
+fn sidecar_file(p: &Path) -> SidecarFile {
+    use std::io::Read;
+    let Ok(meta) = std::fs::metadata(p) else { return SidecarFile::Missing };
+    if !meta.is_file() {
+        return SidecarFile::Missing;
+    }
+    let mut head = [0u8; 4];
+    let n = std::fs::File::open(p).and_then(|mut f| f.read(&mut head)).unwrap_or(0);
+    if starts_like_a_program(&head[..n]) {
+        SidecarFile::Program
+    } else {
+        SidecarFile::NotAProgram(meta.len())
+    }
+}
+
+/// Where the engine may be, in the order it is looked for. Prod: next to the
+/// main executable (where Tauri copies `externalBin`), then the resource dir.
+/// Dev: the target-triple artifact `scripts/build-llama.sh` drops into
+/// `src-tauri/bin/` (`tauri dev` runs from target/debug, so up to the manifest).
+fn engine_binary_candidates(app: &AppHandle) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+        candidates.push(dir.join(sidecar_binary_name()));
+    }
     if let Ok(res) = app.path().resource_dir() {
-        let candidate = res.join(sidecar_binary_name());
-        if candidate.exists() {
-            return Some(candidate);
-        }
+        candidates.push(res.join(sidecar_binary_name()));
     }
-
-    // 3. Dev: src-tauri/bin/lu-llama-server-<triple>[.exe]. `tauri dev` runs
-    //    the binary from target/debug, so walk up to the manifest dir.
-    let triple = host_target_triple();
     let suffix = if cfg!(target_os = "windows") { ".exe" } else { "" };
-    let dev_name = format!("lu-llama-server-{triple}{suffix}");
-    let mut dev_candidates: Vec<PathBuf> = Vec::new();
+    let dev_name = format!("lu-llama-server-{}{suffix}", host_target_triple());
     if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
-        dev_candidates.push(PathBuf::from(&manifest).join("bin").join(&dev_name));
+        candidates.push(PathBuf::from(&manifest).join("bin").join(&dev_name));
     }
     if let Ok(cwd) = std::env::current_dir() {
-        dev_candidates.push(cwd.join("src-tauri").join("bin").join(&dev_name));
-        dev_candidates.push(cwd.join("bin").join(&dev_name));
+        candidates.push(cwd.join("src-tauri").join("bin").join(&dev_name));
+        candidates.push(cwd.join("bin").join(&dev_name));
     }
-    dev_candidates.into_iter().find(|p| p.exists())
+    candidates
+}
+
+/// The first candidate that is a program. A stub is passed over, so a real
+/// binary further down still counts.
+fn pick_engine_binary(candidates: &[PathBuf]) -> Option<PathBuf> {
+    candidates.iter().find(|p| sidecar_file(p) == SidecarFile::Program).cloned()
+}
+
+/// Locate the bundled `llama-server` binary.
+fn resolve_engine_binary(app: &AppHandle) -> Option<PathBuf> {
+    pick_engine_binary(&engine_binary_candidates(app))
+}
+
+/// The sentence for an engine that cannot be started. `missing` is the call
+/// site's own sentence for no file at all; a file that is there but no program
+/// gets its own, because that is a build from source with the CI stub, not a
+/// broken installation.
+fn engine_binary_error(candidates: &[PathBuf], missing: impl FnOnce() -> String) -> String {
+    let stub = candidates.iter().find_map(|p| match sidecar_file(p) {
+        SidecarFile::NotAProgram(len) => Some(len),
+        _ => None,
+    });
+    match stub {
+        Some(len) => format!(
+            "The LU Engine program ({}) in this build is a placeholder of {len} bytes, not the engine, so it cannot start. \
+             A build from source needs the real file: run scripts/build-llama.sh, or take it from the latest release (CONTRIBUTING.md, \"The LU Engine\").",
+            sidecar_binary_name()
+        ),
+        None => missing(),
+    }
+}
+
+/// Another binary that ships next to the engine (`lu-llama-quantize`, used
+/// by the refusal-removal tool), looked for in the same three places as the
+/// engine itself. `base` is the name without the platform suffix.
+pub(crate) fn resolve_sidecar(app: &AppHandle, base: &str) -> Option<PathBuf> {
+    let suffix = if cfg!(target_os = "windows") { ".exe" } else { "" };
+    let bundled = format!("{base}{suffix}");
+    let dev_name = format!("{base}-{}{suffix}", host_target_triple());
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+        candidates.push(dir.join(&bundled));
+    }
+    if let Ok(res) = app.path().resource_dir() {
+        candidates.push(res.join(&bundled));
+    }
+    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
+        candidates.push(PathBuf::from(&manifest).join("bin").join(&dev_name));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("src-tauri").join("bin").join(&dev_name));
+        candidates.push(cwd.join("bin").join(&dev_name));
+    }
+    candidates.into_iter().find(|p| sidecar_file(p) == SidecarFile::Program)
+}
+
+/// A llama-server of its own for one model, apart from the chat engine:
+/// the refusal-removal tool checks the original and the copy with it. Same
+/// binary, key, GPU choice and companion libraries as the chat engine, tied
+/// to the app's lifetime, on a port the caller picked. Healthy when this
+/// returns; the caller kills it.
+pub(crate) fn spawn_private_server(app: &AppHandle, model_path: &str, port: u16, ctx: u32) -> Result<std::process::Child, String> {
+    spawn_private_server_with(app, model_path, port, ctx, &[])
+}
+
+/// `spawn_private_server` with more flags at the end (the Neuron tweaker's
+/// strength check passes `--control-vector`).
+pub(crate) fn spawn_private_server_with(app: &AppHandle, model_path: &str, port: u16, ctx: u32, extra: &[String]) -> Result<std::process::Child, String> {
+    let candidates = engine_binary_candidates(app);
+    let binary = pick_engine_binary(&candidates)
+        .ok_or_else(|| engine_binary_error(&candidates, || format!("Bundled engine binary not found ({}).", sidecar_binary_name())))?;
+    let mut args: Vec<String> = vec![
+        "-m".into(),
+        model_path.into(),
+        "--host".into(),
+        "127.0.0.1".into(),
+        "--port".into(),
+        port.to_string(),
+        "-c".into(),
+        ctx.to_string(),
+        "-ngl".into(),
+        "999".into(),
+        "-np".into(),
+        "1".into(),
+    ];
+    args.extend(extra.iter().cloned());
+    tracing::info!(target: "engine", port, command = %command_line(&binary, &args), "starting a llama-server for a check");
+    let mut cmd = Command::new(&binary);
+    super::engine_key::apply(&mut cmd);
+    cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    let state = app.state::<AppState>();
+    let gpu_selection = state.gpu_selection.lock().ok().map(|sel| sel.clone());
+    if let Some(sel) = gpu_selection {
+        crate::commands::gpu::apply_gpu_env(&mut cmd, &sel);
+    }
+    apply_engine_backend_dir(&mut cmd, resolve_engine_backend_dir(app).as_deref());
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let mut child = cmd.spawn().map_err(|e| format!("The check could not start the model: {}", os_error::english(&e)))?;
+    #[cfg(desktop)]
+    tie_child_to_app_lifetime(child.id());
+    let diagnostics = child.stderr.take().map(super::shell::drain);
+    if let Err(e) = wait_for_health(port, health_timeout_for(model_path)) {
+        let why = diagnostics
+            .map(|(buf, _)| tail_lines(&super::shell::captured_text(&buf), 8))
+            .unwrap_or_default();
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("The check could not load the model: {e}\n{why}"));
+    }
+    Ok(child)
+}
+
+/// What a llama.cpp tool next to the engine needs to find its card and its
+/// libraries the way the engine does: the GPU choice, the companion DLL/so
+/// folder, no console window. Used for `lu-llama-cvector-generator`.
+pub(crate) fn prepare_tool_command(app: &AppHandle, cmd: &mut Command) {
+    let state = app.state::<AppState>();
+    let gpu_selection = state.gpu_selection.lock().ok().map(|sel| sel.clone());
+    if let Some(sel) = gpu_selection {
+        crate::commands::gpu::apply_gpu_env(cmd, &sel);
+    }
+    apply_engine_backend_dir(cmd, resolve_engine_backend_dir(app).as_deref());
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
 }
 
 /// K1 (3.0.1): directory holding the dynamic-ISA sidecar's companion
@@ -1495,6 +2236,45 @@ pub(crate) fn pick_save_slot(slots: &serde_json::Value) -> u32 {
     best
 }
 
+/// Whether llama-server can save and restore a slot for an engine started with
+/// these arguments. Not with an image part: in b9949 every slot save, restore
+/// and erase first ran `check_no_mtmd`, which answered 501 "This feature is
+/// not supported by multimodal" as soon as a projector was loaded
+/// (tools/server/server-context.cpp). b11960 (E1, 3.0.9) no longer has that
+/// check; until a hand-off with an image part has been measured on the card
+/// it stays off here. `--no-mmproj` turns the image part off and counts as
+/// without one.
+pub(crate) fn kv_handoff_possible(args: &[String]) -> bool {
+    !args.iter().any(|a| {
+        let flag = a.split('=').next().unwrap_or(a);
+        matches!(flag, "--mmproj" | "-mm" | "--mmproj-url" | "-mmu")
+    })
+}
+
+/// The model the "no KV hand-off with an image part" line was last written
+/// for. One line per model and session, not one per render.
+static KV_SKIP_NOTED_FOR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Whether the skip line is due for this model, and remember that it was.
+fn kv_skip_note_due(model: &str) -> bool {
+    let mut noted = KV_SKIP_NOTED_FOR.lock().unwrap_or_else(|e| e.into_inner());
+    if noted.as_deref() == Some(model) {
+        return false;
+    }
+    *noted = Some(model.to_string());
+    true
+}
+
+fn note_kv_handoff_skipped(model: &str) {
+    if kv_skip_note_due(model) {
+        tracing::info!(
+            target: "engine",
+            model = %model,
+            "KV hand-off skipped: llama-server cannot save a slot while the model runs with its image part; the next turn after a render re-reads the history"
+        );
+    }
+}
+
 /// Save or restore llama-server's KV cache across the VRAM handoff (GH #85).
 /// The webview cannot fetch the engine port directly (CSP; all engine traffic
 /// rides the Rust proxy), so the handoff calls this instead. One fixed
@@ -1506,17 +2286,40 @@ pub(crate) fn pick_save_slot(slots: &serde_json::Value) -> u32 {
 /// slot, ctx mismatch after a settings change) and means the next turn
 /// re-processes the history, exactly the pre-#85 cost.
 #[tauri::command]
-pub async fn kv_slot_action(port: u16, action: String) -> Result<serde_json::Value, String> {
+pub async fn kv_slot_action(
+    port: u16,
+    action: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
     if action != "save" && action != "restore" {
         return Err("action must be 'save' or 'restore'".to_string());
     }
+    // An engine with an image part refuses both with 501 (box runs d307-b and
+    // d307-c, H1), so neither is sent there. See `kv_handoff_possible`.
+    let multimodal = {
+        let guard = state.bundled_engine.lock().unwrap();
+        guard
+            .as_ref()
+            .filter(|e| e.port == port && !kv_handoff_possible(&e.args))
+            .map(|e| e.model_path.clone())
+    };
+    if let Some(model) = multimodal {
+        note_kv_handoff_skipped(&model);
+        return Ok(serde_json::json!({ "ok": false, "skipped": "multimodal", "body": {} }));
+    }
+    // The slots are the engine's memory of a conversation, so they sit behind
+    // its key. The key goes only to a port an LU engine holds (engine_key.rs).
+    let ports = super::engine_key::engine_ports(&state);
     let slot_id = if action == "save" {
         match reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .build()
         {
-            Ok(probe) => match probe
-                .get(format!("http://127.0.0.1:{port}/slots"))
+            Ok(probe) => match super::engine_key::authorize(
+                probe.get(format!("http://127.0.0.1:{port}/slots")),
+                &format!("http://127.0.0.1:{port}/slots"),
+                &ports,
+            )
                 .send()
                 .await
             {
@@ -1538,8 +2341,7 @@ pub async fn kv_slot_action(port: u16, action: String) -> Result<serde_json::Val
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|e| os_error::english(&e))?;
-    let res = client
-        .post(&url)
+    let res = super::engine_key::authorize(client.post(&url), &url, &ports)
         .json(&serde_json::json!({ "filename": "lu-handoff.bin" }))
         .send()
         .await
@@ -1551,7 +2353,7 @@ pub async fn kv_slot_action(port: u16, action: String) -> Result<serde_json::Val
 
 // ── Port selection ───────────────────────────────────────────────────────────
 //
-// GH #118 (nayffy, 2026-08-27): the engine had exactly one port and no way out
+// GH #118 (2026-08-27): the engine had exactly one port and no way out
 // of it. Whatever held 8127 held the whole chat lane, and the app answered a
 // user with "quit that process or reboot", which is an instruction, not a
 // repair. Windows makes this worse than it sounds: Hyper-V and WSL reserve
@@ -1584,6 +2386,25 @@ pub(crate) fn engine_port_candidates(preferred: u16) -> Vec<u16> {
 /// opening a single socket.
 pub(crate) fn first_usable_port(candidates: &[u16], usable: impl Fn(u16) -> bool) -> Option<u16> {
     candidates.iter().copied().find(|p| usable(*p))
+}
+
+/// The ports the embeddings server of a phone may use, in the order it tries
+/// them: the preferred one first, then a bounded walk that starts above the
+/// last port the chat engine may walk to, so the two never take each other's
+/// place. iOS check of package 17, N-1: the desktop app on the same Mac held
+/// 8128, and the simulator could not read a single document. A taken port is
+/// a different port, as for the chat engine (GH #118).
+#[cfg_attr(not(mobile), allow(dead_code))]
+pub(crate) fn embed_port_candidates(preferred: u16) -> Vec<u16> {
+    let engine = engine_port_candidates(DEFAULT_ENGINE_PORT);
+    let above = engine.iter().copied().max().unwrap_or(DEFAULT_ENGINE_PORT);
+    let mut out = vec![preferred];
+    out.extend(
+        (1..=PORT_SEARCH_SPAN)
+            .filter_map(|i| above.checked_add(i))
+            .filter(|p| *p != preferred && !engine.contains(p)),
+    );
+    out
 }
 
 /// May a healthy engine that already serves the wanted argv simply be kept.
@@ -1627,7 +2448,16 @@ fn engine_healthy(port: u16) -> bool {
         .timeout(Duration::from_millis(400))
         .build()
         .ok()
-        .and_then(|c| c.get(format!("http://127.0.0.1:{port}/health")).send().ok())
+        .and_then(|c| {
+            let request = c.get(format!("http://127.0.0.1:{port}/health"));
+            // The desktop sidecar answers to the engine's key (engine_key.rs),
+            // the in-process engine of a phone to its token (engine_token.rs).
+            #[cfg(desktop)]
+            let request = super::engine_key::authorize_blocking(request);
+            #[cfg(mobile)]
+            let request = super::engine_token::attach_blocking(request, port);
+            request.send().ok()
+        })
         .map(|r| r.status().is_success())
         .unwrap_or(false)
 }
@@ -1684,6 +2514,9 @@ enum HealthWait {
     /// causes ["the process asked to exit with no code" vs "a signal killed
     /// it"] used to be indistinguishable from here on).
     ChildExited { code: Option<i32>, signal: Option<i32> },
+    /// The child was taken out of the slot and killed because somebody asked
+    /// for the engine to be stopped. Not a death, and nothing to try again.
+    Stopped,
     TimedOut,
 }
 
@@ -1705,8 +2538,15 @@ fn wait_for_health_or_exit(state: &AppState, port: u16, timeout: Duration) -> He
             let mut guard = state.bundled_engine.lock().unwrap();
             match guard.as_mut() {
                 Some(e) => e.child.try_wait().ok().flatten().map(|s| (s.code(), unix_exit_signal(&s))),
-                // The slot was cleared under us, so there is no child left to
-                // wait on and no exit code or signal to report.
+                // The slot was cleared under us. Two things do that: a stop
+                // somebody asked for, which takes the child out and kills it,
+                // and the sidecar watch or a status read, which reap a child
+                // that died by itself. Only the second one is a death. Reading
+                // the first as one started the model the user had just
+                // unloaded a second time, on the processor.
+                None if stop_was_requested(state) => return HealthWait::Stopped,
+                // Reaped by the watch, so there is no child left to wait on
+                // and no exit code or signal to report.
                 None => Some((None, None)),
             }
         };
@@ -2079,6 +2919,24 @@ pub(crate) fn stderr_blames_the_port(stderr: &str) -> bool {
 /// install path as the cause (review-longpath.md Runde 2, Blocker 9): this
 /// function stays the right answer for every OTHER "the child died and said
 /// something model-shaped" case, short-path included.
+/// A40 (GH #259, 3.1.2): the Metal compiler of this Mac refused the engine's
+/// shader code. llama.cpp builds its Metal library from source on the user's
+/// machine, with the compiler that ships in macOS, so a shader a newer macOS
+/// accepts can fail on an older one (b11960 on macOS 14 and 15). The log then
+/// carries `ggml_metal_init: error: failed to initialize the Metal library`
+/// after a page of compiler output nobody outside llama.cpp can act on.
+fn stderr_blames_the_metal_library(stderr: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "failed to initialize the metal library",
+        "ggml_metal_library_compile_all: failed to build",
+    ];
+    let lower = stderr.to_ascii_lowercase();
+    MARKERS.iter().any(|m| lower.contains(m))
+}
+
+/// The sentence a user reads instead of the Metal compiler output.
+const METAL_LIBRARY_HINT: &str = "This Mac could not prepare the graphics code of the LU Engine, so no model could load. Update the app and macOS to the newest version. Until then Ollama works as a backend, pick it in Settings, AI Backends.";
+
 fn stderr_blames_the_model(stderr: &str) -> bool {
     const MARKERS: &[&str] = &[
         "unknown model architecture",
@@ -2126,6 +2984,28 @@ fn stderr_blames_the_model_file(stderr: &str) -> bool {
     ];
     let lower = stderr.to_ascii_lowercase();
     MARKERS.iter().any(|m| lower.contains(m))
+}
+
+/// The architecture name llama.cpp says it does not know, when it names one.
+///
+/// N1, 30.10.2026: LiquidAI/LFM3-1.7B-GGUF carries `lfm3`, which the pinned
+/// b9949 does not know, and the engine said `unknown model architecture:
+/// 'lfm3'`. The app answered "may be damaged, cut short ... download it
+/// again", and a second download of a perfectly good file changes nothing. An
+/// EMPTY name stays with the damaged-file answer: that is what a truncated
+/// GGUF prints (`KAPUTTE_GGUF_STDERR`, measured 03.09.2026).
+fn stderr_names_an_unknown_architecture(stderr: &str) -> Option<String> {
+    const MARKER: &str = "unknown model architecture";
+    for line in stderr.lines() {
+        let lower = line.to_ascii_lowercase();
+        let Some(at) = lower.find(MARKER) else { continue };
+        let rest = line[at + MARKER.len()..].trim_start_matches([':', ' ']);
+        let Some(name) = rest.strip_prefix('\'').and_then(|r| r.split('\'').next()) else { continue };
+        if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) {
+            return Some(name.to_string());
+        }
+    }
+    None
 }
 
 /// Der Anfang einer GGUF: die Marke und die Formatversion.
@@ -2306,6 +3186,11 @@ fn illegal_instruction_repair_sentence(module_count: Option<usize>, is_macos: bo
 /// Order, most specific (something the CHILD process itself proved) first:
 /// 1. A named missing system library (`stderr_names_a_missing_system_library`),
 ///    read straight off the loader's own error line.
+///
+///    A40 (3.1.2): right after it, a Metal library the Mac's own shader
+///    compiler refused (`stderr_blames_the_metal_library`). Neither a file
+///    nor an install problem, so neither "download it again" nor
+///    "reinstall" fits.
 /// 2. `backend_dir_too_long`: a too-long install path is checked BEFORE the
 ///    general model-blame step, not after. Blocker 9: `stderr_blames_the_model`
 ///    (step 3) matches `failed to load model`, which llama.cpp prints on load
@@ -2327,6 +3212,10 @@ fn illegal_instruction_repair_sentence(module_count: Option<usize>, is_macos: bo
 fn died_failure_hint(stderr: &str, backend_dir_too_long: bool, on_linux: bool) -> String {
     if let Some(lib) = stderr_names_a_missing_system_library(stderr) {
         missing_library_hint(&lib, on_linux)
+    } else if stderr_blames_the_metal_library(stderr) {
+        format!(" {METAL_LIBRARY_HINT}")
+    } else if let Some(arch) = stderr_names_an_unknown_architecture(stderr) {
+        format!(" The model file is a {arch} model, and this LU Engine does not know that architecture yet. Downloading it again will not help. Run it through Ollama, or pick another model.")
     } else if backend_dir_too_long {
         format!(" {}", long_install_path_hint())
     } else if stderr_blames_the_model(stderr) {
@@ -2466,7 +3355,9 @@ pub(crate) fn start_failure_message(
             budget.as_secs()
         )
     };
-    if failure.stderr.is_empty() {
+    // A40: the Metal compiler output is a page of shader source and helps no
+    // reader of this message. The log file under Troubleshoot keeps all of it.
+    if failure.stderr.is_empty() || stderr_blames_the_metal_library(&failure.stderr) {
         head
     } else {
         format!("{head}\n\n{}", failure.stderr)
@@ -2484,6 +3375,11 @@ pub(crate) fn start_failure_message(
 /// already refused a stranger on the port above and does not retry, so the
 /// port and retry wording would not be true.
 pub(crate) fn embed_start_failure_message(timeout_error: &str, stderr_tail: &str) -> String {
+    if stderr_blames_the_metal_library(stderr_tail) {
+        // A40: the embeddings server is the same binary, so the same Metal
+        // failure kills Document Chat. Same sentence, no shader dump.
+        return format!("The embeddings server of the LU Engine could not start. {METAL_LIBRARY_HINT}");
+    }
     let hint = stderr_names_a_missing_system_library(stderr_tail)
         .map(|lib| missing_library_hint(&lib, cfg!(target_os = "linux")))
         .unwrap_or_default();
@@ -2521,7 +3417,8 @@ pub async fn start_bundled_engine(
     .map_err(|e| format!("Engine start task failed to run: {e}"))?
 }
 
-fn start_bundled_engine_blocking(
+#[cfg(desktop)]
+pub(crate) fn start_bundled_engine_blocking(
     app: &AppHandle,
     state: &State<'_, AppState>,
     model_path: String,
@@ -2529,7 +3426,12 @@ fn start_bundled_engine_blocking(
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
     let _gate = crate::commands::process::start_gate(&crate::commands::process::ENGINE_START);
-    let tuning = tuning.unwrap_or_default();
+    // A stop that came before this start is history: whoever asks for a model
+    // now wants it. Cleared under the gate, so it is only ever a stop that
+    // arrives DURING this start that the waits below get to see.
+    state.engine_stop_requested.store(false, std::sync::atomic::Ordering::SeqCst);
+    let mut tuning = tuning.unwrap_or_default();
+    tuning.control_vector = crate::commands::neuron::control_vector_for(&model_path);
     let port = port.unwrap_or(DEFAULT_ENGINE_PORT);
 
     if !Path::new(&model_path).exists() {
@@ -2555,7 +3457,7 @@ fn start_bundled_engine_blocking(
         .and_then(|models| models.parent().map(|p| p.join("kv-slots")))
         .and_then(|dir| {
             std::fs::create_dir_all(&dir).ok()?;
-            Some(dir.to_string_lossy().to_string())
+            slot_save_dir_arg(&dir)
         });
 
     // Already serving this exact argv and healthy → no-op. The argv is the
@@ -2569,12 +3471,18 @@ fn start_bundled_engine_blocking(
     {
         let guard = state.bundled_engine.lock().unwrap();
         if let Some(engine) = guard.as_ref() {
+            // An engine that came up without the image part (no room on the
+            // card, or the engine refused the part) is still the answer to
+            // this request. Comparing it against an argv WITH the part would
+            // restart a healthy engine on every single call, to arrive at the
+            // same place each time.
+            let part_it_runs_with = if engine.image_part_note.is_some() { None } else { mmproj.as_deref() };
             let args_on_its_port = build_server_args(
                 &model_path,
                 &tuning,
                 engine.port,
                 slot_dir.as_deref(),
-                mmproj.as_deref(),
+                part_it_runs_with,
                 None,
             );
             // With GPU Layers on auto the layer count is a MEASUREMENT, taken
@@ -2585,7 +3493,7 @@ fn start_bundled_engine_blocking(
             // switch between auto and a typed number is still a real
             // difference, which is what `auto_layers` on both sides is for.
             let same_request = if tuning.gpu_layers < 0 && engine.auto_layers {
-                argv_without_gpu_layers(&engine.args) == argv_without_gpu_layers(&args_on_its_port)
+                same_measured_request(&engine.args, &args_on_its_port, !plan_request(&tuning).ctx_chosen, requested_ctx_for(&engine.model_path))
             } else {
                 engine.args == args_on_its_port
             };
@@ -2619,22 +3527,57 @@ fn start_bundled_engine_blocking(
             cpu_fallback: e.cpu_fallback,
             port: e.port,
             ctx: e.ctx,
+            image_part_note: e.image_part_note,
         })
     };
 
     // Different model (or dead) → stop the old process before spawning.
     stop_engine_locked(state);
 
-    match start_after_stop(app, state, &model_path, &tuning, port, slot_dir.as_deref(), mmproj.as_deref())
-    {
-        Ok(v) => Ok(v),
-        Err(msg) => Err(match (vorher, resolve_engine_binary(app)) {
-            (Some(p), Some(bin)) if restore_engine(&bin, state, &p, resolve_engine_backend_dir(app).as_deref()) => {
-                with_note_on_top(&msg, RESTORED_NOTE)
-            }
-            _ => msg,
-        }),
+    let outcome = start_after_stop(app, state, &model_path, &tuning, port, slot_dir.as_deref(), mmproj.as_deref());
+    settle_switch(state, port, &model_path, outcome, || match (vorher, resolve_engine_binary(app)) {
+        (Some(p), Some(bin)) => restore_engine(&bin, state, &p, resolve_engine_backend_dir(app).as_deref()),
+        _ => false,
+    })
+}
+
+/// What a switch answers once the start behind it has ended, and whether the
+/// model that served before is brought back first.
+///
+/// A stop on request outranks everything else, whichever way the start ended.
+/// Every exit of the start comes through here, so this one place covers all of
+/// them: the previous model is NOT brought back (the user asked for an empty
+/// engine), and the answer is not an error. An error is what the callers act
+/// on: the resume loop of the app start runs the start again 1.5 s and 5 s
+/// later, and the context raise falls back to a second start with the old
+/// settings. Either one would load the model that was just unloaded.
+///
+/// The stop is asked about twice. The second time is for a stop that arrives
+/// while the previous model is being brought back: that attempt is cut short
+/// by the same mark, and its failure is not the user's news either.
+///
+/// A start that came up and was stopped right behind it answers "stopped" as
+/// well. Nothing serves, and an answer that still carried the notes of the
+/// sanity probe would describe an engine that is gone.
+fn settle_switch(
+    state: &AppState,
+    port: u16,
+    model_path: &str,
+    outcome: Result<serde_json::Value, String>,
+    restore_previous: impl FnOnce() -> bool,
+) -> Result<serde_json::Value, String> {
+    if stop_was_requested(state) {
+        return Ok(stopped_answer(port, model_path));
     }
+    let msg = match outcome {
+        Ok(answer) => return Ok(answer),
+        Err(msg) => msg,
+    };
+    let restored = restore_previous();
+    if stop_was_requested(state) {
+        return Ok(stopped_answer(port, model_path));
+    }
+    Err(if restored { with_note_on_top(&msg, RESTORED_NOTE) } else { msg })
 }
 
 /// Die Engine, die vor einem Wechsel bediente.
@@ -2651,6 +3594,31 @@ struct PreviousEngine {
     /// reason: a restore brings the process back as it was, and a status read
     /// afterwards must not claim the card back for it.
     cpu_fallback: bool,
+    /// Whether that engine ran without its image part, and why. Carried so
+    /// the restored process keeps saying it.
+    image_part_note: Option<&'static str>,
+}
+
+/// What `start_after_stop` hands up when the engine was stopped on request
+/// before the model had finished loading. `settle_switch` turns it into
+/// `stopped_answer`, so this sentence is for the log and never for a user.
+const STOPPED_WHILE_LOADING: &str = "The LU Engine was stopped while it was loading the model.";
+
+/// What a start answers when it was stopped on request. `port` is the port
+/// that was asked for: nothing listens anywhere, and the next start names its
+/// own.
+fn stopped_answer(port: u16, model_path: &str) -> serde_json::Value {
+    serde_json::json!({
+        "status": "stopped",
+        "port": port,
+        "model_path": model_path,
+    })
+}
+
+/// Whether somebody asked for the engine to be stopped since the running start
+/// took the start gate. See `AppState::engine_stop_requested`.
+fn stop_was_requested(state: &AppState) -> bool {
+    state.engine_stop_requested.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Der Satz, der an die Fehlermeldung geht, wenn das alte Modell wieder laeuft.
@@ -2665,6 +3633,7 @@ const RESTORED_NOTE: &str = "The model that was serving before is running again.
 /// Wiederholung: er bediente vor Sekunden noch, und ein zweiter Fehlschlag
 /// hier waere nichts, woran ein Nutzer etwas aendern koennte. Er wuerde nur
 /// die Fehlermeldung des eigentlichen Problems um Minuten verzoegern.
+#[cfg(desktop)]
 fn restore_engine(binary: &Path, state: &AppState, vorher: &PreviousEngine, backend_dir: Option<&Path>) -> bool {
     tracing::warn!(target: "engine", model = %vorher.model_path, port = vorher.port, "the model switch failed, bringing the previous model back");
     let ok = spawn_engine_attempt(
@@ -2680,6 +3649,8 @@ fn restore_engine(binary: &Path, state: &AppState, vorher: &PreviousEngine, back
     .is_ok();
     if !ok {
         tracing::error!(target: "engine", model = %vorher.model_path, port = vorher.port, "could not bring the previous model back");
+    } else if let Some(live) = state.bundled_engine.lock().unwrap().as_mut() {
+        live.image_part_note = vorher.image_part_note;
     }
     ok
 }
@@ -2690,6 +3661,7 @@ fn restore_engine(binary: &Path, state: &AppState, vorher: &PreviousEngine, back
 /// laeuft. Vorher standen hier vier `return Err(...)` im selben Rumpf wie der
 /// Stopp, und ein Rueckfall haette an vier Stellen wiederholt werden muessen.
 #[allow(clippy::too_many_arguments)]
+#[cfg(desktop)]
 fn start_after_stop(
     app: &AppHandle,
     state: &State<'_, AppState>,
@@ -2697,7 +3669,9 @@ fn start_after_stop(
     tuning: &EngineTuning,
     port: u16,
     slot_dir: Option<&str>,
-    mmproj: Option<&str>,
+    // The image part that lies next to the model, when there is one. Whether
+    // it is LOADED is decided below, against the card.
+    image_part: Option<&str>,
 ) -> Result<serde_json::Value, String> {
 
     // The port must actually be FREE now: our own previous child (if any) was
@@ -2754,14 +3728,18 @@ fn start_after_stop(
         }
     }
 
-    let binary = resolve_engine_binary(app).ok_or_else(|| {
+    let candidates = engine_binary_candidates(app);
+    let binary = pick_engine_binary(&candidates).ok_or_else(|| {
         // This used to name a build script. On a user's machine that is not an
         // instruction, it is noise; the only real remedies are a reinstall or a
-        // different backend (GH #118).
-        format!(
-            "The LU Engine program ({}) is missing from this installation. Reinstall Locally Uncensored, or pick a different backend in Settings, AI Backends.",
-            sidecar_binary_name()
-        )
+        // different backend (GH #118). A placeholder file is the one case that
+        // is a build from source, and gets the build steps (GH #207).
+        engine_binary_error(&candidates, || {
+            format!(
+                "The LU Engine program ({}) is missing from this installation. Reinstall Locally Uncensored, or pick a different backend in Settings, AI Backends.",
+                sidecar_binary_name()
+            )
+        })
     })?;
     // K1 (3.0.1): where the dynamic-ISA sidecar's companion libraries are,
     // None on mac / a static build. Resolved once here and carried through
@@ -2770,7 +3748,7 @@ fn start_after_stop(
 
     // Attempt 1, then exactly one clean retry.
     //
-    // GH #118 (nayffy, 2026-08-27): the only thing a user ever saw when this
+    // GH #118 (2026-08-27): the only thing a user ever saw when this
     // chain failed was a refused connection on 127.0.0.1:8127. Two things were
     // wrong with the old shape. The health wait watched only the port, so a
     // child that died in the first second still burned the whole budget (60 s
@@ -2809,35 +3787,117 @@ fn start_after_stop(
     // free. Those two release asynchronously, so a reading taken while a
     // driver still holds their pages is too small rather than too large, and
     // too small costs speed while too large costs the start.
-    let ctx_size = effective_ctx(tuning);
     let auto_layers = tuning.gpu_layers < 0;
-    let auto_ngl = if auto_layers {
-        let card = crate::commands::gpu::engine_vram_reading();
-        let header = crate::commands::gguf::read_header(model_path);
-        let plan = plan_offload(&OffloadInputs {
-            model_bytes: std::fs::metadata(model_path).map(|m| m.len()).unwrap_or(0),
-            block_count: header.block_count,
-            vram_bytes: card.as_ref().map(|c| c.bytes),
-            ctx: ctx_size,
-            free: card.as_ref().map(|c| c.free).unwrap_or(false),
-        });
+    let mac = cfg!(target_os = "macos");
+    // 3.0.8 (A2): with the chat pinned to one card, that card's free memory
+    // is the budget, not the biggest card's. The device list is read once here
+    // and its pick kept for the attempts below (chat_engine_device).
+    let pinned = pinned_chat_device(state, &binary, backend_dir.as_deref());
+    let card_reading = pinned
+        .as_ref()
+        .map(|d| crate::commands::gpu::VramReading { bytes: d.free_mib * 1024 * 1024, free: true, source: "llama-server --list-devices" })
+        .or_else(crate::commands::gpu::engine_vram_reading);
+    let engine_fits = auto_layers && engine_fits_layers(card_reading.as_ref(), mac);
+    // 3.0.8 (A25): the whole memory decision, from the GGUF head
+    // (vram_plan.rs): context, layers, MoE experts, image part, prompt cache,
+    // and the advice the person reads.
+    let shape = model_shape(model_path);
+    let calibration_key = calibration_key(model_path, tuning);
+    let learned = load_calibration(&calibration_key);
+    let request = plan_request(tuning);
+    remember_requested_ctx(model_path, effective_ctx(tuning));
+    let host = crate::commands::vram_plan::Host { total_ram: crate::commands::system::total_memory_bytes(), mac };
+    let card = if mac {
+        crate::commands::vram_plan::Card::Unified {
+            budget: crate::commands::vram_plan::mac_gpu_budget(host.total_ram, mac_wired_limit_mb()),
+        }
+    } else {
+        match card_reading.as_ref() {
+            Some(r) => crate::commands::vram_plan::Card::Measured(crate::commands::vram_plan::Budget {
+                bytes: r.bytes,
+                free: r.free,
+                learned_overhead: learned.machine.overhead,
+            }),
+            None => crate::commands::vram_plan::Card::None,
+        }
+    };
+    let part_head = image_part.and_then(crate::commands::gguf::read_model_head);
+    let part_bytes = image_part.map(|p| crate::commands::gguf::model_file_bytes_of(p, part_head.as_ref())).unwrap_or(0);
+    let decision = crate::commands::vram_plan::decide(
+        &shape,
+        &request,
+        card,
+        host,
+        crate::commands::vram_plan::ImagePart::from_head(part_bytes, part_head.as_ref()),
+        learned.model,
+    );
+    // What this start really runs with. Every attempt and every restart
+    // below builds its argv from this, so the plan is decided once.
+    let planned = EngineTuning {
+        ctx: decision.ctx,
+        plan_cpu_moe: if engine_fits { 0 } else { decision.cpu_moe },
+        plan_cache_ram_mib: decision.cache_ram_mib,
+        ..tuning.clone()
+    };
+    let tuning = &planned;
+    let ctx_size = decision.ctx;
+    let (auto_ngl, part_fits) = if engine_fits {
+        // GH #156: the card was not measured free, so the engine measures it
+        // (llama.cpp's own fit, which also moves MoE experts). The image part
+        // stays: if it does not fit, the engine says so and the retry below
+        // starts again without it.
         tracing::info!(
             target: "engine",
-            vram_mib = card.as_ref().map(|c| (c.bytes / (1024 * 1024)).to_string()).unwrap_or_else(|| "unknown".into()),
-            vram_is_free_memory = card.as_ref().map(|c| c.free).unwrap_or(false),
-            vram_source = card.as_ref().map(|c| c.source).unwrap_or("none"),
-            block_count = header.block_count.map(|b| b.to_string()).unwrap_or_else(|| "unknown".into()),
+            vram_mib = card_reading.as_ref().map(|c| (c.bytes / (1024 * 1024)).to_string()).unwrap_or_else(|| "unknown".into()),
+            vram_source = card_reading.as_ref().map(|c| c.source).unwrap_or("none"),
             ctx = ctx_size,
-            ngl = plan.layers.unwrap_or(ALL_LAYERS).to_string(),
-            "{}",
-            plan.why
+            ngl = "auto",
+            plan = %decision.why,
+            "the card's free graphics memory was not measured, only its total, so the engine measures it and picks the layer count itself"
         );
-        plan.layers
+        (Some(ENGINE_DECIDES), true)
+    } else if auto_layers {
+        tracing::info!(
+            target: "engine",
+            vram_mib = card_reading.as_ref().map(|c| (c.bytes / (1024 * 1024)).to_string()).unwrap_or_else(|| "unknown".into()),
+            vram_is_free_memory = card_reading.as_ref().map(|c| c.free).unwrap_or(false),
+            vram_source = card_reading.as_ref().map(|c| c.source).unwrap_or("none"),
+            arch = %shape.arch,
+            block_count = shape.n_layer(),
+            ctx = ctx_size,
+            kv = %format!("{}/{}", tuning.cache_type_k, tuning.cache_type_v),
+            ngl = decision.ngl.unwrap_or(ALL_LAYERS).to_string(),
+            cpu_moe = decision.cpu_moe,
+            kv_mib = shape.cache_bytes(&request.cache.with_ctx(ctx_size)) / (1024 * 1024),
+            learned_extra_mib = learned.model.extra / (1024 * 1024),
+            learned_overhead_mib = learned.machine.overhead / (1024 * 1024),
+            "{}",
+            decision.why
+        );
+        (decision.ngl, decision.with_image_part)
     } else {
-        None
+        // A layer count the user typed is the user's answer. The image part
+        // is loaded as it always was.
+        (None, true)
     };
+    // The image part this start really passes along. A part that would push
+    // the model off the card is left out, and the note says so afterwards.
+    let mmproj = if part_fits { image_part } else { None };
+    let image_note = (image_part.is_some() && !part_fits).then_some(IMAGE_PART_NO_ROOM_NOTE);
     let desired_args =
         build_server_args(model_path, tuning, port, slot_dir, mmproj, auto_ngl);
+    if let Some(a) = decision.advice.as_ref() {
+        tracing::info!(target: "engine", model = %model_path, actions = a.actions.len(), "{}", a.text);
+    }
+    if let Some(mib) = decision.cache_ram_mib {
+        tracing::info!(target: "engine", cache_ram_mib = mib, "the prompt cache in RAM is capped, because the model already holds most of the RAM");
+    }
+    remember_fit_note(model_path, decision.advice.clone());
+    let plan_check = PlanCheck {
+        plan: decision.plan,
+        free_before: card_reading.as_ref().filter(|r| r.free).map(|r| r.bytes),
+        key: calibration_key,
+    };
 
     let deadline = health_timeout_for(model_path);
     let ctx = Some(ctx_size);
@@ -2854,7 +3914,8 @@ fn start_after_stop(
     let failure = match first {
         Ok(startup) => {
             tracing::info!(target: "engine", port, attempt = 1, "the LU Engine is serving");
-            return Ok(serve_or_heal_garbled(
+            check_plan(&plan_check, &startup);
+            let mut answer = serve_or_heal_garbled(
                 state,
                 &binary,
                 model_path,
@@ -2867,10 +3928,20 @@ fn start_after_stop(
                 auto_layers,
                 &startup,
                 backend_dir.as_deref(),
-            ));
+            );
+            note_image_part(state, &mut answer, image_note);
+            return Ok(answer);
         }
         Err(f) => f,
     };
+
+    if stop_was_requested(state) {
+        // The child did not die, it was stopped while it was loading (the
+        // user switched away, went into Cloud, or closed the app). Every
+        // retry below would start the model that was just unloaded.
+        tracing::info!(target: "engine", port, "the LU Engine was stopped while it was loading, no second attempt");
+        return Err(STOPPED_WHILE_LOADING.to_string());
+    }
 
     if !failure.died {
         // The budget ran out with the child still alive: it is loading slowly,
@@ -2897,8 +3968,60 @@ fn start_after_stop(
         return Err(start_failure_message(&failure, port, deadline, SecondAttempt::SameOffload, backend_dir.as_deref()));
     }
 
+    // The engine died on the image part, not on the model. Then the second
+    // attempt is the same start without the part: the card keeps its layers,
+    // the model answers, and the note says that it cannot see. Running it on
+    // the processor instead would change the one thing that was not at fault.
+    if mmproj.is_some() && stderr_blames_the_image_part(&failure.stderr) {
+        tracing::warn!(target: "engine", port, "the engine could not load the image part, retrying without it");
+        std::thread::sleep(Duration::from_millis(1500));
+        let args = build_server_args(model_path, tuning, port, slot_dir, None, auto_ngl);
+        return match spawn_engine_attempt(
+            state,
+            &binary,
+            &args,
+            model_path,
+            port,
+            ctx,
+            AttemptFlags { auto_layers, cpu_fallback: false },
+            backend_dir.as_deref(),
+        ) {
+            Ok(startup) => {
+                tracing::warn!(target: "engine", port, "the LU Engine is serving without the image part");
+                let mut answer = serve_or_heal_garbled(
+                    state,
+                    &binary,
+                    model_path,
+                    tuning,
+                    port,
+                    slot_dir,
+                    None,
+                    &args,
+                    ctx,
+                    auto_layers,
+                    &startup,
+                    backend_dir.as_deref(),
+                );
+                answer["retried"] = serde_json::json!(true);
+                note_image_part(state, &mut answer, Some(IMAGE_PART_REFUSED_NOTE));
+                Ok(answer)
+            }
+            Err(second) => Err(start_failure_message(&second, port, deadline, SecondAttempt::SameOffload, backend_dir.as_deref())),
+        };
+    }
+
     tracing::warn!(target: "engine", port, "the first start attempt exited before it served, retrying once");
     std::thread::sleep(Duration::from_millis(1500));
+    // GH #190, second net: llama.cpp refused the slot folder. The retry
+    // leaves the flag out, and so does every start after it.
+    let slot_dropped = slot_dir.is_some() && stderr_blames_the_slot_dir(&failure.stderr);
+    let slot_dir = if slot_dropped {
+        tracing::warn!(target: "engine", port, "the engine refused the KV-slot folder, the retry starts without slot save");
+        SLOT_DIR_REFUSED.store(true, std::sync::atomic::Ordering::SeqCst);
+        None
+    } else {
+        slot_dir
+    };
     // A start that died ON THE PORT does not get better by using the same port
     // a second time, so the retry moves. The bind check above said the port was
     // free, and on Windows it can still be refused to the child (a reserved
@@ -2942,7 +4065,7 @@ fn start_after_stop(
             "the retry drops GPU offload and runs the LU Engine on the processor"
         );
         build_server_args(model_path, &retry_tuning, retry_port, slot_dir, mmproj, None)
-    } else if retry_port != port {
+    } else if retry_port != port || slot_dropped {
         build_server_args(model_path, &retry_tuning, retry_port, slot_dir, mmproj, auto_ngl)
     } else {
         desired_args.clone()
@@ -2994,6 +4117,7 @@ fn start_after_stop(
             );
             answer["retried"] = serde_json::json!(true);
             answer["cpuOnly"] = serde_json::json!(offload_was_tried);
+            note_image_part(state, &mut answer, image_note);
             Ok(answer)
         }
         Err(second) => Err(start_failure_message(&second, retry_port, deadline, second_attempt, backend_dir.as_deref())),
@@ -3042,6 +4166,7 @@ fn on_the_processor(tuning: &EngineTuning) -> EngineTuning {
 /// times out, is refused, or answers something unjudgeable leaves the engine
 /// exactly where it is.
 #[allow(clippy::too_many_arguments)]
+#[cfg(desktop)]
 fn serve_or_heal_garbled(
     state: &AppState,
     binary: &Path,
@@ -3057,9 +4182,20 @@ fn serve_or_heal_garbled(
     backend_dir: Option<&Path>,
 ) -> serde_json::Value {
     let mut answer = started_answer(port, model_path, ctx);
+    // An engine that asked for the card and found none serves on the
+    // processor without a word (fanezeu, Linux server without a Vulkan
+    // driver). The probe below may still put a weightier sentence over it.
+    if let Some(note) = engine_sanity::no_gpu_device_note(startup, gpu_layers_in(args), std::env::consts::OS) {
+        tracing::warn!(target: "engine", port, "the LU Engine found no graphics card it can use and serves on the processor");
+        remember_sanity_note(state, note);
+    }
     // Measured once, from what llama-server itself printed on its way up. A
     // restart does not change the card, so this is not asked again.
-    let no_matrix_cores = engine_sanity::device_without_matrix_cores(startup).unwrap_or(false);
+    // GH #156: the pinned Vulkan build never prints its device line, so on
+    // Windows and Linux silence counts as "may have none" (see
+    // `may_lack_matrix_cores`). The Mac runs Metal.
+    let no_matrix_cores = engine_sanity::may_lack_matrix_cores(startup, !cfg!(target_os = "macos"));
+    let matrix_cores = engine_sanity::matrix_cores_label(startup);
     // What the engine currently runs with. Both move as the ladder is climbed,
     // and both are read back out of the argv that was actually spawned.
     let mut serving = tuning.clone();
@@ -3099,9 +4235,10 @@ fn serve_or_heal_garbled(
             port,
             verdict = engine_sanity::verdict_label(probe.verdict, probe.still_thinking),
             ms = probe.took.as_millis() as u64,
-            ngl = facts.gpu_layers.map(|n| n.to_string()).unwrap_or_else(|| "none".into()),
+            ngl = facts.gpu_layers.map(ngl_arg).unwrap_or_else(|| "none".into()),
             flash_attention = facts.flash_attention_on,
-            matrix_cores = !no_matrix_cores,
+            matrix_cores,
+            flash_attention_rung = no_matrix_cores,
             answer = %probe.sample,
             "sanity probe on the LU Engine"
         );
@@ -3174,6 +4311,12 @@ fn serve_or_heal_garbled(
             AttemptFlags { auto_layers: false, cpu_fallback: cpu_rung },
             backend_dir,
         ).is_err() {
+            if stop_was_requested(state) {
+                // The restart did not fail, the engine was stopped on request
+                // while it loaded. Nothing is brought back and nothing is
+                // noted about a restart: `settle_switch` answers "stopped".
+                return answer;
+            }
             // The restart did not come up, and an engine that at least served
             // has just been torn down for it. Put the first one back rather
             // than leave the user with nothing; ONE attempt, for the same
@@ -3222,6 +4365,30 @@ fn serve_or_heal_garbled(
         serving_args = next_args;
     }
     answer
+}
+
+/// Pin "this engine runs without its image part" to the process and to the
+/// answer of the start, after every restart the sanity probe may have made:
+/// each of those spawns a fresh process, and a note set before them would be
+/// gone with the old one. Nothing happens for an ordinary start.
+fn note_image_part(state: &AppState, answer: &mut serde_json::Value, note: Option<&'static str>) {
+    let Some(note) = note else { return };
+    if let Some(live) = state.bundled_engine.lock().unwrap().as_mut() {
+        live.image_part_note = Some(note);
+    }
+    answer["imageNote"] = serde_json::json!(note);
+}
+
+/// The image part a finished argv passes along, when it passes one.
+/// Whether a process started with these arguments can see a picture: it got
+/// a part, and that part is an image part (N1: LFM3 Audio's part only hears).
+pub(crate) fn started_seeing(args: &[String]) -> bool {
+    image_part_in(args).is_some_and(projector_sees_images)
+}
+
+pub(crate) fn image_part_in(args: &[String]) -> Option<&str> {
+    let at = args.iter().position(|a| a == "--mmproj")?;
+    args.get(at + 1).map(String::as_str)
 }
 
 /// Pin the sanity probe's sentence to the process it is about, so a status
@@ -3279,6 +4446,7 @@ struct AttemptFlags {
 /// flash-attention rung of the sanity probe is decided on it. It used to be
 /// read on the failure paths only and thrown away whenever the engine came up.
 #[allow(clippy::too_many_arguments)]
+#[cfg(desktop)]
 fn spawn_engine_attempt(
     state: &AppState,
     binary: &Path,
@@ -3290,6 +4458,12 @@ fn spawn_engine_attempt(
     backend_dir: Option<&Path>,
 ) -> Result<String, StartFailure> {
     log_cpu_features_once();
+    // A stop that arrived between two attempts (the settle before a retry, a
+    // restart of the sanity probe) found an empty slot and had nothing to
+    // kill. It still means what it said, so nothing is spawned after it.
+    if stop_was_requested(state) {
+        return Err(stopped_on_request());
+    }
     // The one line a support log has to carry. Everything the start depends on
     // is in the argv: model path, context size, layer count, cache types,
     // thread count, mlock/mmap flags, the vision file and the port.
@@ -3302,8 +4476,30 @@ fn spawn_engine_attempt(
         "starting the LU Engine llama-server"
     );
     let mut cmd = Command::new(binary);
-    cmd.args(args)
-        .stdin(Stdio::null())
+    // The key the engine answers to, in its environment (engine_key.rs).
+    super::engine_key::apply(&mut cmd);
+    cmd.args(args);
+    // 3.0.8 (A2): the chat role's card, as the device the engine offloads to.
+    // Without it a two-card box spreads the model over both, and the video on
+    // the other card runs out of memory. Added here, not in build_server_args,
+    // so every attempt and every restart gets it from one place.
+    //
+    // A40 (GH #259, 3.1.2): on a Mac the processor-only attempt also says
+    // `--device none`. `-ngl 0` alone keeps no layers on the GPU, but
+    // llama.cpp still opens the Metal backend for the context and compiles
+    // its shader library there, so a Metal library the system compiler
+    // refuses killed the "CPU" retry with the same error as the first try.
+    // With no device the Metal context is never created. Mac only for now:
+    // on Windows and Linux the Vulkan behaviour of this flag is not measured
+    // on the box yet, and the chat-card pin below is never set on a Mac.
+    if flags.cpu_fallback && cfg!(target_os = "macos") {
+        tracing::info!(target: "engine", "the processor-only attempt runs with --device none, so Metal is not opened at all");
+        cmd.args(["--device", "none"]);
+    } else if let Some(device) = chat_engine_device(state, binary, backend_dir) {
+        tracing::info!(target: "engine", device = %device, "the LU Engine is pinned to the chat card");
+        cmd.args(["--device", device.as_str()]);
+    }
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         // llama-server writes the REASON a start fails here: a GGUF it refuses,
         // a quant this build has no kernel for, a port already taken, too little
@@ -3319,7 +4515,8 @@ fn spawn_engine_attempt(
     // never across the detection call, which would freeze the Hardware
     // tab's set_gpu_selection/get_gpu_selection (same mutex) for however
     // long that subprocess I/O takes.
-    let gpu_selection = state.gpu_selection.lock().ok().map(|sel| sel.clone());
+    // 3.0.8 (A2): the chat role's card when one is set (commands/gpu_roles.rs).
+    let gpu_selection = crate::commands::gpu_roles::effective_selection(state, crate::commands::gpu_roles::GpuRole::Chat);
     if let Some(sel) = gpu_selection {
         crate::commands::gpu::apply_gpu_env(&mut cmd, &sel);
     }
@@ -3371,16 +4568,33 @@ fn spawn_engine_attempt(
     tie_child_to_app_lifetime(child.id());
     let diagnostics = child.stderr.take().map(super::shell::drain);
 
-    *state.bundled_engine.lock().unwrap() = Some(BundledEngine {
-        child,
-        model_path: model_path.to_string(),
-        port,
-        ctx,
-        args: args.to_vec(),
-        auto_layers: flags.auto_layers,
-        cpu_fallback: flags.cpu_fallback,
-        sanity_note: None,
-    });
+    {
+        let mut slot = state.bundled_engine.lock().unwrap();
+        // Asked again with the slot held. A stop sets its mark BEFORE it takes
+        // this lock, so it either finds the child parked here and kills it, or
+        // its mark is already visible now. There is no order in which a child
+        // is parked after a stop and left running.
+        if stop_was_requested(state) {
+            drop(slot);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(stopped_on_request());
+        }
+        *slot = Some(BundledEngine {
+            child,
+            model_path: model_path.to_string(),
+            port,
+            ctx,
+            args: args.to_vec(),
+            auto_layers: flags.auto_layers,
+            cpu_fallback: flags.cpu_fallback,
+            sanity_note: None,
+            image_part_note: None,
+            stderr: diagnostics.as_ref().map(|(buf, _)| std::sync::Arc::clone(buf)),
+        });
+        // A new engine: what the last one died of is history (C81).
+        clear_last_engine_exit();
+    }
 
     let outcome = wait_for_health_or_exit(state, port, health_timeout_for(model_path));
     match &outcome {
@@ -3394,6 +4608,9 @@ fn spawn_engine_attempt(
             signal = signal.map(|s| s.to_string()).unwrap_or_else(|| "none".into()),
             "the LU Engine exited before it served"
         ),
+        HealthWait::Stopped => {
+            tracing::info!(target: "engine", port, "the LU Engine was stopped on request before it served")
+        }
         HealthWait::TimedOut => tracing::warn!(
             target: "engine",
             port,
@@ -3422,11 +4639,20 @@ fn spawn_engine_attempt(
                 .map(|(buf, _)| super::shell::captured_text(&buf))
                 .unwrap_or_default());
         }
+        if stop_was_requested(state) {
+            // Health answered and the stop came right behind it. Our child is
+            // gone because it was asked to go, not because a stranger holds
+            // the port.
+            return Err(stopped_on_request());
+        }
         let why = diagnostics
             .map(|(buf, _)| tail_lines(&super::shell::captured_text(&buf), 12))
             .unwrap_or_default();
         stop_engine_locked(state);
         return Err(StartFailure { died: true, port_taken: true, stderr: why, exit_code: None, signal: None });
+    }
+    if matches!(outcome, HealthWait::Stopped) {
+        return Err(stopped_on_request());
     }
 
     let why = diagnostics
@@ -3440,13 +4666,19 @@ fn spawn_engine_attempt(
     Err(StartFailure { died, port_taken: false, stderr: why, exit_code, signal })
 }
 
+/// What an attempt reports when it ended because the engine was stopped on
+/// request. Not `died`: a death is what `start_after_stop` retries.
+fn stopped_on_request() -> StartFailure {
+    StartFailure { died: false, port_taken: false, stderr: String::new(), exit_code: None, signal: None }
+}
+
 /// Stop the managed engine, killing the child. Idempotent.
 #[tauri::command]
 pub async fn stop_bundled_engine(app: AppHandle) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         // kill + wait on a server that is mid-load is not instant.
         let state = app.state::<AppState>();
-        let was_running = stop_engine_locked(&state);
+        let was_running = stop_engine_on_request(&state);
         serde_json::json!({ "status": if was_running { "stopped" } else { "idle" } })
     })
     .await
@@ -3470,7 +4702,7 @@ pub async fn bundled_engine_status(app: AppHandle) -> Result<serde_json::Value, 
             // A handle whose process died is not a running engine (A15).
             live_sidecar(&mut guard)
         };
-        match probe {
+        let answer = match probe {
             Some(live) => serde_json::json!({
                 "running": true,
                 "healthy": engine_healthy(live.port),
@@ -3478,7 +4710,8 @@ pub async fn bundled_engine_status(app: AppHandle) -> Result<serde_json::Value, 
                 // Model file size feeds the handoff's fits/doesn't-fit call
                 // (GH #85): a GGUF's on-disk size is a close proxy for its
                 // VRAM footprint at full offload.
-                "modelBytes": std::fs::metadata(&live.model_path).map(|m| m.len()).unwrap_or(0),
+                // The image part is loaded next to the weights, so it counts.
+                "modelBytes": std::fs::metadata(&live.model_path).map(|m| m.len()).unwrap_or(0) + live.image_part_bytes,
                 "model_path": live.model_path,
                 "ctx": live.ctx,
                 // Where this engine computes, and how much of the model the
@@ -3496,6 +4729,23 @@ pub async fn bundled_engine_status(app: AppHandle) -> Result<serde_json::Value, 
                 // standing line can say why the card was taken away, and
                 // why an engine that kept its layers restarted at all.
                 "sanityNote": live.sanity_note,
+                // Why this model came up without its image part: no room on
+                // the card, or the engine refused the part. Null on every
+                // start that loaded it, and on a model that has none.
+                "imageNote": live.image_part_note,
+                // The model takes so much of the RAM that the computer gets
+                // slow while it is loaded (Discord, 21.10.2026). Null when it
+                // leaves room, and where it could not be weighed.
+                "memoryNote": memory_note_for(&live.model_path),
+                // 3.0.8 (A25): the buttons under that sentence ("Context
+                // 16K", "KV q8_0"), and the MoE layers whose experts stay on
+                // the processor.
+                "fitActions": fit_note_for(&live.model_path).map(|a| a.actions).unwrap_or_default(),
+                // The context the start asked for; `ctx` is what the plan
+                // gave it (more while the card has room, less when the
+                // asked one, which nobody chose, would cost layers).
+                "ctxRequested": requested_ctx_for(&live.model_path),
+                "cpuMoe": live.cpu_moe,
             }),
             None => serde_json::json!({
                 "running": false,
@@ -3503,11 +4753,24 @@ pub async fn bundled_engine_status(app: AppHandle) -> Result<serde_json::Value, 
                 "port": DEFAULT_ENGINE_PORT,
                 "model_path": null,
                 "ctx": null,
+                // C81: what the last engine died of, when it died on its own.
+                "lastExit": last_engine_exit_note(),
                 "cpuOnly": false,
                 "gpuLayers": null,
                 "sanityNote": null,
+                "imageNote": null,
+                "fitActions": [],
+                "cpuMoe": 0,
+                "ctxRequested": null,
             }),
-        }
+        };
+        // A phone adds two keys and changes none: `inProcess`, and where the
+        // model computes. `cpuOnly` cannot say the second one, it only means
+        // "the app took the card away", and an Android phone that never had
+        // one answers false there while it runs on the processor.
+        #[cfg(mobile)]
+        let answer = with_phone_status(answer);
+        answer
     })
     .await
     .map_err(|e| format!("Engine status task failed to run: {e}"))
@@ -3537,7 +4800,7 @@ pub async fn swap_bundled_model(
 }
 
 /// Which folders `list_bundled_models` walks, in priority order: the app
-/// models dir first, then whatever the user named under Model Storage.
+/// models dir first, then whatever the user named under Storage.
 ///
 /// A blank entry, a duplicate, and the app dir named a second time are all
 /// dropped here, so the caller can hand the setting over raw.
@@ -3577,7 +4840,7 @@ pub(crate) fn bundled_scan_dirs(app_dir: &Path, extra: &[String]) -> Vec<PathBuf
 }
 
 /// List `*.gguf` files in the built-in models dir AND in every folder the user
-/// named under Model Storage, marking the one currently loaded. Used by the
+/// named under Storage, marking the one currently loaded. Used by the
 /// frontend instead of `/v1/models` (which would only report the single loaded
 /// model).
 // ASYNC + spawn_blocking: a SYNCHRONOUS Tauri command runs on the MAIN thread.
@@ -3598,7 +4861,7 @@ pub async fn list_bundled_models(
 
 /// Which files go when the user deletes an LU Engine row: the GGUF itself, or
 /// every part of a gguf-split set, and only inside a folder the listing reads
-/// (the app's own models dir, or one named under Model Storage).
+/// (the app's own models dir, or one named under Storage).
 ///
 /// .dan_48 (help chat, 2026-09-05, 2.6.7, GTX 1660 Ti with 6 GB): the
 /// Installed list had a bin on Ollama rows and none on LU Engine rows, and
@@ -3617,13 +4880,25 @@ pub(crate) fn gguf_delete_plan(path: &Path, roots: &[PathBuf]) -> Result<Vec<Pat
         .any(|r| file.starts_with(&r));
     if !inside {
         return Err(
-            "LU only deletes models inside its own models folder or a folder named under Model Storage.".to_string(),
+            "LU only deletes models inside its own models folder or a folder named under Storage.".to_string(),
         );
     }
     let dir = file.parent().ok_or("That model file has no folder.")?.to_path_buf();
     let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    // The image part goes with its model. It is named after the model (after
+    // the first part of a split one), it is listed nowhere, and left behind it
+    // would be several hundred megabytes that belong to nothing.
+    let with_part = |mut files: Vec<PathBuf>| {
+        if let Some(first) = files.first() {
+            let part = mmproj_sibling_path(&first.to_string_lossy());
+            if part.is_file() {
+                files.push(part);
+            }
+        }
+        files
+    };
     let Some((base, _, total)) = split_shard_stem(stem) else {
-        return Ok(vec![file]);
+        return Ok(with_part(vec![file]));
     };
     // A split set is one model: every sibling with the same base and total
     // goes along, whichever part the row pointed at, both digit widths.
@@ -3640,18 +4915,47 @@ pub(crate) fn gguf_delete_plan(path: &Path, roots: &[PathBuf]) -> Result<Vec<Pat
         })
         .collect();
     parts.sort();
-    Ok(parts)
+    Ok(with_part(parts))
 }
 
 /// Delete an LU Engine row's file(s). The loaded model is refused: on Windows
 /// the mapped file cannot be removed while the engine holds it, and a delete
 /// that half works is worse than one that says why. The frontend stops the
 /// engine first when the row is the active one.
+/// C17: what Delete would take off the disk for an LU Engine row, without
+/// taking it: every file of the model (all parts of a split set, the image
+/// part) with its size. The same plan `delete_bundled_model` acts on, so the
+/// dialog cannot list other files than the ones that go.
+#[tauri::command]
+pub async fn bundled_model_delete_plan(
+    path: String,
+    extra_dirs: Option<Vec<String>>,
+) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        let roots = bundled_scan_dirs(&builtin_models_dir()?, &extra_dirs.unwrap_or_default());
+        let files = gguf_delete_plan(Path::new(&path), &roots)?;
+        let rows: Vec<serde_json::Value> = files
+            .iter()
+            .map(|f| {
+                let bytes = std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
+                serde_json::json!({ "path": f.to_string_lossy(), "bytes": bytes })
+            })
+            .collect();
+        let bytes: u64 = files.iter().map(|f| std::fs::metadata(f).map(|m| m.len()).unwrap_or(0)).sum();
+        Ok(serde_json::json!({ "files": rows, "bytes": bytes }))
+    })
+    .await
+    .map_err(|e| format!("bundled_model_delete_plan task: {e}"))?
+}
+
+/// `trash`: move the files to the system's Trash instead of deleting them
+/// (C17, the uninstall dialog offers it), so a misclick can be put back.
 #[tauri::command]
 pub async fn delete_bundled_model(
     app: tauri::AppHandle,
     path: String,
     extra_dirs: Option<Vec<String>>,
+    trash: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
@@ -3668,20 +4972,39 @@ pub async fn delete_bundled_model(
                     (Ok(x), Ok(y)) if x == y
                 )
         };
+        // Desktop: refuse. Phone: stop it, then delete. A phone holds one
+        // model, so "switch to another model first" is a dead end there, and
+        // an installed model could never be removed again (old Android
+        // finding A43). The engine here is in this process, so the stop below
+        // has really given the file back by the time it returns.
+        #[cfg(desktop)]
         if loaded.as_deref().is_some_and(|l| same(l, &path)) {
             return Err(
                 "This model is loaded in the LU Engine right now. Stop the engine or switch to another model, then delete it.".to_string(),
             );
         }
+        #[cfg(mobile)]
+        let stopped = loaded.as_deref().is_some_and(|l| same(l, &path)) && stop_engine_locked(&state);
         let roots = bundled_scan_dirs(&builtin_models_dir()?, &extra_dirs.unwrap_or_default());
         let files = gguf_delete_plan(Path::new(&path), &roots)?;
-        let mut bytes = 0u64;
+        // Summed before anything moves; an unreadable size counts as 0.
+        let bytes: u64 = files.iter().map(|f| std::fs::metadata(f).map(|m| m.len()).unwrap_or(0)).sum();
+        let to_bin = trash.unwrap_or(false);
         for f in &files {
-            bytes += std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
-            std::fs::remove_file(f)
-                .map_err(|e| format!("Could not delete {}: {}", f.display(), os_error::english(&e)))?;
+            if to_bin {
+                crate::commands::os_trash::system_trash(f)
+                    .map_err(|e| format!("Could not move {} to the Trash: {}", f.display(), e))?;
+            } else {
+                std::fs::remove_file(f)
+                    .map_err(|e| format!("Could not delete {}: {}", f.display(), os_error::english(&e)))?;
+            }
         }
-        Ok(serde_json::json!({ "deleted": files.len(), "bytes": bytes }))
+        #[cfg(desktop)]
+        let answer = serde_json::json!({ "deleted": files.len(), "bytes": bytes });
+        // One key more on a phone: whether the engine had to be stopped.
+        #[cfg(mobile)]
+        let answer = serde_json::json!({ "deleted": files.len(), "bytes": bytes, "stopped": stopped });
+        Ok(answer)
     })
     .await
     .map_err(|e| format!("delete_bundled_model task: {e}"))?
@@ -3692,12 +5015,16 @@ fn list_bundled_models_blocking(
     extra_dirs: &[String],
 ) -> Result<serde_json::Value, String> {
     let dir = builtin_models_dir()?;
-    let loaded = state
-        .bundled_engine
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|e| e.model_path.clone());
+    // The loaded model, and whether its process was started with the image
+    // part: what the engine can show a picture right now is a fact about the
+    // process, not about the folder.
+    let (loaded, loaded_sees) = {
+        let guard = state.bundled_engine.lock().unwrap();
+        (
+            guard.as_ref().map(|e| e.model_path.clone()),
+            guard.as_ref().is_some_and(|e| started_seeing(&e.args)),
+        )
+    };
     let dirs = bundled_scan_dirs(&dir, extra_dirs);
     let roots: Vec<ScanRoot> = dirs
         .iter()
@@ -3717,19 +5044,43 @@ fn list_bundled_models_blocking(
             // place it exists; /props and /v1/models don't carry it. None on
             // any parse hiccup so a weird file can never break the listing.
             let ctx_train = crate::commands::gguf::context_length(&m.path);
+            // Asked once: without the part under our own name this reads the
+            // folder, and the list holds one entry per model in it.
+            let image_part = model_can_see_images(&m.path);
+            // What the refusal-removal tool needs to offer its button: where
+            // the original weights are, and whether LU made this copy itself.
+            let general = crate::commands::gguf::read_general(&m.path);
+            let stem = Path::new(&m.path).file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let refusals_removed = crate::commands::abliterate::plan::made_by_lu(&general);
+            let source_repo = if refusals_removed {
+                None
+            } else {
+                crate::commands::abliterate::plan::guess_source(&general, stem).map(|g| g.repo)
+            };
             serde_json::json!({
                 "name": m.name,
                 "path": m.path,
                 "size": m.size,
                 "loaded": is_loaded,
                 "ctx_train": ctx_train,
-                "vision": model_can_see_images(&m.path),
+                // Can the engine show this model a picture? For the model that
+                // is loaded: was it started with its image part (it is not
+                // when the card had no room, or when the part arrived after
+                // the start). For every other model: does the part lie next
+                // to it, which is what the next start will pass along.
+                "vision": if is_loaded { loaded_sees } else { image_part },
+                // The part is on disk. Together with `vision` this tells a
+                // model that cannot see from one that only has to be loaded
+                // again, or loaded with a smaller context.
+                "imagePart": image_part,
+                "refusalsRemoved": refusals_removed,
+                "sourceRepo": source_repo,
             })
         })
         .collect();
     // Every folder that was asked, app dir first, WITH how it fared. "No
     // models" and "I could not finish looking" are different answers, and the
-    // Model Storage panel is where the user can act on the difference.
+    // Storage panel is where the user can act on the difference.
     let dir_rows: Vec<serde_json::Value> = dirs
         .iter()
         .zip(outcome.statuses.iter())
@@ -3906,7 +5257,10 @@ pub(crate) fn scan_lmstudio_models(root: &Path) -> Vec<ImportCandidate> {
 
 /// Hard link src into dest_dir under the sanitized name. Deliberately no copy
 /// fallback: a copy would eat the disk twice for a 10 GB model, and the error
-/// tells the user the honest way out (same drive, or move the models folder).
+/// tells the user the honest way out. That way out only holds because the
+/// import links into the LU Engine folder set under Storage when there
+/// is one (see `import_dest_dir`): pointing that folder at the drive of the
+/// file is then what makes the next import work.
 pub(crate) fn import_model_file(src: &Path, dest_dir: &Path, name: &str) -> Result<PathBuf, String> {
     if !src.is_file() {
         return Err(format!("Source model not found: {}", src.display()));
@@ -3921,9 +5275,10 @@ pub(crate) fn import_model_file(src: &Path, dest_dir: &Path, name: &str) -> Resu
     std::fs::hard_link(src, &target).map_err(|e| {
         format!(
             "Could not link the model into the LU Engine folder ({e}). \
-             Linking needs source and destination on the same drive. \
-             Move the models folder (Settings, Model Storage) to that drive, \
-             or copy the file there yourself."
+             Linking needs the model file and the LU Engine folder on the same drive. \
+             Set the LU Engine folder (Settings, AI Backends, Storage) to a folder \
+             on the drive of the model file and import again, or copy the file into the \
+             LU Engine folder yourself."
         )
     })?;
     // A vision model without its projector loads and answers but cannot see, so
@@ -3932,49 +5287,21 @@ pub(crate) fn import_model_file(src: &Path, dest_dir: &Path, name: &str) -> Resu
     // like. (Ollama sources are content-addressed blobs with no sibling to
     // find; those import text-only, which is why vision models are worth
     // pulling through Ollama itself.)
-    if let Some(projector) = find_projector_sibling(src) {
+    if let Some(projector) = existing_mmproj(&src.to_string_lossy()) {
         let _ = std::fs::hard_link(&projector, mmproj_sibling_path(&target.to_string_lossy()));
     }
     Ok(target)
-}
-
-/// The projector belonging to a model file in another tool's store. Prefers our
-/// own `<stem>.mmproj.gguf` naming, then falls back to a single upstream
-/// `mmproj*.gguf` in the same folder (LM Studio keeps one repo per folder). Two
-/// or more candidates mean guessing, and a wrong projector is worse than none.
-fn find_projector_sibling(model: &Path) -> Option<PathBuf> {
-    let exact = mmproj_sibling_path(&model.to_string_lossy());
-    if exact.is_file() {
-        return Some(exact);
-    }
-    let dir = model.parent()?;
-    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_file()
-                && p.file_name()
-                    .and_then(|s| s.to_str())
-                    .map(is_projector_file)
-                    .unwrap_or(false)
-        })
-        .collect();
-    found.sort();
-    if found.len() == 1 {
-        found.pop()
-    } else {
-        None
-    }
 }
 
 /// GGUFs found in local Ollama and LM Studio stores, ready to link into the
 /// built-in engine. Candidates whose target file already exists are flagged
 /// instead of hidden so the UI can show them as done.
 #[tauri::command]
-pub async fn list_importable_models() -> Result<serde_json::Value, String> {
-    tokio::task::spawn_blocking(|| {
-        let dest = builtin_models_dir()?;
+pub async fn list_importable_models(dest_dir: Option<String>) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        // Both folders count: a model imported before the LU Engine folder
+        // was set sits in LU's own folder and is still listed from there.
+        let dests = [import_dest_dir(dest_dir.as_deref())?, builtin_models_dir()?];
         let home = dirs::home_dir().ok_or("Cannot resolve home directory")?;
         let mut all = scan_ollama_models(&home.join(".ollama").join("models"));
         let lm_primary = home.join(".lmstudio").join("models");
@@ -3985,7 +5312,8 @@ pub async fn list_importable_models() -> Result<serde_json::Value, String> {
         };
         all.extend(scan_lmstudio_models(&lm));
         for c in &mut all {
-            c.already_imported = dest.join(sanitize_model_file_name(&c.name)).exists();
+            let file = sanitize_model_file_name(&c.name);
+            c.already_imported = dests.iter().any(|d| d.join(&file).exists());
         }
         Ok(serde_json::json!({ "candidates": all }))
     })
@@ -3993,12 +5321,48 @@ pub async fn list_importable_models() -> Result<serde_json::Value, String> {
     .map_err(|e| format!("list_importable_models task: {e}"))?
 }
 
-/// Link one candidate into the built-in models dir (zero copy hard link).
+/// Where an import lands: the LU Engine folder the user set under Model
+/// Storage, else the app's own models dir. The set folder is where downloads
+/// go and what the listing reads, and it is the one folder the user can move
+/// to another drive, which is what the cross drive error tells him to do.
+pub(crate) fn import_dest_dir(dest_dir: Option<&str>) -> Result<PathBuf, String> {
+    match dest_dir.map(str::trim).filter(|d| !d.is_empty()) {
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            std::fs::create_dir_all(&dir).map_err(|e| {
+                format!("Create LU Engine folder {}: {}", dir.display(), os_error::english(&e))
+            })?;
+            Ok(dir)
+        }
+        None => builtin_models_dir(),
+    }
+}
+
+/// D17: the system open dialog for one GGUF anywhere on the drive. Returns
+/// the path, or None when the dialog was cancelled. The frontend hands the
+/// path to `import_local_model`, the same link as the Ollama and LM Studio
+/// import.
+#[cfg(desktop)]
+#[tauri::command]
+pub async fn pick_gguf_file() -> Result<Option<String>, String> {
+    let picked = rfd::AsyncFileDialog::new()
+        .set_title("Choose a GGUF model")
+        .add_filter("GGUF model", &["gguf", "GGUF"])
+        .pick_file()
+        .await;
+    Ok(picked.map(|f| f.path().to_string_lossy().to_string()))
+}
+
+/// Link one candidate into the LU Engine folder (zero copy hard link).
 /// The next list_bundled_models picks it up like any downloaded GGUF.
 #[tauri::command]
-pub async fn import_local_model(path: String, name: String) -> Result<serde_json::Value, String> {
+pub async fn import_local_model(
+    path: String,
+    name: String,
+    dest_dir: Option<String>,
+) -> Result<serde_json::Value, String> {
     tokio::task::spawn_blocking(move || {
-        let dest = builtin_models_dir()?;
+        let dest = import_dest_dir(dest_dir.as_deref())?;
         let target = import_model_file(Path::new(&path), &dest, &name)?;
         Ok(serde_json::json!({ "path": target.to_string_lossy() }))
     })
@@ -4020,21 +5384,194 @@ pub async fn import_local_model(path: String, name: String) -> Result<serde_json
 /// its process. Reaping here also leaves the state fit for the next start,
 /// which would otherwise find a stale child in the slot.
 pub(crate) fn reap_dead_engine(slot: &mut Option<BundledEngine>) -> bool {
-    let gone = match slot.as_mut() {
-        // Ok(Some(status)) is an exited child; Ok(None) is a live one. An Err
-        // means the question could not be asked, and a handle we cannot ask
-        // about is not evidence of death, so it is left alone.
-        Some(e) => matches!(e.child.try_wait(), Ok(Some(_))),
-        None => false,
+    reap_dead_engine_exit(slot).is_some()
+}
+
+/// How a sidecar ended, as far as the operating system and its own stderr say.
+///
+/// C81 (3.1.0): c1rrus, Linux/ROCm, the engine vanished mid-answer and the log
+/// said only "the sidecar is gone". The status the reap had in its hand was
+/// thrown away, and so was the stderr the drain thread kept collecting. Both
+/// are now carried here, logged, and turned into one sentence for the UI.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SidecarExit {
+    pub code: Option<i32>,
+    pub signal: Option<i32>,
+    /// The last stderr lines, ANSI stripped. Empty when nothing was piped.
+    pub stderr_tail: String,
+    /// True for the `--embeddings` server, false for the chat engine.
+    pub embed: bool,
+}
+
+/// How many stderr lines a death carries into the log and the event.
+const EXIT_TAIL_LINES: usize = 20;
+
+/// The reap, with what it found. `None` while the child lives, or when the
+/// question could not be asked.
+pub(crate) fn reap_dead_engine_exit(slot: &mut Option<BundledEngine>) -> Option<SidecarExit> {
+    // Ok(Some(status)) is an exited child; Ok(None) is a live one. An Err
+    // means the question could not be asked, and a handle we cannot ask
+    // about is not evidence of death, so it is left alone.
+    let status = match slot.as_mut()?.child.try_wait() {
+        Ok(Some(status)) => status,
+        _ => return None,
     };
-    if gone {
-        if let Some(mut e) = slot.take() {
-            let _ = e.child.wait();
-            // Said for both sidecars, so the wording names neither.
-            tracing::warn!(target: "engine", port = e.port, "the sidecar is gone, clearing the handle");
+    let mut e = slot.take()?;
+    let _ = e.child.wait();
+    let exit = SidecarExit {
+        code: status.code(),
+        signal: unix_exit_signal(&status),
+        stderr_tail: e
+            .stderr
+            .as_ref()
+            .map(|buf| super::shell::captured_tail(buf, EXIT_TAIL_LINES))
+            .unwrap_or_default(),
+        embed: e.args.iter().any(|a| a == "--embeddings"),
+    };
+    // Said for both sidecars, so the wording names neither; the fields do.
+    tracing::warn!(
+        target: "engine",
+        port = e.port,
+        model = %e.model_path,
+        sidecar = if exit.embed { SIDECAR_EMBED } else { SIDECAR_ENGINE },
+        exit_code = exit.code.map(|c| c.to_string()).unwrap_or_else(|| "none".into()),
+        signal = exit.signal.map(|s| s.to_string()).unwrap_or_else(|| "none".into()),
+        cause = %exit_cause_words(exit.code, exit.signal),
+        "the sidecar is gone, clearing the handle"
+    );
+    if !exit.stderr_tail.is_empty() {
+        tracing::warn!(target: "engine", port = e.port, "last stderr lines of the sidecar:\n{}", exit.stderr_tail);
+    }
+    // The phone's in-process engine has no exit status of its own (its
+    // `try_wait` reports a made-up success), so only a real process speaks.
+    if !exit.embed && cfg!(desktop) {
+        if let Ok(mut last) = LAST_ENGINE_EXIT.lock() {
+            *last = Some(engine_exit_note(&exit));
         }
     }
-    gone
+    Some(exit)
+}
+
+/// What the chat engine died of last, as the sentence the status shows while
+/// no engine runs. Cleared by the next start.
+static LAST_ENGINE_EXIT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn clear_last_engine_exit() {
+    if let Ok(mut last) = LAST_ENGINE_EXIT.lock() {
+        *last = None;
+    }
+}
+
+pub(crate) fn last_engine_exit_note() -> Option<String> {
+    LAST_ENGINE_EXIT.lock().ok().and_then(|g| g.clone())
+}
+
+/// The POSIX name of the signals a model server actually dies of.
+fn signal_name(signal: i32) -> Option<&'static str> {
+    Some(match signal {
+        2 => "SIGINT",
+        4 => "SIGILL",
+        6 => "SIGABRT",
+        7 => "SIGBUS",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        15 => "SIGTERM",
+        _ => return None,
+    })
+}
+
+/// What that signal usually means for a llama-server, in a user's words.
+fn signal_meaning(signal: i32) -> Option<&'static str> {
+    Some(match signal {
+        2 => "it was interrupted",
+        4 => "the processor does not support an instruction the engine uses",
+        6 => "the engine stopped itself on an internal error, often a graphics driver error",
+        7 => "a memory access failed, for example because the model file changed or its disk went away",
+        9 => "it was killed from outside, on Linux most often by the system's out-of-memory killer",
+        11 => "it crashed inside the engine or the graphics driver",
+        15 => "it was asked to stop from outside LU",
+        _ => return None,
+    })
+}
+
+/// Windows NTSTATUS crash codes, read back from `ExitStatus::code()`.
+fn windows_code_meaning(code: i32) -> Option<&'static str> {
+    match code as u32 {
+        0xC000_0005 => Some("it crashed inside the engine or the graphics driver (access violation)"),
+        0xC000_001D => Some("the processor lacks AVX2, which the engine needs"),
+        0xC000_0409 => Some("the engine stopped itself on an internal error"),
+        0xC000_00FD => Some("the engine ran out of stack"),
+        0xC000_0017 | 0xC000_012D => Some("the computer ran out of memory"),
+        0xC000_0135 => Some("a DLL the engine needs was not found"),
+        0xC000_013A => Some("it was stopped with Ctrl+C or Ctrl+Break"),
+        _ => None,
+    }
+}
+
+/// The short label: "signal 6, SIGABRT", "exit code 0xC0000005", "exit code 1".
+fn exit_label(code: Option<i32>, signal: Option<i32>) -> String {
+    match (code, signal) {
+        (_, Some(sig)) => match signal_name(sig) {
+            Some(name) => format!("signal {sig}, {name}"),
+            None => format!("signal {sig}"),
+        },
+        (Some(c), None) if windows_code_meaning(c).is_some() => format!("exit code 0x{:08X}", c as u32),
+        (Some(c), None) => format!("exit code {c}"),
+        (None, None) => "no exit code".into(),
+    }
+}
+
+fn exit_meaning(code: Option<i32>, signal: Option<i32>) -> Option<&'static str> {
+    match (code, signal) {
+        (_, Some(sig)) => signal_meaning(sig),
+        (Some(c), None) => windows_code_meaning(c),
+        (None, None) => None,
+    }
+}
+
+/// For the log: "signal 6, SIGABRT: the engine stopped itself on …".
+pub(crate) fn exit_cause_words(code: Option<i32>, signal: Option<i32>) -> String {
+    match exit_meaning(code, signal) {
+        Some(m) => format!("{}: {m}", exit_label(code, signal)),
+        None => exit_label(code, signal),
+    }
+}
+
+/// What the stderr tail says the trouble was, when it says something a user
+/// can act on. Read from the end: the last words are the cause.
+fn stderr_exit_hint(tail: &str) -> Option<&'static str> {
+    let lower = tail.to_ascii_lowercase();
+    if lower.contains("out of memory") || lower.contains("outofmemory") || lower.contains("failed to allocate") {
+        return Some("The graphics card ran out of memory. A smaller model, a shorter context or fewer GPU layers usually fixes this.");
+    }
+    if lower.contains("rocm error") || lower.contains("hip error") || lower.contains("hiperror") {
+        return Some("The ROCm driver reported an error. Updating the AMD driver or ROCm, or starting the engine on Vulkan, usually helps.");
+    }
+    if lower.contains("cuda error") {
+        return Some("The NVIDIA driver reported an error. Updating the NVIDIA driver usually helps.");
+    }
+    if lower.contains("vk::") || lower.contains("vulkan error") || lower.contains("devicelost") || lower.contains("device lost") {
+        return Some("The Vulkan driver lost the graphics card. Updating the graphics driver usually helps.");
+    }
+    None
+}
+
+/// The one sentence a user reads about an engine that stopped on its own.
+///
+/// What the engine itself said wins over what the signal usually means: a
+/// "ROCm error: out of memory" before a SIGABRT is the cause, the abort only
+/// the way it ended.
+pub(crate) fn engine_exit_note(exit: &SidecarExit) -> String {
+    let label = exit_label(exit.code, exit.signal);
+    let tail = "It starts again with your next message; details are in the log.";
+    if let Some(hint) = stderr_exit_hint(&exit.stderr_tail) {
+        return format!("The LU Engine stopped unexpectedly ({label}). {hint} {tail}");
+    }
+    let memory = if exit.signal == Some(9) { " A smaller model or a shorter context usually fixes this." } else { "" };
+    match exit_meaning(exit.code, exit.signal) {
+        Some(meaning) => format!("The LU Engine stopped unexpectedly ({label}): {meaning}.{memory} {tail}"),
+        None => format!("The LU Engine stopped unexpectedly ({label}). {tail}"),
+    }
 }
 
 /// What a status command should report for a sidecar slot: the port, the model
@@ -4061,6 +5598,12 @@ pub(crate) struct LiveSidecar {
     pub gpu_layers: Option<u32>,
     /// The sentence the sanity probe left behind (`BundledEngine::sanity_note`).
     pub sanity_note: Option<&'static str>,
+    /// Why this engine runs without its image part, when it does.
+    pub image_part_note: Option<&'static str>,
+    /// Size of the image part this process loaded, 0 without one.
+    pub image_part_bytes: u64,
+    /// `--n-cpu-moe` of this process, 0 without.
+    pub cpu_moe: u32,
 }
 
 pub(crate) fn live_sidecar(slot: &mut Option<BundledEngine>) -> Option<LiveSidecar> {
@@ -4072,6 +5615,12 @@ pub(crate) fn live_sidecar(slot: &mut Option<BundledEngine>) -> Option<LiveSidec
         cpu_fallback: e.cpu_fallback,
         gpu_layers: gpu_layers_reported(&e.args),
         sanity_note: e.sanity_note,
+        image_part_note: e.image_part_note,
+        image_part_bytes: image_part_in(&e.args)
+            .and_then(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .unwrap_or(0),
+        cpu_moe: cpu_moe_in(&e.args),
     })
 }
 
@@ -4110,9 +5659,23 @@ pub(crate) const SIDECAR_WATCH_INTERVAL: Duration = Duration::from_millis(1500);
 /// Split out from the loop so the decision is testable without a Tauri app:
 /// the port has to be read BEFORE the reap, because the reap is what throws
 /// the handle away.
-pub(crate) fn reaped_sidecar_port(slot: &mut Option<BundledEngine>) -> Option<u16> {
-    let port = slot.as_ref().map(|e| e.port);
-    if reap_dead_engine(slot) { port } else { None }
+pub(crate) fn reaped_sidecar_port(slot: &mut Option<BundledEngine>) -> Option<(u16, SidecarExit)> {
+    let port = slot.as_ref().map(|e| e.port)?;
+    reap_dead_engine_exit(slot).map(|exit| (port, exit))
+}
+
+/// The payload of `SIDECAR_GONE_EVENT`. `message` is the sentence for the
+/// chat engine; the embeddings server has no surface and gets none.
+pub(crate) fn sidecar_gone_payload(sidecar: &str, port: u16, exit: &SidecarExit) -> serde_json::Value {
+    serde_json::json!({
+        "sidecar": sidecar,
+        "port": port,
+        "exitCode": exit.code,
+        "signal": exit.signal,
+        "cause": exit_cause_words(exit.code, exit.signal),
+        "stderrTail": exit.stderr_tail,
+        "message": if exit.embed || !cfg!(desktop) { None } else { Some(engine_exit_note(exit)) },
+    })
 }
 
 /// Start the watch. One thread for both sidecars, for the life of the app.
@@ -4125,28 +5688,48 @@ pub fn spawn_sidecar_watch(app: AppHandle) {
         loop {
             std::thread::sleep(SIDECAR_WATCH_INTERVAL);
             let state = app.state::<AppState>();
-            let mut gone: Vec<(&'static str, u16)> = Vec::new();
+            let mut gone: Vec<(&'static str, u16, SidecarExit)> = Vec::new();
             if let Ok(mut guard) = state.bundled_engine.lock() {
-                if let Some(port) = reaped_sidecar_port(&mut guard) {
-                    gone.push((SIDECAR_ENGINE, port));
+                if let Some((port, exit)) = reaped_sidecar_port(&mut guard) {
+                    gone.push((SIDECAR_ENGINE, port, exit));
                 }
             }
             if let Ok(mut guard) = state.bundled_embed.lock() {
-                if let Some(port) = reaped_sidecar_port(&mut guard) {
-                    gone.push((SIDECAR_EMBED, port));
+                if let Some((port, exit)) = reaped_sidecar_port(&mut guard) {
+                    gone.push((SIDECAR_EMBED, port, exit));
                 }
             }
-            for (sidecar, port) in gone {
-                let _ = app.emit(SIDECAR_GONE_EVENT, serde_json::json!({
-                    "sidecar": sidecar,
-                    "port": port,
-                }));
+            for (sidecar, port, exit) in gone {
+                let _ = app.emit(SIDECAR_GONE_EVENT, sidecar_gone_payload(sidecar, port, &exit));
             }
         }
     });
 }
 
-pub(crate) fn stop_engine_locked(state: &AppState) -> bool {
+/// Stop the engine because somebody outside the start asked for it: the
+/// frontend's stop, the switch into Cloud, a render that needs the memory.
+///
+/// The mark is set BEFORE the child is taken, and it is set even when the slot
+/// is empty: a start that is between two attempts has nothing parked, and it
+/// must still not begin the next one.
+pub(crate) fn stop_engine_on_request(state: &AppState) -> bool {
+    state.engine_stop_requested.store(true, std::sync::atomic::Ordering::SeqCst);
+    stop_engine_locked(state)
+}
+
+/// The phone gives the chat model back when the system warns about memory
+/// (`engine_inproc::unload_for_memory`). Not a request in the sense of
+/// `stop_engine_on_request`: the mark that one sets belongs to the start of
+/// the desktop engine, and a phone start never reads or clears it.
+#[cfg(mobile)]
+pub(crate) fn stop_engine_for_memory(state: &AppState) -> bool {
+    stop_engine_locked(state)
+}
+
+/// Kill and reap whatever is in the slot. The start's own stops (the old model
+/// before a switch, a failed attempt, a restart of the sanity probe) use this
+/// one, because none of them is a request to leave the engine empty.
+fn stop_engine_locked(state: &AppState) -> bool {
     let mut guard = state.bundled_engine.lock().unwrap();
     if let Some(mut engine) = guard.take() {
         let _ = engine.child.kill();
@@ -4183,6 +5766,7 @@ pub async fn start_bundled_embed(
     .map_err(|e| format!("Embeddings start task failed to run: {e}"))?
 }
 
+#[cfg(desktop)]
 fn start_bundled_embed_blocking(
     app: &AppHandle,
     state: &State<'_, AppState>,
@@ -4221,11 +5805,14 @@ fn start_bundled_embed_blocking(
         ));
     }
 
-    let binary = resolve_engine_binary(app).ok_or_else(|| {
-        format!(
-            "Bundled engine binary not found ({}). Run scripts/build-llama.sh to produce the sidecar.",
-            sidecar_binary_name()
-        )
+    let candidates = engine_binary_candidates(app);
+    let binary = pick_engine_binary(&candidates).ok_or_else(|| {
+        engine_binary_error(&candidates, || {
+            format!(
+                "Bundled engine binary not found ({}). Run scripts/build-llama.sh to produce the sidecar.",
+                sidecar_binary_name()
+            )
+        })
     })?;
 
     let embed_args = build_embed_args(&model_path, port);
@@ -4236,8 +5823,13 @@ fn start_bundled_embed_blocking(
         "starting the LU Engine embeddings server"
     );
     let mut cmd = Command::new(&binary);
-    cmd.args(&embed_args)
-        .stdin(Stdio::null())
+    super::engine_key::apply(&mut cmd);
+    cmd.args(&embed_args);
+    // 3.0.8 (A2): the embeddings sit next to the chat model, on its card.
+    if let Some(device) = chat_engine_device(state, &binary, resolve_engine_backend_dir(app).as_deref()) {
+        cmd.args(["--device", device.as_str()]);
+    }
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     // B2 fix (review-w2rust.md): apply_gpu_env can now shell out to
@@ -4246,7 +5838,8 @@ fn start_bundled_embed_blocking(
     // never across the detection call, which would freeze the Hardware
     // tab's set_gpu_selection/get_gpu_selection (same mutex) for however
     // long that subprocess I/O takes.
-    let gpu_selection = state.gpu_selection.lock().ok().map(|sel| sel.clone());
+    // 3.0.8 (A2): the chat role's card when one is set (commands/gpu_roles.rs).
+    let gpu_selection = crate::commands::gpu_roles::effective_selection(state, crate::commands::gpu_roles::GpuRole::Chat);
     if let Some(sel) = gpu_selection {
         crate::commands::gpu::apply_gpu_env(&mut cmd, &sel);
     }
@@ -4278,6 +5871,8 @@ fn start_bundled_embed_blocking(
         auto_layers: false,
         cpu_fallback: false,
         sanity_note: None,
+        image_part_note: None,
+        stderr: diagnostics.as_ref().map(|(buf, _)| std::sync::Arc::clone(buf)),
     });
 
     if let Err(e) = wait_for_health(port, health_timeout_for(&model_path)) {
@@ -4378,6 +5973,542 @@ pub(crate) fn stop_embed_locked(state: &AppState) -> bool {
     }
 }
 
+// ── 3.0.8 (A2): the chat role's card for the LU Engine ─────────────────
+
+/// What the engine itself lists as its devices (`--list-devices`), started
+/// the way a real start is (its companion libraries next to it). Bounded: a
+/// wedged Vulkan driver must not hold up the engine start. Empty on any
+/// failure, which reads as "no device of that name" and leaves the start
+/// unpinned.
+fn list_engine_devices(binary: &Path, backend_dir: Option<&Path>) -> Vec<crate::commands::gpu_roles::LlamaDevice> {
+    let mut cmd = Command::new(binary);
+    cmd.arg("--list-devices");
+    apply_engine_backend_dir(&mut cmd, backend_dir);
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    crate::commands::shell::output_bounded(cmd, Duration::from_secs(15))
+        .map(|out| crate::commands::gpu_roles::parse_list_devices(&out))
+        .unwrap_or_default()
+}
+
+/// The chat card's engine device, read fresh (its free memory is wanted) and
+/// remembered for the attempts of this start. `None` without a chat role, on
+/// a Mac (one GPU, Metal), or when the engine lists no device of that name,
+/// which is logged with what it does list.
+fn pinned_chat_device(state: &AppState, binary: &Path, backend_dir: Option<&Path>) -> Option<crate::commands::gpu_roles::LlamaDevice> {
+    use crate::commands::gpu_roles as roles;
+    if cfg!(target_os = "macos") {
+        return None;
+    }
+    let card = roles::chat_card(state)?;
+    let devices = list_engine_devices(binary, backend_dir);
+    let detected = if roles::needs_detection(&card, &devices) { roles::detected_of_vendor(&card.vendor) } else { Vec::new() };
+    match roles::pick_llama_device(&card, &detected, &devices) {
+        Ok(device) => {
+            roles::remember_device(&binary.to_string_lossy(), &card, &device.id);
+            tracing::info!(
+                target: "engine",
+                card = %card.name,
+                vendor = %card.vendor,
+                index = card.index,
+                device = %device.id,
+                free_mib = device.free_mib,
+                "the chat card is this engine device"
+            );
+            Some(device.clone())
+        }
+        Err(why) => {
+            tracing::warn!(target: "engine", card = %card.name, reason = %why, "the chat card could not be found among the engine devices, the engine starts unpinned");
+            None
+        }
+    }
+}
+
+/// The device for one attempt: the start's pick when there is one, read
+/// fresh otherwise (a restart after a render, a sanity-probe restart).
+fn chat_engine_device(state: &AppState, binary: &Path, backend_dir: Option<&Path>) -> Option<String> {
+    if cfg!(target_os = "macos") {
+        return None;
+    }
+    let card = crate::commands::gpu_roles::chat_card(state)?;
+    if let Some(id) = crate::commands::gpu_roles::cached_device(&binary.to_string_lossy(), &card) {
+        return Some(id);
+    }
+    pinned_chat_device(state, binary, backend_dir).map(|d| d.id)
+}
+
+/// What each service will be started with under the current picks, for the
+/// readout in Settings, Hardware and for a support log. Spawns nothing but
+/// the engine's own device listing, and that only with a chat role set.
+#[tauri::command]
+pub async fn describe_gpu_roles(app: AppHandle) -> Result<Vec<crate::commands::gpu_roles::RolePlan>, String> {
+    // Off the main thread: the device listing starts the engine binary.
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        describe_gpu_roles_blocking(&app, &state)
+    })
+    .await
+    .map_err(|e| format!("GPU role readout failed to run: {e}"))?
+}
+
+fn describe_gpu_roles_blocking(app: &AppHandle, state: &AppState) -> Result<Vec<crate::commands::gpu_roles::RolePlan>, String> {
+    use crate::commands::gpu_roles::{effective_selection, env_of, GpuRole, RolePlan};
+    let mut out = Vec::new();
+    let comfy = effective_selection(state, GpuRole::Comfy).unwrap_or_default();
+    // C56: with the split on, say which card holds which part.
+    let comfy_note = crate::commands::gpu_roles::comfy_split(state).map(|s| crate::commands::gpu_roles::split_note(&s));
+    out.push(RolePlan { service: "ComfyUI".into(), env: env_of(&comfy), args: vec![], note: comfy_note });
+    let chat = effective_selection(state, GpuRole::Chat).unwrap_or_default();
+    out.push(RolePlan {
+        service: "Ollama".into(),
+        env: env_of(&chat),
+        args: vec![],
+        note: Some("Applies when LU starts Ollama. An Ollama that was already running keeps its card until it is restarted.".into()),
+    });
+    let (args, note) = match (crate::commands::gpu_roles::chat_card(state), resolve_engine_binary(app)) {
+        (None, _) => (vec![], None),
+        (Some(_), _) if cfg!(target_os = "macos") => (vec![], None),
+        (Some(_), None) => (vec![], Some("The LU Engine is not installed.".into())),
+        (Some(card), Some(binary)) => match pinned_chat_device(state, &binary, resolve_engine_backend_dir(app).as_deref()) {
+            Some(d) => (vec!["--device".into(), d.id.clone()], None),
+            None => (vec![], Some(format!("The LU Engine lists no device called \"{}\", so it would use every card.", card.name))),
+        },
+    };
+    out.push(RolePlan { service: "LU Engine".into(), env: env_of(&chat), args, note });
+    out.push(RolePlan {
+        service: "LM Studio".into(),
+        env: vec![],
+        args: vec![],
+        note: Some("LM Studio picks its card itself: choose it in LM Studio's own hardware settings.".into()),
+    });
+    Ok(out)
+}
+
+// ── The phone: the same commands, an engine inside the app ───────────────────
+//
+// Android and iOS cannot start `llama-server`. The commands above keep their
+// names, their arguments and their answers, and what differs is only what
+// "start" does: instead of spawning a process it loads the model into this
+// one (`engine_inproc.rs`). Stop, status, the dead-engine watch and the
+// shutdown are the desktop code, because the handle answers like a process.
+//
+// What a phone does NOT do, on purpose, and what the answers therefore never
+// contain: no Flash Attention retry, no measured partial offload, no vision
+// file (the in-process engine is text only, an `mmproj` next to the model is
+// ignored), no KV slot directory.
+//
+// Of `EngineTuning` the phone applies the context size, the layer count, the
+// threads, Flash Attention and the cache types (8 bit at most). It never
+// applies `mlock` and `no_mmap`, see `engine_inproc::LoadTuning` for why.
+
+/// `bundled_engine_status` on a phone: the desktop answer plus `inProcess`
+/// and `accelerator` (`"gpu"`, `"cpu"`, or null when nothing runs).
+#[cfg(any(mobile, test))]
+pub(crate) fn with_phone_status(mut answer: serde_json::Value) -> serde_json::Value {
+    let accelerator = if answer["running"] == serde_json::json!(true) {
+        // `gpuLayers` is null for "every layer" and a number otherwise, and
+        // the only number a phone ever asks for by itself is 0.
+        match answer["gpuLayers"].as_u64() {
+            Some(0) => serde_json::json!("cpu"),
+            _ => serde_json::json!("gpu"),
+        }
+    } else {
+        serde_json::Value::Null
+    };
+    answer["inProcess"] = serde_json::json!(true);
+    answer["accelerator"] = accelerator;
+    answer
+}
+
+#[cfg(mobile)]
+fn start_bundled_engine_blocking(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    model_path: String,
+    tuning: Option<EngineTuning>,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    use super::engine_inproc as inproc;
+
+    // One load at a time. Two triggers without the gate put two GGUFs into
+    // memory side by side, and the loser sits in a C call nobody can cancel
+    // (old Android finding F7).
+    let _gate = crate::commands::process::start_gate(&crate::commands::process::ENGINE_START);
+    let tuning = tuning.unwrap_or_default();
+    let preferred = port.unwrap_or(DEFAULT_ENGINE_PORT);
+
+    if !Path::new(&model_path).exists() {
+        return Err(format!("Model file not found: {model_path}"));
+    }
+    // Eight bytes of the file before anything is stopped, as on the desktop.
+    // The vision file it may find is not used here.
+    let _vision_file_not_used = precheck_model_files(&model_path)?;
+
+    let n_ctx = inproc::clamp_ctx(effective_ctx(&tuning));
+    let plan = inproc::plan_gpu(inproc::Platform::current(), tuning.gpu_layers, inproc::force_gpu_from_env());
+    let load_tuning = inproc::LoadTuning::from_settings(tuning.threads, &tuning.flash_attn, &tuning.cache_type_k, &tuning.cache_type_v);
+    // The settings are part of the identity: a change on the engine page is
+    // a different request, and the model is loaded again with it.
+    let wanted = inproc::identity_args_tuned(&model_path, n_ctx, plan.layers, load_tuning);
+
+    // Already serving exactly this and healthy: nothing to do. The context in
+    // the identity is the REQUESTED one on both sides, so a model that trains
+    // at less than the request is not reloaded on every call.
+    {
+        let guard = state.bundled_engine.lock().unwrap();
+        if let Some(engine) = guard.as_ref() {
+            // On auto the layer count the engine ended up with is a result
+            // (the self-test may have taken the card away), not part of the
+            // request. Same rule as the desktop's measured offload.
+            let same_request = if tuning.gpu_layers < 0 && engine.auto_layers {
+                argv_without_gpu_layers(&engine.args) == argv_without_gpu_layers(&wanted)
+            } else {
+                engine.args == wanted
+            };
+            if same_request
+                && may_keep_engine_where_it_is(engine.port, preferred, || port_is_bindable(preferred))
+                && engine_healthy(engine.port)
+            {
+                return Ok(serde_json::json!({
+                    "status": "already_running",
+                    "port": engine.port,
+                    "model_path": engine.model_path,
+                    "ctx": engine.ctx,
+                }));
+            }
+        }
+    }
+
+    // What was serving, so a failed switch can bring it back.
+    let previous = {
+        let guard = state.bundled_engine.lock().unwrap();
+        guard.as_ref().map(|e| (e.model_path.clone(), e.args.clone(), e.auto_layers, e.port))
+    };
+
+    // One model at a time. The stop joins the engine's threads, and only
+    // then is the old GGUF out of memory, which is also why the memory guard
+    // below comes after it: before the stop the old model still counts
+    // against what is available.
+    stop_engine_locked(state);
+
+    // From here to the end of the load a memory warning finds no model in the
+    // state. It is kept and answered below (M9).
+    let load_mark = inproc::LoadInProgress::begin();
+    let loaded = inproc::ram_guard(&model_path).and_then(|()| {
+        load_into(state, &model_path, n_ctx, &wanted, tuning.gpu_layers < 0, plan, load_tuning, preferred)
+    });
+    drop(load_mark);
+    match loaded {
+        Ok(answer) => {
+            // The system warned while the model was loading: it goes again
+            // before the system ends the app, and the caller is told why.
+            // The previous model is not brought back, memory is what is short.
+            if inproc::answer_warning_from_load(app) {
+                return Err(inproc::MEMORY_DURING_LOAD_MESSAGE.to_string());
+            }
+            Ok(answer)
+        }
+        Err(msg) => {
+            let restored = previous.is_some_and(|(path, args, auto, old_port)| {
+                let old_ctx = args
+                    .windows(2)
+                    .find(|w| w[0] == "--ctx-size")
+                    .and_then(|w| w[1].parse().ok())
+                    .unwrap_or(inproc::MAX_CTX);
+                let old_layers = gpu_layers_in(&args).unwrap_or(0);
+                let old_plan = inproc::GpuPlan { layers: old_layers, app_chose_cpu: false, note: None };
+                // The way it ran before, settings included.
+                let old_tuning = inproc::LoadTuning::from_identity(&args);
+                Path::new(&path).exists()
+                    && load_into(state, &path, old_ctx, &args, auto, old_plan, old_tuning, old_port).is_ok()
+            });
+            Err(if restored { with_note_on_top(&msg, RESTORED_NOTE) } else { msg })
+        }
+    }
+}
+
+/// Load one model into this process and put its handle into the state.
+#[cfg(mobile)]
+fn load_into(
+    state: &AppState,
+    model_path: &str,
+    n_ctx: u32,
+    identity: &[String],
+    auto_layers: bool,
+    plan: super::engine_inproc::GpuPlan,
+    load_tuning: super::engine_inproc::LoadTuning,
+    preferred_port: u16,
+) -> Result<serde_json::Value, String> {
+    use super::engine_inproc as inproc;
+
+    let candidates = engine_port_candidates(preferred_port);
+    let port = first_usable_port(&candidates, port_is_bindable).ok_or_else(|| {
+        no_free_port_message(preferred_port, candidates.last().copied().unwrap_or(preferred_port))
+    })?;
+
+    tracing::info!(
+        target: "engine",
+        port, ctx = n_ctx, gpu_layers = plan.layers,
+        model_bytes = std::fs::metadata(model_path).map(|m| m.len()).unwrap_or(0),
+        model = %model_path,
+        "starting the LU Engine in-process"
+    );
+    let up = inproc::launch_with_fallback(&inproc::LaunchRequest {
+        kind: inproc::Kind::Chat,
+        model_path,
+        n_ctx,
+        port,
+        gpu: plan,
+        tuning: load_tuning,
+        is_garbled: inproc::sanity_says_garbled,
+    })?;
+
+    // The identity keeps the REQUEST (model and asked-for context), with the
+    // layer count the engine really runs with: that is what the status reads.
+    let mut args = argv_without_gpu_layers(identity);
+    args.push("-ngl".to_string());
+    args.push(up.gpu_layers.to_string());
+
+    let mut answer = started_answer(port, model_path, Some(up.n_ctx));
+    if up.retried {
+        // The keys the desktop uses when its probe had to step in.
+        answer["retried"] = serde_json::json!(true);
+        answer["garbled"] = serde_json::json!(true);
+    }
+    if up.cpu_fallback {
+        answer["cpuOnly"] = serde_json::json!(true);
+    }
+    if let Some(note) = up.note {
+        answer["note"] = serde_json::json!(note);
+    }
+    if up.tuning_dropped {
+        // The model runs, with the standard cache settings instead of the
+        // chosen ones. Its own key: `note` belongs to the card.
+        answer["tuningNote"] = serde_json::json!(inproc::TUNING_DROPPED_NOTE);
+    }
+
+    *state.bundled_engine.lock().unwrap() = Some(BundledEngine {
+        child: up.child,
+        model_path: model_path.to_string(),
+        port,
+        // The context really opened, not the one asked for.
+        ctx: Some(up.n_ctx),
+        args,
+        auto_layers,
+        cpu_fallback: up.cpu_fallback,
+        sanity_note: up.note,
+        // The engine inside the app loads no image part (the phone catalogue
+        // names none), so there is nothing that could have stayed out.
+        image_part_note: None,
+        stderr: None,
+    });
+    tracing::info!(target: "engine", port, ctx = up.n_ctx, gpu_layers = up.gpu_layers, cpu_fallback = up.cpu_fallback, "the LU Engine is serving in-process");
+    Ok(answer)
+}
+
+/// The embeddings engine of a phone. Always on the processor: there is no
+/// text to judge, so a card that computes garbage would go unnoticed, and the
+/// vectors would be wrong without anything looking wrong.
+#[cfg(mobile)]
+fn start_bundled_embed_blocking(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    model_path: String,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    use super::engine_inproc as inproc;
+
+    let _gate = crate::commands::process::start_gate(&crate::commands::process::EMBED_START);
+    let preferred = port.unwrap_or(DEFAULT_EMBED_PORT);
+
+    if !Path::new(&model_path).exists() {
+        return Err(format!("Embedding model file not found: {model_path}"));
+    }
+    {
+        let guard = state.bundled_embed.lock().unwrap();
+        if let Some(embed) = guard.as_ref() {
+            if embed.model_path == model_path && engine_healthy(embed.port) {
+                return Ok(serde_json::json!({
+                    "status": "already_running",
+                    "port": embed.port,
+                    "model_path": embed.model_path,
+                }));
+            }
+        }
+    }
+    stop_embed_locked(state);
+    inproc::ram_guard(&model_path)?;
+    // After the stop, so the port the old server held counts as free again.
+    // The answer carries the port, and the page follows it (embedBaseUrl).
+    let candidates = embed_port_candidates(preferred);
+    let port = first_usable_port(&candidates, port_is_bindable).ok_or_else(|| {
+        no_free_port_message(preferred, candidates.last().copied().unwrap_or(preferred))
+    })?;
+
+    let cpu = inproc::GpuPlan { layers: 0, app_chose_cpu: false, note: None };
+    // A memory warning during this load is kept and answered below (M9).
+    let load_mark = inproc::LoadInProgress::begin();
+    let up = inproc::launch_with_fallback(&inproc::LaunchRequest {
+        kind: inproc::Kind::Embed,
+        model_path: &model_path,
+        n_ctx: inproc::EMBED_CTX,
+        port,
+        gpu: cpu,
+        // The embeddings engine has no settings of its own.
+        tuning: inproc::LoadTuning::default(),
+        is_garbled: inproc::sanity_says_garbled,
+    });
+    drop(load_mark);
+    let up = up?;
+
+    *state.bundled_embed.lock().unwrap() = Some(BundledEngine {
+        child: up.child,
+        model_path: model_path.clone(),
+        port,
+        // The embed server never reports a context size (same as desktop).
+        ctx: None,
+        args: inproc::identity_args(&model_path, inproc::EMBED_CTX, 0),
+        auto_layers: false,
+        cpu_fallback: false,
+        sanity_note: None,
+        image_part_note: None,
+        stderr: None,
+    });
+    // `low` and `critical` both take the embeddings model, so a kept warning
+    // always means it is gone again.
+    let chat_went = inproc::answer_warning_from_load(app);
+    if chat_went || state.bundled_embed.lock().map(|g| g.is_none()).unwrap_or(false) {
+        return Err(inproc::MEMORY_DURING_LOAD_MESSAGE.to_string());
+    }
+    tracing::info!(target: "engine", port, "the LU Engine embeddings server is serving in-process");
+    Ok(serde_json::json!({
+        "status": "started",
+        "port": port,
+        "model_path": model_path,
+    }))
+}
+
+/// The phone arms are not compiled in the build these tests run in, so what
+/// they promise is held partly by running the pure pieces and partly by
+/// reading the source.
+#[cfg(test)]
+mod phone_tests {
+    use super::*;
+
+    const SRC: &str = include_str!("engine.rs");
+
+    fn body_of(signature: &str) -> &'static str {
+        let f = &SRC[SRC.find(signature).unwrap_or_else(|| panic!("{signature} exists"))..];
+        &f[..f.find("\n}\n").expect("the function ends")]
+    }
+
+    /// Found on the emulator: every model command answered "Cannot resolve
+    /// app data directory", because the models folder asked `dirs` first.
+    #[test]
+    fn the_models_folder_asks_dirs_only_on_a_desktop() {
+        let body = body_of("pub fn builtin_models_dir() -> Result<PathBuf, String>");
+        let at = body.find("dirs::data_dir()").expect("the desktop check exists");
+        let before = &body[..at];
+        let last_code_line = before
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with("//"))
+            .unwrap_or("");
+        assert_eq!(last_code_line, "#[cfg(desktop)]", "the dirs check is gated to desktop");
+    }
+
+    #[test]
+    fn the_status_says_where_a_phone_computes_and_changes_no_desktop_key() {
+        let on_cpu = with_phone_status(serde_json::json!({
+            "running": true, "healthy": true, "port": 8127, "cpuOnly": true, "gpuLayers": 0,
+            "sanityNote": "x", "ctx": 4096, "model_path": "/m.gguf", "modelBytes": 1,
+        }));
+        assert_eq!(on_cpu["accelerator"], "cpu");
+        assert_eq!(on_cpu["inProcess"], true);
+        // Nothing the desktop answer carries was touched.
+        assert_eq!(on_cpu["cpuOnly"], true);
+        assert_eq!(on_cpu["gpuLayers"], 0);
+        assert_eq!(on_cpu["port"], 8127);
+
+        // Every layer on the card is reported as null (`gpu_layers_reported`).
+        let on_card = with_phone_status(serde_json::json!({ "running": true, "gpuLayers": null, "cpuOnly": false }));
+        assert_eq!(on_card["accelerator"], "gpu");
+
+        let idle = with_phone_status(serde_json::json!({ "running": false, "gpuLayers": null }));
+        assert!(idle["accelerator"].is_null(), "nothing runs, so nothing computes anywhere");
+        assert_eq!(idle["inProcess"], true);
+    }
+
+    #[test]
+    fn a_phone_stops_the_loaded_model_and_then_deletes_it() {
+        // Old Android finding A43, and the dead end v3.0.5 would have brought
+        // to the phone: its delete REFUSES the loaded model, and a phone has
+        // only the one.
+        let f = body_of("pub async fn delete_bundled_model(");
+        let refuse = f.find("#[cfg(desktop)]\n        if loaded.as_deref().is_some_and(|l| same(l, &path)) {").expect("the desktop refusal is desktop only");
+        let stop = f.find("#[cfg(mobile)]\n        let stopped = loaded.as_deref().is_some_and(|l| same(l, &path)) && stop_engine_locked(&state);").expect("a phone stops the engine instead");
+        let remove = f.find("std::fs::remove_file(f)").expect("the delete itself");
+        assert!(refuse < stop && stop < remove, "stop first, then delete");
+    }
+
+    #[test]
+    fn a_phone_start_goes_through_the_gate_and_keeps_the_desktop_answer() {
+        let f = body_of("#[cfg(mobile)]\nfn start_bundled_engine_blocking(");
+        assert!(f.contains("start_gate(&crate::commands::process::ENGINE_START)"), "one load at a time");
+        assert!(f.contains("stop_engine_locked(state);"), "one model at a time");
+        // The same four keys the desktop answers `already_running` with.
+        for key in ["\"status\": \"already_running\"", "\"port\": engine.port", "\"model_path\": engine.model_path", "\"ctx\": engine.ctx"] {
+            assert!(f.contains(key), "{key}");
+        }
+        let load = body_of("#[cfg(mobile)]\nfn load_into(");
+        assert!(load.contains("started_answer(port, model_path, Some(up.n_ctx))"), "the loaded context, not the requested one");
+        assert!(load.contains("engine_port_candidates(preferred_port)"), "the port walk of the desktop");
+        let embed = body_of("#[cfg(mobile)]\nfn start_bundled_embed_blocking(");
+        assert!(embed.contains("start_gate(&crate::commands::process::EMBED_START)"));
+        // N-1 of the iOS check of package 17: a taken 8128 is another port.
+        let walk = embed.find("first_usable_port(&candidates, port_is_bindable)").expect("the embed start walks");
+        assert!(embed.contains("embed_port_candidates(preferred)"), "its own walk, apart from the chat engine");
+        assert!(embed.find("stop_embed_locked(state);").expect("the old server goes first") < walk, "stop, then look for a port");
+        assert!(embed.contains("\"port\": port,"), "the answer names the port it took");
+    }
+
+    #[test]
+    fn the_embed_walk_never_meets_the_chat_engine_walk() {
+        let engine = engine_port_candidates(DEFAULT_ENGINE_PORT);
+        let embed = embed_port_candidates(DEFAULT_EMBED_PORT);
+        assert_eq!(embed[0], DEFAULT_EMBED_PORT, "8128 is still tried first");
+        assert_eq!(embed.len(), PORT_SEARCH_SPAN as usize + 1, "the walk stays bounded");
+        assert!(embed.iter().all(|p| !engine.contains(p)), "{embed:?} against {engine:?}");
+        assert!(embed[1] > *engine.iter().max().unwrap(), "the walk starts above the chat engine's");
+        // A taken 8128 becomes the next port of this walk, not an error.
+        assert_eq!(first_usable_port(&embed, |p| p != DEFAULT_EMBED_PORT), Some(embed[1]));
+        assert_eq!(first_usable_port(&embed, |_| false), None);
+        // At the top of the range the walk ends instead of wrapping.
+        assert!(embed_port_candidates(u16::MAX).iter().all(|p| *p >= DEFAULT_EMBED_PORT));
+    }
+
+    #[test]
+    fn every_function_that_spawns_the_sidecar_is_desktop_only() {
+        // A phone cannot start a process. Whatever builds a `Command` for
+        // llama-server must not be reachable there.
+        for signature in [
+            // pub(crate) since 3.0.9: the Neuron tweaker restarts the engine with it.
+            "pub(crate) fn start_bundled_engine_blocking(\n    app: &AppHandle,",
+            "fn restore_engine(binary: &Path,",
+            "fn start_after_stop(\n",
+            "fn serve_or_heal_garbled(\n",
+            "fn spawn_engine_attempt(\n",
+            "fn start_bundled_embed_blocking(\n    app: &AppHandle,",
+        ] {
+            assert!(
+                SRC.contains(&format!("\n#[cfg(desktop)]\n{signature}")),
+                "{signature} must be gated with cfg(desktop)"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // .dan_48 (help chat, 2026-09-05): the bin on an LU Engine row. What it may
@@ -4405,7 +6536,7 @@ mod tests {
 
         assert_eq!(gguf_delete_plan(&single, &roots).unwrap(), vec![std::fs::canonicalize(&single).unwrap()]);
         assert!(gguf_delete_plan(&text, &roots).unwrap_err().contains("GGUF"));
-        assert!(gguf_delete_plan(&stranger, &roots).unwrap_err().contains("Model Storage"));
+        assert!(gguf_delete_plan(&stranger, &roots).unwrap_err().contains("Storage"));
         // whichever part the row pointed at, the set goes, and only that set
         let shards = gguf_delete_plan(&inside.join("big-00002-of-00003.gguf"), &roots).unwrap();
         assert_eq!(shards.len(), 3, "{shards:?}");
@@ -4420,9 +6551,197 @@ mod tests {
         let _ = std::fs::remove_dir_all(&outside);
     }
 
+    #[test]
+    fn deleting_a_model_takes_its_image_part_along_and_no_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("Qwen3.5-9B.Q4_K_M.gguf");
+        let part = dir.path().join("Qwen3.5-9B.Q4_K_M.mmproj.gguf");
+        let other_part = dir.path().join("Other.Q4_K_M.mmproj.gguf");
+        for f in [&model, &part, &other_part] {
+            std::fs::write(f, b"x").unwrap();
+        }
+        for i in 1..=2 {
+            std::fs::write(dir.path().join(format!("big-0000{i}-of-00002.gguf")), b"x").unwrap();
+        }
+        // A split model names its part after its first file.
+        let split_part = dir.path().join("big-00001-of-00002.mmproj.gguf");
+        std::fs::write(&split_part, b"x").unwrap();
+        let roots = vec![dir.path().to_path_buf()];
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
+
+        assert_eq!(gguf_delete_plan(&model, &roots).unwrap(), vec![canon(&model), canon(&part)]);
+        let split = gguf_delete_plan(&dir.path().join("big-00002-of-00002.gguf"), &roots).unwrap();
+        assert_eq!(split.len(), 3, "{split:?}");
+        assert_eq!(split.last().unwrap(), &canon(&split_part));
+        assert!(!split.contains(&canon(&other_part)));
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+
+    /// The argv of every test below on every machine: the macOS and Linux one.
+    /// It shadows `super::build_server_args`, whose mmap answer follows the
+    /// machine the tests run on (`mmap_off`); the Windows answer is pinned by
+    /// its own tests with `server_args`.
+    fn build_server_args(model_path: &str, tuning: &EngineTuning, port: u16, slot_save_dir: Option<&str>, mmproj: Option<&str>, auto_ngl: Option<u32>) -> Vec<String> {
+        server_args(model_path, tuning, port, slot_save_dir, mmproj, auto_ngl, false)
+    }
+
+    #[test]
+    fn windows_starts_without_mmap_when_layers_go_to_the_card() {
+        let auto = EngineTuning::default();
+        let has = |args: &[String]| args.windows(2).any(|w| w[0] == "--load-mode" && w[1] == "none");
+        // Every layer on the card, a measured count, and the engine's own fit.
+        assert!(has(&server_args("/m.gguf", &auto, 8127, None, None, None, true)));
+        assert!(has(&server_args("/m.gguf", &auto, 8127, None, None, Some(35), true)));
+        assert!(has(&server_args("/m.gguf", &auto, 8127, None, None, Some(ENGINE_DECIDES), true)));
+        let typed = EngineTuning { gpu_layers: 20, ..Default::default() };
+        assert!(has(&server_args("/m.gguf", &typed, 8127, None, None, None, true)));
+        // Once, also when the user ticked it as well.
+        let ticked = EngineTuning { no_mmap: true, ..Default::default() };
+        let args = server_args("/m.gguf", &ticked, 8127, None, None, None, true);
+        assert_eq!(args.iter().filter(|a| *a == "--load-mode").count(), 1);
+    }
+
+    #[test]
+    fn windows_keeps_mmap_on_the_processor_and_other_systems_keep_it_always() {
+        let auto = EngineTuning::default();
+        let has = |args: &[String]| args.windows(2).any(|w| w[0] == "--load-mode" && w[1] == "none");
+        // Every layer on the processor: the mapping is the model.
+        let cpu = EngineTuning { gpu_layers: 0, ..Default::default() };
+        assert!(!has(&server_args("/m.gguf", &cpu, 8127, None, None, None, true)));
+        assert!(!has(&server_args("/m.gguf", &auto, 8127, None, None, Some(0), true)));
+        // The retry on the processor (`on_the_processor`) drops it with the card.
+        assert!(!has(&server_args("/m.gguf", &on_the_processor(&auto), 8127, None, None, None, true)));
+        // macOS and Linux release what went to the card, so nothing changes there.
+        assert!(!has(&server_args("/m.gguf", &auto, 8127, None, None, None, false)));
+        // A tick in Settings still turns it off everywhere.
+        let ticked = EngineTuning { no_mmap: true, ..Default::default() };
+        assert!(has(&server_args("/m.gguf", &ticked, 8127, None, None, None, false)));
+        assert!(has(&server_args("/m.gguf", &EngineTuning { gpu_layers: 0, ..ticked }, 8127, None, None, None, true)));
+    }
+
+    const GB: u64 = 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+
+    /// The advice for a model of `model_gb` with 60 layers (read the way an
+    /// unreadable head is read, `ModelShape::rough`) at 8K on a card with
+    /// `vram_gb` free, `layers` typed or auto.
+    fn fit(model_gb: f64, vram_gb: Option<u64>, layers: Option<u32>, ram_gb: u64, mac: bool) -> Option<String> {
+        use crate::commands::vram_plan::{decide, mac_gpu_budget, Budget, Calibration, Card, Host, ImagePart, ModelShape};
+        let shape = ModelShape::rough((model_gb * GB as f64) as u64, Some(60));
+        let tuning = EngineTuning { gpu_layers: layers.map(|l| l as i32).unwrap_or(-1), ctx_chosen: true, ..Default::default() };
+        let card = if mac {
+            Card::Unified { budget: mac_gpu_budget(ram_gb * GB, 0) }
+        } else {
+            vram_gb.map(|g| Card::Measured(Budget { bytes: g * GB, free: true, learned_overhead: 0 })).unwrap_or(Card::None)
+        };
+        decide(&shape, &plan_request(&tuning), card, Host { total_ram: ram_gb * GB, mac }, ImagePart::default(), Calibration::default())
+            .advice
+            .map(|a| a.text)
+    }
+
+    #[test]
+    fn a_model_the_card_holds_most_of_leaves_a_32_gb_pc_room() {
+        // gemma-4-31b-it Q4_K_M (18.3 GB) on a 16 GB card: once the file is no
+        // longer mapped twice (mmap_off), what stays in RAM is no tight fit.
+        let note = fit(18.3, Some(16), None, 32, false).expect("does not fit the card whole");
+        assert!(!note.contains("RAM busy"), "{note}");
+        // Qwen3.8-27B UD-Q3_K_XL (13.2 GB) fits a 16 GB card whole.
+        assert_eq!(fit(13.2, Some(16), None, 32, false), None);
+    }
+
+    #[test]
+    fn a_model_mostly_in_ram_is_called_a_tight_fit_with_its_numbers() {
+        // The same 31B on an 8 GB card and 16 GB of RAM.
+        let note = fit(18.3, Some(8), None, 16, false).expect("tight");
+        assert!(note.starts_with("This model is larger than the graphics card: "), "{note}");
+        assert!(note.contains("of this PC's 16 GB RAM busy"), "{note}");
+        // Every layer on the processor: all of it is in RAM.
+        let cpu = fit(18.3, Some(24), Some(0), 32, false).expect("tight on the processor");
+        assert!(cpu.starts_with("Tight fit: all of this model runs on the processor"), "{cpu}");
+    }
+
+    #[test]
+    fn no_verdict_without_a_measured_card_or_without_numbers() {
+        assert_eq!(fit(18.3, None, None, 16, false), None);
+        assert_eq!(fit(18.3, Some(8), Some(999), 0, false), None);
+        // On the processor nothing needs the card to be measured.
+        assert!(fit(18.3, None, Some(0), 16, false).is_some());
+    }
+
+    #[test]
+    fn a_mac_weighs_the_model_against_its_unified_memory() {
+        assert_eq!(fit(18.3, None, None, 48, true), None);
+        let note = fit(18.3, None, None, 24, true).expect("tight on 24 GB");
+        assert!(note.contains("this Mac can give it"), "{note}");
+    }
+
+    #[test]
+    fn the_note_belongs_to_the_model_it_was_taken_for() {
+        use crate::commands::vram_plan::FitAdvice;
+        remember_fit_note("/m/a.gguf", Some(FitAdvice { text: "Tight fit: a".into(), actions: vec![] }));
+        assert_eq!(memory_note_for("/m/a.gguf").as_deref(), Some("Tight fit: a"));
+        assert_eq!(memory_note_for("/m/b.gguf"), None);
+        remember_fit_note("/m/b.gguf", None);
+        assert_eq!(memory_note_for("/m/a.gguf"), None);
+    }
+
+    /// GH #190: llama.cpp checks `--slot-save-path` through the ANSI code
+    /// page, so a folder under `C:\Users\Şaban Yılmaz` must never reach it
+    /// as it is.
+    #[test]
+    fn gh190_a_slot_folder_with_a_non_ascii_name_never_reaches_the_engine_as_is() {
+        let long = r"C:\Users\Şaban Yılmaz\AppData\Roaming\Locally Uncensored\kv-slots".to_string();
+        let short = r"C:\Users\ABANYI~1\AppData\Roaming\LOCALL~1\kv-slots".to_string();
+        assert_eq!(super::ascii_slot_dir(long.clone(), || Some(short.clone())), Some(short));
+        // No short names on this volume: start without the flag.
+        assert_eq!(super::ascii_slot_dir(long.clone(), || None), None);
+        // An OEM short name that kept the letter is no better.
+        assert_eq!(super::ascii_slot_dir(long, || Some(r"C:\Users\ŞABANY~1\kv-slots".into())), None);
+        let ascii = r"C:\Users\Bob Smith\AppData\Roaming\Locally Uncensored\kv-slots".to_string();
+        assert_eq!(super::ascii_slot_dir(ascii.clone(), || panic!("an ASCII path needs no lookup")), Some(ascii));
+    }
+
+    /// GH #190 on a real Windows folder: what reaches llama.cpp is ASCII and
+    /// is the same folder, or nothing at all on a volume without 8.3 names.
+    #[cfg(windows)]
+    #[test]
+    fn gh190_a_real_non_ascii_folder_reaches_the_engine_as_ascii_or_not_at_all() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("Şaban Yılmaz").join("kv-slots");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("probe"), "x").unwrap();
+        let arg = super::slot_save_dir_arg(&dir);
+        eprintln!("GH190 {} -> {arg:?}", dir.display());
+        if let Some(arg) = arg {
+            assert!(arg.is_ascii(), "{arg}");
+            assert!(Path::new(&arg).join("probe").is_file(), "{arg} is the same folder");
+        }
+    }
+
+    /// GH #190, the second net: the exact line from the report is read as the
+    /// slot folder's fault, and the start retries without the flag.
+    #[test]
+    fn gh190_the_refused_slot_folder_is_dropped_for_the_retry() {
+        let stderr = "error while handling argument \"--slot-save-path\": not a directory: C:\\Users\\Şaban Yılmaz\\AppData\\Roaming\\Locally Uncensored\\kv-slots\n\nusage:\n";
+        assert!(super::stderr_blames_the_slot_dir(stderr));
+        assert!(!super::stderr_blames_the_slot_dir("llama_model_load: error loading model: tensor 'blk.0' data is not within the file bounds"));
+        assert!(!super::stderr_blames_the_port(stderr));
+        let src = include_str!("engine.rs");
+        let start = &src[src.find("fn start_after_stop(").unwrap()..];
+        let start = &start[..start.find("\n}\n").unwrap()];
+        assert!(start.contains("stderr_blames_the_slot_dir(&failure.stderr)"), "the retry looks at the slot folder");
+        assert!(start.contains("retry_port != port || slot_dropped"), "a dropped folder rebuilds the argv");
+        assert!(src.contains(concat!("create_dir_all(&dir).ok()?;\n", "            slot_save_dir_arg(&dir)")), "the folder goes through the ASCII check");
+    }
+
+    #[test]
+    fn the_flag_follows_the_machine_it_is_built_for() {
+        let args = super::build_server_args("/m.gguf", &EngineTuning::default(), 8127, None, None, None);
+        assert_eq!(args.iter().any(|a| a == "--load-mode"), cfg!(target_os = "windows"));
+    }
 
     #[test]
     fn health_timeout_scales_with_model_size_and_caps() {
@@ -4449,6 +6768,9 @@ mod tests {
     fn default_tuning_args_match_legacy_shape() {
         // Pin: absent/default tuning must produce EXACTLY the argv the app has
         // shipped since 2.5.7 — expert settings are opt-in, never a drift.
+        // 3.0.8 (A25) adds one thing, the log level llama-server prints its
+        // buffer sizes at, which the check after the start reads; it changes
+        // nothing about what the engine computes.
         let args = build_server_args("/models/qwen.gguf", &EngineTuning::default(), 8127, None, None, None);
         assert_eq!(
             args,
@@ -4458,6 +6780,7 @@ mod tests {
                 "--port", "8127",
                 "--ctx-size", "8192",
                 "-ngl", "999",
+                "-lv", "4",
             ]
         );
     }
@@ -4474,11 +6797,17 @@ mod tests {
         );
         let at = with.iter().position(|a| a == "--mmproj").expect("--mmproj missing");
         assert_eq!(with[at + 1], "/models/qwen3.8.mmproj.gguf");
+        // A Qwen that sees gets a floor for the size of an image.
+        let floor = with.iter().position(|a| a == "--image-min-tokens").expect("--image-min-tokens missing");
+        assert_eq!(with[floor + 1], "1024");
+        let gemma = build_server_args("/models/gemma-4.gguf", &EngineTuning::default(), 8127, None, Some("/models/gemma-4.mmproj.gguf"), None);
+        assert!(gemma.iter().any(|a| a == "--mmproj") && !gemma.iter().any(|a| a == "--image-min-tokens"));
         // Negative control: a model without a projector keeps the legacy argv,
         // so a text-only model can never gain a flag it cannot honour.
         let without = build_server_args("/models/qwen3.8.gguf", &EngineTuning::default(), 8127, None, None, None);
         assert!(!without.iter().any(|a| a == "--mmproj"));
-        assert_eq!(without.len(), with.len() - 2);
+        // The projector and the floor for the size of an image: two flags, two values.
+        assert_eq!(without.len(), with.len() - 4);
     }
 
     #[test]
@@ -4566,21 +6895,210 @@ mod tests {
         assert!(!dest2.path().join("text.mmproj.gguf").exists());
     }
 
+    /// A folder holding these GGUFs. The head is a real one, so the same files
+    /// pass the header check a start runs.
+    fn gguf_folder(names: &[&str]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let mut head = b"GGUF".to_vec();
+        head.extend_from_slice(&3u32.to_le_bytes());
+        for name in names {
+            std::fs::write(dir.path().join(name), &head).unwrap();
+        }
+        dir
+    }
+
+    /// The projector a model in `dir` gets, as a bare file name.
+    fn projector_of(dir: &tempfile::TempDir, model: &str) -> Option<String> {
+        existing_mmproj(&dir.path().join(model).to_string_lossy())
+            .map(|p| Path::new(&p).file_name().unwrap().to_string_lossy().to_string())
+    }
+
+    #[test]
+    fn a_stray_projector_does_not_hang_itself_on_every_model() {
+        // GH discussion 67, and the reason the rule is narrow: the models
+        // folder is flat. One hand-placed mmproj-F16.gguf next to two models
+        // belongs to neither by name, so neither may be called able to see.
+        let dir = gguf_folder(&["gemma-3-4b-it-Q4_K_M.gguf", "Nemo-12B-Q4_K_M.gguf", "mmproj-F16.gguf"]);
+        assert_eq!(projector_of(&dir, "gemma-3-4b-it-Q4_K_M.gguf"), None);
+        assert_eq!(projector_of(&dir, "Nemo-12B-Q4_K_M.gguf"), None);
+        // A file that is not there owns nothing either.
+        assert_eq!(projector_of(&dir, "nothing-here.gguf"), None);
+    }
+
+    #[test]
+    fn one_model_and_one_projector_in_a_folder_belong_together() {
+        // The names the big publishers ship that say nothing about the model.
+        for projector in ["mmproj-F16.gguf", "mmproj-model-f16.gguf", "mmproj-model-f16-4B.gguf", "MMPROJ-BF16.GGUF"] {
+            let dir = gguf_folder(&["gemma-3-4b-it-Q4_K_M.gguf", projector]);
+            assert_eq!(projector_of(&dir, "gemma-3-4b-it-Q4_K_M.gguf").as_deref(), Some(projector));
+        }
+        // Two quants of the one model are still one model.
+        let dir = gguf_folder(&["gemma-3-4b-it-Q4_K_M.gguf", "gemma-3-4b-it-Q8_0.gguf", "mmproj-model-f16.gguf"]);
+        assert_eq!(projector_of(&dir, "gemma-3-4b-it-Q4_K_M.gguf").as_deref(), Some("mmproj-model-f16.gguf"));
+        assert_eq!(projector_of(&dir, "gemma-3-4b-it-Q8_0.gguf").as_deref(), Some("mmproj-model-f16.gguf"));
+        // NEGATIVE CONTROL: a look-alike is another model, and then nobody
+        // gets the projector.
+        let dir = gguf_folder(&["gemma-3-4b-it-Q4_K_M.gguf", "gemma-3-4b-it-abliterated-Q4_K_M.gguf", "mmproj-model-f16.gguf"]);
+        assert_eq!(projector_of(&dir, "gemma-3-4b-it-Q4_K_M.gguf"), None);
+        assert_eq!(projector_of(&dir, "gemma-3-4b-it-abliterated-Q4_K_M.gguf"), None);
+        // NEGATIVE CONTROL: a part in our own naming belongs to the file it
+        // names, also when that file is gone and one other model is left.
+        let dir = gguf_folder(&["Nemo-12B-Q4_K_M.gguf", "gemma-3-4b-it-Q4_K_M.mmproj.gguf"]);
+        assert_eq!(projector_of(&dir, "Nemo-12B-Q4_K_M.gguf"), None);
+    }
+
+    #[test]
+    fn a_projector_that_names_its_model_finds_it_in_a_full_folder() {
+        // The three shapes in use upstream, each next to a model it does not
+        // belong to and a stray projector that names nothing.
+        for (model, projector) in [
+            ("google_gemma-3-4b-it-Q4_K_M.gguf", "mmproj-google_gemma-3-4b-it-f16.gguf"),
+            ("Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf", "mmproj-Qwen2.5-VL-7B-Instruct-Q8_0.gguf"),
+            ("Qwen2-VL-7B-Instruct-abliterated.Q4_K_M.gguf", "Qwen2-VL-7B-Instruct-abliterated.mmproj-fp16.gguf"),
+            ("Qwen2-VL-7B-Instruct-abliterated.i1-Q4_K_M.gguf", "Qwen2-VL-7B-Instruct-abliterated.mmproj-Q8_0.gguf"),
+            ("llava-llama-3-8b-v1_1-int4.gguf", "llava-llama-3-8b-v1_1-mmproj-f16.gguf"),
+            // case of name and extension is the publisher's and the user's
+            ("FOO-BAR-q4_k_m.GGUF", "MMPROJ-foo-bar-F16.Gguf"),
+        ] {
+            let dir = gguf_folder(&[model, projector, "Nemo-12B-Q4_K_M.gguf", "mmproj-F16.gguf"]);
+            assert_eq!(projector_of(&dir, model).as_deref(), Some(projector), "{model}");
+            assert_eq!(projector_of(&dir, "Nemo-12B-Q4_K_M.gguf"), None, "{model}");
+        }
+        // NEGATIVE CONTROL: a longer name is another model, not this one.
+        let dir = gguf_folder(&[
+            "gemma-3-4b-it-abliterated-Q4_K_M.gguf",
+            "gemma-3-4b-it-Q4_K_M.gguf",
+            "mmproj-gemma-3-4b-it-f16.gguf",
+        ]);
+        assert_eq!(projector_of(&dir, "gemma-3-4b-it-abliterated-Q4_K_M.gguf"), None);
+        assert_eq!(projector_of(&dir, "gemma-3-4b-it-Q4_K_M.gguf").as_deref(), Some("mmproj-gemma-3-4b-it-f16.gguf"));
+    }
+
     #[test]
     fn an_ambiguous_projector_is_left_alone() {
         // Two projectors in one folder means guessing; a wrong image tower is
         // worse than a model that is honestly text-only.
-        let src = tempfile::tempdir().unwrap();
-        std::fs::write(src.path().join("m.gguf"), b"weights").unwrap();
-        std::fs::write(src.path().join("mmproj-F16.gguf"), b"a").unwrap();
-        std::fs::write(src.path().join("mmproj-BF16.gguf"), b"b").unwrap();
-        assert!(find_projector_sibling(&src.path().join("m.gguf")).is_none());
-        // The exact-name convention still wins over the ambiguous pair.
-        std::fs::write(src.path().join("m.mmproj.gguf"), b"c").unwrap();
+        let dir = gguf_folder(&["m.gguf", "mmproj-F16.gguf", "mmproj-BF16.gguf"]);
+        assert_eq!(projector_of(&dir, "m.gguf"), None);
+        // Two that both carry the model's name are a choice just the same.
+        let dir = gguf_folder(&["m-Q4_K_M.gguf", "mmproj-m-f16.gguf", "mmproj-m-Q8_0.gguf"]);
+        assert_eq!(projector_of(&dir, "m-Q4_K_M.gguf"), None);
+        // One by name beats one that names nothing.
+        let dir = gguf_folder(&["m-Q4_K_M.gguf", "mmproj-m-f16.gguf", "mmproj-F16.gguf"]);
+        assert_eq!(projector_of(&dir, "m-Q4_K_M.gguf").as_deref(), Some("mmproj-m-f16.gguf"));
+        // And our own naming wins over all of them.
+        let dir = gguf_folder(&["m.gguf", "mmproj-F16.gguf", "mmproj-BF16.gguf", "mmproj-m-f16.gguf", "m.mmproj.gguf"]);
+        assert_eq!(projector_of(&dir, "m.gguf").as_deref(), Some("m.mmproj.gguf"));
+    }
+
+    #[test]
+    fn the_rule_reads_names_the_same_on_every_system() {
+        // No disk in this one: Windows hands over names in whatever case the
+        // user typed, and a case-sensitive disk can hold what Windows cannot.
+        let names = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let folder = names(&["Model-Q4_K_M.GGUF", "MODEL-Q4_K_M.MMPROJ.GGUF", "other.gguf"]);
+        assert_eq!(pick_projector("Model-Q4_K_M.GGUF", &folder), Some("MODEL-Q4_K_M.MMPROJ.GGUF"));
+        assert_eq!(pick_projector("other.gguf", &folder), None);
+        // Two spellings of our own part can only exist on a case-sensitive
+        // disk, and then it is a choice again.
+        let twice = names(&["m.gguf", "m.mmproj.gguf", "M.MMPROJ.gguf"]);
+        assert_eq!(pick_projector("m.gguf", &twice), None);
+        // A Windows path goes in whole and the folder part does not matter
+        // to the name rule.
         assert_eq!(
-            find_projector_sibling(&src.path().join("m.gguf")),
-            Some(src.path().join("m.mmproj.gguf"))
+            mmproj_sibling_path("C:\\Models\\a.Gguf").to_string_lossy().replace('\\', "/").rsplit('/').next(),
+            Some("a.mmproj.gguf")
         );
+    }
+
+    /// A GGUF head with nothing but these bool keys, as a projector writes them.
+    fn projector_head(flags: &[(&str, bool)]) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"GGUF");
+        b.extend_from_slice(&3u32.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        b.extend_from_slice(&(flags.len() as u64).to_le_bytes());
+        for (key, on) in flags {
+            b.extend_from_slice(&(key.len() as u64).to_le_bytes());
+            b.extend_from_slice(key.as_bytes());
+            b.extend_from_slice(&7u32.to_le_bytes());
+            b.push(u8::from(*on));
+        }
+        b
+    }
+
+    #[test]
+    fn a_loaded_audio_model_does_not_see_either() {
+        // Measured in the Mac app: LFM3-Audio loaded in the LU Engine was
+        // listed with vision=true, because the loaded model answered with
+        // "started with --mmproj".
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("a.mmproj.gguf");
+        std::fs::write(&audio, projector_head(&[("clip.has_audio_encoder", true)])).unwrap();
+        let vision = dir.path().join("v.mmproj.gguf");
+        std::fs::write(&vision, projector_head(&[("clip.has_vision_encoder", true)])).unwrap();
+        let args = |p: &std::path::Path| vec!["-m".to_string(), "/m.gguf".into(), "--mmproj".into(), p.to_string_lossy().to_string()];
+        assert!(!started_seeing(&args(&audio)));
+        assert!(started_seeing(&args(&vision)));
+        assert!(!started_seeing(&["-m".to_string(), "/m.gguf".into()]));
+    }
+
+    #[test]
+    fn an_audio_projector_hears_and_does_not_see() {
+        // The flags of the three LFM3 projectors, read from the files on
+        // Hugging Face (LiquidAI/LFM3-{Audio,Omni,VL}-2B-GGUF, Q8_0) on the Mac.
+        let dir = tempfile::tempdir().unwrap();
+        for (name, flags, sees) in [
+            ("LFM3-Audio-2B-Q4_K_M", vec![("clip.has_audio_encoder", true)], false),
+            ("LFM3-Omni-2B-Q4_K_M", vec![("clip.has_vision_encoder", true), ("clip.has_audio_encoder", true)], true),
+            ("LFM3-VL-2B-Q4_K_M", vec![("clip.has_vision_encoder", true)], true),
+            ("Older-Vision-Q4_K_M", vec![], true),
+            ("Off-Q4_K_M", vec![("clip.has_vision_encoder", false), ("clip.has_audio_encoder", true)], false),
+        ] {
+            let model = dir.path().join(format!("{name}.gguf"));
+            std::fs::write(&model, b"weights").unwrap();
+            std::fs::write(dir.path().join(format!("{name}.mmproj.gguf")), projector_head(&flags)).unwrap();
+            let path = model.to_string_lossy().to_string();
+            assert_eq!(model_can_see_images(&path), sees, "{name}");
+            // The engine still starts with the projector: it is the model's ear.
+            assert!(existing_mmproj(&path).is_some(), "{name}");
+        }
+    }
+
+    #[test]
+    fn what_the_list_calls_seeing_is_what_the_start_passes_along() {
+        // One question, asked twice: the model list reports `vision`, the
+        // start puts --mmproj on the argv. Every folder shape above has to
+        // get the same answer from both, or the app shows a model as seeing
+        // that then starts blind (or the other way round).
+        for (folder, model) in [
+            (vec!["a-Q4_K_M.gguf", "a-Q4_K_M.mmproj.gguf"], "a-Q4_K_M.gguf"),
+            (vec!["a-Q4_K_M.gguf", "mmproj-F16.gguf"], "a-Q4_K_M.gguf"),
+            (vec!["a-Q4_K_M.gguf", "b-Q4_K_M.gguf", "mmproj-a-f16.gguf"], "a-Q4_K_M.gguf"),
+            (vec!["a-Q4_K_M.gguf", "b-Q4_K_M.gguf", "mmproj-a-f16.gguf"], "b-Q4_K_M.gguf"),
+            (vec!["a-Q4_K_M.gguf", "b-Q4_K_M.gguf", "mmproj-F16.gguf"], "a-Q4_K_M.gguf"),
+            (vec!["a-Q4_K_M.gguf", "mmproj-F16.gguf", "mmproj-BF16.gguf"], "a-Q4_K_M.gguf"),
+            (vec!["a-Q4_K_M.gguf"], "a-Q4_K_M.gguf"),
+        ] {
+            let dir = gguf_folder(&folder);
+            let path = dir.path().join(model).to_string_lossy().to_string();
+            let started_with = precheck_model_files(&path).unwrap();
+            assert_eq!(model_can_see_images(&path), started_with.is_some(), "{folder:?} {model}");
+            let args = build_server_args(&path, &EngineTuning::default(), 8127, None, started_with.as_deref(), None);
+            let on_argv = args.iter().position(|a| a == "--mmproj").map(|at| args[at + 1].clone());
+            assert_eq!(on_argv, existing_mmproj(&path), "{folder:?} {model}");
+        }
+    }
+
+    #[test]
+    fn a_hand_placed_projector_gets_the_same_header_check() {
+        // The net under the wider rule: a file picked up under its upstream
+        // name is read before anything is stopped, exactly like our own.
+        let dir = gguf_folder(&["a-Q4_K_M.gguf"]);
+        std::fs::write(dir.path().join("mmproj-a-f16.gguf"), b"<!DOCTYPE html>").unwrap();
+        let reason = precheck_model_files(&dir.path().join("a-Q4_K_M.gguf").to_string_lossy()).unwrap_err();
+        assert!(reason.starts_with("The vision file next to this model "), "{reason}");
+        assert!(reason.contains("mmproj-a-f16"), "{reason}");
     }
 
     #[test]
@@ -4588,6 +7106,10 @@ mod tests {
         assert!(is_projector_file("Qwen3.8-27B-UD-Q4_K_M.mmproj.gguf"));
         assert!(is_projector_file("mmproj-F16.gguf"));
         assert!(is_projector_file("mmproj-model-bf16.gguf"));
+        // upstream names that carry the model in front
+        assert!(is_projector_file("Qwen2-VL-7B-Instruct-abliterated.mmproj-fp16.gguf"));
+        assert!(is_projector_file("llava-llama-3-8b-v1_1-mmproj-f16.gguf"));
+        assert!(is_projector_file("X.MMPROJ.GGUF"));
         assert!(!is_projector_file("Qwen3.8-27B-UD-Q4_K_M.gguf"));
         assert!(!is_projector_file("Huihui-Qwen3.8-27B-abliterated-Q4_K.gguf"));
     }
@@ -4603,6 +7125,7 @@ mod tests {
             gpu_layers: 20,
             mlock: true,
             no_mmap: true,
+            ..Default::default()
         };
         let args = build_server_args("/m.gguf", &tuning, 8127, None, None, None);
         assert_eq!(
@@ -4613,14 +7136,89 @@ mod tests {
                 "--port", "8127",
                 "--ctx-size", "16384",
                 "-ngl", "20",
+                "-lv", "4",
                 "-fa", "on",
                 "-ctk", "q8_0",
                 "-ctv", "q8_0",
                 "-t", "8",
-                "--mlock",
-                "--no-mmap",
+                "--load-mode", "mlock",
             ]
         );
+    }
+
+    /// E1 (3.0.9): every option LU hands the bundled llama.cpp, checked
+    /// against the option list of the pinned tag. b11960 dropped `--mlock`
+    /// and `--no-mmap`, and an option the server does not know ends it before
+    /// it loads a byte: nothing but a real start would have shown that. The
+    /// list is per tag (fixtures/llama-flags/<tag>.txt), so a bump without a
+    /// new list turns this red, and a new list shows every option that went.
+    #[test]
+    fn flags_lu_passes_exist_in_the_pinned_engine() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let script = std::fs::read_to_string(root.join("../scripts/build-llama.sh")).unwrap();
+        let tag = script
+            .lines()
+            .find_map(|l| l.strip_prefix("LLAMA_TAG=\"${LLAMA_TAG:-")?.strip_suffix("}\""))
+            .expect("LLAMA_TAG in build-llama.sh");
+        let list = std::fs::read_to_string(root.join(format!("fixtures/llama-flags/{tag}.txt")))
+            .unwrap_or_else(|_| panic!("fixtures/llama-flags/{tag}.txt is missing: make it from common/arg.cpp of {tag} (see its first lines)"));
+        let known: std::collections::HashSet<&str> = list.lines().filter(|l| l.starts_with('-')).collect();
+
+        let everything = EngineTuning {
+            ctx: 16384,
+            flash_attn: "on".into(),
+            cache_type_k: "q8_0".into(),
+            cache_type_v: "q8_0".into(),
+            threads: 8,
+            gpu_layers: 20,
+            mlock: true,
+            no_mmap: true,
+            plan_cpu_moe: 4,
+            plan_cache_ram_mib: Some(2048),
+            control_vector: Some("/cv.gguf".into()),
+            ..Default::default()
+        };
+        let mut argvs = vec![
+            server_args("/m/qwen.gguf", &everything, 8127, Some("/slots"), Some("/m/qwen.mmproj.gguf"), None, true),
+            server_args("/m.gguf", &EngineTuning::default(), 8127, None, None, None, false),
+            build_embed_args("/e.gguf", 8128),
+        ];
+        // spawn_private_server_with, the GPU choice and the device probe,
+        // and the Neuron tweaker's generator (neuron/mod.rs `generate`).
+        argvs.push(["-c", "-np", "--device", "--list-devices", "--control-vector"].map(String::from).to_vec());
+        argvs.push(["--positive-file", "--negative-file", "-o", "--method", "-ngl", "-c"].map(String::from).to_vec());
+        let src = std::fs::read_to_string(root.join("src/commands/neuron/mod.rs")).unwrap();
+        for flag in ["\"--positive-file\"", "\"--negative-file\"", "\"--method\""] {
+            assert!(src.contains(flag), "the generator call changed, update this list: {flag}");
+        }
+        for argv in &argvs {
+            for a in argv.iter().filter(|a| a.starts_with('-') && a.parse::<f64>().is_err()) {
+                assert!(known.contains(a.as_str()), "llama.cpp {tag} has no option {a} (argv {argv:?})");
+            }
+        }
+    }
+
+    #[test]
+    fn load_settings_become_one_load_mode_the_pinned_engine_knows() {
+        // E1: b11960 ends on `--mlock` and `--no-mmap` ("invalid argument"),
+        // so neither may ever reach the argv again, in any combination.
+        assert_eq!(load_mode(false, false), None);
+        assert_eq!(load_mode(false, true), Some("none"));
+        assert_eq!(load_mode(true, false), Some("mmap+mlock"));
+        assert_eq!(load_mode(true, true), Some("mlock"));
+        for (mlock, no_mmap) in [(false, false), (false, true), (true, false), (true, true)] {
+            let tuning = EngineTuning { mlock, no_mmap, ..Default::default() };
+            for windows in [false, true] {
+                let args = server_args("/m.gguf", &tuning, 8127, None, None, None, windows);
+                assert!(!args.iter().any(|a| a == "--mlock" || a == "--no-mmap" || a == "--mmap"), "{args:?}");
+                assert!(args.iter().filter(|a| *a == "--load-mode").count() <= 1, "{args:?}");
+            }
+        }
+        // Windows with layers on the card reads the file in, and a ticked
+        // mlock pins that copy.
+        let pinned = EngineTuning { mlock: true, ..Default::default() };
+        let args = server_args("/m.gguf", &pinned, 8127, None, None, None, true);
+        assert!(args.windows(2).any(|w| w[0] == "--load-mode" && w[1] == "mlock"), "{args:?}");
     }
 
     #[test]
@@ -4638,6 +7236,7 @@ mod tests {
             gpu_layers: 24,
             mlock: true,
             no_mmap: true,
+            ..Default::default()
         };
         let args = build_server_args(
             "/Users/me/Library/Application Support/LU/models/Nemo 12B.gguf",
@@ -4658,8 +7257,7 @@ mod tests {
             "-ctk q8_0",
             "-ctv q4_0",
             "-t 6",
-            "--mlock",
-            "--no-mmap",
+            "--load-mode mlock",
             "--slot-save-path /slots",
         ] {
             assert!(line.contains(wanted), "{wanted:?} missing from:\n{line}");
@@ -4682,7 +7280,7 @@ mod tests {
             Path::new("/opt/lu/lu-llama-server"),
             &build_server_args("/m.gguf", &EngineTuning::default(), 8127, None, None, None),
         );
-        for unwanted in ["-ctk", "-ctv", "-fa", "-t ", "--mlock", "--no-mmap", "--mmproj", "--slot-save-path"] {
+        for unwanted in ["-ctk", "-ctv", "-fa", "-t ", "--load-mode", "--mmproj", "--slot-save-path"] {
             assert!(!line.contains(unwanted), "{unwanted:?} invented in:\n{line}");
         }
         assert!(line.contains("-ngl 999"), "{line}");
@@ -4707,37 +7305,167 @@ mod tests {
     const CARD_8_GB: u64 = 8188 * 1024 * 1024;
     const CARD_12_GB: u64 = 12288 * 1024 * 1024;
 
-    fn plan(model: u64, blocks: Option<u32>, vram: Option<u64>, ctx: u32) -> OffloadPlan {
+    /// The start decision for a model read the way an unreadable head is
+    /// (`ModelShape::rough`: the file over its layers, 4 KiB of cache per
+    /// token per layer), at a chosen context, so nothing but the layers moves.
+    fn plan_free(model: u64, blocks: Option<u32>, vram: Option<u64>, ctx: u32, free: bool) -> crate::commands::vram_plan::StartDecision {
+        plan_with(model, 0, blocks, vram, ctx, free)
+    }
+
+    fn plan(model: u64, blocks: Option<u32>, vram: Option<u64>, ctx: u32) -> crate::commands::vram_plan::StartDecision {
         plan_free(model, blocks, vram, ctx, true)
     }
 
-    /// R1-3: same as `plan`, with the free-vs-total flag exposed.
-    fn plan_free(model: u64, blocks: Option<u32>, vram: Option<u64>, ctx: u32, free: bool) -> OffloadPlan {
-        plan_offload(&OffloadInputs {
-            model_bytes: model,
-            block_count: blocks,
-            vram_bytes: vram,
-            ctx,
-            free,
-        })
+    fn plan_with(model: u64, part: u64, blocks: Option<u32>, vram: Option<u64>, ctx: u32, free: bool) -> crate::commands::vram_plan::StartDecision {
+        use crate::commands::vram_plan::{decide, Budget, Calibration, Card, Host, ImagePart, ModelShape};
+        let shape = ModelShape::rough(model, blocks);
+        let tuning = EngineTuning { ctx, ctx_chosen: true, ..Default::default() };
+        let card = vram.map(|b| Card::Measured(Budget { bytes: b, free, learned_overhead: 0 })).unwrap_or(Card::None);
+        decide(&shape, &plan_request(&tuning), card, Host { total_ram: 64 * GB, mac: false }, ImagePart::of(part), Calibration::default())
+    }
+
+    fn plan_with_part(model: u64, part: u64, blocks: Option<u32>, vram: Option<u64>, ctx: u32) -> crate::commands::vram_plan::StartDecision {
+        plan_with(model, part, blocks, vram, ctx, true)
+    }
+
+    /// What a decision puts on the card really fits what the probe measured,
+    /// and one layer more would not have.
+    fn fits_and_one_more_would_not(model: u64, blocks: u32, vram: u64, ctx: u32) -> u32 {
+        use crate::commands::vram_plan::{Budget, CacheConfig, ImagePart, ModelShape, Placement};
+        let d = plan(model, Some(blocks), Some(vram), ctx);
+        let ngl = d.ngl.expect("does not fit whole");
+        let shape = ModelShape::rough(model, Some(blocks));
+        let usable = Budget { bytes: vram, free: true, learned_overhead: 0 }.usable();
+        let cfg = CacheConfig::new(ctx, "f16", "f16", "auto");
+        let at = |n: u32| shape.split(Placement { ngl: n, cpu_moe: 0 }, &cfg, &ImagePart::default()).card.total();
+        assert!(at(ngl) <= usable, "-ngl {ngl} does not fit: {} > {}", at(ngl), usable);
+        assert!(at(ngl + 1) > usable, "-ngl {} would have fit too", ngl + 1);
+        ngl
+    }
+
+    // ── The image part in the plan (October 2026) ───────────────────────────
+
+    /// Qwen 3.5 9B Q4_K_M and its F16 image part, as the catalog states them.
+    const NINE_B: u64 = 5_627_045_216;
+    const NINE_B_PART: u64 = 918_166_080;
+
+    #[test]
+    fn a_model_and_its_image_part_that_fit_are_loaded_whole_and_together() {
+        // The owner's test machine: a 9B with its part on a 12 GB card.
+        let p = plan_with_part(NINE_B, NINE_B_PART, Some(32), Some(CARD_12_GB), 8192);
+        assert_eq!(p.ngl, None);
+        assert!(p.with_image_part);
+        assert!(p.why.contains("image part"), "{}", p.why);
+    }
+
+    #[test]
+    fn a_part_that_would_push_the_model_off_the_card_is_left_out_and_the_model_stays_whole() {
+        use crate::commands::vram_plan::{Budget, CacheConfig, ImagePart, ModelShape, Placement};
+        // A card with room for the model at 32K and not for its part beside it.
+        let shape = ModelShape::rough(NINE_B, Some(32));
+        let cfg = CacheConfig::new(32768, "f16", "f16", "auto");
+        let all = Placement { ngl: shape.all_layers(), cpu_moe: 0 };
+        let alone = shape.split(all, &cfg, &ImagePart::default()).card.total();
+        let free = alone + 200 * MIB + Budget { bytes: 0, free: true, learned_overhead: 0 }.reserve();
+        let p = plan_with_part(NINE_B, NINE_B_PART, Some(32), Some(free), 32768);
+        // Every layer on the card, exactly as without a part: nothing moves to
+        // the processor because of the image part.
+        assert_eq!(p.ngl, None, "{}", p.why);
+        assert!(!p.with_image_part);
+        assert!(p.why.contains("without image input"), "{}", p.why);
+        // A smaller context makes room again, which is what the note advises.
+        let smaller = plan_with_part(NINE_B, NINE_B_PART, Some(32), Some(free), 8192);
+        assert!(smaller.with_image_part, "{}", smaller.why);
+        assert_eq!(smaller.ngl, None);
+    }
+
+    #[test]
+    fn a_model_larger_than_the_card_keeps_its_part_and_pays_for_it_in_layers() {
+        // A 27B at 16.5 GB on a 12 GB card is shared with the processor
+        // either way. The part stays and costs layers, it is not dropped.
+        let model = 17_716_740_096_u64;
+        let part = 927_607_488_u64;
+        let without = plan_with_part(model, 0, Some(64), Some(CARD_12_GB), 8192);
+        let with = plan_with_part(model, part, Some(64), Some(CARD_12_GB), 8192);
+        assert!(with.with_image_part);
+        let (a, b) = (without.ngl.unwrap(), with.ngl.unwrap());
+        assert!(b < a && b > 0, "the part costs layers and leaves some: {a} without, {b} with");
+    }
+
+    #[test]
+    fn a_card_that_cannot_hold_the_part_at_all_loads_without_it() {
+        // A 5.4 GB part (Mistral Medium 3.5) on a 2 GB card.
+        let big = plan_with_part(45_000_000_000, 5_356_846_528, Some(88), Some(CARD_2_GB), 8192);
+        assert!(!big.with_image_part);
+        assert!(big.ngl.is_some());
+    }
+
+    #[test]
+    fn a_machine_nothing_measured_loads_the_part_as_before() {
+        let p = plan_with_part(NINE_B, NINE_B_PART, Some(32), None, 8192);
+        assert_eq!(p.ngl, None);
+        assert!(p.with_image_part);
+    }
+
+    #[test]
+    fn a_model_without_a_part_keeps_nothing_to_drop() {
+        for (vram, ctx) in [(Some(CARD_2_GB), 4096), (Some(CARD_8_GB), 8192), (Some(CARD_12_GB), 32768), (None, 8192)] {
+            assert!(plan(NINE_B, Some(32), vram, ctx).with_image_part, "nothing to drop means nothing is dropped");
+        }
+    }
+
+    #[test]
+    fn a_death_on_the_image_part_is_told_from_a_death_on_the_model() {
+        // What llama.cpp prints when the part is the problem.
+        for line in [
+            "clip_init: failed to load model '/m/x.mmproj.gguf': load_hparams: unknown projector type: gemma9v",
+            "mtmd_init_from_file: error: Failed to load CLIP model from /m/x.mmproj.gguf",
+            "srv    load_model: failed to load multimodal model, '/m/x.mmproj.gguf'",
+        ] {
+            assert!(stderr_blames_the_image_part(line), "{line}");
+        }
+        // The part loaded fine and something else died afterwards.
+        let fine = "srv    load_model: loaded multimodal model, '/m/x.mmproj.gguf'\nggml_backend_cuda_buffer_type_alloc_buffer: allocating 9000.00 MiB on device 0: cudaMalloc failed: out of memory";
+        assert!(!stderr_blames_the_image_part(fine));
+        assert!(!stderr_blames_the_image_part("llama_model_load: error loading model: unknown model architecture: 'foo'"));
+        assert!(!stderr_blames_the_image_part(""));
+    }
+
+    #[test]
+    fn the_two_image_notes_are_english_sentences_that_name_what_happened() {
+        for note in [IMAGE_PART_NO_ROOM_NOTE, IMAGE_PART_REFUSED_NOTE] {
+            assert!(note.starts_with("Loaded without image input: "), "{note}");
+            assert!(note.is_ascii(), "{note}");
+            assert!(!note.contains(" - "), "{note}");
+        }
+        assert_ne!(IMAGE_PART_NO_ROOM_NOTE, IMAGE_PART_REFUSED_NOTE);
+        assert!(IMAGE_PART_NO_ROOM_NOTE.contains("smaller context"));
+    }
+
+    #[test]
+    fn the_image_part_of_a_running_engine_is_read_from_its_argv() {
+        let tuning = EngineTuning::default();
+        let with = build_server_args("/m/a.gguf", &tuning, 8127, None, Some("/m/a.mmproj.gguf"), None);
+        let without = build_server_args("/m/a.gguf", &tuning, 8127, None, None, None);
+        assert_eq!(image_part_in(&with), Some("/m/a.mmproj.gguf"));
+        assert_eq!(image_part_in(&without), None);
     }
 
     #[test]
     fn a_model_that_fits_is_left_exactly_as_it_was() {
-        // The rule this whole change lives under. A 3B on a 12 GB card has
-        // room for its weights, its cache and the driver, so nothing about
-        // that start may move.
+        // A 3B on a 12 GB card has room for its weights, its cache and the
+        // driver, so with a chosen context nothing about that start may move.
         let p = plan(THREE_B_Q4, Some(THREE_B_BLOCKS), Some(CARD_12_GB), 8192);
-        assert_eq!(p.layers, None, "{}", p.why);
+        assert_eq!((p.ngl, p.ctx, p.cpu_moe, p.with_image_part), (None, 8192, 0, true), "{}", p.why);
         assert!(p.why.contains("every layer is requested"), "{}", p.why);
+        assert!(p.advice.is_none());
     }
 
-    /// R1-3 table test: the SAME numbers, once with `free: true` (a measured
-    /// `nvidia-smi` reading) and once with `free: false` (`detect_gpus`'
-    /// total-capacity fallback). The sentence must differ and the total-
-    /// capacity run must never ask for MORE layers than the measured-free run
-    ///, a card that has not been shown to be empty is the case where asking
-    /// for too much costs the start.
+    /// R1-3 table test: the SAME numbers, once as a measured `nvidia-smi`
+    /// reading and once as `detect_gpus`' total. The sentence must differ and
+    /// the total must never ask for MORE layers than the measured reading: a
+    /// card that has not been shown to be empty is the case where asking for
+    /// too much costs the start.
     #[test]
     fn r1_3_a_total_capacity_reading_never_outbids_a_measured_free_one() {
         let cases: &[(u64, Option<u32>, u64, u32)] = &[
@@ -4748,25 +7476,12 @@ mod tests {
         for &(model, blocks, vram, ctx) in cases {
             let free = plan_free(model, blocks, Some(vram), ctx, true);
             let total = plan_free(model, blocks, Some(vram), ctx, false);
-
             assert_ne!(free.why, total.why, "the two readings must not read the same on screen");
             assert!(free.why.contains("are free"), "{}", free.why);
-            assert!(
-                total.why.contains("in total (actual free memory was not measured)"),
-                "{}",
-                total.why
-            );
-
-            let free_layers = free.layers.unwrap_or(ALL_LAYERS);
-            let total_layers = total.layers.unwrap_or(ALL_LAYERS);
-            assert!(
-                total_layers <= free_layers,
-                "an unmeasured total-capacity reading asked for MORE layers ({total_layers}) than \
-                 the measured-free reading ({free_layers}) on the same {vram} bytes, \
-                 free: {}\ntotal: {}",
-                free.why,
-                total.why
-            );
+            assert!(total.why.contains("in total (actual free memory was not measured)"), "{}", total.why);
+            let free_layers = free.ngl.unwrap_or(ALL_LAYERS);
+            let total_layers = total.ngl.unwrap_or(ALL_LAYERS);
+            assert!(total_layers <= free_layers, "{total_layers} > {free_layers}: {}\n{}", free.why, total.why);
         }
     }
 
@@ -4776,38 +7491,31 @@ mod tests {
         // real answer and it has to mean "carry on as before", or this change
         // would take the graphics card away from everyone it cannot see.
         let p = plan(TWELVE_B_IQ4, Some(TWELVE_B_BLOCKS), None, 8192);
-        assert_eq!(p.layers, None);
+        assert_eq!(p.ngl, None);
         assert!(p.why.contains("no probe measured"), "{}", p.why);
     }
 
     #[test]
     fn a_twelve_b_on_an_eight_gb_card_gets_a_layer_count_instead_of_all_of_them() {
-        // Discord ticket-0009. 7.3 GB of weights plus 1.25 GB of cache at 8192
-        // tokens plus the driver is more than the 8 GB board has, so the whole
-        // model was never going to fit and `-ngl 999` was asking for it anyway.
-        let p = plan(TWELVE_B_IQ4, Some(TWELVE_B_BLOCKS), Some(CARD_8_GB), 8192);
-        assert_eq!(p.layers, Some(37), "{}", p.why);
-        assert!(p.why.contains("40 layers the GGUF header names"), "{}", p.why);
-
-        // And what it chose really does fit in what it measured.
-        let per_layer = TWELVE_B_IQ4 / TWELVE_B_BLOCKS as u64 + 4 * 1024 * 1024 * 8;
-        assert!(37 * per_layer + VRAM_OVERHEAD_BYTES <= CARD_8_GB);
-        assert!(38 * per_layer + VRAM_OVERHEAD_BYTES > CARD_8_GB, "one layer short of the truth");
+        // Discord ticket-0009. 7.3 GB of weights plus the cache at 8192 tokens
+        // plus the driver is more than the 8 GB board has, so the whole model
+        // was never going to fit and `-ngl 999` was asking for it anyway.
+        let ngl = fits_and_one_more_would_not(TWELVE_B_IQ4, TWELVE_B_BLOCKS, CARD_8_GB, 8192);
+        assert!((30..=38).contains(&ngl), "-ngl {ngl}");
     }
 
     #[test]
     fn the_counter_check_the_old_code_would_have_sent_all_of_them() {
-        // The same 8 GB case with the new decision switched off, which is what
+        // The same 8 GB case with the decision switched off, which is what
         // `auto_ngl: None` is: the argv is the one that shipped, `-ngl 999`.
-        // Without this the test above proves an arithmetic nobody asked for.
         let tuning = EngineTuning::default();
         assert_eq!(tuning.gpu_layers, -1, "the default is auto");
         let old = build_server_args("/models/nemo-12b.gguf", &tuning, 8127, None, None, None);
         assert_eq!(gpu_layers_in(&old), Some(999));
 
         let plan = plan(TWELVE_B_IQ4, Some(TWELVE_B_BLOCKS), Some(CARD_8_GB), 8192);
-        let now = build_server_args("/models/nemo-12b.gguf", &tuning, 8127, None, None, plan.layers);
-        assert_eq!(gpu_layers_in(&now), Some(37));
+        let now = build_server_args("/models/nemo-12b.gguf", &tuning, 8127, None, None, plan.ngl);
+        assert_eq!(gpu_layers_in(&now), plan.ngl);
         // Nothing else about the argv moved.
         assert_eq!(argv_without_gpu_layers(&old), argv_without_gpu_layers(&now));
     }
@@ -4816,48 +7524,90 @@ mod tests {
     fn a_three_b_on_a_two_gb_card_stops_asking_for_the_whole_model() {
         // GitHub 128 and the two Discord reports. 2 GB of card, about 2 GB of
         // weights, and a cache on top.
-        let p = plan(THREE_B_Q4, Some(THREE_B_BLOCKS), Some(CARD_2_GB), 8192);
-        assert_eq!(p.layers, Some(15), "{}", p.why);
-        let per_layer = THREE_B_Q4 / THREE_B_BLOCKS as u64 + 4 * 1024 * 1024 * 8;
-        assert!(15 * per_layer + VRAM_OVERHEAD_BYTES <= CARD_2_GB);
-        assert!(16 * per_layer + VRAM_OVERHEAD_BYTES > CARD_2_GB);
+        let ngl = fits_and_one_more_would_not(THREE_B_Q4, THREE_B_BLOCKS, CARD_2_GB, 8192);
+        assert!(ngl > 0 && ngl < THREE_B_BLOCKS, "-ngl {ngl}");
     }
 
     #[test]
     fn a_smaller_context_pays_for_fewer_layers_of_cache_and_buys_more_layers() {
-        // The reserve is derived from the context, so the same card and the
-        // same model at 2048 tokens has room for more of the model.
         let wide = plan(THREE_B_Q4, Some(THREE_B_BLOCKS), Some(CARD_2_GB), 8192);
         let narrow = plan(THREE_B_Q4, Some(THREE_B_BLOCKS), Some(CARD_2_GB), 2048);
-        assert_eq!(narrow.layers, Some(20), "{}", narrow.why);
-        assert!(narrow.layers > wide.layers);
+        assert!(narrow.ngl > wide.ngl, "{:?} vs {:?}", narrow.ngl, wide.ngl);
     }
 
     #[test]
-    fn a_header_without_a_layer_count_guesses_low_and_says_that_it_guessed() {
-        // The fallback. 16 assumed layers against a model that really has 28
-        // buys 10 layers where the truth would have bought 15, and 10 layers
-        // of a 28 layer model really do fit. The guess is low ON PURPOSE: the
-        // count only multiplies the fraction that fits, so guessing under the
-        // real block count can only ask for too few layers, never too many.
-        let guessed = plan(THREE_B_Q4, None, Some(CARD_2_GB), 8192);
-        assert_eq!(guessed.layers, Some(10), "{}", guessed.why);
-        assert!(guessed.why.contains("carries no block count"), "{}", guessed.why);
-
-        let real_per_layer = THREE_B_Q4 / THREE_B_BLOCKS as u64 + 4 * 1024 * 1024 * 8;
-        assert!(10 * real_per_layer + VRAM_OVERHEAD_BYTES <= CARD_2_GB, "the guess overshot");
-
+    fn a_header_without_a_layer_count_guesses_low() {
+        // 16 assumed layers against a model that really has 28: the count only
+        // divides the file, so guessing under the real block count asks for a
+        // smaller share of the model than fits, never a larger one.
+        let guessed = plan(THREE_B_Q4, None, Some(CARD_2_GB), 8192).ngl.unwrap();
+        let real = plan(THREE_B_Q4, Some(THREE_B_BLOCKS), Some(CARD_2_GB), 8192).ngl.unwrap();
+        assert!((guessed as f64 / 17.0) <= (real as f64 / (THREE_B_BLOCKS + 1) as f64) + 0.07, "{guessed}/16 vs {real}/{THREE_B_BLOCKS}");
         // A header that answers zero is a header that answered nothing.
-        assert_eq!(plan(THREE_B_Q4, Some(0), Some(CARD_2_GB), 8192), guessed);
+        assert_eq!(plan(THREE_B_Q4, Some(0), Some(CARD_2_GB), 8192).ngl, Some(guessed));
     }
 
     #[test]
     fn a_card_far_too_small_ends_up_on_the_processor_rather_than_at_a_bad_number() {
-        // 512 MiB of memory cannot hold the driver's own reserve, let alone a
-        // layer. Zero is the right answer and `saturating_sub` is why it is
-        // not a panic.
+        // 256 MiB cannot hold the driver's own reserve, let alone a layer.
         let p = plan(THREE_B_Q4, Some(THREE_B_BLOCKS), Some(256 * 1024 * 1024), 8192);
-        assert_eq!(p.layers, Some(0), "{}", p.why);
+        assert_eq!(p.ngl, Some(0), "{}", p.why);
+    }
+
+    #[test]
+    fn gh156_auto_on_a_card_only_its_total_is_known_of_goes_to_the_engine() {
+        use crate::commands::gpu::VramReading;
+        // The RX 5700 of GH #156: Vulkan, no nvidia-smi, the card's total out
+        // of sysfs or the registry. The engine measures, LU does not guess.
+        let total = VramReading { bytes: 8176 * 1024 * 1024, free: false, source: "detect_gpus" };
+        assert!(engine_fits_layers(Some(&total), false), "an AMD or Intel card on Windows or Linux");
+        // A measured-free reading keeps the plan, and so does the Mac.
+        let measured = VramReading { bytes: 7000 * 1024 * 1024, free: true, source: "nvidia-smi" };
+        assert!(!engine_fits_layers(Some(&measured), false), "nvidia-smi measured it");
+        assert!(!engine_fits_layers(Some(&total), true), "the Mac keeps its plan");
+        // Nothing measured at all: every layer, as it always was.
+        assert!(!engine_fits_layers(None, false));
+
+        let auto = EngineTuning::default();
+        assert_eq!(auto.gpu_layers, -1);
+        let args = build_server_args("/m.gguf", &auto, 8127, None, None, Some(ENGINE_DECIDES));
+        let at = args.iter().position(|a| a == "-ngl").expect("-ngl in argv");
+        assert_eq!(args[at + 1], "auto", "llama-server gets its own word, not a number LU made up");
+        assert!(!args.iter().any(|a| a == "--fit"), "fit is on by default in the pinned engine");
+    }
+
+    #[test]
+    fn gh156_auto_by_the_engine_counts_as_layers_on_the_card_everywhere_after() {
+        let auto = EngineTuning::default();
+        let args = build_server_args("/m.gguf", &auto, 8127, None, None, Some(ENGINE_DECIDES));
+        // The died-on-start retry takes the card out: layers were on it.
+        assert!(gpu_layers_in(&args).is_some_and(|n| n > 0));
+        // The sanity ladder sees a card it can take away, not "nothing to give up".
+        let facts = crate::commands::engine_sanity::EngineFacts {
+            gpu_layers: gpu_layers_in(&args),
+            flash_attention_on: true,
+            every_device_without_matrix_cores: false,
+        };
+        assert_eq!(
+            crate::commands::engine_sanity::decide(crate::commands::engine_sanity::Sanity::Garbled(crate::commands::engine_sanity::Garble::Replacement), &facts),
+            crate::commands::engine_sanity::AfterProbe::RestartOnCpu
+        );
+        // A restart that keeps the layer count hands the same word on.
+        let again = build_server_args("/m.gguf", &auto, 8127, None, None, gpu_layers_in(&args));
+        assert_eq!(gpu_layers_in(&again), Some(ENGINE_DECIDES));
+        assert!(again.windows(2).any(|w| w[0] == "-ngl" && w[1] == "auto"));
+        // The processor rung is a typed 0 and beats it.
+        let cpu = on_the_processor(&auto);
+        assert_eq!(gpu_layers_in(&build_server_args("/m.gguf", &cpu, 8127, None, None, gpu_layers_in(&args))), Some(0));
+        // Nobody is shown the sentinel, and the idempotence check ignores it.
+        assert_eq!(gpu_layers_reported(&args), None);
+        assert_eq!(
+            argv_without_gpu_layers(&args),
+            argv_without_gpu_layers(&build_server_args("/m.gguf", &auto, 8127, None, None, None))
+        );
+        // A typed count still wins over the engine's word.
+        let typed = EngineTuning { gpu_layers: 20, ..Default::default() };
+        assert_eq!(gpu_layers_in(&build_server_args("/m.gguf", &typed, 8127, None, None, Some(ENGINE_DECIDES))), Some(20));
     }
 
     #[test]
@@ -4894,6 +7644,54 @@ mod tests {
     }
 
     #[test]
+    fn the_plan_s_experts_and_prompt_cache_ride_the_argv_and_the_processor_rung_drops_the_experts() {
+        let planned = EngineTuning { plan_cpu_moe: 12, plan_cache_ram_mib: Some(2048), ..Default::default() };
+        let args = build_server_args("/m.gguf", &planned, 8127, None, None, None);
+        assert!(args.windows(2).any(|w| w[0] == "--n-cpu-moe" && w[1] == "12"), "{args:?}");
+        assert!(args.windows(2).any(|w| w[0] == "--cache-ram" && w[1] == "2048"), "{args:?}");
+        assert_eq!(cpu_moe_in(&args), 12);
+        // On the processor there are no experts to keep there.
+        let cpu = build_server_args("/m.gguf", &on_the_processor(&planned), 8127, None, None, None);
+        assert!(!cpu.iter().any(|a| a == "--n-cpu-moe"), "{cpu:?}");
+        assert_eq!(cpu_moe_in(&cpu), 0);
+        // The settings never carry them: a profile is read without them.
+        let read: EngineTuning = serde_json::from_str(r#"{"ctx":8192,"planCpuMoe":5,"plan_cpu_moe":5}"#).unwrap();
+        assert_eq!((read.plan_cpu_moe, read.plan_cache_ram_mib), (0, None));
+        let chosen: EngineTuning = serde_json::from_str(r#"{"ctx":16384,"ctxChosen":true}"#).unwrap();
+        assert!(chosen.ctx_chosen);
+    }
+
+    #[test]
+    fn an_engine_the_plan_gave_more_context_still_answers_the_default_request() {
+        let running = build_server_args("/m.gguf", &EngineTuning { ctx: 32768, plan_cpu_moe: 3, ..Default::default() }, 8127, None, None, Some(40));
+        let default = build_server_args("/m.gguf", &EngineTuning::default(), 8127, None, None, None);
+        assert!(same_measured_request(&running, &default, true, Some(8192)));
+        // More than runs, asked for the first time: a restart.
+        let agent = build_server_args("/m.gguf", &EngineTuning { ctx: 65536, ..Default::default() }, 8127, None, None, None);
+        assert!(!same_measured_request(&running, &agent, true, Some(8192)));
+        // The same ask again, which the plan answered with less: no restart.
+        assert!(same_measured_request(&running, &agent, true, Some(65536)));
+        // A chosen context has to match exactly.
+        assert!(!same_measured_request(&running, &default, false, Some(8192)));
+        // Anything else that differs is a different request.
+        let q8 = build_server_args("/m.gguf", &EngineTuning { cache_type_k: "q8_0".into(), ..Default::default() }, 8127, None, None, None);
+        assert!(!same_measured_request(&running, &q8, true, Some(8192)));
+        remember_requested_ctx("/m.gguf", 32768);
+        assert_eq!(requested_ctx_for("/m.gguf"), Some(32768));
+        assert_eq!(requested_ctx_for("/other.gguf"), None);
+    }
+
+    #[test]
+    fn the_default_context_is_flexible_and_a_chosen_or_large_one_is_not() {
+        assert!(!plan_request(&EngineTuning::default()).ctx_chosen);
+        assert!(!plan_request(&EngineTuning { ctx: 32768, ..Default::default() }).ctx_chosen, "the agent mode's raise");
+        assert!(plan_request(&EngineTuning { ctx: 65536, ..Default::default() }).ctx_chosen, "a profile from before GH #129");
+        assert!(plan_request(&EngineTuning { ctx: 8192, ctx_chosen: true, ..Default::default() }).ctx_chosen);
+        assert_eq!(plan_request(&EngineTuning { gpu_layers: 7, ..Default::default() }).typed_layers, Some(7));
+        assert_eq!(plan_request(&EngineTuning::default()).typed_layers, None);
+    }
+
+    #[test]
     fn the_idempotence_key_ignores_a_measurement_but_not_a_setting() {
         // Two auto starts a minute apart measure different free memory. That
         // is not a reason to tear down a healthy engine, and comparing the
@@ -4914,6 +7712,63 @@ mod tests {
             argv_without_gpu_layers(&a),
             argv_without_gpu_layers(&build_server_args("/m.gguf", &wider, 8127, None, None, Some(35)))
         );
+    }
+
+    /// A40 (GH #259): the stderr tail of 3.1.1 on macOS 15.7.4, M1 Max, as
+    /// the reporter pasted it (shortened, the shader lines kept).
+    const METAL_LIBRARY_STDERR: &str = "program_source:1570:26: error: constexpr function never produces a constant expression [-Winvalid-constexpr]
+inline constexpr bfloat4 ggml_metal_unary_cast<bfloat4, float4>(float4 x) {
+                         ^
+program_source:1571:27: note: subexpression not valid in a constant expression
+    return bfloat4(bfloat(x[0]), bfloat(x[1]), bfloat(x[2]), bfloat(x[3]));
+                          ^
+0.00.190.668 E ggml_metal_init: error: failed to initialize the Metal library
+0.00.190.675 E ggml_backend_metal_device_init_backend: error: failed to allocate context
+0.00.190.709 E llama_init_from_model: failed to initialize the context: failed to initialize MTL0 backend
+0.00.190.712 E cmn  common_init_: failed to create context with model '/m.gguf'
+0.00.190.715 I srv    operator(): operator(): cleaning up before exit...
+0.00.190.946 E srv  server_run_i: exiting due to model loading error";
+
+    #[test]
+    fn a_metal_library_the_mac_refuses_gets_a_sentence_and_no_shader_dump() {
+        let failure = StartFailure {
+            died: true,
+            port_taken: false,
+            stderr: METAL_LIBRARY_STDERR.into(),
+            exit_code: Some(1),
+            signal: None,
+        };
+        for second in [SecondAttempt::CpuOnly, SecondAttempt::SameOffload] {
+            let msg = start_failure_message(&failure, 8127, Duration::from_secs(60), second, None);
+            assert!(msg.contains(METAL_LIBRARY_HINT), "{msg}");
+            assert!(!msg.contains("program_source"), "{msg}");
+            assert!(!msg.contains("bfloat4"), "{msg}");
+            // Not the reinstall advice: a reinstall brings back the same binary.
+            assert!(!msg.contains("Reinstall"), "{msg}");
+            // Not the GPU-Layers advice either, the retry already ran without
+            // the card and Metal is no name in GPU_BACKENDS.
+            assert!(!msg.contains("set GPU Layers to 0"), "{msg}");
+        }
+        let embed = embed_start_failure_message("LU Engine did not become healthy on port 8128 within 30s", METAL_LIBRARY_STDERR);
+        assert!(embed.contains(METAL_LIBRARY_HINT), "{embed}");
+        assert!(!embed.contains("program_source"), "{embed}");
+        // Any other death still carries llama-server's own words.
+        let other = embed_start_failure_message("x", "some other line");
+        assert!(other.contains("some other line"), "{other}");
+    }
+
+    #[test]
+    fn the_processor_only_attempt_on_a_mac_opens_no_metal_device() {
+        // `-ngl 0` alone still creates the Metal context, which is where the
+        // shader library is compiled. Only `--device none` keeps it shut, so
+        // the retry has to send it, and only when it is the processor retry.
+        let src = include_str!("engine.rs");
+        let body = &src[src.find("\nfn spawn_engine_attempt(\n").expect("spawn_engine_attempt")..];
+        let body = &body[..body.find("\n}\n").expect("end of spawn_engine_attempt")];
+        let gate = body.find("if flags.cpu_fallback && cfg!(target_os = \"macos\") {").expect("the processor retry gate");
+        let none = body.find("cmd.args([\"--device\", \"none\"]);").expect("--device none");
+        let pin = body.find("chat_engine_device(state, binary, backend_dir)").expect("chat card pin");
+        assert!(gate < none && none < pin, "--device none is sent before, and instead of, the chat card pin");
     }
 
     #[test]
@@ -5196,7 +8051,7 @@ mod tests {
         // all (commands/logging.rs, finding #01), so a `println!` here is a
         // line that exists on a developer machine and nowhere else.
         //
-        // The level matters as much as the macro: `init_tracing` in main.rs
+        // The level matters as much as the macro: `init_tracing` in lib.rs
         // builds its EnvFilter as `EnvFilter::new("info")` when RUST_LOG says
         // nothing, and that filter sits on the registry, ABOVE the rolling
         // file layer. Anything below info is therefore filtered out before the
@@ -5239,6 +8094,7 @@ mod tests {
             gpu_layers: -1,
             mlock: false,
             no_mmap: false,
+            ..Default::default()
         };
         let args = build_server_args("/m.gguf", &tuning, 8127, None, None, None);
         assert_eq!(
@@ -5249,6 +8105,7 @@ mod tests {
                 "--port", "8127",
                 "--ctx-size", "8192",
                 "-ngl", "999",
+                "-lv", "4",
             ]
         );
     }
@@ -5874,7 +8731,7 @@ mod tests {
 
     #[test]
     fn the_bundled_sidecar_name_is_ours_and_not_one_debian_already_owns() {
-        // GitHub #120 (AnnSdf1969, Ubuntu 26.04): Tauri's deb bundler copies
+        // GitHub #120 (Ubuntu 26.04): Tauri's deb bundler copies
         // every externalBin straight into /usr/bin, so the file name IS the
         // system path. Debian's own llama.cpp-tools package owns
         // /usr/bin/llama-server, and dpkg refused the entire LU install over
@@ -5960,7 +8817,7 @@ mod tests {
         // The exact shape a v2.6.6 fresh install produced: no active chat
         // model, so the LM Studio branch wrote the GGUF two levels down and
         // the flat scan reported an empty models folder while a 8 GB file sat
-        // right there (nayffy, 2026-08-27).
+        // right there (2026-08-27).
         let dir = std::env::temp_dir().join(format!("lu-engine-nested-{}", std::process::id()));
         let nested = dir.join("TheDrummer").join("Cydonia-24B-v4.1-GGUF");
         std::fs::create_dir_all(&nested).unwrap();
@@ -6372,6 +9229,8 @@ mod tests {
             auto_layers: false,
             cpu_fallback: false,
             sanity_note: None,
+            image_part_note: None,
+            stderr: None,
         });
     }
 
@@ -6406,7 +9265,14 @@ mod tests {
         // that says "it exited" without saying how is a log that cannot tell a
         // refused GGUF from a card that ran out of memory.
         assert_eq!(out, HealthWait::ChildExited { code: Some(3), signal: None });
-        assert!(took < Duration::from_secs(5), "waited {took:?}, which is the old dead wait");
+        // 17.11.2026, 3.1.1: on the windows-latest runner Git Bash needed 8.6 s
+        // and 9.97 s for `exit 3` in two runs, while the same Rust code passed
+        // there in the morning (master 4486bf5a4). The code under test did not
+        // change; the runner did. Windows gets 20 s, still well inside the 30 s
+        // budget, so the old dead wait would still fail here. Mac and Linux
+        // keep 5 s. Recheck in 3.1.2.
+        let limit = if cfg!(windows) { Duration::from_secs(20) } else { Duration::from_secs(5) };
+        assert!(took < limit, "waited {took:?}, which is the old dead wait");
     }
 
     // ── Der Rueckfall nach einem misslungenen Wechsel ─────────────────────
@@ -6457,6 +9323,7 @@ mod tests {
             cpu_fallback: false,
             port,
             ctx: Some(8192),
+            image_part_note: None,
         };
 
         let zurueck = restore_engine(&binary, &state, &vorher, None);
@@ -6495,6 +9362,7 @@ mod tests {
             cpu_fallback: false,
             port: DEAD_PORT,
             ctx: Some(8192),
+            image_part_note: None,
         };
 
         assert!(!restore_engine(
@@ -6540,8 +9408,16 @@ mod tests {
         assert!(wechsel.contains("start_after_stop("));
         // Die gute Nachricht wird eingesetzt, nicht angehaengt. Ein
         // `format!("{msg}\n\n...")` schoebe sie wieder hinter das Protokoll.
+        let ausgang = src
+            .split("fn settle_switch(")
+            .nth(1)
+            .expect("the one exit of the switch is gone")
+            .split("\nfn ")
+            .next()
+            .unwrap();
+        assert!(wechsel.contains("settle_switch("), "the switch no longer ends in its one exit");
         assert!(
-            wechsel.contains("with_note_on_top(&msg, RESTORED_NOTE)"),
+            ausgang.contains("with_note_on_top(&msg, RESTORED_NOTE)"),
             "the good news is appended again instead of put on top"
         );
     }
@@ -6552,8 +9428,9 @@ mod tests {
         // the sanity probe (bug a) through `serve_or_heal_garbled`, but the
         // SECOND attempt (the one clean retry) used to hand back a bare
         // "started" object instead, a garbled answer on the retry was
-        // never caught or healed. `serve_or_heal_garbled(` must now appear
-        // twice in this function's body: once per attempt.
+        // never caught or healed. `serve_or_heal_garbled(` must appear once
+        // per way this function can come up: the first attempt, the clean
+        // retry, and (since October 2026) the retry without the image part.
         let src = include_str!("engine.rs");
         let body = src
             .split("fn start_after_stop(")
@@ -6563,7 +9440,7 @@ mod tests {
             .next()
             .unwrap();
         let count = body.matches("serve_or_heal_garbled(").count();
-        assert_eq!(count, 2, "expected the sanity probe on both attempts, found it {count} time(s)");
+        assert_eq!(count, 3, "expected the sanity probe on all three ways up, found it {count} time(s)");
     }
 
     #[test]
@@ -6620,6 +9497,8 @@ mod tests {
             auto_layers: false,
             cpu_fallback: false,
             sanity_note: None,
+            image_part_note: None,
+            stderr: None,
         })
     }
 
@@ -6812,14 +9691,115 @@ mod tests {
         let mut slot = engine_around(child, DEFAULT_ENGINE_PORT);
 
         assert_eq!(
-            reaped_sidecar_port(&mut slot),
-            Some(DEFAULT_ENGINE_PORT),
+            reaped_sidecar_port(&mut slot).map(|(port, exit)| (port, exit.code)),
+            Some((DEFAULT_ENGINE_PORT, Some(0))),
             "the watch could not say which sidecar had gone",
         );
         assert!(slot.is_none(), "the handle survived its process");
         // A second tick has nothing to report: the event fires once, not on
         // every tick for the rest of the session.
         assert_eq!(reaped_sidecar_port(&mut slot), None);
+    }
+
+    // ── C81: how the sidecar died, not only that it did ─────────────────────
+
+    /// A real child that writes llama.cpp's last words to stderr and then
+    /// dies of `how`, with its stderr drained the way the start drains it.
+    #[cfg(unix)]
+    fn dying_engine(script: &str, embed: bool) -> Option<BundledEngine> {
+        let mut child = std::process::Command::new(crate::test_support::posix_shell())
+            .args(["-c", script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn a child that dies");
+        let (buf, done) = super::super::shell::drain(child.stderr.take().unwrap());
+        let mut slot = engine_around(child, DEFAULT_ENGINE_PORT);
+        if let Some(e) = slot.as_mut() {
+            e.stderr = Some(buf);
+            if embed {
+                e.args = vec!["--embeddings".into()];
+            }
+            // The death has to have happened before the reap asks.
+            let _ = e.child.wait();
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done.load(std::sync::atomic::Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        slot
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn c1rrus_mid_answer_death_names_its_signal_and_its_last_lines() {
+        // The c1rrus case: ROCm, the engine gone mid-answer. Before 3.1.0 the
+        // log said "the sidecar is gone" and nothing else.
+        let mut slot = dying_engine(
+            "echo 'srv  update_slots: decoding' >&2; \
+             echo 'ggml_cuda_compute_forward: ROCm error: out of memory' >&2; \
+             kill -ABRT $$",
+            false,
+        );
+        let (port, exit) = reaped_sidecar_port(&mut slot).expect("reaped");
+        assert_eq!(port, DEFAULT_ENGINE_PORT);
+        assert_eq!(exit.signal, Some(6), "{exit:?}");
+        assert_eq!(exit.code, None);
+        assert!(exit.stderr_tail.ends_with("ROCm error: out of memory"), "{exit:?}");
+        let note = engine_exit_note(&exit);
+        assert!(note.starts_with("The LU Engine stopped unexpectedly (signal 6, SIGABRT). The graphics card ran out of memory."), "{note}");
+        assert!(note.contains("ran out of memory"), "{note}");
+        let payload = sidecar_gone_payload(SIDECAR_ENGINE, port, &exit);
+        assert_eq!(payload["signal"], 6);
+        assert_eq!(payload["message"], serde_json::Value::String(note));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_sigkill_without_words_points_at_memory() {
+        let mut slot = dying_engine("kill -KILL $$", false);
+        let (_, exit) = reaped_sidecar_port(&mut slot).expect("reaped");
+        assert_eq!(exit.signal, Some(9));
+        assert!(exit.stderr_tail.is_empty());
+        let note = engine_exit_note(&exit);
+        assert!(note.contains("(signal 9, SIGKILL): it was killed from outside") && note.contains("out-of-memory killer"), "{note}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_embeddings_server_is_logged_but_tells_the_chat_nothing() {
+        let mut slot = dying_engine("echo 'bye' >&2; exit 3", true);
+        let (port, exit) = reaped_sidecar_port(&mut slot).expect("reaped");
+        assert!(exit.embed);
+        assert_eq!(exit.code, Some(3));
+        assert_eq!(exit.stderr_tail, "bye");
+        let payload = sidecar_gone_payload(SIDECAR_EMBED, port, &exit);
+        assert!(payload["message"].is_null(), "{payload}");
+        assert_eq!(payload["cause"], "exit code 3");
+    }
+
+    #[test]
+    fn exit_causes_read_like_words_on_every_platform() {
+        assert_eq!(exit_cause_words(Some(1), None), "exit code 1");
+        assert_eq!(exit_cause_words(None, None), "no exit code");
+        assert!(exit_cause_words(None, Some(11)).starts_with("signal 11, SIGSEGV: it crashed"));
+        assert_eq!(exit_cause_words(None, Some(42)), "signal 42");
+        // Windows hands NTSTATUS back as a negative i32.
+        assert_eq!(
+            exit_cause_words(Some(0xC000_0005u32 as i32), None),
+            "exit code 0xC0000005: it crashed inside the engine or the graphics driver (access violation)",
+        );
+        assert!(exit_cause_words(Some(ILLEGAL_INSTRUCTION_EXIT_CODE), None).contains("AVX2"));
+        // A driver error in the tail beats the generic signal guess.
+        let exit = SidecarExit { code: None, signal: Some(9), stderr_tail: "CUDA error: an illegal memory access".into(), embed: false };
+        assert!(engine_exit_note(&exit).contains("NVIDIA driver"));
+        // Nothing to say beyond the cause: no invented advice.
+        let exit = SidecarExit { code: Some(1), signal: None, stderr_tail: "something".into(), embed: false };
+        assert_eq!(
+            engine_exit_note(&exit),
+            "The LU Engine stopped unexpectedly (exit code 1). It starts again with your next message; details are in the log.",
+        );
     }
 
     #[test]
@@ -7117,6 +10097,308 @@ mod tests {
                 let _ = e.child.kill();
                 let _ = e.child.wait();
             }
+        }
+    }
+
+    // ── A stop that arrives while the model is still loading ──────────────
+    //
+    // The start holds ENGINE_START for the whole load, the stop does not wait
+    // for it: it takes the child out of the slot and kills it. The waiting
+    // start then found an empty slot and read that as "the engine died", and
+    // a death is what earns the second attempt, 1.5 s later, on the processor.
+    // The model somebody had just unloaded came back, slower, and stayed.
+
+    /// Stand in for the frontend: wait until the start has parked its child,
+    /// then stop the engine the way `stop_bundled_engine` does.
+    fn stop_once_loading(state: &Arc<AppState>) -> std::thread::JoinHandle<bool> {
+        let state = Arc::clone(state);
+        std::thread::spawn(move || {
+            let began = Instant::now();
+            while state.bundled_engine.lock().unwrap().is_none() {
+                assert!(began.elapsed() < Duration::from_secs(10), "the start never parked a child");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            stop_engine_on_request(&state)
+        })
+    }
+
+    #[test]
+    fn a_stop_while_the_model_loads_is_not_read_as_a_death() {
+        let state = Arc::new(AppState::new());
+        let (binary, args) = long_lived_argv(30);
+        let stopper = stop_once_loading(&state);
+
+        let began = Instant::now();
+        let failure = spawn_engine_attempt(
+            &state,
+            &binary,
+            &args,
+            "/tmp/does-not-matter.gguf",
+            DEAD_PORT,
+            Some(8192),
+            AttemptFlags { auto_layers: true, cpu_fallback: false },
+            None,
+        )
+        .expect_err("nothing serves on that port, the attempt cannot have come up");
+        let took = began.elapsed();
+
+        assert!(stopper.join().unwrap(), "the stop found nothing to stop");
+        assert!(took < Duration::from_secs(10), "the stop was only noticed after {took:?}");
+        // `died` is the one thing `start_after_stop` asks before it starts the
+        // model a second time.
+        assert!(!failure.died, "a stop the user asked for was reported as a crash, so the start runs again");
+        assert!(stop_was_requested(&state), "the stop left no mark for the start to read");
+        assert!(state.bundled_engine.lock().unwrap().is_none(), "the stopped engine is back in the slot");
+    }
+
+    #[test]
+    fn an_emptied_slot_is_a_stop_only_when_somebody_asked_for_one() {
+        // Negative control. The sidecar watch and every status read clear the
+        // slot too, for a child that died by itself, and THAT must stay a
+        // death: it is the crash the second attempt exists for.
+        let state = AppState::new();
+        assert_eq!(
+            wait_for_health_or_exit(&state, DEAD_PORT, Duration::from_secs(5)),
+            HealthWait::ChildExited { code: None, signal: None }
+        );
+        assert!(!stop_engine_on_request(&state), "there was nothing to stop");
+        assert_eq!(wait_for_health_or_exit(&state, DEAD_PORT, Duration::from_secs(5)), HealthWait::Stopped);
+    }
+
+    #[test]
+    fn nothing_is_started_after_a_stop_that_found_the_slot_empty() {
+        // The window between two attempts: the first child is reaped, the
+        // start sleeps its 1.5 s settle, and the stop arrives. It has nothing
+        // to kill and answers "idle", and the retry used to start the model
+        // right behind it.
+        let state = AppState::new();
+        assert!(!stop_engine_on_request(&state));
+        let (binary, args) = long_lived_argv(30);
+
+        let began = Instant::now();
+        let failure = spawn_engine_attempt(
+            &state,
+            &binary,
+            &args,
+            "/tmp/does-not-matter.gguf",
+            DEAD_PORT,
+            Some(8192),
+            AttemptFlags { auto_layers: false, cpu_fallback: true },
+            None,
+        )
+        .expect_err("an attempt ran after the engine was stopped");
+
+        assert!(!failure.died);
+        assert!(began.elapsed() < Duration::from_secs(2), "the attempt waited on a child it should never have spawned");
+        assert!(state.bundled_engine.lock().unwrap().is_none(), "a child was parked after the stop");
+    }
+
+    #[test]
+    fn a_stopped_start_answers_without_claiming_an_engine() {
+        let answer = stopped_answer(8127, "/models/hermes.gguf");
+        assert_eq!(answer["status"], "stopped");
+        assert_eq!(answer["port"], 8127);
+        assert_eq!(answer["model_path"], "/models/hermes.gguf");
+        // Nothing a caller could mistake for the processor fallback this used
+        // to end in.
+        assert!(answer.get("cpuOnly").is_none() && answer.get("retried").is_none(), "{answer}");
+    }
+
+    #[test]
+    fn a_stop_at_any_moment_of_the_attempt_ends_it_without_a_death() {
+        // The first test waits until the child is parked. A real stop does not
+        // wait for anything, so this one lets it land wherever it lands:
+        // before the spawn, between the spawn and the slot, during the wait.
+        // Whichever window it hits, the attempt must end at once, must not
+        // report a death, and must leave nothing in the slot.
+        for delay_ms in [0u64, 1, 2, 3, 5, 8, 12, 20, 35, 60, 100, 250] {
+            let state = Arc::new(AppState::new());
+            let (binary, args) = long_lived_argv(30);
+            let stopper = {
+                let state = Arc::clone(&state);
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(delay_ms));
+                    stop_engine_on_request(&state)
+                })
+            };
+
+            let began = Instant::now();
+            let failure = spawn_engine_attempt(
+                &state,
+                &binary,
+                &args,
+                "/tmp/does-not-matter.gguf",
+                DEAD_PORT,
+                Some(8192),
+                AttemptFlags { auto_layers: true, cpu_fallback: false },
+                None,
+            )
+            .expect_err("nothing serves on that port, the attempt cannot have come up");
+            let took = began.elapsed();
+            stopper.join().unwrap();
+
+            assert!(!failure.died, "a stop {delay_ms} ms into the attempt was reported as a crash");
+            assert!(took < Duration::from_secs(10), "a stop {delay_ms} ms into the attempt was only noticed after {took:?}");
+            assert!(
+                state.bundled_engine.lock().unwrap().is_none(),
+                "a stop {delay_ms} ms into the attempt left a child in the slot"
+            );
+        }
+    }
+
+    #[test]
+    fn the_end_of_the_app_while_the_model_loads_is_a_stop_too() {
+        // `shutdown_subprocesses` kills the child itself instead of going
+        // through `stop_engine_on_request`, so it has to leave the same mark.
+        let state = Arc::new(AppState::new());
+        let (binary, args) = long_lived_argv(30);
+        let closer = {
+            let state = Arc::clone(&state);
+            std::thread::spawn(move || {
+                let began = Instant::now();
+                while state.bundled_engine.lock().unwrap().is_none() {
+                    assert!(began.elapsed() < Duration::from_secs(10), "the start never parked a child");
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                state.shutdown_subprocesses();
+            })
+        };
+
+        let failure = spawn_engine_attempt(
+            &state,
+            &binary,
+            &args,
+            "/tmp/does-not-matter.gguf",
+            DEAD_PORT,
+            Some(8192),
+            AttemptFlags { auto_layers: true, cpu_fallback: false },
+            None,
+        )
+        .expect_err("nothing serves on that port, the attempt cannot have come up");
+        closer.join().unwrap();
+
+        assert!(!failure.died, "the end of the app was reported as a crash, so the start runs again");
+        assert!(state.bundled_engine.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_child_that_dies_by_itself_is_still_a_death_after_the_fix() {
+        // Negative control on the whole attempt: the crash the second attempt
+        // exists for must keep earning it.
+        let state = AppState::new();
+        let (binary, args) = long_lived_argv(0);
+        let failure = spawn_engine_attempt(
+            &state,
+            &binary,
+            &args,
+            "/tmp/does-not-matter.gguf",
+            DEAD_PORT,
+            Some(8192),
+            AttemptFlags { auto_layers: true, cpu_fallback: false },
+            None,
+        )
+        .expect_err("nothing serves on that port, the attempt cannot have come up");
+        assert!(failure.died, "a child that exited by itself is no longer a death, so a real crash gets no retry");
+        assert!(!stop_was_requested(&state));
+    }
+
+    #[test]
+    fn settle_switch_answers_stopped_and_brings_nothing_back_after_a_stop() {
+        // The start failed BECAUSE it was stopped. An error here is what the
+        // resume loop and the context raise answer with another start.
+        let state = AppState::new();
+        stop_engine_on_request(&state);
+        let restores = std::cell::Cell::new(0);
+        let answer = settle_switch(&state, 8127, "/models/hermes.gguf", Err(STOPPED_WHILE_LOADING.into()), || {
+            restores.set(restores.get() + 1);
+            true
+        })
+        .expect("a stop the user asked for was reported as a failed start");
+        assert_eq!(answer["status"], "stopped");
+        assert_eq!(restores.get(), 0, "the previous model was started again after the user stopped the engine");
+
+        // The start came up and the stop landed right behind it. Whatever the
+        // start had to say describes an engine that is gone.
+        let mut served = started_answer(8127, "/models/hermes.gguf", Some(8192));
+        served["cpuOnly"] = serde_json::json!(true);
+        let answer = settle_switch(&state, 8127, "/models/hermes.gguf", Ok(served), || unreachable!()).unwrap();
+        assert_eq!(answer["status"], "stopped");
+        assert!(answer.get("cpuOnly").is_none(), "{answer}");
+    }
+
+    #[test]
+    fn settle_switch_reads_a_stop_that_arrives_while_the_previous_model_comes_back() {
+        let state = AppState::new();
+        let answer = settle_switch(&state, 8127, "/models/hermes.gguf", Err("it broke".into()), || {
+            stop_engine_on_request(&state);
+            false
+        })
+        .expect("the stop that cut the restore short was reported as a failed start");
+        assert_eq!(answer["status"], "stopped");
+    }
+
+    #[test]
+    fn settle_switch_without_a_stop_is_the_switch_it_always_was() {
+        // Negative control: a start that fails for a reason of its own still
+        // brings the previous model back and still says so on top.
+        let state = AppState::new();
+        let served = started_answer(8127, "/models/hermes.gguf", Some(8192));
+        assert_eq!(
+            settle_switch(&state, 8127, "/models/hermes.gguf", Ok(served.clone()), || unreachable!()),
+            Ok(served)
+        );
+        let restored = settle_switch(&state, 8127, "/models/hermes.gguf", Err("it broke".into()), || true).unwrap_err();
+        assert!(restored.contains(RESTORED_NOTE) && restored.contains("it broke"), "{restored}");
+        assert_eq!(
+            settle_switch(&state, 8127, "/models/hermes.gguf", Err("it broke".into()), || false),
+            Err("it broke".to_string())
+        );
+    }
+
+    #[test]
+    fn a_stopped_start_neither_retries_nor_brings_the_previous_model_back() {
+        // Source anchors, in the manner of `every_failed_switch_runs_through_
+        // the_fallback`: the two functions below need an AppHandle and cannot
+        // be run here, so the order of their exits is pinned instead.
+        let src = include_str!("engine.rs");
+        let body_of = |name: &str| {
+            src.split(name).nth(1).expect("the function is gone").split("\nfn ").next().unwrap().to_string()
+        };
+
+        let start = body_of("fn start_after_stop(");
+        let asked = start.find("if stop_was_requested(state) {").expect("start_after_stop no longer asks whether it was stopped");
+        for later in ["if !failure.died {", "retrying without it", "retrying once", "the retry drops GPU offload"] {
+            let at = start.find(later).unwrap_or_else(|| panic!("`{later}` is gone from start_after_stop"));
+            assert!(asked < at, "the stop is asked about after `{later}`");
+        }
+
+        let switch = body_of("fn start_bundled_engine_blocking(");
+        let cleared = switch.find("engine_stop_requested.store(false").expect("a start no longer clears an old stop");
+        let gate = switch.find("start_gate(").expect("the start gate is gone");
+        let first_stop = switch.find("stop_engine_locked(state);").expect("no stop");
+        assert!(gate < cleared && cleared < first_stop, "an old stop is not cleared under the gate, before the work begins");
+        // Whether the previous model comes back is decided in one place, and
+        // `settle_switch_*` below run that place.
+        let handed_over = switch.find("settle_switch(").expect("the switch no longer ends in settle_switch");
+        assert!(
+            handed_over < switch.find("restore_engine(").unwrap(),
+            "the previous model is brought back outside settle_switch, where no stop is asked about"
+        );
+
+        // The restart of the sanity probe puts the first engine back when it
+        // does not come up. Not after a stop.
+        let heal = body_of("fn serve_or_heal_garbled(");
+        let asked = heal.find("if stop_was_requested(state) {").expect("the sanity restart no longer asks whether it was stopped");
+        let back = heal.find("bringing the first LU Engine back").expect("the sanity restart no longer puts the first engine back");
+        assert!(asked < back, "the first engine is put back before the stop is asked about");
+
+        // The requests from outside set the mark, the start's own stops do not.
+        let command = body_of("pub async fn stop_bundled_engine(");
+        assert!(command.contains("stop_engine_on_request(&state)"), "the frontend's stop no longer says that it is one");
+        let cloud = include_str!("process.rs");
+        assert!(cloud.contains("commands::engine::stop_engine_on_request(state)"), "the switch into Cloud no longer says that it is a stop");
+        for own in ["fn start_after_stop(", "fn serve_or_heal_garbled(", "fn spawn_engine_attempt("] {
+            assert!(!body_of(own).contains("stop_engine_on_request("), "`{own}` marks its own stop as a request");
         }
     }
 
@@ -7437,7 +10719,9 @@ mod tests {
             stderr: "llama_model_load: error loading model: unknown model architecture 'wanx'".into(),
             exit_code: None, signal: None };
         let msg = start_failure_message(&f, 8127, Duration::from_secs(60), SecondAttempt::SameOffload, None);
-        assert!(msg.contains("could not read the model file"), "{msg}");
+        // A NAMED architecture is the engine's age, not the file (N1, LFM3).
+        assert!(msg.contains("a wanx model"), "{msg}");
+        assert!(msg.contains("does not know that architecture"), "{msg}");
         assert!(!msg.contains("GPU Layers"), "{msg}");
     }
 
@@ -7457,6 +10741,39 @@ llama_model_load_from_file_impl: failed to load model
 common_fit_params: encountered an error while trying to fit params to free device memory: failed to load model
 cmn    common_init_: failed to load model 'C:\\Users\\x\\models\\diag-kaputt.gguf'
 srv    llama_server: exiting due to model loading error";
+
+    /// Wort fuer Wort, was lu-llama-server 049326a (b9949, aus LU 3.0.7) am
+    /// 30.10.2026 am Mac zu LiquidAI/LFM3-1.7B-GGUF Q4_K_M (sha256 3793e1e6…,
+    /// heil) gesagt hat (N1). Die Datei ist in Ordnung, die Engine zu alt.
+    const LFM3_AUF_B9949_STDERR: &str = "\
+0.00.167.117 E llama_model_load: error loading model: unknown model architecture: 'lfm3'
+0.00.167.232 E llama_model_load_from_file_impl: failed to load model
+0.00.167.484 E common_fit_params: encountered an error while trying to fit params to free device memory: failed to load model
+0.00.221.539 E cmn  common_init_: failed to load model 'dl-gguf/LFM3-1.7B-Q4_K_M.gguf'
+0.00.221.540 E srv    load_model: failed to load model, 'dl-gguf/LFM3-1.7B-Q4_K_M.gguf'
+0.00.221.928 E srv  llama_server: exiting due to model loading error";
+
+    #[test]
+    fn a_model_newer_than_the_engine_is_not_called_a_damaged_file() {
+        let f = StartFailure { died: true, port_taken: false, stderr: LFM3_AUF_B9949_STDERR.into(), exit_code: Some(1), signal: None };
+        let msg = start_failure_message(&f, 8127, Duration::from_secs(60), SecondAttempt::SameOffload, None);
+        assert!(msg.contains("a lfm3 model"), "{msg}");
+        assert!(msg.contains("does not know that architecture"), "{msg}");
+        assert!(msg.contains("Downloading it again will not help"), "{msg}");
+        assert!(!msg.contains("download it again"), "{msg}");
+        assert!(!msg.contains("GPU Layers"), "{msg}");
+        // Auch nach dem zweiten Versuch auf der CPU bleibt es dieselbe Ursache.
+        let cpu = start_failure_message(&f, 8127, Duration::from_secs(60), SecondAttempt::CpuOnly, None);
+        assert!(cpu.contains("does not know that architecture"), "{cpu}");
+    }
+
+    #[test]
+    fn the_architecture_name_is_read_in_both_spellings_and_never_empty() {
+        assert_eq!(stderr_names_an_unknown_architecture(LFM3_AUF_B9949_STDERR).as_deref(), Some("lfm3"));
+        assert_eq!(stderr_names_an_unknown_architecture("error loading model: unknown model architecture 'wanx'").as_deref(), Some("wanx"));
+        assert_eq!(stderr_names_an_unknown_architecture(KAPUTTE_GGUF_STDERR), None);
+        assert_eq!(stderr_names_an_unknown_architecture("unknown model architecture: '<script>'"), None);
+    }
 
     #[test]
     fn a_broken_file_is_not_reported_as_a_graphics_card_problem() {
@@ -7480,7 +10797,7 @@ srv    llama_server: exiting due to model loading error";
     /// `gguf_init_from_reader`: sie traegt den Namen der lesenden Routine, die
     /// alte Marke suchte nach der Huelle `gguf_init_from_file` darum herum.
     const KAPUTTE_VERSION_STDERR: &str = r#"0.00.262.272 E gguf_init_from_reader: failed to read header
-0.00.262.420 E llama_model_load: error loading model: llama_model_loader: failed to load model from C:\Users\ddrob\AppData\Roaming\Locally Uncensored\models\P5-Kaputt-Test-Q4_K_M.gguf
+0.00.262.420 E llama_model_load: error loading model: llama_model_loader: failed to load model from C:\Users\alice\AppData\Roaming\Locally Uncensored\models\P5-Kaputt-Test-Q4_K_M.gguf
 0.00.262.483 E llama_model_load_from_file_impl: failed to load model
 0.00.262.556 E common_fit_params: encountered an error while trying to fit params to free device memory: failed to load model
 0.00.262.723 E gguf_init_from_reader: this GGUF file is version 684680038 but this software only supports up to version 3
@@ -7979,11 +11296,181 @@ srv    llama_server: exiting due to model loading error";
         let missing = import_model_file(&store.path().join("nope"), dest.path(), "x");
         assert!(missing.unwrap_err().contains("not found"));
     }
+
+    #[test]
+    fn import_lands_in_the_set_lu_engine_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let set = root.path().join("on the other drive").join("models");
+        // The set folder wins and is created when it is not there yet.
+        assert_eq!(import_dest_dir(Some(set.to_str().unwrap())).unwrap(), set);
+        assert!(set.is_dir());
+        // Negative control: no folder set, or only blanks, is the app's own
+        // models dir, the folder the import always used before.
+        let own = builtin_models_dir().unwrap();
+        assert_eq!(import_dest_dir(None).unwrap(), own);
+        assert_eq!(import_dest_dir(Some("   ")).unwrap(), own);
+    }
+
+    #[test]
+    fn the_cross_drive_error_names_the_lu_engine_folder_setting() {
+        let dest = tempfile::tempdir().unwrap();
+        // A source that is a file but whose link cannot be made: the target
+        // folder does not exist, so hard_link fails and the error is shown.
+        let store = tempfile::tempdir().unwrap();
+        let src = store.path().join("m.gguf");
+        std::fs::write(&src, b"w").unwrap();
+        let err = import_model_file(&src, &dest.path().join("gone"), "m").unwrap_err();
+        assert!(err.contains("LU Engine folder (Settings, AI Backends, Storage)"), "{err}");
+        assert!(!err.contains("Move the models folder"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod orphaned_sidecar_tests {
+    use super::*;
+
+    fn row(pid: u32, parent: Option<u32>, exe: &str) -> ProcRow {
+        ProcRow { pid, parent, exe: Some(PathBuf::from(exe)) }
+    }
+
+    const OURS: &str = "/Applications/LU.app/Contents/MacOS/lu-llama-server";
+
+    /// Fehlerkontrolle Mac 2, Fund 9: only a sidecar of ours whose app is gone.
+    #[test]
+    fn only_our_own_binary_under_launchd_counts_as_orphaned() {
+        let rows = vec![
+            row(100, Some(1), OURS),                                   // the orphan
+            row(101, Some(4242), OURS),                                // a running app's sidecar
+            row(102, Some(1), "/opt/homebrew/bin/llama-server"),       // the user's own
+            row(103, Some(1), "/Users/x/dev/lu/src-tauri/bin/lu-llama-server-aarch64-apple-darwin"),
+            row(104, None, OURS),                                      // parent unknown: not proven
+            ProcRow { pid: 105, parent: Some(1), exe: None },          // unreadable: not proven
+        ];
+        assert_eq!(orphaned_sidecars(&rows, Path::new(OURS)), vec![100]);
+        assert!(orphaned_sidecars(&[], Path::new(OURS)).is_empty());
+    }
+
+    /// Against real processes, on the one platform the sweep runs on. Linux
+    /// hands an orphan to the nearest subreaper (often `systemd --user`), not
+    /// to pid 1, so the same test there would measure the session manager.
+    #[cfg(target_os = "macos")]
+    mod real {
+        use super::*;
+        use std::process::{Command, Stdio};
+
+        /// A stand-in sidecar: the compiled `park` under the sidecar's name, in a
+        /// folder of its own so no real sidecar on this machine can match it.
+        fn stand_in(dir: &Path) -> PathBuf {
+            let path = dir.join(sidecar_binary_name());
+            std::fs::copy(crate::test_support::park_binary(), &path).expect("copy park");
+            path
+        }
+
+        /// Start `binary` so that its parent exits at once and the kernel hands
+        /// it to pid 1, which is what a crashed app leaves behind. It reads from a
+        /// fifo it holds open itself, so it lives until it is killed.
+        fn spawn_orphan(binary: &Path, dir: &Path) -> u32 {
+            let fifo = dir.join("stdin.fifo");
+            let out = Command::new("sh")
+                .arg("-c")
+                .arg(r#"mkfifo "$1"; exec 3<>"$1"; "$0" <&3 >/dev/null 2>&1 & echo $!"#)
+                .arg(binary)
+                .arg(&fifo)
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .expect("sh ran");
+            String::from_utf8_lossy(&out.stdout).trim().parse().expect("a pid")
+        }
+
+        fn wait_until(what: impl Fn() -> bool) -> bool {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while std::time::Instant::now() < deadline {
+                if what() {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            what()
+        }
+
+        /// The whole way against real processes: an orphan and a child that still
+        /// has its parent run the same file; the sweep ends the first and leaves
+        /// the second alone.
+        #[test]
+        fn the_sweep_ends_a_real_orphan_and_spares_a_child_with_a_living_parent() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let binary = stand_in(dir.path());
+
+            let orphan = spawn_orphan(&binary, dir.path());
+            let mut kept = Command::new(&binary)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .expect("spawn the child with a living parent");
+
+            // The subshell has to be gone before the orphan shows pid 1 as parent.
+            let seen = wait_until(|| orphaned_sidecars(&process_rows(), &binary).contains(&orphan));
+            let ended = if seen { reap_orphaned_sidecars_of(&binary) } else { Vec::new() };
+            let gone = seen && wait_until(|| !crate::test_support::is_alive(orphan));
+            let kept_alive = crate::test_support::is_alive(kept.id());
+
+            // Clean up before any assertion can leave a process behind.
+            unsafe {
+                libc::kill(orphan as i32, libc::SIGKILL);
+            }
+            let _ = kept.kill();
+            let _ = kept.wait();
+
+            assert!(seen, "the orphan {orphan} was never seen as a child of pid 1");
+            assert_eq!(ended, vec![orphan], "exactly the orphan is ended, never the child of a living parent");
+            assert!(gone, "the orphan {orphan} survived the sweep");
+            assert!(kept_alive, "the sweep killed a sidecar whose app is still running");
+        }
+    }
 }
 
 #[cfg(test)]
 mod diag_tests {
-    use super::{pick_save_slot, tail_lines};
+    use super::{kv_handoff_possible, kv_skip_note_due, pick_save_slot, tail_lines};
+
+    #[test]
+    fn an_engine_with_an_image_part_gets_no_kv_handoff() {
+        let argv = |extra: &[&str]| -> Vec<String> {
+            ["-m", "/m/gemma.gguf", "--port", "8127", "--ctx-size", "8192"]
+                .iter()
+                .chain(extra.iter())
+                .map(|s| s.to_string())
+                .collect()
+        };
+        assert!(kv_handoff_possible(&argv(&[])));
+        assert!(!kv_handoff_possible(&argv(&["--mmproj", "/m/gemma.mmproj.gguf"])));
+        assert!(!kv_handoff_possible(&argv(&["-mm", "/m/gemma.mmproj.gguf"])));
+        assert!(!kv_handoff_possible(&argv(&["--mmproj=/m/gemma.mmproj.gguf"])));
+        assert!(!kv_handoff_possible(&argv(&["--mmproj-url", "https://example.invalid/p.gguf"])));
+        assert!(kv_handoff_possible(&argv(&["--no-mmproj"])));
+        assert!(kv_handoff_possible(&argv(&["--no-mmproj-offload"])));
+        // The argv LU itself builds for a model with an image part.
+        let ours = super::build_server_args(
+            "/m/gemma.gguf",
+            &super::EngineTuning::default(),
+            8127,
+            Some("/data/kv-slots"),
+            Some("/m/gemma.mmproj.gguf"),
+            None,
+        );
+        assert!(!kv_handoff_possible(&ours));
+        let text_only = super::build_server_args("/m/qwen.gguf", &super::EngineTuning::default(), 8127, Some("/data/kv-slots"), None, None);
+        assert!(kv_handoff_possible(&text_only));
+    }
+
+    #[test]
+    fn the_skip_is_said_once_per_model_not_once_per_render() {
+        assert!(kv_skip_note_due("/m/test-once-a.gguf"));
+        assert!(!kv_skip_note_due("/m/test-once-a.gguf"));
+        assert!(!kv_skip_note_due("/m/test-once-a.gguf"));
+        assert!(kv_skip_note_due("/m/test-once-b.gguf"));
+    }
 
     #[test]
     fn tail_keeps_the_last_lines_and_drops_blanks() {
@@ -8037,5 +11524,74 @@ mod diag_tests {
         assert_eq!(pick_save_slot(&serde_json::json!({})), 0);
         assert_eq!(pick_save_slot(&serde_json::json!([])), 0);
         assert_eq!(pick_save_slot(&serde_json::json!(null)), 0);
+    }
+}
+
+#[cfg(test)]
+mod a_stub_is_not_the_engine {
+    //! GH #207: a build from source with ci.yml's 0-byte sidecar stubs got
+    //! "os error 193" from the embeddings server, because the lookup took any
+    //! file that exists.
+    use super::*;
+
+    /// The head of a real program of this platform: the test binary itself.
+    fn program_bytes() -> Vec<u8> {
+        let mut b = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        b.truncate(4096);
+        b
+    }
+
+    #[test]
+    fn the_empty_ci_stub_is_passed_over_for_the_real_binary_behind_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("next-to-the-exe");
+        let real = dir.path().join("src-tauri-bin");
+        std::fs::write(&stub, b"").unwrap();
+        std::fs::write(&real, program_bytes()).unwrap();
+        assert_eq!(pick_engine_binary(&[stub, real.clone()]), Some(real));
+    }
+
+    #[test]
+    fn a_stub_alone_is_no_engine_and_the_error_says_what_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("lu-llama-server");
+        std::fs::write(&stub, b"").unwrap();
+        let candidates = [stub];
+        assert_eq!(pick_engine_binary(&candidates), None);
+        let msg = engine_binary_error(&candidates, || "missing".into());
+        assert!(msg.contains("placeholder of 0 bytes"), "{msg}");
+        // engine-start-failure.ts keys on this fragment: a stub is no reason
+        // for the boot resume to start the engine again.
+        assert!(msg.contains("is a placeholder of"), "{msg}");
+        assert!(msg.contains("scripts/build-llama.sh"), "{msg}");
+        assert!(msg.contains("latest release"), "{msg}");
+        assert!(!msg.contains(dir.path().to_str().unwrap()), "no path of its own: {msg}");
+    }
+
+    #[test]
+    fn a_text_file_of_that_name_is_not_a_program_either() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("lu-llama-server");
+        std::fs::write(&p, b"hello").unwrap();
+        assert_eq!(sidecar_file(&p), SidecarFile::NotAProgram(5));
+    }
+
+    // Negative controls: a real program is still found, and no file at all
+    // keeps the call site's own sentence.
+    #[test]
+    fn a_real_program_is_the_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("lu-llama-server");
+        std::fs::write(&p, program_bytes()).unwrap();
+        assert_eq!(sidecar_file(&p), SidecarFile::Program);
+        assert_eq!(pick_engine_binary(std::slice::from_ref(&p)), Some(p));
+    }
+
+    #[test]
+    fn no_file_at_all_keeps_the_sentence_of_the_call_site() {
+        let dir = tempfile::tempdir().unwrap();
+        let candidates = [dir.path().join("nothing-here")];
+        assert_eq!(sidecar_file(&candidates[0]), SidecarFile::Missing);
+        assert_eq!(engine_binary_error(&candidates, || "missing".into()), "missing");
     }
 }

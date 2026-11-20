@@ -1,7 +1,7 @@
 /**
  * The CivitAI API key field.
  *
- * goonerforporn, Discord #bug-reports 2026-08-28: "the field for the CivitAI
+ * Discord #bug-reports 2026-08-28: "the field for the CivitAI
  * API key is gone from the UI". He was right, and he had already checked
  * Settings, Models/Discover and the workflow finder before writing. The store
  * held `civitaiApiKey`, `setCivitaiApiKey` existed, the changelog mentioned the

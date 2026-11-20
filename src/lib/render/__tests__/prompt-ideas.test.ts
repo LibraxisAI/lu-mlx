@@ -1,6 +1,6 @@
 // Die Vorgaben sind eine Lehre, kein Zierrat.
 //
-// 19.09.2026, zwei Befunde von David an einem Tag: ein Satz auf einem
+// 19.09.2026, zwei Befunde vom Inhaber an einem Tag: ein Satz auf einem
 // Tag-Modell brachte das Haus statt der Figur, und eine Stimmung auf einem
 // Videomodell brachte einen Vogel, der stillsteht. Also muss an den Vorgaben
 // ABLESBAR sein, was in einen Prompt gehoert: das Wort fotorealistisch beim

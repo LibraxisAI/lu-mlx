@@ -1,9 +1,12 @@
 import {
   Image as ImageIcon, Wand2, Scissors, Video, Film, Maximize2, Eraser,
-  UserRound, Mic, Music, FastForward, PersonStanding,
+  UserRound, Mic, Music, FastForward, PersonStanding, Box, Replace,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import type { CreateBackend, CreateIntent } from '../../../stores/createStore'
+import type { CreateBackend, CreateIntent, ThreeDWay } from '../../../stores/createStore'
+import { THREE_D_TEXT } from '../../../lib/three/three-d-text'
+import { MUSIC_PLACEHOLDER } from '../../../lib/render/music-ui'
+import { isHubIntent } from '../../../lib/create/character-hub'
 
 export interface IntentMeta {
   id: CreateIntent
@@ -13,6 +16,9 @@ export interface IntentMeta {
   placeholder: string
   needsSource: boolean
   needsPrompt: boolean
+  /** A prompt the local lanes read when one is typed and run without:
+   *  the field shows there, and Create does not wait for it. */
+  localPrompt?: true
   allowsMask: boolean
   isVideo: boolean
   /** Capability id (node probe) this intent depends on, if any. */
@@ -20,8 +26,9 @@ export interface IntentMeta {
   /** Categories with a hosted endpoint (cloud clip/teaser exists). */
   cloudOnly?: true
   /** 2.5.8: cloudOnly categories that ALSO run on the local ComfyUI backend
-   *  (mirrors createStore's LOCAL_LANE_OPS). The IntentBar unlocks these in
-   *  local mode; the cloud glyph becomes a "Try cloud" affordance. */
+   *  (mirrors createStore's LOCAL_LANE_OPS and LOCAL_UTILITY_OPS). The
+   *  IntentBar unlocks these in local mode; the cloud glyph becomes a
+   *  "Try cloud" affordance. */
   hasLocalLane?: true
   /** The local lane exists only in the Mac fork (a ComfyUI the user already
    *  runs, connected on its port). Windows/Linux keep the LU Cloud teaser: their
@@ -29,7 +36,7 @@ export interface IntentMeta {
    *  hosted tool, so it must not replace it there. */
   localLaneMacOnly?: true
   /** Local model files this intent needs (gates the Download & install card). */
-  requiresModels?: 'image' | 'video' | 'audio' | 'lipsync' | 'motion'
+  requiresModels?: 'image' | 'video' | 'audio' | 'lipsync' | 'motion' | 'upscale'
   examples: string[]
 }
 
@@ -52,7 +59,7 @@ export const INTENTS: IntentMeta[] = [
     // the SDXL/SD1.5 checkpoint path. Cloud keeps its hosted edit endpoint; both
     // share the MaskEditor. Renamed 2.5.9: "Edit" alone hid the i2i entry for
     // the r/SD crowd who search for "image to image" (GH D#86 jendrelele /
-    // the_mr_pickles / pnwpdr4519; David committed to making it clearer).
+    // A user / a user; the owner committed to making it clearer).
     id: 'edit', label: 'Edit / Image to Image', short: 'Edit', icon: Wand2,
     placeholder: 'Describe the new look. Leave the mask empty to restyle the whole image, or paint an area to change just that…',
     needsSource: true, needsPrompt: true, allowsMask: true, isVideo: false,
@@ -67,17 +74,22 @@ export const INTENTS: IntentMeta[] = [
     examples: [],
   },
   {
-    // R5-67: label/short renamed to match apps/web/components/create/
-    // experimental/intents.ts ("Enhance Image" / "Enhance"). The id stays
+    // R5-67: label/short renamed to match the web app
+    // ("Enhance Image" / "Enhance"). The id stays
     // 'upscale' on purpose, a saved gallery result or a stored createStore
     // state references intents by id, and renaming that too would strand
     // them. Web's separate 'video_upscale' intent is a feature decision for
-    // David (does the Desktop get video upscaling at all), not a text fix,
+    // The owner (does the Desktop get video upscaling at all), not a text fix,
     // and is out of scope here.
+    //
+    // 3.0.7 (Discord wish D10): a local lane on Windows and Linux, ComfyUI's
+    // core upscale nodes over a file in models/upscale_models
+    // (lib/local-upscale.ts). The Stage offers that file when none is there.
+    // A Mac has no ComfyUI and keeps this a cloud tool.
     id: 'upscale', label: 'Enhance Image', short: 'Enhance', icon: Maximize2,
     placeholder: '',
     needsSource: true, needsPrompt: false, allowsMask: false, isVideo: false,
-    cloudOnly: true, hasLocalLane: true, localLaneMacOnly: true,
+    cloudOnly: true, hasLocalLane: true, requiresModels: 'upscale',
     examples: [],
   },
   {
@@ -95,7 +107,7 @@ export const INTENTS: IntentMeta[] = [
     examples: ['a wave breaking on rocks in slow motion, cinematic', 'timelapse of clouds over a mountain range'],
   },
   {
-    // Local lane restored 2026-07-17 (David): the lu-labs port had marked
+    // Local lane restored 2026-07-17: the lu-labs port had marked
     // animate cloudOnly, which silently dropped the local I2V the old Create
     // tab always had. Local builds route through buildDynamicWorkflow's
     // family-specific I2V wiring (WAN/WAN2.2/Hunyuan/LTX/Cosmos/SVD/FramePack);
@@ -107,7 +119,7 @@ export const INTENTS: IntentMeta[] = [
     examples: ['slow zoom in, subtle parallax', 'hair and clothes moving in the wind'],
   },
 
-  // ── 2.5.8 specialized categories (2026-07-17 David). All have hosted
+  // ── 2.5.8 specialized categories (2026-07-17). All have hosted
   // endpoints (cloudOnly = cloud clip/teaser exists); music, lipsync, extend
   // and motion ALSO run locally (hasLocalLane) on core ComfyUI node families
   // (ACE audio, Wan S2V, I2V last-frame chain, Wan VACE/Animate). Their
@@ -140,7 +152,7 @@ export const INTENTS: IntentMeta[] = [
   },
   {
     id: 'music', label: 'Music', short: 'Music', icon: Music,
-    placeholder: 'Describe the track. Genre, mood, tempo, instruments…',
+    placeholder: MUSIC_PLACEHOLDER.style,
     needsSource: false, needsPrompt: true, allowsMask: false, isVideo: false,
     cloudOnly: true, hasLocalLane: true, requiresModels: 'audio',
     examples: [
@@ -164,26 +176,90 @@ export const INTENTS: IntentMeta[] = [
     // onnxruntime-gpu is absent — slower, not broken); the pack only shows
     // up after a ComfyUI restart, which installCapability performs.
     id: 'motion', label: 'Motion Control', short: 'Motion', icon: PersonStanding,
-    placeholder: 'Optional: extra style/scene hints…',
-    needsSource: false, needsPrompt: false, allowsMask: false, isVideo: true,
+    // The local lanes read a prompt and run without one: the ComfyUI graph
+    // falls back to its own scene line (dynamic-workflow buildMotionWorkflow),
+    // the Mac to MLX_MOTION_PROMPT. The cloud model takes none.
+    placeholder: 'Optional: describe the scene or the style…',
+    needsSource: false, needsPrompt: false, localPrompt: true, allowsMask: false, isVideo: true,
     capability: 'dwpose',
     cloudOnly: true, hasLocalLane: true, requiresModels: 'motion',
     examples: [],
+  },
+  {
+    // Swap Character (07.11.2026, port of the web's C52): a real video keeps
+    // its motion, camera, sound and scene, and its people become the people
+    // of the customer's photos. Studio models only (lib/render/swap.ts), no
+    // local lane: in local mode it is a locked cloud pill like Erase. The
+    // pill says "Swap" (the web's desktop word), the full name stands in
+    // title and aria-label; the bar has no room for two more words.
+    id: 'swap_character', label: 'Swap Character', short: 'Swap', icon: Replace,
+    placeholder: '',
+    needsSource: false, needsPrompt: false, allowsMask: false, isVideo: true,
+    cloudOnly: true,
+    examples: [],
+  },
+  {
+    // 3.1.0 (C3D-PLAN): a 3D model from words, a picture or a video. The
+    // thirteenth pill, at the far right, so no tool moves. Which inputs it
+    // takes depends on the way (intentNeedsSource / intentTakesPrompt), so
+    // the two flags here stay false. Local: TripoSR on a Mac (its own
+    // engine, commands/mesh3d.rs), TRELLIS.2 in ComfyUI on Windows and Linux.
+    // The Stage gates the local tab on its own setup card, not on
+    // requiresModels.
+    id: '3d', label: '3D Model', short: '3D', icon: Box,
+    placeholder: THREE_D_TEXT.prompt,
+    needsSource: false, needsPrompt: false, allowsMask: false, isVideo: false,
+    cloudOnly: true, hasLocalLane: true,
+    examples: THREE_D_TEXT.examples,
   },
 ]
 
 export const INTENT_MAP: Record<CreateIntent, IntentMeta> =
   Object.fromEntries(INTENTS.map((i) => [i.id, i])) as Record<CreateIntent, IntentMeta>
 
+/** Does the view on screen show a prompt field? Composer draws the field under
+ *  this rule and both starts (cloud and local) send a prompt under the same
+ *  one: a view without the field must never send the text left over from
+ *  another tab. Character Studio's use surface is a plain image generate and
+ *  has one. */
+export function intentTakesPrompt(intent: CreateIntent, characterUse = false, threeDWay: ThreeDWay = 'image'): boolean {
+  if (intent === '3d') return threeDWay === 'text'
+  return INTENT_MAP[intent].needsPrompt || characterUse
+}
+
+/** Does the view need a picture on the Stage before it can start? 3D needs
+ *  one from a picture and from a video (the first still frame stands there). */
+export function intentNeedsSource(intent: CreateIntent, threeDWay: ThreeDWay = 'image'): boolean {
+  if (intent === '3d') return threeDWay !== 'text'
+  return INTENT_MAP[intent].needsSource
+}
+
+/** Does the view on `backend` show a prompt field that may stay empty?
+ *  Motion Control on the local lanes. The start sends what is typed there,
+ *  and Create does not wait for it. */
+export function intentTakesOptionalPrompt(intent: CreateIntent, backend: CreateBackend): boolean {
+  return backend === 'local' && !!INTENT_MAP[intent].localPrompt
+}
+
 /**
- * Intents that have a REAL local pipeline on an MLX-only Mac (no ComfyUI
- * connected). Text-to-image and text-to-video run in-process (api/mlx-image.ts,
- * api/mlx-video.ts). Character Studio trains through the musubi runtime
- * (trainer.rs) — that is not a ComfyUI graph. Everything else on this host is
- * a ComfyUI graph or a ComfyUI-staged source, so it stays locked until the
- * user's already-running ComfyUI answers (connect-only).
+ * The intents that have a REAL local pipeline on an MLX host (Apple Silicon
+ * Mac without a connected ComfyUI). Every other local lane is a ComfyUI
+ * graph, and on macOS ComfyUI is connect-only (never spawned).
+ *
+ * Text-to-image and text-to-video always run. Remove Background runs on Vision
+ * in macOS. Character Studio runs "Use character" via mflux LoRA and trains via
+ * musubi/mflux. 3D runs via TripoSR. Edit / Animate / Extend / Enhance /
+ * Music / Motion / Talking run natively when their MLX/second-engine model is
+ * installed. Everything else stays locked as a cloud teaser until the user's
+ * own ComfyUI answers (connect-only).
  */
-const MLX_LOCAL_INTENTS: ReadonlySet<CreateIntent> = new Set<CreateIntent>(['image', 'video', 'character'])
+// Remove Background runs on Vision in macOS (commands/mlx_cutout.rs).
+// Character Studio: "Use character" runs a character's LoRA from the Mac's
+// LoRA folder on the second image engine (mflux `--lora`), the way Windows
+// runs it in ComfyUI.
+// 3D (3.1.0) is a local tab on every Mac: without the engine the Stage shows
+// its one-time setup card (commands/mesh3d.rs, TripoSR).
+const MLX_LOCAL_INTENTS: ReadonlySet<CreateIntent> = new Set<CreateIntent>(['image', 'video', 'removebg', 'character', '3d'])
 
 /**
  * True when this Apple Silicon Mac has no ComfyUI connected, so local Create
@@ -201,22 +277,36 @@ export function intentNeedsComfyGraph(id: CreateIntent): boolean {
     || id === 'animate' || id === 'extend' || id === 'lipsync' || id === 'music' || id === 'motion'
 }
 
+function runsOnMlx(id: CreateIntent, mlxAnimate: boolean, mlxEdit: boolean, mlxUpscale: boolean, mlxMusic: boolean, mlxMotion: boolean, mlxTalk: boolean): boolean {
+  return MLX_LOCAL_INTENTS.has(id) || ((id === 'animate' || id === 'extend') && mlxAnimate) || (id === 'edit' && mlxEdit)
+    || (id === 'upscale' && mlxUpscale) || (id === 'music' && mlxMusic) || (id === 'motion' && mlxMotion) || (id === 'lipsync' && mlxTalk)
+}
+
 /**
  * The intents to surface for a given backend + host. Pure so the rule is unit
  * tested instead of buried in the IntentBar's JSX.
  *
- * Cloud shows everything. Local ComfyUI hosts (Windows/Linux, and a Mac with
- * ComfyUI connected) also show everything — hosted-only tools with no
- * local lane would render as locked teasers, but every Create intent now has a
- * local lane when that backend exists. An MLX-only Mac hides the intents that
- * have neither an MLX/trainer path nor a hosted teaser sheet (edit, removebg,
- * animate): they need a ComfyUI node or a ComfyUI-staged source, so leaving
- * them selectable is a dead affordance (MLX generate silently drops source +
- * mask and returns an unrelated fresh image).
+ * Cloud shows everything. Local (ComfyUI, Windows/Linux, and a Mac with
+ * ComfyUI connected where `mlxHost` is false) also shows everything — the
+ * hosted-only tools render as locked cloud teasers rather than disappearing.
+ * Local on an MLX Mac hides the intents that have neither a local MLX path
+ * nor a hosted teaser sheet (edit while no installed model takes an image,
+ * and animate while none starts from one): they need a ComfyUI node or a
+ * model that is not there, so leaving them selectable is a dead affordance
+ * that either errors on submit or, worse and the MLX case, silently drops the
+ * source and returns an unrelated fresh image.
+ *
+ * `cloudFeatures` is the setting "Show Cloud features in Local mode". Off, the
+ * local bar carries no cloud teaser at all: a tool that cannot run on this
+ * machine is left out, the same way the Mac leaves out what MLX cannot do.
+ * Until 3.0.5 the switch only took the LU Cloud rows out of the model
+ * pickers, and Enhance and Erase kept their cloud tag and kept opening the
+ * Cloud sheet (the box, 04.10.2026).
  */
-export function visibleIntents(backend: CreateBackend, mlxHost: boolean): IntentMeta[] {
-  if (backend === 'cloud' || !mlxHost) return INTENTS
-  return INTENTS.filter((m) => MLX_LOCAL_INTENTS.has(m.id) || m.cloudOnly === true)
+export function visibleIntents(backend: CreateBackend, mlxHost: boolean, cloudFeatures: boolean, mlxAnimate = false, mlxEdit = false, mlxUpscale = false, mlxMusic = false, mlxMotion = false, mlxTalk = false, macHost = false): IntentMeta[] {
+  if (backend === 'cloud') return INTENTS
+  const shown = mlxHost ? INTENTS.filter((m) => runsOnMlx(m.id, mlxAnimate, mlxEdit, mlxUpscale, mlxMusic, mlxMotion, mlxTalk) || m.cloudOnly === true) : INTENTS
+  return cloudFeatures ? shown : shown.filter((m) => !isIntentLocked(m, backend, mlxHost, mlxAnimate, mlxEdit, mlxUpscale, mlxMusic, mlxMotion, mlxTalk, macHost))
 }
 
 /**
@@ -227,14 +317,9 @@ export function visibleIntents(backend: CreateBackend, mlxHost: boolean): Intent
  * — those lanes' "local" implementation is a ComfyUI graph this host does not
  * have, so the honest state is the cloud teaser, not a working-looking pill.
  */
-export function isIntentLocked(
-  meta: IntentMeta,
-  backend: CreateBackend,
-  mlxHost: boolean,
-  macHost = false,
-): boolean {
+export function isIntentLocked(meta: IntentMeta, backend: CreateBackend, mlxHost: boolean, mlxAnimate = false, mlxEdit = false, mlxUpscale = false, mlxMusic = false, mlxMotion = false, mlxTalk = false, macHost = false): boolean {
   if (backend === 'cloud') return false
-  if (mlxHost) return !MLX_LOCAL_INTENTS.has(meta.id)
+  if (mlxHost) return !runsOnMlx(meta.id, mlxAnimate, mlxEdit, mlxUpscale, mlxMusic, mlxMotion, mlxTalk)
   if (meta.localLaneMacOnly && !macHost) return meta.cloudOnly === true
   return meta.cloudOnly === true && !meta.hasLocalLane
 }
@@ -245,12 +330,42 @@ export function isIntentLocked(
  * result actions that FORCE-switch to an intent — "Edit with mask" on a
  * finished image used to set 'edit' even where that lane cannot run.
  */
-export function isIntentAvailable(
-  id: CreateIntent,
-  backend: CreateBackend,
-  mlxHost: boolean,
-  macHost = false,
-): boolean {
+export function isIntentAvailable(id: CreateIntent, backend: CreateBackend, mlxHost: boolean, mlxAnimate = false, mlxEdit = false, mlxUpscale = false, mlxMusic = false, mlxMotion = false, mlxTalk = false, macHost = false): boolean {
   const meta = INTENT_MAP[id]
-  return visibleIntents(backend, mlxHost).includes(meta) && !isIntentLocked(meta, backend, mlxHost, macHost)
+  return visibleIntents(backend, mlxHost, true, mlxAnimate, mlxEdit, mlxUpscale, mlxMusic, mlxMotion, mlxTalk, macHost).includes(meta)
+    && !isIntentLocked(meta, backend, mlxHost, mlxAnimate, mlxEdit, mlxUpscale, mlxMusic, mlxMotion, mlxTalk, macHost)
+}
+
+/**
+ * The pill of the Character area (3.1.0 part B): one pill for Character
+ * Studio, Talking Character, Motion Control and Swap Character. It carries the
+ * id of the first of them, so the bar keeps its order (after Animate).
+ */
+export const HUB_PILL: IntentMeta = {
+  ...INTENT_MAP.character,
+  label: 'Character',
+  short: 'Character',
+}
+
+export interface PillEntry {
+  meta: IntentMeta
+  /** The pill of the Character area. */
+  hub: boolean
+}
+
+/**
+ * The pills of the bar: the visible intents, with the four intents of the
+ * Character area folded into one pill where the first of them stood. The
+ * area itself shows which of its actions are local, locked or cloud.
+ */
+export function pillEntries(visible: readonly IntentMeta[]): PillEntry[] {
+  const out: PillEntry[] = []
+  let hubDone = false
+  for (const meta of visible) {
+    if (!isHubIntent(meta.id)) { out.push({ meta, hub: false }); continue }
+    if (hubDone) continue
+    hubDone = true
+    out.push({ meta: HUB_PILL, hub: true })
+  }
+  return out
 }

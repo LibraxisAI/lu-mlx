@@ -186,6 +186,25 @@ describe('mirroring to the app log file', () => {
     expect(invokeMock.mock.calls.filter((c) => c[0] === 'log_write')).toHaveLength(0)
   })
 
+  it('mirrors an event at info level', async () => {
+    // The end of a voice session is no warning, and it still has to be in
+    // the file: it is what a support log is read for when a session ended
+    // and nobody knows why.
+    log.event('voice.session_ended', { reason: 'left', liveMs: 700 })
+    await flush()
+    expect(lastMirror()).toEqual({ level: 'info', target: 'frontend', message: 'voice.session_ended {"reason":"left","liveMs":700}' })
+  })
+
+  it('the end of a voice session is written as such an event', async () => {
+    // It was log.info once: in the app that reached neither the file nor,
+    // after the build strips the console, anything else.
+    const { readFileSync } = await import('node:fs')
+    const { resolve } = await import('node:path')
+    const source = readFileSync(resolve(__dirname, '../../api/voice-session.ts'), 'utf8')
+    expect(source).toContain("log.event('voice.session_ended'")
+    expect(source).not.toContain("log.info('voice.session_ended'")
+  })
+
   it('stays silent outside Tauri — a browser has no log file to write to', async () => {
     leaveTauri()
     log.error('boom')

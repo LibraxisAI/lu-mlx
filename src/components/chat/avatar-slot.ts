@@ -1,28 +1,23 @@
 /**
- * Der Avatar-Slot — EIN Rezept fuer beide Sprecher.
+ * The avatar column of a conversation, one recipe for chat and code view.
  *
- * Design-Audit §4, „Chat mit Antwort": „Zwei Avatar-Systeme: Assistent
- * rahmenlos, User als gerahmte Box mit 11px-Icon". Die Nutzerseite trug
- * Flaeche + Rahmen, das Monogramm sass nackt auf der Pane, und die Code-Ansicht
- * hatte mit `w-5 h-5` ohne Rahmen noch eine dritte Fassung.
+ * The user has a chip: a framed square with their picture or a small figure.
+ * The model has none. Its sign is the LU mark, bare, at the size of the mark
+ * that shows while it works (GRID in status/glyph-geometry.ts, 20 px), so the
+ * line that says "Working" and the answers above it read as one speaker. The
+ * grey chip behind the mark made it look like a second user.
  *
- * Warum das mehr ist als Geschmack: die Avatarspalte ist der Taktgeber beim
- * Ueberfliegen eines Transkripts. Zwei Silhouetten in einer Spalte heissen,
- * dass der Sprecherwechsel an der FORM nicht ablesbar ist — man muss den
- * Inhalt des Chips lesen, um zu wissen, wer spricht. Ein Chip fuer beide gibt
- * der Spalte eine konstante Kante.
- *
- * Nebeneffekt, und kein kleiner: das Monogramm ist weiss gezeichnet und wird
- * im Hellmodus per `invert` geschwaerzt. Ohne Chip stand es direkt auf der
- * jeweiligen Pane — im Hellmodus schwarz auf Weiss, im Dunkelmodus weiss auf
- * #1e1e1e. Mit Chip steht es in beiden Modi auf einer definierten Flaeche.
+ * Both slots are 24 px wide, so the text of both speakers starts on one edge.
  */
 
-/**
- * Der Chip selbst. 24x24 im Chat, dieselbe Klasse in der Code-Ansicht — die
- * Groesse steht hier und nicht mehr pro Datei, sonst laufen sie wieder
- * auseinander (Chat 24px, Code 20px war der Stand davor).
- */
-export const AVATAR_SLOT =
-  'w-6 h-6 rounded-md overflow-hidden flex items-center justify-center shrink-0 ' +
-  'bg-gray-100 dark:bg-white/8 border border-gray-200 dark:border-white/10'
+/** The place of either speaker: 24 px, its content in the middle. */
+const PLACE = 'w-6 h-6 flex items-center justify-center shrink-0'
+
+/** The chip of the user. */
+export const AVATAR_SLOT = `${PLACE} rounded-md overflow-hidden bg-gray-100 dark:bg-white/8 border border-gray-200 dark:border-white/10`
+
+/** The place of the model's mark: the width of the chip, no surface, no frame. */
+export const MODEL_MARK_SLOT = PLACE
+
+/** The mark itself, 20 px like the working mark. */
+export const MODEL_MARK = 'w-5 h-5 object-contain opacity-90'

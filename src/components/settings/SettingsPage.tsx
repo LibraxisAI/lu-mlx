@@ -1,35 +1,48 @@
-import { useState, useEffect, useRef, type ReactNode, type ChangeEvent } from 'react'
+import { SkillsSettings } from './SkillsSettings'
+import { CreditLimitSettings } from './CreditLimitSettings'
+import { CommandRulesSettings } from './CommandRulesSettings'
+import { useState, useEffect, useLayoutEffect, useRef, type ReactNode, type ChangeEvent } from 'react'
 import { withDetail } from '../../lib/error-text'
 // `X` steht hier weiterhin, obwohl der Sprachabschnitt mit seinen Symbolen
 // nach ./SpeechSettings.tsx gezogen ist: der Dismiss-Knopf der ComfyUI-Notiz
 // traegt ihn neben dem Wort.
 import { ArrowLeft, RotateCcw, Sun, Moon, Check, X, Loader2, Shield, ChevronRight, GraduationCap, Lock, Sliders, Plug, Bot, Phone, User, Download, AlertTriangle } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { SETTINGS_TAB_RESET_KEYS, type SettingsTab } from '../../lib/settings-reset'
+import { type SettingsTab } from '../../lib/settings-reset'
+import { runSettingsReset } from '../../lib/run-settings-reset'
 import { armedScopeFor, type ResetArm, type ResetArmScope } from '../../lib/reset-arming'
 import { sectionAnchorId, sectionsFor, type SettingsSectionFlags } from './settings-nav'
+import { AgentChangeLog } from './AgentChangeLog'
+import { WatcherSettings } from './WatcherSettings'
+import { ChatReplyTimeoutSettings } from './ChatReplyTimeoutSettings'
+import { CompactThresholdInput } from './CompactThresholdInput'
+import { HowItWorks } from '../ui/HowItWorks'
+import { HOWTO } from '../../lib/howto'
 import { useSettingsStore } from '../../stores/settingsStore'
-import { usePermissionStore } from '../../stores/permissionStore'
+import { rerunOnboarding } from '../../lib/onboarding-rerun'
 import { useUIStore } from '../../stores/uiStore'
 import { SliderControl } from './SliderControl'
+import { THINK_BUDGET_STEP, normalizeThinkBudget } from '../../lib/think-budget'
 import { InlineToggle } from './InlineToggle'
+import { ChatRecallToggle } from './ChatRecallToggle'
+import { composerHint, enterKeyMode } from '../../lib/enter-key'
 import { SpeechSettings } from './SpeechSettings'
 import { LogFileSettings } from './LogFileSettings'
 import { PersonaPanel } from '../personas/PersonaPanel'
 import { AccountPanel } from '../auth/AccountPanel'
-import { useVoiceStore } from '../../stores/voiceStore'
 import { downloadSuffix } from '../../lib/formatters'
 // Der Satz zum Startfehler kommt fuer beide Oberflaechen aus dieser Stelle
 // (Ticket 007). Statisch geladen, weil ihn der Beobachter unten in dem
 // Augenblick braucht, in dem ein Start gescheitert ist: eine Meldung darf
 // nicht erst darauf warten, dass ein Stueck Programm nachgeladen wird.
-import { comfyStartupError, comfyCrashAdvice, comfyStartThrowText, COMFY_START_FAILED } from '../create/experimental/comfyError'
+import { comfyStartupError, comfyCrashAdvice, comfyStartThrowText, comfyDeviceLine, COMFY_START_FAILED } from '../create/experimental/comfyError'
 import { Modal } from '../ui/Modal'
+import { ModalActions, ModalButton } from '../ui/ModalActions'
 
 // AS-09: PIPER_VOICES und CLOUD_TTS_VOICES sind mit dem Abschnitt, der sie
 // benutzt, nach ./SpeechSettings.tsx gezogen.
 import { useAgentModeStore } from '../../stores/agentModeStore'
-import { FEATURE_FLAGS } from '../../lib/constants'
+import { DEFAULT_SETTINGS, FEATURE_FLAGS } from '../../lib/constants'
 import { MemorySettings } from './MemorySettings'
 import { ChatBackupSettings } from './ChatBackupSettings'
 import { ImportScanSkeleton } from '../layout/ViewSkeletons'
@@ -37,10 +50,18 @@ import { LocalApiSettings } from './LocalApiSettings'
 import { RemoteAccessSettings } from './RemoteAccessSettings'
 import { RemoteAccessDocs } from './RemoteAccessDocs'
 import { HardwareSettings } from './HardwareSettings'
+import { AppleHardwareInfo } from './AppleHardwareInfo'
+import { DataFolderWhere, DataFolderAfterword } from './DataFolderWhere'
+import { DownloadLimitSetting } from './DownloadLimitSetting'
+import { RuntimeFolderSetting } from './RuntimeFolderSetting'
+import { StorageFolderSetting } from './StorageFolderSetting'
+import { ComfyFolderTargets } from './ComfyFolderTargets'
 import { ChatbotImporter } from '../import/ChatbotImporter'
 import { ProviderSettings } from './ProviderConfig'
 import { BuiltinEngineSettings } from './BuiltinEngineSettings'
+import { IdleUnloadSetting } from './IdleUnloadSetting'
 import { MlxMediaSettings } from './MlxMediaSettings'
+import { CustomNodesSettings } from './CustomNodesSettings'
 import { useProviderStore } from '../../stores/providerStore'
 import { useComfyInstallStore, comfySectionShouldOpen } from '../../stores/comfyInstallStore'
 import { PermissionSettings } from './PermissionSettings'
@@ -48,6 +69,8 @@ import { MCPServerSettings } from './MCPServerSettings'
 import { WorkflowList } from '../agents/WorkflowList'
 import { WorkflowBuilder } from '../agents/WorkflowBuilder'
 import { useUpdateStore, isNewerVersion } from '../../stores/updateStore'
+import { useReleaseNotesStore } from '../../stores/releaseNotesStore'
+import { releaseNoteFor } from '../../lib/release-notes'
 import { timeAgo } from '../../lib/time-ago'
 import { backendCall, isTauri, isMacOS, isWindows, openExternal } from '../../api/backend'
 import { comfyPathPlaceholder } from '../../lib/comfy-path-placeholder'
@@ -55,6 +78,7 @@ import { troubleshootHinweis, type TroubleshootHinweis } from './troubleshoot-me
 import { isMlxImageHost } from '../../api/mlx-image'
 import { ArrowUpCircle, KeyRound, RefreshCw } from 'lucide-react'
 import { CLOUD_BASE } from '../../api/cloud/config'
+import { cloudLink } from '../../lib/cloud-links'
 import { formatBytes } from '../../lib/formatters'
 import { syncCustomModelDir, type CustomModelDirResult } from '../../lib/custom-model-dir'
 import { listBundledModels, lastCustomScanDir, lastScanDirs, type ScannedDir } from '../../api/engine'
@@ -69,8 +93,16 @@ import { HfTokenSetting } from './HfTokenSetting'
 import { ModelsRootSetting } from './ModelsRootSetting'
 import { defaultComfyPort } from '../../lib/comfy-default-port'
 import { HINWEIS_TEXT, PUNKT_FARBE } from '../../lib/hinweis'
+import { userAgentProblem } from '../../lib/search-user-agent'
+import { SEARCH_PROVIDERS, normalizeSearchProvider } from '../../lib/search-providers'
 import { ContentPolicySettings } from './ContentPolicySettings'
 import { isLmStudioProvider } from '../../lib/hf-to-provider'
+import { TEMPERATURE_MAX, TEMPERATURE_HELP, TEMPERATURE_HELP_LABEL } from '../../lib/sampling'
+import { HighTemperatureWarning } from '../chat/HighTemperatureWarning'
+import { BoundedNumberInput } from './BoundedNumberInput'
+import { CONTEXT_WINDOW_MAX, MAX_TOKENS_MAX, SUB_AGENT_LIMIT_MAX } from '../../lib/number-limits'
+import { usePageMemoryStore } from '../../stores/pageMemoryStore'
+import { SeparateComfyInstall, COMFY_PATH_CONNECT_HINT } from './SeparateComfyInstall'
 
 // ── User profile picture (Appearance) ───────────────────────────
 // Self-contained like HfDownloadPathSetting. Stores the picture as a
@@ -147,8 +179,21 @@ function AvatarSetting() {
 
 // ── Collapsible Section ─────────────────────────────────────────
 
+/** The how-to line of a settings section. Renders nothing for a topic that
+ *  has no film yet. */
+function HowtoRow({ topic }: { topic: string }) {
+  if (!HOWTO[topic]) return null
+  return <div className="pt-1 pb-1.5"><HowItWorks topic={topic} variant="line" placement="above-start" /></div>
+}
+
 function Section({ title, children, defaultOpen = false }: { title: string; children: ReactNode; defaultOpen?: boolean }) {
-  const [open, setOpen] = useState(defaultOpen)
+  // C22: a section the user opened or closed stays so on the next visit of
+  // this session, instead of folding back each time Chat was looked at.
+  const [open, setOpenState] = useState(() => usePageMemoryStore.getState().settingsSections[title] ?? defaultOpen)
+  const setOpen = (v: boolean) => {
+    setOpenState(v)
+    usePageMemoryStore.getState().setSettingsSection(title, v)
+  }
   const [animating, setAnimating] = useState(false)
   return (
     // D-S27: `id` + `scroll-mt` machen die Sektion zum Sprungziel der Rail.
@@ -175,7 +220,10 @@ function Section({ title, children, defaultOpen = false }: { title: string; chil
         </span>
         <ChevronRight size={12} className={`text-gray-400 transition-transform duration-200 ${open ? 'rotate-90' : ''}`} />
       </button>
-      <AnimatePresence>
+      {/* initial={false}: a section that is open when the page mounts (its
+          default, or remembered from the last visit, C22) is simply there,
+          so the scroll position can be put back at once. */}
+      <AnimatePresence initial={false}>
         {open && (
           <motion.div
             id={`${sectionAnchorId(title)}-body`}
@@ -255,9 +303,9 @@ function WorkflowSection() {
   )
 }
 
-// ── Model Storage (the user's own model folder) ─────────────────
+// ── Storage (the user's own model folder) ─────────────────
 //
-// GH #122 (zrmdsxa) + Discord "Read me first" (ever.noob): this folder was a
+// GH #122 + Discord "Read me first": this folder was a
 // download TARGET and nothing else. Models already sitting in it were never
 // looked at, and the copy above the field said nothing about that, so the
 // Models tab stayed empty beside a folder full of models. It is read now
@@ -542,7 +590,7 @@ function CustomModelDirNote({ result }: { result: CustomModelDirResult }) {
   if (result.status === 'unsupported') {
     return (
       <div className={`${cls} ${HINWEIS_TEXT.ruhig}`}>
-        Chat models in this folder are read. Image and video on the Mac run on Apple MLX, not ComfyUI, so image models in this folder are not picked up. Install those under Local Media (Apple MLX).
+        Chat models in this folder are read. Image and video on the Mac run on Apple MLX, not ComfyUI, so image models in this folder are not picked up. Install those in the Model Manager, under Image.
       </div>
     )
   }
@@ -561,7 +609,7 @@ function CustomModelDirNote({ result }: { result: CustomModelDirResult }) {
 // download them a second time. The backend hard links the GGUF into the app
 // models dir, zero copy; Ollama and LM Studio keep working untouched.
 
-// ── Model Storage, row 2: LM Studio's folder ────────────────────
+// ── Storage, row 2: LM Studio's folder ────────────────────
 //
 // Read-only on purpose. LU does not own this folder and cannot move it, so a
 // field here would be a lie with a Browse button on it. What the user needs is
@@ -592,7 +640,7 @@ export function LmStudioFolderSetting() {
   )
 }
 
-// ── Model Storage, row 3: Ollama ────────────────────────────────
+// ── Storage, row 3: Ollama ────────────────────────────────
 //
 // No path at all, and that is the point of the row. Ollama keeps its models in
 // a content-addressed blob store under names no human picked, so there is
@@ -733,6 +781,11 @@ interface ComfyStatusResponse {
    *  read as foreign after a restart, blocking Update on the customer's own
    *  process). */
   ownedByApp?: boolean
+  /** 3.0.9: the "Start ComfyUI when LU starts" switch (`comfy_boot_plan` in
+   *  `process.rs`). Off unless the user turned it on or LU installed this
+   *  ComfyUI itself; a ComfyUI LU only found is no longer started at launch.
+   *  The dev server does not send it. */
+  autostart?: boolean
 }
 
 /** Antwort von `comfyui_last_output` (`process.rs`). Alle vier Schluessel
@@ -771,24 +824,17 @@ function ComfyUpdateConfirmModal({
     <Modal open={open} onClose={onClose} title="Update ComfyUI?">
       <div className="space-y-4 text-sm text-gray-200">
         <p className="t-body leading-relaxed text-gray-300">
-          This pulls the latest ComfyUI and reinstalls its Python packages. It can take a few minutes. If ComfyUI is running and this app started it, it will be stopped first; a ComfyUI this app did not start blocks the update instead.
+          This pulls the latest ComfyUI and reinstalls its Python packages. It can take a few minutes. If ComfyUI is running and this app started it, it will be stopped first; a ComfyUI this app did not start blocks the update instead. ComfyUI starts again when the update is done.
         </p>
         {path && <p className="t-label text-gray-500 text-center">ComfyUI folder: {path}</p>}
-        <div className="flex flex-col gap-2 pt-1">
-          <button
-            onClick={onConfirm}
-            className="w-full px-4 py-2 rounded-lg bg-blue-500/20 hover:bg-blue-500/30 border border-blue-500/30 text-blue-200 text-sm font-medium transition-colors"
-          >
-            Update
-          </button>
-          <button
-            onClick={onClose}
-            data-autofocus
-            className="w-full px-4 py-1.5 rounded-lg hover:bg-white/5 text-gray-500 hover:text-gray-300 text-xs transition-colors"
-          >
+        <ModalActions>
+          <ModalButton variant="quiet" onClick={onClose} data-autofocus>
             Cancel
-          </button>
-        </div>
+          </ModalButton>
+          <ModalButton variant="primary" onClick={onConfirm}>
+            Update
+          </ModalButton>
+        </ModalActions>
       </div>
     </Modal>
   )
@@ -804,6 +850,9 @@ export function ComfyUISettings() {
   // was still no reason anywhere on screen while the traceback sat in our own
   // ring buffer. An error is not allowed to be silence.
   const [startError, setStartError] = useState('')
+  // 3.0.7: the line ComfyUI prints at start to say what it runs on. After a
+  // switch of the ComfyUI GPU mode this is where the user sees it took.
+  const [deviceLine, setDeviceLine] = useState('')
   const [loading, setLoading] = useState(true)
   const [customPath, setCustomPath] = useState('')
   const [pathError, setPathError] = useState('')
@@ -895,6 +944,26 @@ export function ComfyUISettings() {
     const interval = setInterval(check, 5000)
     return () => { cancelled = true; clearInterval(interval) }
   }, [])
+
+  // Read the Device line once per run of our own ComfyUI. The ring buffer
+  // holds only what LU's own child printed, so a ComfyUI started elsewhere is
+  // not asked. A stop clears the line, and the next run is read afresh.
+  const ownRunning = !!status?.running && status?.ownedByApp !== false
+  useEffect(() => {
+    if (!ownRunning) { setDeviceLine(''); return }
+    if (deviceLine) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const { backendCall } = await import('../../api/backend')
+        const out = await backendCall<ComfyLastOutput>('comfyui_last_output')
+        if (!cancelled) setDeviceLine(comfyDeviceLine(out?.lines))
+      } catch {
+        // Level (a): the status poll runs again in 5 s and this with it.
+      }
+    })()
+    return () => { cancelled = true }
+  }, [ownRunning, deviceLine, status])
 
   /** Auf den Absturz warten, der nach dem Spawn kommt.
    *
@@ -1104,6 +1173,11 @@ export function ComfyUISettings() {
           </span>
         </div>
       </div>
+      {ownRunning && deviceLine && (
+        <p className="t-micro font-mono text-gray-600 dark:text-gray-300 truncate" title={deviceLine} data-testid="comfy-device-line">
+          {deviceLine}
+        </p>
+      )}
 
       {startError && (
         <pre role="alert" className="whitespace-pre-wrap break-words text-[0.55rem] leading-relaxed text-red-400 bg-red-500/[0.06] border border-red-500/20 rounded p-2 max-h-40 overflow-y-auto">
@@ -1188,10 +1262,17 @@ export function ComfyUISettings() {
             Connect
           </button>
         </div>
+        {/* C80: the field alone does nothing; GitHub #230 read it as saved. */}
+        {customPath.trim() && customPath.trim() !== status?.path && !pathError && !pathSuccess && (
+          <p className={`t-micro ${HINWEIS_TEXT.ruhig}`} data-testid="comfy-path-connect-hint">{COMFY_PATH_CONNECT_HINT}</p>
+        )}
         {pathError && <p className="text-[0.55rem] text-red-400">{pathError}</p>}
         {pathSuccess && <p className="text-[0.55rem] text-green-400">Path set successfully</p>}
       </div>
       )}
+
+      {/* GH #183: which folder LU writes into per kind of model, and why. */}
+      {status?.isLocal !== false && <ComfyFolderTargets path={status?.path} running={status?.running} />}
 
       {/* Port - editable */}
       <div className="space-y-1">
@@ -1238,9 +1319,35 @@ export function ComfyUISettings() {
       </div>
 
       {/* Controls, local host only (can't manage a remote process). Hidden on
-          macOS because LU never spawns ComfyUI there. */}
+          macOS because LU never spawns/installs ComfyUI there. */}
       {status?.isLocal !== false && canSpawnComfy && (
-      <div className="flex items-center gap-1.5">
+        <>
+          {/* 3.0.9: at launch LU only connects to a ComfyUI that already runs. */}
+          {status?.found && (
+            <label className="flex items-start justify-between gap-3 cursor-pointer">
+              <span>
+                <span className="block t-micro text-gray-300">Start ComfyUI when LU starts</span>
+                <span className={`block t-micro leading-relaxed ${HINWEIS_TEXT.ruhig}`}>
+                  Off: LU uses a ComfyUI that is already running and starts this one only when you click Start or create something.
+                </span>
+              </span>
+              <input
+                type="checkbox"
+                aria-label="Start ComfyUI when LU starts"
+                checked={status?.autostart === true}
+                onChange={async (e) => {
+                  const enabled = e.target.checked
+                  const { backendCall } = await import('../../api/backend')
+                  try {
+                    await backendCall('set_comfyui_autostart', { enabled })
+                    setStatus(prev => prev ? { ...prev, autostart: enabled } : prev)
+                  } catch { /* the next status poll shows what was actually saved */ }
+                }}
+                className="mt-0.5 accent-emerald-500"
+              />
+            </label>
+          )}
+          <div className="flex items-center gap-1.5">
         {status?.found && !status.running && (
           <button onClick={handleStart} className="px-2 py-1 rounded text-[0.6rem] bg-green-500/10 text-green-400 hover:bg-green-500/20 transition-colors">
             Start
@@ -1275,7 +1382,7 @@ export function ComfyUISettings() {
         {(!status?.found || status?.complete === false) && installIdle && (
           <button
             onClick={() => {
-              // andy_38747 (Discord): let the Path field double as the install
+              // A user (Discord): let the Path field double as the install
               // target so the multi-GB install can land on another drive.
               // Empty field means the backend default (~/ComfyUI). On a carcass
               // re-install with no override, reuse the detected path so the
@@ -1386,6 +1493,19 @@ export function ComfyUISettings() {
           </div>
         )}
       </div>
+        </>
+      )}
+      {/* C80 (GitHub #230): a second, separate install next to the found one.
+          Its own row: the button row above does not wrap. */}
+      {status?.isLocal !== false && canSpawnComfy && status?.found && status?.complete !== false && installIdle && (
+        <SeparateComfyInstall
+          currentPath={status?.path}
+          onInstall={(target) => {
+            clearInstallNotice()
+            void useComfyInstallStore.getState().runInstall(target)
+          }}
+          buttonClassName="flex items-center gap-1 px-2 py-1 rounded t-micro bg-white/5 text-gray-400 hover:text-gray-200 hover:bg-white/10 transition-colors"
+        />
       )}
       <ComfyUpdateConfirmModal
         open={updateConfirmOpen}
@@ -1481,18 +1601,14 @@ function CodexAgentSettings() {
 
       {/* Stage + Review */}
       <div className="pt-1.5 border-t border-white/[0.04]" />
+      {/* Staging is the mode's call (Ask stages file edits for review). The
+          switch that used to sit here no longer decided anything and only
+          hid this one, bug hunt 01.10.2026 (C5). */}
       <InlineToggle
-        label="Stage file_write changes (review before apply)"
-        enabled={settings.codexStageMode}
-        onChange={() => updateSettings({ codexStageMode: !settings.codexStageMode })}
+        label="Auto-apply changes staged in Ask mode when the run finishes (no per-file clicking)"
+        enabled={settings.codexAutoApply}
+        onChange={() => updateSettings({ codexAutoApply: !settings.codexAutoApply })}
       />
-      {settings.codexStageMode && (
-        <InlineToggle
-          label="Auto-apply staged changes when the run finishes (no per-file clicking)"
-          enabled={settings.codexAutoApply}
-          onChange={() => updateSettings({ codexAutoApply: !settings.codexAutoApply })}
-        />
-      )}
       <InlineToggle
         label="Code-Review mode (read-only)"
         enabled={settings.codexReviewMode}
@@ -1503,7 +1619,7 @@ function CodexAgentSettings() {
         enabled={settings.codexConfirmShell}
         onChange={() => updateSettings({ codexConfirmShell: !settings.codexConfirmShell })}
       />
-      {/* Cloud arm of the same gate, an opt-in since David's decision of
+      {/* Cloud arm of the same gate, an opt-in since the owner's decision of
           2026-08-22: off by default, a cloud model runs like a local one, and
           Bypass really bypasses. Always shown, because it governs Agent mode
           too, which ignores the Codex-only toggle above. */}
@@ -1524,7 +1640,7 @@ function CodexAgentSettings() {
 // sync with LU-Aufgaben.md / IMPLEMENTATION_NOTES.md):
 //
 //   General      → Appearance · Generation · Privacy · Onboarding · Updates
-//   AI Backends  → Providers · Model Storage · ComfyUI
+//   AI Backends  → Providers · Storage · ComfyUI
 //   Agent        → Personas · Memory · Agent Permissions ·
 //                  Agent Workflows · MCP Servers · Search Provider
 //   Voice & Remote → Speech · Remote Access
@@ -1553,10 +1669,6 @@ const SETTINGS_TABS: { id: SettingsTab; label: string; icon: ReactNode }[] = [
 // visible signals are pinned by
 // src/lib/__tests__/reset-arming-is-visible.test.ts.
 function ResetSection({ tab }: { tab: SettingsTab }) {
-  const resetSettingsKeys = useSettingsStore((s) => s.resetSettingsKeys)
-  const resetSettings = useSettingsStore((s) => s.resetSettings)
-  const resetVoiceDefaults = useVoiceStore((s) => s.resetVoiceDefaults)
-  const resetPermissions = usePermissionStore((s) => s.resetToDefaults)
   // The arm records the tab it was made on, so "still armed?" is a question
   // that can be answered while rendering. Switching tabs while armed must
   // disarm, otherwise a click armed on General would confirm-fire on Agent,
@@ -1586,22 +1698,8 @@ function ResetSection({ tab }: { tab: SettingsTab }) {
     }
     if (armTimer.current) window.clearTimeout(armTimer.current)
     setArmed(null)
-    if (which === 'all') {
-      resetSettings()
-      resetVoiceDefaults()
-      resetPermissions()
-      setDone('All settings restored to defaults')
-    } else {
-      resetSettingsKeys(SETTINGS_TAB_RESET_KEYS[tab])
-      if (tab === 'agent') resetPermissions()
-      if (tab === 'voice-remote') resetVoiceDefaults()
-      // G20: "Reset AI Backends" only reset settings KEYS and never touched
-      // the provider store, so it could not hand the openai slot back to the
-      // Built-in Engine once LM Studio had adopted it. Now it restores the
-      // shipped slots too (API keys and the cloud account flag are kept).
-      if (tab === 'backends') useProviderStore.getState().resetProvidersToDefaults()
-      setDone(`${tabLabel} settings restored to defaults`)
-    }
+    runSettingsReset(which, tab)
+    setDone(which === 'all' ? 'All settings restored to defaults' : `${tabLabel} settings restored to defaults`)
     if (doneTimer.current) window.clearTimeout(doneTimer.current)
     doneTimer.current = window.setTimeout(() => setDone(null), 3000)
   }
@@ -1700,7 +1798,39 @@ export function SettingsPage() {
   // initial value, so a focus that vanished from the store on the next render
   // would fold the section straight back up (Nebenbefund 3, R8 re-measure).
   const [entryFocus] = useState(() => useUIStore.getState().settingsFocus)
+  // C22: a button that sends the user to a section opens it, whatever the
+  // memory of this session says about it. Once, before the sections mount.
+  useState(() => {
+    const titles: Record<string, string> = { comfyui: 'ComfyUI (Image & Video)', 'comfyui-nodes': 'ComfyUI node packs' }
+    const title = entryFocus?.section ? titles[entryFocus.section] : undefined
+    if (title) usePageMemoryStore.getState().forgetSettingsSection(title)
+    return null
+  })
+  // C22: where the page was scrolled to, put back on the next visit of the
+  // session. Not when a button sent the user to a section: that one scrolls.
+  const scrollRef = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    if (!entryFocus) {
+      const top = usePageMemoryStore.getState().settingsScroll
+      if (top > 0) el.scrollTop = top
+    }
+    const save = () => usePageMemoryStore.getState().setSettingsScroll(el.scrollTop)
+    el.addEventListener('scroll', save, { passive: true })
+    return () => el.removeEventListener('scroll', save)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   useEffect(() => { useUIStore.getState().clearSettingsFocus() }, [])
+  // The node pack section sits below the long ComfyUI section, so a button
+  // that sends the user there (the workflow import) also scrolls to it.
+  useEffect(() => {
+    if (entryFocus?.section !== 'comfyui-nodes') return
+    const t = setTimeout(() => {
+      document.getElementById(sectionAnchorId('ComfyUI node packs'))?.scrollIntoView({ block: 'start' })
+    }, 60)
+    return () => clearTimeout(t)
+  }, [entryFocus])
   const [tab, setTab] = useState<SettingsTab>(() => {
     if (entryFocus) return entryFocus.tab
     if (typeof window === 'undefined') return 'general'
@@ -1730,11 +1860,14 @@ export function SettingsPage() {
     mlxMedia: isMlxImageHost(),
     agentMode: FEATURE_FLAGS.AGENT_MODE,
     agentWorkflows: FEATURE_FLAGS.AGENT_WORKFLOWS,
+    // C71: the Mac's image engine goes by the Image timeout too.
     mediaTimeouts: settings.appMode !== 'cloud',
+    chatTimeout: settings.appMode !== 'cloud',
+    watchers: isTauri(),
   }
 
   return (
-    <div className="h-full overflow-y-auto scrollbar-thin">
+    <div ref={scrollRef} className="h-full overflow-y-auto scrollbar-thin">
       {/* D-S27 / D-S48: vorher `max-w-lg mx-auto`, eine 552px-Spalte, die in
           der Fenstermitte schwebte und bei 1600px links und rechts je ~524px
           Leere stehen liess. Die Zeilenlaenge war richtig, die Aufhaengung
@@ -1860,8 +1993,9 @@ export function SettingsPage() {
           <Section title="LU Cloud Account" defaultOpen>
             <AccountPanel />
             {/* Local-mode discovery layer (2.5.8): the locked Create tabs +
-                hosted-model rows. The teaser sheet's "Hide Cloud features"
-                link flips this off; this is the way back on. */}
+                hosted-model rows. The teaser sheet's "Don't show Cloud
+                features in Local mode" link flips this off, and nothing else
+                on that sheet does; this is the way back on. */}
             <div className="flex items-center justify-between pt-1">
               <div className="min-w-0 pr-3">
                 <span className="text-[0.7rem] text-gray-700 dark:text-gray-400">Show Cloud features in Local mode</span>
@@ -1900,7 +2034,7 @@ export function SettingsPage() {
               A key spends plan tokens only; it can never read or change the account.
             </p>
             <button
-              onClick={() => void openExternal(`${CLOUD_BASE}/account`)}
+              onClick={() => void openExternal(cloudLink('/account', 'settings'))}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[0.65rem] font-medium bg-violet-500/15 text-violet-500 dark:text-violet-300 hover:bg-violet-500/25 transition-colors"
             >
               <KeyRound size={11} /> Generate API key on lu-labs.ai
@@ -1935,10 +2069,41 @@ export function SettingsPage() {
               </div>
             </div>
             <AvatarSetting />
+            <InlineToggle
+              label="Turn :) into 🙂 while typing"
+              enabled={settings.emojiAutoReplace}
+              onChange={() => updateSettings({ emojiAutoReplace: !settings.emojiAutoReplace })}
+            />
+            {/* GH #202: what Enter does in the chat box and in an edit. */}
+            <div className="flex items-center justify-between gap-2" data-testid="enter-key-setting">
+              <span className="t-control text-gray-700 dark:text-gray-400" title="In the chat box and when you edit an earlier message.">Enter key</span>
+              <div className="flex gap-1" role="radiogroup" aria-label="Enter key">
+                {([['send', 'Sends'], ['newline', 'New line']] as const).map(([mode, text]) => (
+                  <button
+                    key={mode}
+                    role="radio"
+                    aria-checked={enterKeyMode(settings.enterKey) === mode}
+                    onClick={() => updateSettings({ enterKey: mode })}
+                    className={`px-2 py-1 rounded t-micro transition-colors ${
+                      enterKeyMode(settings.enterKey) === mode ? 'bg-lu-accent-soft ring-1 ring-lu-accent-edge dark:ring-lu-accent text-gray-900 dark:text-white' : 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'
+                    }`}
+                  >
+                    {text}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <p className="t-micro text-gray-500 -mt-1" data-testid="enter-key-hint">{composerHint(enterKeyMode(settings.enterKey), isMacOS())}{enterKeyMode(settings.enterKey) === 'newline' ? '. In an edit, add Shift to save and resend.' : '.'}</p>
           </Section>
 
           <Section title="Generation">
-            <SliderControl label="Temperature" value={settings.temperature} min={0} max={2} step={0.1} onChange={(v) => updateSettings({ temperature: v })} />
+            <SliderControl label="Temperature" help={{ text: TEMPERATURE_HELP, label: TEMPERATURE_HELP_LABEL }} value={settings.temperature} min={0} max={TEMPERATURE_MAX} step={0.1} onChange={(v) => updateSettings({ temperature: v })} />
+            {/* A33: every chat that never moved its own slider follows this
+                one, so a high value here turns all of them into noise. */}
+            <HighTemperatureWarning
+              temperature={settings.temperature}
+              onReset={() => updateSettings({ temperature: DEFAULT_SETTINGS.temperature })}
+            />
             <SliderControl label="Top P" value={settings.topP} min={0} max={1} step={0.05} onChange={(v) => updateSettings({ topP: v })} />
             <SliderControl label="Top K" value={settings.topK} min={1} max={100} step={1} onChange={(v) => updateSettings({ topK: v })} />
             {/* Die drei Zahlenzeilen dieser Sektion stehen auf der Leiter statt
@@ -1950,87 +2115,124 @@ export function SettingsPage() {
                 die Werte untereinander nicht wandern). */}
             <div className="flex items-center justify-between">
               <span className="t-micro text-gray-700 dark:text-gray-400">Max Tokens</span>
-              <input
-                aria-label="Max Tokens"
-                type="number"
+              <BoundedNumberInput
+                ariaLabel="Max Tokens"
                 value={settings.maxTokens}
-                onChange={(e) => updateSettings({ maxTokens: Math.max(0, parseInt(e.target.value) || 0) })}
+                max={MAX_TOKENS_MAX}
+                onCommit={(v) => updateSettings({ maxTokens: v })}
+              />
+            </div>
+            {/* Think budget (D12). Same row shape as Max Tokens above; 0 is
+                auto, the request every backend got before. The composer's
+                sampling popup shows the same number next to the Think button
+                and says there whether the active backend takes it. */}
+            <div className="flex items-center justify-between">
+              <span
+                className="t-micro text-gray-700 dark:text-gray-400"
+                title="Most tokens a model may spend thinking while Think is on. 0 = auto. Used by the LU Engine and Anthropic; Ollama, LM Studio, other OpenAI-compatible servers and LU Cloud have no token budget and ignore it."
+              >Think budget</span>
+              <input
+                aria-label="Think budget"
+                type="number"
+                value={normalizeThinkBudget(settings.thinkingBudget)}
+                onChange={(e) => updateSettings({ thinkingBudget: normalizeThinkBudget(parseInt(e.target.value) || 0) })}
                 min={0}
+                step={THINK_BUDGET_STEP}
                 placeholder="0"
                 className="w-20 px-1.5 py-0.5 rounded bg-transparent border border-white/8 t-mono text-right text-gray-300 focus:outline-none focus:border-white/20"
               />
+            </div>
+            <div className="t-micro text-gray-500 dark:text-gray-500 leading-relaxed pt-0.5">
+              0 = auto. Only the LU Engine and Anthropic take a thinking budget; other backends do not support one.
             </div>
             {/* Bug AA v2.5.0, Ollama num_ctx override. 0 = use the provider
                 default (Ollama default = 2048 on most builds, which silently
                 clips RAG / long chats). Bump up to use the model's full
                 context window. Ignored by Anthropic / OpenAI providers. */}
             <div className="flex items-center justify-between">
-              <span className="t-micro text-gray-700 dark:text-gray-400" title="Forwarded as Ollama num_ctx. 0 = provider default (Ollama defaults to 2048, which clips RAG and long chats). Bump up to use the model's full context. Ignored by cloud providers.">Context window (Ollama)</span>
-              <input
-                aria-label="Context window (Ollama)"
-                type="number"
+              <span className="t-micro text-gray-700 dark:text-gray-400" title="Forwarded as Ollama num_ctx. 0 = provider default (Ollama defaults to 2048, which clips RAG and long chats). Bump up to use the model's full context. Ignored by cloud providers: for an API model whose server reports no window, set it from the context button in the chat.">Context window (Ollama)</span>
+              <BoundedNumberInput
+                ariaLabel="Context window (Ollama)"
                 value={settings.contextWindowOverride ?? 0}
-                onChange={(e) => updateSettings({ contextWindowOverride: Math.max(0, parseInt(e.target.value) || 0) })}
+                max={CONTEXT_WINDOW_MAX}
+                onCommit={(v) => updateSettings({ contextWindowOverride: v })}
+              />
+            </div>
+            <div className="t-micro text-gray-500 dark:text-gray-500 leading-relaxed pt-0.5">
+              0 = let Ollama decide (defaults to 2048). Set to e.g. 8192 or 16384 if RAG / long chats get clipped, at most 1,048,576. Cloud providers ignore this. Max Tokens goes up to 1,000,000.
+            </div>
+            {/* Auto-compact (2.6.8, on by default since 3.0.7). The switch is
+                its own row; the threshold is shown as a percentage and stored
+                as a fraction, because it is compared against a ratio
+                (compact-trigger.ts). 0 = fit the model's window, the same
+                shape as the context window row above, whose 0 also hands the
+                choice to the model. */}
+            <InlineToggle
+              label="Auto-compact"
+              enabled={settings.autoCompact !== false}
+              onChange={() => updateSettings({ autoCompact: settings.autoCompact === false })}
+            />
+            <div className="flex items-center justify-between">
+              <span
+                className="t-micro text-gray-700 dark:text-gray-400"
+                title="When the conversation or a running tool chain fills this much of the window, the model writes a summary of the older part and that part stops being sent. 0 = fit the model's context window, from 32K up. The full history stays in the chat either way; only what is sent changes."
+              >Compact at</span>
+              <div className="flex items-center gap-1">
+                <CompactThresholdInput />
+                <span className="t-mono text-gray-500 w-3">%</span>
+              </div>
+            </div>
+            <div className="t-micro text-gray-500 dark:text-gray-500 leading-relaxed pt-0.5">
+              0 = fit the model: runs from a 32K context window up, and compacts earlier on smaller windows than on large ones, because the summary and the answer need room too. Below 32K older turns are only shortened. Set 30 to 95 for a fixed point that runs on every window. Works before a message and in the middle of long tool runs, and the chat says each time it happened. Costs one extra model call each time it fires. You can always run it yourself with <span className="font-mono">/compact</span>.
+            </div>
+            <ChatRecallToggle />
+            {/* GH #171: how much of an attached text file one message may
+                carry. 0 is "what the model's context allows", the same shape
+                as the two rows above. */}
+            <div className="flex items-center justify-between">
+              <span
+                className="t-micro text-gray-700 dark:text-gray-400"
+                title="The most an attached text file may take of one message, in tokens. 0 = as much as the model's context window allows next to the conversation and room for the answer. When a file is cut, the chat says how much was sent and why."
+              >Attached file limit</span>
+              <input
+                aria-label="Attached file limit"
+                type="number"
+                value={settings.attachmentTokenLimit ?? 0}
+                onChange={(e) => updateSettings({ attachmentTokenLimit: Math.max(0, parseInt(e.target.value) || 0) })}
                 min={0}
+                step={1024}
                 placeholder="0"
                 className="w-20 px-1.5 py-0.5 rounded bg-transparent border border-white/8 t-mono text-right text-gray-300 focus:outline-none focus:border-white/20"
               />
             </div>
             <div className="t-micro text-gray-500 dark:text-gray-500 leading-relaxed pt-0.5">
-              0 = let Ollama decide (defaults to 2048). Set to e.g. 8192 or 16384 if RAG / long chats get clipped. Cloud providers ignore this.
-            </div>
-            {/* 2.6.8 auto-compact. Shown as a percentage and stored as a
-                fraction, because the threshold is compared against a ratio
-                (compact-trigger.ts). Same shape as the row above, a number
-                input whose 0 is the off state, rather than a slider, because
-                a slider has no way to express "off" at all. */}
-            <div className="flex items-center justify-between">
-              <span
-                className="t-micro text-gray-700 dark:text-gray-400"
-                title="When the conversation fills this much of the window, the model writes a summary of the older turns and those turns stop being sent. 0 = off. The full history stays in the chat either way; only what is sent changes."
-              >Auto-compact at</span>
-              <div className="flex items-center gap-1">
-                <input
-                aria-label="Auto-compact at"
-                  type="number"
-                  value={Math.round((settings.autoCompactThreshold || 0) * 100)}
-                  onChange={(e) => {
-                    const pct = Math.max(0, Math.min(100, parseInt(e.target.value) || 0))
-                    updateSettings({ autoCompactThreshold: pct === 0 ? 0 : pct / 100 })
-                  }}
-                  min={0}
-                  max={100}
-                  step={5}
-                  placeholder="0"
-                  className="w-20 px-1.5 py-0.5 rounded bg-transparent border border-white/8 t-mono text-right text-gray-300 focus:outline-none focus:border-white/20"
-                />
-                <span className="t-mono text-gray-500 w-3">%</span>
-              </div>
-            </div>
-            <div className="t-micro text-gray-500 dark:text-gray-500 leading-relaxed pt-0.5">
-              0 = off. Set 80 to have older turns summarised once the context is 80% full, instead of being dropped without a word. Values under 30 or over 95 count as off. Costs one extra model call each time it fires. You can always run it yourself with <span className="font-mono">/compact</span>.
+              0 = no limit of its own: an attached text file goes out whole when it fits the model's context, and as far as it fits otherwise. Set a number of tokens to send less. Either way the chat says when a file was cut.
             </div>
 
           </Section>
 
-          {/* Bug BB v2.5.0, BobbyT GPU picker. Lazy-loads the GPU list when
+          {/* Bug BB v2.5.0, a user GPU picker. Lazy-loads the GPU list when
               the section opens via detect_gpus probe (nvidia-smi + rocm-smi +
               lspci/wmic). */}
           {/* Not on macOS: every knob in there is a no-op on Apple Silicon.
               The vendor picker forwards CUDA_VISIBLE_DEVICES / HIP_* /
               ONEAPI_* to Ollama and ComfyUI, none of which exist here (Metal,
-              unified memory, and ComfyUI never launches). Showing a dead
-              NVIDIA/AMD/Intel selector is worse than showing nothing. */}
-          {!isMlxImageHost() && (
+              unified memory, and ComfyUI never launches). The Mac gets a plain
+              readout in its place: chip, shared memory, Metal, no control. */}
+          {!isMlxImageHost() ? (
             <Section title="Hardware (GPU picker)">
               <HardwareSettings />
+            </Section>
+          ) : (
+            <Section title="Hardware">
+              <AppleHardwareInfo />
             </Section>
           )}
 
           {/* Feature CC v2.5.0, MikeS++ chatbot export importer. Parses
-              ChatGPT / Claude / Gemini export JSON (or .zip), pre-selects
-              every conversation, feeds the chosen ones into the active
-              chat's RAG store. */}
+              ChatGPT / Claude / Gemini export JSON (or .zip); since 3.0.8
+              (D26) every picked conversation becomes its own chat, the old
+              RAG-document path stays as the second button. */}
           <Section title="Import from other chatbots">
             <ChatbotImporter />
           </Section>
@@ -2039,12 +2241,22 @@ export function SettingsPage() {
             <ChatBackupSettings />
           </Section>
 
-          {/* ComfyUI-only knobs — cloud renders use server-side limits. On Mac
-              these apply once ComfyUI is connected on 8080. */}
+          {/* Issue 177: the wait for the first byte of a local chat answer. */}
+          {settings.appMode !== 'cloud' && (
+          <Section title="Chat Reply Timeout">
+            <ChatReplyTimeoutSettings />
+          </Section>
+          )}
+
+          {/* Cloud renders use server-side limits. On a Mac the image limit is
+              also the one the MLX image engine goes by (C71); video there also
+              applies when a user connects ComfyUI. */}
           {settings.appMode !== 'cloud' && (
           <Section title="Image / Video Generation Timeouts">
             <div className="text-[0.6rem] text-gray-500 dark:text-gray-500 leading-relaxed pb-1.5">
-              Maximum minutes a ComfyUI generation can run before LU aborts it. Bump these up if you run on iGPU or CPU only, because a 1024px image on integrated graphics can take 30+ min.
+              {isMlxImageHost()
+                ? 'Minutes an image may go without any progress before LU stops it. Loading a model always gets at least 15 minutes. Raise this for large models with many steps, where a single step can take minutes.'
+                : 'Minutes a ComfyUI generation may go without any progress before LU stops it. Raise these if you run on iGPU or CPU only, because a single step of a 1024px image on integrated graphics can take many minutes.'}
             </div>
             <div className="flex items-center justify-between">
               <span className="text-[0.7rem] text-gray-700 dark:text-gray-400">Image timeout (min)</span>
@@ -2059,18 +2271,35 @@ export function SettingsPage() {
                 className="w-20 px-1.5 py-0.5 rounded bg-transparent border border-white/8 text-[0.65rem] text-right text-gray-300 font-mono focus:outline-none focus:border-white/20"
               />
             </div>
-            <div className="flex items-center justify-between">
-              <span className="text-[0.7rem] text-gray-700 dark:text-gray-400">Video timeout (min)</span>
-              <input
-                aria-label="Video timeout (min)"
-                type="number"
-                value={settings.videoGenTimeoutMinutes ?? 60}
-                onChange={(e) => updateSettings({ videoGenTimeoutMinutes: Math.min(480, Math.max(1, parseInt(e.target.value) || 60)) })}
-                min={1}
-                max={480}
-                placeholder="60"
-                className="w-20 px-1.5 py-0.5 rounded bg-transparent border border-white/8 text-[0.65rem] text-right text-gray-300 font-mono focus:outline-none focus:border-white/20"
-              />
+            {!isMlxImageHost() && (
+              <div className="flex items-center justify-between">
+                <span className="text-[0.7rem] text-gray-700 dark:text-gray-400">Video timeout (min)</span>
+                <input
+                  aria-label="Video timeout (min)"
+                  type="number"
+                  value={settings.videoGenTimeoutMinutes ?? 60}
+                  onChange={(e) => updateSettings({ videoGenTimeoutMinutes: Math.min(480, Math.max(1, parseInt(e.target.value) || 60)) })}
+                  min={1}
+                  max={480}
+                  placeholder="60"
+                  className="w-20 px-1.5 py-0.5 rounded bg-transparent border border-white/8 text-[0.65rem] text-right text-gray-300 font-mono focus:outline-none focus:border-white/20"
+                />
+              </div>
+            )}
+          </Section>
+          )}
+
+          {/* 3.0.8 (A2): a long picture or video from the chat goes on in the
+              background and the chat stays usable (lib/background-tools.ts). */}
+          {settings.appMode !== 'cloud' && (
+          <Section title="Pictures and Video from the Chat">
+            <InlineToggle
+              label="Keep chatting while it renders"
+              enabled={settings.backgroundMediaTools !== false}
+              onChange={() => updateSettings({ backgroundMediaTools: settings.backgroundMediaTools === false })}
+            />
+            <div className="t-micro text-gray-500 dark:text-gray-500 leading-relaxed pt-0.5">
+              A picture or video that takes longer than a few seconds goes on in the background. You can write on, and it appears in the message that started it when it is done. Off: the chat waits for every render.
             </div>
           </Section>
           )}
@@ -2084,14 +2313,14 @@ export function SettingsPage() {
                   <Lock size={12} className="mt-0.5 shrink-0 text-sky-500" />
                   <div>
                     <p className="text-gray-700 dark:text-gray-300 font-medium mb-0.5">Cloud mode is active.</p>
-                    <p>Chat, Create renders and voice run on lu-labs.ai against your LU account and are metered against your credits; generated media and job records are stored with your account. Switch to Local in the header to run everything on your machine, and the 100% local pledge below then applies.</p>
+                    <p>Chat, Create renders and voice run on lu-labs.ai against your LU account and are metered against your credits; generated media and job records are stored with your account. Switch to Local in the header to run everything on your machine. What local mode still sends is listed in this section once you are there.</p>
                   </div>
                 </div>
                 <div className="flex items-start gap-2 pt-1.5">
                   <Shield size={12} className="mt-0.5 shrink-0 text-emerald-500" />
                   <div>
-                    <p className="text-gray-700 dark:text-gray-300 font-medium mb-0.5">Local mode: 100% local.</p>
-                    <p>In local mode chat, agent runs, and image &amp; video generation all execute on your machine. No telemetry, no analytics, no model pings home. Your local data lives in <code className="px-1 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-[0.6rem]">%APPDATA%/Locally Uncensored</code> on Windows (or the equivalent on Linux/macOS).</p>
+                    <p className="text-gray-700 dark:text-gray-300 font-medium mb-0.5">Local mode runs on your machine.</p>
+                    <p>In local mode chat, agent runs, and image &amp; video generation all execute on your machine. LU has no analytics kit and sends no crash reports. In both modes it checks GitHub Releases for updates and counts each press of the Cloud switch. Your local data lives in <DataFolderWhere />.</p>
                   </div>
                 </div>
               </div>
@@ -2100,15 +2329,18 @@ export function SettingsPage() {
                 <div className="flex items-start gap-2">
                   <Lock size={12} className="mt-0.5 shrink-0 text-emerald-500" />
                   <div>
-                    <p className="text-gray-700 dark:text-gray-300 font-medium mb-0.5">100% local by default.</p>
-                    <p>Chat, agent runs, image &amp; video generation all execute on your machine. No telemetry, no analytics, no model pings home. The only network calls LU makes unless you explicitly opt in are: update checks against GitHub Releases, cloud provider APIs (OpenAI, Anthropic, etc.) that you configure yourself with your own API keys, and one anonymous daily count to lu-labs.ai when you press the Cloud switch (which way it was pressed, platform, app version, nothing else).</p>
+                    <p className="text-gray-700 dark:text-gray-300 font-medium mb-0.5">Local by default.</p>
+                    <p>Chat, agent runs, image &amp; video generation all execute on your machine. LU has no analytics kit and sends no crash reports.</p>
+                    <p className="mt-1">On its own LU uses the network for two things. It asks GitHub Releases for a new version a few seconds after start and at most every six hours after that; a new version is downloaded in the background unless you switch that off under Updates, and installing always needs your click. And it counts each press of the Cloud switch with LU Labs: which way it was pressed, platform and app version, no identifier. A click on a way into LU Cloud counts the same way (a model, a plan, a pack, the sign in, or hiding the Cloud features), never which model.</p>
+                    <p className="mt-1">While you are signed in to LU Cloud, the app also checks your account at lu-labs.ai every five minutes, and a press of the Cloud switch is counted for your account as well.</p>
+                    <p className="mt-1">Everything else that goes online you start yourself: model and engine downloads, cloud providers you set up with your own API keys, web search in agent runs, and Remote Access.</p>
                   </div>
                 </div>
                 <div className="flex items-start gap-2 pt-1.5">
                   <Shield size={12} className="mt-0.5 shrink-0 text-emerald-500" />
                   <div>
                     <p className="text-gray-700 dark:text-gray-300 font-medium mb-0.5">You own your data.</p>
-                    <p>Conversations, memories, and generated media live in <code className="px-1 py-0.5 rounded bg-black/5 dark:bg-white/5 font-mono text-[0.6rem]">%APPDATA%/Locally Uncensored</code> on Windows (or the equivalent on Linux/macOS). Back up the folder, move it between machines, or delete it. LU writes nothing else.</p>
+                    <p>Conversations, memories, and generated media live in <DataFolderWhere />. <DataFolderAfterword /></p>
                   </div>
                 </div>
               </div>
@@ -2121,25 +2353,11 @@ export function SettingsPage() {
                 <GraduationCap size={12} className="mt-0.5 shrink-0 text-gray-500" />
                 <div className="text-[0.65rem] text-gray-600 dark:text-gray-400 leading-relaxed">
                   Run the first-launch setup wizard again (hardware scan, recommended models, tool-calling tour).
+                  <HowtoRow topic="beginners" />
                 </div>
               </div>
               <button
-                onClick={async () => {
-                  // The line above is what actually re-runs the wizard: AppShell
-                  // gates it on settings.onboardingDone, and that store is
-                  // persisted, so it survives the reload below. The backend call
-                  // only clears the marker FILE, which is read in one place,
-                  // the NSIS-update recovery in AppShell, and only when the
-                  // store itself was lost.
-                  //
-                  // Level (a): silent on purpose. The visible action succeeds
-                  // either way, and the reload on the next line would wipe any
-                  // message before it could be read. A stale marker costs
-                  // nothing until a store-loss recovery, which re-writes it.
-                  useSettingsStore.getState().updateSettings({ onboardingDone: false })
-                  try { await backendCall('set_onboarding_done', { done: false }) } catch { /* see above */ }
-                  window.location.reload()
-                }}
+                onClick={() => { void rerunOnboarding() }}
                 className="ml-3 shrink-0 px-2.5 py-1 rounded-md text-[0.6rem] font-medium bg-white dark:bg-white/10 text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-white/15 border border-gray-200 dark:border-white/15 transition-colors"
               >
                 Re-run onboarding
@@ -2160,17 +2378,33 @@ export function SettingsPage() {
             <ProviderSettings />
           </Section>
 
-          <Section title="Model Storage">
+          {/* GH #235: for every local backend, so not in the LU Engine section. */}
+          <Section title="Unused models">
+            <IdleUnloadSetting />
+          </Section>
+
+          <Section title="Storage">
+            <HowtoRow topic="storage" />
+            <HowtoRow topic="gguf-file" />
+            {/* Discord "Storage Management": one folder for the models, the
+                gallery and the runtime, and a safe move of what is there. The
+                rows below place each part on its own. Desktop only. */}
+            {isTauri() && <StorageFolderSetting />}
+            {isTauri() && <p className="t-micro font-semibold text-gray-500 pt-2 border-t border-white/5 mt-2">Each part on its own</p>}
             <ModelsRootSetting />
             <HfDownloadPathSetting />
+            <DownloadLimitSetting />
             <LmStudioFolderSetting />
+            {/* Discord D2: the voice engine and LU's own Python can live on
+                another drive. Desktop only, the browser build has neither. */}
+            {isTauri() && <RuntimeFolderSetting />}
             <ImportLocalModels />
           </Section>
 
-          {/* goonerforporn (Discord #bug-reports, 2026-08-28): the store knew
+          {/* A user (Discord #bug-reports, 2026-08-28): the store knew
               the key, the changelog named it, and no component ever set it.
               A14 review 8, Windows follow-up: it then sat directly under the
-              Model Storage folder field, two bare text boxes in a row, and a
+              Storage folder field, two bare text boxes in a row, and a
               tester saved a filesystem path as his API key. A credential and a
               folder do not belong in one list, so the key has a section of its
               own now, and the field says what a key looks like. */}
@@ -2193,13 +2427,17 @@ export function SettingsPage() {
           {/* ComfyUI connect panel is always shown. Spawn/install stay refused
               on macOS (`comfy_supported_here`); Mac also keeps the MLX installer. */}
           <Section title="ComfyUI (Image & Video)" defaultOpen={entryFocus?.section === 'comfyui' || comfySectionShouldOpen(useComfyInstallStore.getState())}>
-              {settings.appMode === 'cloud' && (
-                <p className="text-[0.55rem] text-gray-500 leading-snug pb-1">
-                  Local mode only. Cloud renders run on lu-labs.ai and never use ComfyUI.
-                </p>
-              )}
-              <ComfyUISettings />
-            </Section>
+            {settings.appMode === 'cloud' && (
+              <p className="text-[0.55rem] text-gray-500 leading-snug pb-1">
+                Local mode only. Cloud renders run on lu-labs.ai and never use ComfyUI.
+              </p>
+            )}
+            <ComfyUISettings />
+          </Section>
+          {/* GitHub wish #14: the packs in ComfyUI/custom_nodes. */}
+          <Section title="ComfyUI node packs" defaultOpen={entryFocus?.section === 'comfyui-nodes'}>
+            <CustomNodesSettings />
+          </Section>
           {isMlxImageHost() && (
             <Section title="Local Media (Apple MLX)">
               {settings.appMode === 'cloud' && (
@@ -2215,6 +2453,7 @@ export function SettingsPage() {
         {/* ── Agent tab ─────────────────────────────────── */}
         {tab === 'agent' && (<>
           <Section title="Personas">
+            <HowtoRow topic="persona-sampling" />
             <PersonaPanel />
           </Section>
 
@@ -2225,12 +2464,55 @@ export function SettingsPage() {
           {FEATURE_FLAGS.AGENT_MODE && (
             <Section title="Agent Permissions">
               <PermissionSettings />
+              {/* C44 (Discord 05.11.2026): the loop guard can be switched off
+                  completely. On by default (owner, 05.11.). */}
+              <InlineToggle
+                label="Loop guard"
+                enabled={settings.agentLoopGuard !== false}
+                onChange={() => updateSettings({ agentLoopGuard: settings.agentLoopGuard === false })}
+              />
+              <div className="t-micro text-gray-500 dark:text-gray-500 leading-relaxed pt-0.5">
+                Stops an agent run that keeps repeating the same steps (&quot;Loop guard halted the run&quot;). Off: the run goes on until its step limit or until you press Stop.
+              </div>
+              <CreditLimitSettings />
+              {/* CA (14.11.2026, AG10): the shell stays in the agent's folder. */}
+              <InlineToggle
+                label="Let the agent look outside its folder"
+                enabled={settings.agentShellOutsideFolder === true}
+                onChange={() => updateSettings({ agentShellOutsideFolder: settings.agentShellOutsideFolder !== true })}
+              />
+              <div className="t-micro text-gray-500 dark:text-gray-500 leading-relaxed pt-0.5">
+                Off: the agent&apos;s commands stay in its folder and never read your home folder or the rest of the disk. Turn on only for a task that needs it.
+              </div>
+              {/* C59 A2: the compact profile for local models, on by default. */}
+              <InlineToggle
+                label="Short tool list for local models"
+                enabled={settings.agentCompactAuto !== false}
+                onChange={() => updateSettings({ agentCompactAuto: settings.agentCompactAuto === false })}
+              />
+              <div className="t-micro text-gray-500 dark:text-gray-500 leading-relaxed pt-0.5">
+                A local model up to about 35B sees the core tools with short descriptions and finds every other tool with tool_search. Small model mode still wins.
+              </div>
               <button
                 onClick={() => useAgentModeStore.getState().resetTutorial()}
                 className="text-[0.6rem] text-gray-500 hover:text-gray-300 transition-colors"
               >
                 Reset tutorial
               </button>
+            </Section>
+          )}
+
+          {FEATURE_FLAGS.AGENT_MODE && (
+            <Section title="Changes by the agent">
+              {/* C60 (3.1.0): what the agent asked to change in LU, the answer, Undo. */}
+              <AgentChangeLog />
+            </Section>
+          )}
+
+          {FEATURE_FLAGS.AGENT_MODE && isTauri() && (
+            <Section title="Watchers">
+              {/* Scheduled turns: only the notification of the system. */}
+              <WatcherSettings />
             </Section>
           )}
 
@@ -2252,14 +2534,12 @@ export function SettingsPage() {
               >
                 Sub-agent tool calls
               </span>
-              <input
-                aria-label="Sub-agent tool calls"
-                type="number"
+              <BoundedNumberInput
+                ariaLabel="Sub-agent tool calls"
                 value={settings.subAgentMaxToolCalls ?? 0}
-                onChange={(e) => updateSettings({ subAgentMaxToolCalls: Math.max(0, parseInt(e.target.value) || 0) })}
-                min={0}
+                max={SUB_AGENT_LIMIT_MAX}
                 placeholder="10"
-                className="w-20 px-1.5 py-0.5 rounded bg-transparent border border-white/8 t-mono text-right text-gray-300 focus:outline-none focus:border-white/20"
+                onCommit={(v) => updateSettings({ subAgentMaxToolCalls: v })}
               />
             </div>
             <div className="flex items-center justify-between">
@@ -2269,19 +2549,29 @@ export function SettingsPage() {
               >
                 Sub-agent steps
               </span>
-              <input
-                aria-label="Sub-agent steps"
-                type="number"
+              <BoundedNumberInput
+                ariaLabel="Sub-agent steps"
                 value={settings.subAgentMaxIterations ?? 0}
-                onChange={(e) => updateSettings({ subAgentMaxIterations: Math.max(0, parseInt(e.target.value) || 0) })}
-                min={0}
+                max={SUB_AGENT_LIMIT_MAX}
                 placeholder="5"
-                className="w-20 px-1.5 py-0.5 rounded bg-transparent border border-white/8 t-mono text-right text-gray-300 focus:outline-none focus:border-white/20"
+                onCommit={(v) => updateSettings({ subAgentMaxIterations: v })}
               />
             </div>
             <div className="t-micro text-gray-500 dark:text-gray-500 leading-relaxed pt-0.5">
-              0 = use the defaults (10 calls, 5 steps). A sub-agent runs unattended, so these stay deliberately tight, raise them only for a task you know is long.
+              0 = use the defaults (10 calls, 5 steps), at most 1,000 each. A sub-agent runs unattended, so these stay deliberately tight, raise them only for a task you know is long.
             </div>
+            </Section>
+          )}
+
+          {FEATURE_FLAGS.AGENT_MODE && (
+            <Section title="Skills">
+              <SkillsSettings />
+            </Section>
+          )}
+
+          {FEATURE_FLAGS.AGENT_MODE && (
+            <Section title="Allowed commands">
+              <CommandRulesSettings />
             </Section>
           )}
 
@@ -2307,22 +2597,36 @@ export function SettingsPage() {
             <Section title="Search Provider">
               <div className="space-y-3">
                 <div>
-                  <span className="text-[0.6rem] text-gray-500 block mb-1">Provider for Agent web_search</span>
-                  <div className="flex gap-1.5">
-                    {(['auto', 'brave', 'tavily'] as const).map(p => (
+                  <span className="t-micro text-gray-500 block mb-1">Web search asks first</span>
+                  <div className="flex flex-wrap gap-1.5" role="group" aria-label="Web search service">
+                    {SEARCH_PROVIDERS.map(p => (
                       <button
-                        key={p}
-                        onClick={() => updateSettings({ searchProvider: p })}
+                        key={p.id}
+                        data-testid={`search-provider-${p.id}`}
+                        aria-pressed={normalizeSearchProvider(settings.searchProvider) === p.id}
+                        onClick={() => updateSettings({ searchProvider: p.id })}
                         className={`px-2.5 py-1 rounded-md text-[0.6rem] font-medium transition-all ${
-                          settings.searchProvider === p
+                          normalizeSearchProvider(settings.searchProvider) === p.id
                             ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm border border-gray-200 dark:border-white/15'
                             : 'text-gray-500 hover:text-gray-700 dark:hover:text-white bg-gray-100 dark:bg-white/5'
                         }`}
                       >
-                        {p === 'auto' ? 'Auto (SearXNG > DDG)' : p === 'brave' ? 'Brave Search' : 'Tavily'}
+                        {p.label}
                       </button>
                     ))}
                   </div>
+                  <span className="t-micro text-gray-500 mt-1 block" data-testid="search-provider-hint">
+                    {SEARCH_PROVIDERS.find(p => p.id === normalizeSearchProvider(settings.searchProvider))?.hint}
+                    {' '}Searches run on this computer, also for LU Cloud chats. Keys stay on this computer.
+                  </span>
+                </div>
+                <div data-testid="web-strict-urls">
+                  <InlineToggle
+                    label="Ask before unknown web addresses (an address the model made up can carry chat text out)"
+                    enabled={settings.webStrictUrls !== false}
+                    onChange={() => updateSettings({ webStrictUrls: settings.webStrictUrls === false })}
+                  />
+                  <span className="t-micro text-gray-500 mt-0.5 block">On: web tools open addresses you wrote or that came from web results; anything else asks first.</span>
                 </div>
                 <div>
                   <label className="text-[0.6rem] text-gray-500 block mb-1">Brave Search API Key</label>
@@ -2333,7 +2637,7 @@ export function SettingsPage() {
                     placeholder="BSA-..."
                     className="w-full px-2.5 py-1.5 rounded-lg bg-gray-100 dark:bg-white/5 border border-gray-200 dark:border-white/10 text-[0.65rem] text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:border-gray-400 dark:focus:border-white/25"
                   />
-                  <span className="text-[0.5rem] text-gray-500 mt-0.5 block">Free tier: 2000 queries/month. Get key at brave.com/search/api</span>
+                  <span className="text-[0.5rem] text-gray-500 mt-0.5 block">$5 free credit each month (about 1000 searches). Get key at brave.com/search/api</span>
                 </div>
                 <div>
                   <label className="text-[0.6rem] text-gray-500 block mb-1">Tavily API Key</label>
@@ -2346,6 +2650,41 @@ export function SettingsPage() {
                   />
                   <span className="text-[0.5rem] text-gray-500 mt-0.5 block">AI-optimized search. Free tier: 1000 queries/month. Get key at tavily.com</span>
                 </div>
+                <div>
+                  <label htmlFor="search-exa-key" className="t-micro text-gray-500 block mb-1">Exa API Key (optional)</label>
+                  <input
+                    id="search-exa-key"
+                    type="password"
+                    value={settings.exaApiKey ?? ''}
+                    onChange={(e) => updateSettings({ exaApiKey: e.target.value })}
+                    placeholder="Empty = free without a key"
+                    autoComplete="off"
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-gray-100 dark:bg-white/5 border border-gray-200 dark:border-white/10 text-[0.65rem] text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:border-gray-400 dark:focus:border-white/25"
+                  />
+                  <span className="t-micro text-gray-500 mt-0.5 block">Exa works without a key. Your own key lifts its rate limit. Get one at exa.ai</span>
+                </div>
+                <div>
+                  {/* D16 (3.0.7): the User-Agent of the free tiers and of
+                      web_fetch. Empty keeps the one each of them always sent;
+                      a value the backend cannot send falls back the same way,
+                      and the line below says so (lib/search-user-agent.ts). */}
+                  <label htmlFor="search-user-agent" className="text-[0.6rem] text-gray-500 block mb-1">User-Agent</label>
+                  <input
+                    id="search-user-agent"
+                    type="text"
+                    value={settings.searchUserAgent ?? ''}
+                    onChange={(e) => updateSettings({ searchUserAgent: e.target.value })}
+                    placeholder="Default"
+                    spellCheck={false}
+                    autoComplete="off"
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-gray-100 dark:bg-white/5 border border-gray-200 dark:border-white/10 text-[0.65rem] t-mono text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:border-gray-400 dark:focus:border-white/25"
+                  />
+                  {userAgentProblem(settings.searchUserAgent) ? (
+                    <span className={`text-[0.5rem] ${HINWEIS_TEXT.fehler} mt-0.5 block`} data-testid="search-user-agent-problem">{userAgentProblem(settings.searchUserAgent)}</span>
+                  ) : (
+                    <span className="text-[0.5rem] text-gray-500 mt-0.5 block">Sent by the free search tiers and when the agent reads a page. Leave empty for the default.</span>
+                  )}
+                </div>
               </div>
             </Section>
           )}
@@ -2354,6 +2693,7 @@ export function SettingsPage() {
         {/* ── Voice & Remote tab ────────────────────────── */}
         {tab === 'voice-remote' && (<>
           <Section title="Speech" defaultOpen>
+            <HowtoRow topic="dictation" />
             <SpeechSettings />
           </Section>
 
@@ -2393,7 +2733,7 @@ export function lastCheckedText(ts: number, now: number = Date.now()): string {
 }
 
 export function UpdateSection() {
-  const { currentVersion, latestVersion, updateAvailable, releaseNotes, dismissed, isChecking, lastChecked, lastCheckFailed, autoDownload, downloadStatus, downloadProgress, downloadedBytes, totalBytes, errorMessage, progressNote, checkForUpdate, downloadUpdate, installAndRestart, clearDismiss, setAutoDownload, openReleasePage } = useUpdateStore()
+  const { currentVersion, latestVersion, updateAvailable, releaseNotes, dismissed, isChecking, lastChecked, lastCheckFailed, noBuildForPlatform, autoDownload, downloadStatus, downloadProgress, downloadedBytes, totalBytes, errorMessage, progressNote, checkForUpdate, downloadUpdate, installAndRestart, clearDismiss, setAutoDownload, openReleasePage } = useUpdateStore()
   // Defensive: only treat the persisted `latestVersion` as actually newer if a
   // semver compare confirms it. Otherwise the binary was updated out-of-band
   // and the persisted value is stale (e.g. localStorage still says 2.3.8 while
@@ -2402,6 +2742,7 @@ export function UpdateSection() {
   const latestIsActuallyNewer = !!(latestVersion && isNewerVersion(latestVersion, currentVersion))
   const displayLatestVersion = latestIsActuallyNewer ? latestVersion : null
   const showUpdate = updateAvailable && latestIsActuallyNewer
+  const reopenReleaseNotes = useReleaseNotesStore((s) => s.reopen)
 
   return (
     <Section title="Updates">
@@ -2409,7 +2750,15 @@ export function UpdateSection() {
         {/* Current version */}
         <div className="flex items-center justify-between">
           <span className="text-[0.65rem] text-gray-500">Current Version</span>
-          <span className="text-[0.65rem] text-gray-300 font-mono">v{currentVersion}</span>
+          <span className="flex items-center gap-2">
+            {/* The sheet shows once after an update; this brings it back. */}
+            {releaseNoteFor(currentVersion) && (
+              <button onClick={reopenReleaseNotes} className="t-micro text-lu-accent hover:text-lu-accent-hover transition-colors">
+                What's new
+              </button>
+            )}
+            <span className="text-[0.65rem] text-gray-300 font-mono">v{currentVersion}</span>
+          </span>
         </div>
 
         {/* Latest version, only show if it's actually newer than current */}
@@ -2428,7 +2777,7 @@ export function UpdateSection() {
         {showUpdate ? (
           <div className="rounded-lg bg-emerald-500/[0.08] border border-emerald-500/20 p-3">
             <div className="flex items-center gap-2 mb-2">
-              <ArrowUpCircle size={14} className="text-emerald-400" />
+              <ArrowUpCircle size={14} className="text-emerald-600 dark:text-emerald-400" />
               <span className="text-[0.65rem] font-medium text-emerald-400">Update available!</span>
             </div>
             {releaseNotes && downloadStatus !== 'downloading' && downloadStatus !== 'downloaded' && (
@@ -2511,6 +2860,13 @@ export function UpdateSection() {
                 </button>
               )}
             </div>
+          </div>
+        ) : noBuildForPlatform ? (
+          /* The server answered and the release has no Mac build in it (yet).
+             That is neither a failed check nor "you are on the latest
+             version", so it gets its own quiet line and no tick. */
+          <div className="flex items-center gap-2 t-micro text-gray-600" data-testid="update-no-build">
+            No update for this Mac yet.
           </div>
         ) : lastCheckFailed ? (
           /* R2-12: hier stand der gruene Haken auch dann, wenn die Pruefung gar
@@ -2792,6 +3148,10 @@ function TroubleshootSection() {
                 {report.host.disk_free_gb} GB
               </span>
             </div>
+            {/* Not on a Mac: it has no graphics memory of its own, the RAM row
+                above IS the pool its graphics unit draws from, and the row
+                could only ever read "not detected" there. */}
+            {!isMacOS() && (
             <div className="flex items-center justify-between text-[0.65rem]">
               <span className="text-gray-500">VRAM (GPU)</span>
               <span className="text-gray-300 font-mono">
@@ -2802,6 +3162,7 @@ function TroubleshootSection() {
                   : 'not detected'}
               </span>
             </div>
+            )}
           </div>
         </div>
       )}

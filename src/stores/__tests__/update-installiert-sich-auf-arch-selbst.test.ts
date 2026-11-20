@@ -9,8 +9,7 @@
  * machine, so on Arch it picks linux-x86_64-deb out of latest.json, downloads
  * a Debian package and runs `pkexec dpkg -i` on a box with no dpkg. polkit
  * asks for the password first and the command fails afterwards, which is
- * exactly the order he described. Full trace with line numbers in
- * UPDATER-LINUX-BEFUND.md.
+ * exactly the order he described.
  *
  * What is pinned here is that he never has to know any of that: the same
  * Download button fetches the AppImage, the same Restart button puts it in his
@@ -98,7 +97,7 @@ function reset(kind: unknown) {
       // The real command reports its download through events on the way.
       events.listener?.({ payload: { phase: 'download', downloaded: 50, total: 100 } })
       events.listener?.({ payload: { phase: 'verify', downloaded: 100, total: 100 } })
-      return { version: '2.6.8', bytes: 100, staged: '/home/zen/.local/share/locally-uncensored/x.part' }
+      return { version: '2.6.8', bytes: 100, staged: '/home/bob/.local/share/locally-uncensored/x.part' }
     }
     return null
   })
@@ -149,7 +148,7 @@ describe('who installs the update', () => {
     // The plugin's first move there is a rename INSIDE that folder, which
     // fails with EACCES and no prompt at all (updater.rs:1003).
     expect(installsItself({ kind: 'appimage', exePath: '/opt/LU.AppImage', writable: false })).toBe(true)
-    expect(installsItself({ kind: 'appimage', exePath: '/home/zen/LU.AppImage', writable: true })).toBe(false)
+    expect(installsItself({ kind: 'appimage', exePath: '/home/bob/LU.AppImage', writable: true })).toBe(false)
   })
 
   it('leaves the lanes that work to the plugin', () => {
@@ -322,7 +321,7 @@ describe('the store on the installs the plugin serves', () => {
   })
 
   it('leaves an AppImage the user owns on the plugin s in place swap', async () => {
-    reset(method({ kind: 'appimage', exe_path: '/home/zen/LU.AppImage', writable: true }))
+    reset(method({ kind: 'appimage', exe_path: '/home/bob/LU.AppImage', writable: true }))
 
     await useUpdateStore.getState().checkForUpdate(true)
     await settle()

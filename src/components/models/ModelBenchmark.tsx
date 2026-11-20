@@ -3,6 +3,7 @@ import { useBenchmark } from '../../hooks/useBenchmark'
 import { Zap, Play, Square, Trophy } from 'lucide-react'
 import { displayModelName } from '../../api/providers/registry'
 import { HINWEIS_TEXT } from '../../lib/hinweis'
+import { modelSkin } from './skin'
 
 interface Props {
   modelName: string
@@ -40,7 +41,7 @@ export function BenchmarkButton({ modelName }: Props) {
         <button
           onClick={() => runBenchmark(modelName)}
           disabled={isRunning}
-          className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-white/5 text-gray-400 text-[0.55rem] hover:bg-white/10 hover:text-gray-300 transition-colors disabled:opacity-30"
+          className={modelSkin().card.bench}
           title="Run benchmark"
         >
           <Play size={9} />

@@ -125,10 +125,10 @@ describe('the second pass runs the moment ComfyUI is there', () => {
 
 describe('the model list arms that second pass, and holds the counter while it runs', () => {
   it('THE FIX: an unreachable ComfyUI marks the pass as unanswered', () => {
-    // Probe on every OS (Mac is connect-only on :8080). Unreachable stays
-    // unanswered; the second-pass arm still waits on comfyui_status.
-    expect(useModels).toMatch(/const comfyOk = await checkComfyConnection\(\)/)
-    expect(useModels).toMatch(/if \(!comfyOk\) comfyAnswered = false/)
+    // Probe on every desktop OS (Mac is connect-only on its configured port).
+    // Unreachable stays unanswered; the second-pass arm still waits on comfyui_status.
+    expect(useModels).toMatch(/const comfyOk = desktop && \(await checkComfyConnection\(\)\)/)
+    expect(useModels).toMatch(/if \(desktop && !comfyOk\) comfyAnswered = false/)
     expect(useModels).not.toMatch(/!isMacOS\(\) && \(await checkComfyConnection/)
   })
 
@@ -166,6 +166,8 @@ describe('the model list arms that second pass, and holds the counter while it r
       useModels.indexOf('function armComfyInventoryRetry'),
       useModels.indexOf('export function __resetComfyInventoryRetryForTests'),
     )
+    expect(arm).toMatch(/if \(isMobile\(\)\) return/)
     expect(arm).not.toMatch(/if \(isMacOS\(\)\) return/)
+    expect(arm).not.toMatch(/if \(!hasComfy\(\)\) return/)
   })
 })

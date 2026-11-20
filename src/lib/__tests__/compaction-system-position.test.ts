@@ -5,11 +5,11 @@
  * and LM Studio render them with the template's own raise_exception, and the
  * run dies with "System message must be at the beginning".
  *
- * Reported on Discord #bug-reports (2026-08-21): platorius, "the problem is
+ * Reported on Discord #bug-reports (2026-08-21): A user, "the problem is
  * only in LU. It has very often problems. When i use Unsloth Desktop, i can
  * copy paste the same prompts and no problem" (same prompts elsewhere are
  * fine because compaction only fires once the history is long), and
- * helpslowlydying's diagnosis of the crash, "the system instructions or
+ * a user's diagnosis of the crash, "the system instructions or
  * tools are being injected in the wrong order, causing the Jinja template
  * engine to crash with System message must be at the beginning".
  *

@@ -30,22 +30,33 @@ import { getProviderForModel, getProviderIdFromModel } from '../api/providers'
 import { resolveAgentNumCtxWithConfidence } from './agent-num-ctx'
 import { runCompactSummary, type CompactRunReason } from './compact-run'
 import {
+  chainToSend,
   renderCompactSummary,
+  stateFromStored,
+  renderTranscript,
   stripCompactSummary,
+  summaryCouldEverFit,
   summaryTokens,
   type TranscriptTurn,
 } from './compact-summary'
 import { estimateTokens } from './context-compaction'
 import { computeContextFill, type FillMessage } from './token-usage'
-import { shouldAutoCompact, MIN_MESSAGES_SINCE_COMPACT } from './compact-trigger'
-import { effectiveSendWindow } from './send-window'
+import {
+  shouldAutoCompact,
+  autoCompactOn,
+  resolveCompactThreshold,
+  MIN_MESSAGES_SINCE_COMPACT,
+} from './compact-trigger'
+import { effectiveSendWindow, sendWindowFor } from './send-window'
 import { sendsToALanBackend } from './lan-openai-slot'
 import { useSendSizeStore } from '../stores/sendSizeStore'
+import { COMPACTING_ACTIVITY, useRunActivityStore } from '../stores/runActivityStore'
 import type { CompactionRecord, Message } from '../types/chat'
 import { formatCount } from './formatters'
 
 /**
- * How many of the newest messages stay verbatim behind a summary.
+ * How many of the newest messages stay verbatim behind a summary when the
+ * context window is not known.
  *
  * The mechanical path keeps KEEP_RECENT (4) as a floor under a budget-driven
  * window. Here the summary carries everything older, so this number answers a
@@ -56,9 +67,74 @@ import { formatCount } from './formatters'
  */
 export const KEEP_AFTER_COMPACT = 6
 
+/**
+ * The adaptive window (issue #151): with a known context window, keep as many
+ * of the newest messages as fit into this share of it, never fewer than
+ * KEEP_MIN and never more than KEEP_MAX.
+ *
+ * A quarter leaves three quarters for the summary, the system prompt, tools and
+ * the answer. The floor is the mechanical path's KEEP_RECENT: two exchanges is
+ * the least that still carries what "that" refers to. The ceiling stops a large
+ * window from keeping so much that the compaction frees almost nothing; at
+ * twenty short turns the immediate thread is long since covered.
+ */
+export const KEEP_WINDOW_SHARE = 0.25
+export const KEEP_MIN = 4
+export const KEEP_MAX = 20
+
+/** Per message overhead of the wire format, the same 4 tokensBefore counts. */
+const MESSAGE_OVERHEAD_TOKENS = 4
+
+/**
+ * How many of the newest visible messages stay verbatim, given the window the
+ * payload is built against. Without a window (0, unknown, not a number) the
+ * fixed KEEP_AFTER_COMPACT applies, which is what every compaction did before.
+ */
+export function keepRecentCount(
+  visible: ReadonlyArray<{ content: string }>,
+  windowTokens: number | undefined,
+): number {
+  if (!(typeof windowTokens === 'number' && Number.isFinite(windowTokens) && windowTokens > 0)) {
+    return KEEP_AFTER_COMPACT
+  }
+  const budget = windowTokens * KEEP_WINDOW_SHARE
+  let used = 0
+  let count = 0
+  for (let i = visible.length - 1; i >= 0 && count < KEEP_MAX; i--) {
+    used += estimateTokens(visible[i].content) + MESSAGE_OVERHEAD_TOKENS
+    if (used > budget) break
+    count++
+  }
+  return Math.min(KEEP_MAX, Math.max(KEEP_MIN, count))
+}
+
 export type CompactOutcome =
   | { ok: true; record: CompactionRecord }
   | { ok: false; reason: CompactRunReason | 'no-conversation' | 'nothing-to-compact'; detail?: string }
+
+/** How full the payload of this chat is, the same reading the counter shows. */
+function contextFillOf(conv: { id: string; messages: Message[] }) {
+  const sent = useSendSizeStore.getState().byConv[conv.id]
+  return computeContextFill(
+    conv.messages as unknown as FillMessage[],
+    sent ? { tokens: sent.tokens + sent.toolsTokens, atMessageCount: sent.atMessageCount } : undefined,
+  )
+}
+
+/**
+ * Why a chat with too few turns to cut still does not fit: undefined when it
+ * fits (or the window is unknown), 'message-over-window' when one message is
+ * longer than the whole window, 'over-window' when the few turns together are.
+ */
+function overWindowDetail(
+  visible: ReadonlyArray<{ content: string }>,
+  windowTokens: number,
+): 'message-over-window' | 'over-window' | undefined {
+  if (!(Number.isFinite(windowTokens) && windowTokens > 0)) return undefined
+  const sizes = visible.map((m) => estimateTokens(m.content) + MESSAGE_OVERHEAD_TOKENS)
+  if (sizes.some((t) => t > windowTokens)) return 'message-over-window'
+  return sizes.reduce((a, b) => a + b, 0) > windowTokens ? 'over-window' : undefined
+}
 
 /** A stored message the model actually saw. App notices never reach a model. */
 export function isModelVisible(m: Message): boolean {
@@ -85,6 +161,12 @@ export async function runCompactForConversation(opts: {
   trigger: 'manual' | 'auto'
   focus?: string
   signal?: AbortSignal
+  /**
+   * The window the payload is built against, for the adaptive count of kept
+   * messages. Omitted, it is resolved here the same way the auto trigger
+   * resolves it; 0 means unknown and keeps KEEP_AFTER_COMPACT.
+   */
+  window?: number
 }): Promise<CompactOutcome> {
   if (!opts.activeModel) return { ok: false, reason: 'no-model' }
 
@@ -93,8 +175,15 @@ export async function runCompactForConversation(opts: {
   if (!conv) return { ok: false, reason: 'no-conversation' }
 
   const visible = conv.messages.filter(isModelVisible)
-  const cutAt = visible.length - KEEP_AFTER_COMPACT
-  if (cutAt <= 0) return { ok: false, reason: 'nothing-to-compact' }
+  const window = opts.window
+    ?? (await resolveSendWindow(opts.activeModel).catch(() => ({ window: 0 }))).window
+  const cutAt = visible.length - keepRecentCount(visible, window)
+  if (cutAt <= 0) {
+    // Too few turns to cut anything is not the same as "short enough to send
+    // whole": one huge answer in a short chat fills the window on its own
+    // (Jaeger A, A3). Say which of the two it is.
+    return { ok: false, reason: 'nothing-to-compact', detail: overWindowDetail(visible, window) }
+  }
 
   // Do not re-summarise material an earlier summary already covers: that is
   // the summary-of-a-summary decay this feature is designed to avoid. The cut
@@ -120,41 +209,119 @@ export async function runCompactForConversation(opts: {
     content: stripCompactSummary(m.content),
   }))
 
-  const result = await runCompactSummary({
-    turns,
-    activeModel: opts.activeModel,
-    focus: opts.focus,
-    contextWindowOverride: useSettingsStore.getState().settings.contextWindowOverride,
-    signal: opts.signal,
-  })
-  if (!result.ok) return { ok: false, reason: result.reason, detail: result.detail }
+  // Billig und vor jedem Modellaufruf: sind die neuen Zuege so kurz, dass
+  // keine Verdichtung etwas spart, endet der Lauf hier mit derselben Meldung,
+  // die sonst erst nach einem (oder zwei) vergeblichen Aufrufen kaeme. Das
+  // gilt fuer die Zusammenfuehrung wie fuer den Rueckfall, denn beide ersetzen
+  // dieselben neuen Zuege (Box-Lauf 3, Befund H3).
+  const canSave = summaryCouldEverFit(renderTranscript(turns).length)
+  if (!canSave) return { ok: false, reason: 'unusable', detail: 'not-smaller' }
 
-  const record: CompactionRecord = {
-    id: uuid(),
-    summary: renderCompactSummary(result.summary),
-    upToMessageId: anchor.id,
-    replaced: covered.length,
-    atMessageCount: conv.messages.length,
-    tokensBefore: turns.reduce((n, t) => n + estimateTokens(t.content) + 4, 0),
-    tokensAfter: summaryTokens(result.summary),
-    trigger: opts.trigger,
-    at: Date.now(),
+  // ── Zusammengefuehrter Stand statt Kette (Issue #151) ────────────────────
+  //
+  // Steht vor dem Schnitt schon eine Verdichtung, wird ihr Stand mit den neuen
+  // Zuegen zu EINEM Stand zusammengefuehrt, und nur dieser geht kuenftig mit.
+  // Der Stand ist genau das, was die Nutzlast heute traegt: der neueste
+  // zusammengefuehrte Datensatz und die Kettenglieder danach (chainToSend).
+  const records = conv.compactions ?? []
+  const chain = prevIdx >= 0 ? chainToSend(records, records.length - 1) : []
+  const previousState = chain.length ? stateFromStored(chain) : undefined
+
+  // The summary is a model call of its own and can take a while. The
+  // transcript shows "Compacting conversation…" for as long as this runs,
+  // for /compact as for the automatic trigger (3.0.9). Whatever the run said
+  // before comes back afterwards.
+  const activity = useRunActivityStore.getState()
+  const activityBefore = activity.activity[opts.conversationId] ?? null
+  activity.setActivity(opts.conversationId, COMPACTING_ACTIVITY)
+  try {
+    return await summariseAndRecord()
+  } finally {
+    useRunActivityStore.getState().setActivity(opts.conversationId, activityBefore)
   }
-  // Re-read the store: the conversation may have been deleted while the model
-  // was writing. recordCompaction is a no-op on a missing id, but reporting
-  // success for a chat that no longer exists would be a lie to the caller.
-  if (!useChatStore.getState().conversations.some((c) => c.id === opts.conversationId)) {
-    return { ok: false, reason: 'no-conversation' }
+
+  async function summariseAndRecord(): Promise<CompactOutcome> {
+    if (!opts.activeModel || !conv) return { ok: false, reason: 'no-model' }
+    let result = await runCompactSummary({
+      turns,
+      activeModel: opts.activeModel,
+      focus: opts.focus,
+      signal: opts.signal,
+      previous: previousState,
+      window,
+    })
+    // Scheitert die Zusammenfuehrung, wird wie bisher nur der neue Abschnitt
+    // zusammengefasst und als Kettenglied gespeichert. Die alten Datensaetze
+    // bleiben unangetastet und gehen weiter mit, es geht also nichts verloren.
+    // Abbruch und fehlendes Modell sind keine Gruende fuer einen zweiten Lauf.
+    // Der Rueckfall nur, wenn er etwas sparen kann (canSave, oben) und der
+    // Grund nicht beim Nutzer oder beim fehlenden Modell liegt.
+    if (!result.ok && previousState && canSave
+        && result.reason !== 'aborted' && result.reason !== 'no-model') {
+      result = await runCompactSummary({
+        turns,
+        activeModel: opts.activeModel,
+        focus: opts.focus,
+        signal: opts.signal,
+        window,
+      })
+    }
+    if (!result.ok) return { ok: false, reason: result.reason, detail: result.detail }
+
+    const merged = Boolean(result.merged && previousState)
+    // Was ohne diesen Lauf mitginge: die neuen Zuege, und bei einer
+    // Zusammenfuehrung auch die Kette, die der neue Stand ersetzt.
+    const chainTokens = merged ? chain.reduce((n, r) => n + estimateTokens(r.summary), 0) : 0
+    const record: CompactionRecord = {
+      id: uuid(),
+      summary: renderCompactSummary(result.summary),
+      upToMessageId: anchor.id,
+      replaced: covered.length,
+      atMessageCount: conv.messages.length,
+      tokensBefore: turns.reduce((n, t) => n + estimateTokens(t.content) + 4, 0) + chainTokens,
+      tokensAfter: summaryTokens(result.summary),
+      trigger: opts.trigger,
+      at: Date.now(),
+      ...(merged ? { merged: true } : {}),
+    }
+    // The whole payload, for the line in the transcript: what the counter read
+    // before, less what the summary saves. An estimate both ways, like the
+    // counter's own number between two real usage reports.
+    //
+    // tokensBefore is the raw size of the replaced turns, and a turn the
+    // mechanical trim already shortened never went out whole, so the saving
+    // can exceed what the counter read. The payload after still carries the
+    // summary and the kept messages: that is its floor, capped at the number
+    // before (T1 29.10.: an 82K-character answer gave "Compacted, 737 → 0").
+    const contextBefore = contextFillOf(conv).used
+    if (contextBefore > 0) {
+      const kept = visible.slice(cutAt).reduce((n, m) => n + estimateTokens(m.content) + MESSAGE_OVERHEAD_TOKENS, 0)
+      const floor = Math.min(contextBefore, record.tokensAfter + kept)
+      record.contextBefore = contextBefore
+      record.contextAfter = Math.max(floor, contextBefore - Math.max(0, record.tokensBefore - record.tokensAfter))
+    }
+    // The answer the agent loops have already opened (empty, no step yet) is
+    // not part of the stand before: what it will say comes after. Mac run
+    // 28.10.: with it as the end, the layer "before" showed the later answer.
+    const newest = conv.messages.findLast((m) => !(m.role === 'assistant' && !m.content && !m.agentBlocks?.length))
+    if (newest) record.endMessageId = newest.id
+    // Re-read the store: the conversation may have been deleted while the model
+    // was writing. recordCompaction is a no-op on a missing id, but reporting
+    // success for a chat that no longer exists would be a lie to the caller.
+    if (!useChatStore.getState().conversations.some((c) => c.id === opts.conversationId)) {
+      return { ok: false, reason: 'no-conversation' }
+    }
+    useChatStore.getState().recordCompaction(opts.conversationId, record)
+    return { ok: true, record }
   }
-  useChatStore.getState().recordCompaction(opts.conversationId, record)
-  return { ok: true, record }
 }
 
 /**
  * The newest record, or undefined.
  *
- * NOT for building a payload. That takes the whole chain, because each run
- * only summarises what the previous one did not cover, and a cut placed by the
+ * NOT for building a payload. That takes the chain from the newest merged
+ * state on (all of it in chats from before 3.0.7), because a plain link only
+ * summarises what the previous one did not cover, and a cut placed by the
  * newest anchor drops everything the earlier summaries stand for
  * (`applyStoredCompaction` in `compact-summary.ts`, fixed 04.09.2026). This
  * function exists for one thing only: `atMessageCount`, which the counter and
@@ -178,6 +345,12 @@ export function compactOutcomeMessage(outcome: CompactOutcome): string {
     case 'nothing-to-compact':
       if (outcome.detail === 'already-compacted') {
         return 'Nothing new to summarise — everything before the last summary is already covered, and the turns since then are the ones being kept.'
+      }
+      if (outcome.detail === 'message-over-window') {
+        return 'Nothing to summarise: this conversation has too few turns to cut, and one message alone is longer than the model\'s context window. It gets shortened when it is sent; the full text stays here.'
+      }
+      if (outcome.detail === 'over-window') {
+        return 'Nothing to summarise: this conversation has too few turns to cut, but together they no longer fit the model\'s context window. The oldest part gets shortened when it is sent; the full text stays here.'
       }
       return 'Nothing to summarise yet — this conversation is still short enough to send whole.'
     case 'no-conversation':
@@ -205,10 +378,68 @@ export function compactOutcomeMessage(outcome: CompactOutcome): string {
 // ── Der automatische Auslöser ──────────────────────────────────────────────
 
 /**
- * Compact before this send, if the user asked for that to happen.
+ * The window a payload for this model is built against: the model window,
+ * capped the way the send path caps it. Shared by the auto trigger (its
+ * denominator) and the compaction itself (the adaptive kept window), so both
+ * read the same number. A lookup that fails comes back as 0, which both read
+ * as unknown.
+ */
+export async function resolveSendWindow(
+  activeModel: string,
+): Promise<{ window: number; isTrue: boolean; modelWindow: number }> {
+  const { modelId } = getProviderForModel(activeModel)
+  // Der Aufloeser sagt jetzt selbst, ob er gemessen oder geraten hat. Hier
+  // stand `window !== 8192`: ein Ratespiel an der Zahl, und in beide
+  // Richtungen falsch: 8192 ist Ollamas Voreinstellung UND ein legitimer
+  // Override, ein wirklich mit 8192 laufendes Modell galt also dauerhaft
+  // als unsicher und wurde acht Prozentpunkte zu frueh zusammengefasst.
+  const aufgeloest = await resolveAgentNumCtxWithConfidence(
+    modelId,
+    getProviderIdFromModel(activeModel),
+    useSettingsStore.getState().settings.contextWindowOverride,
+    activeModel,
+  ).catch(() => ({ ctx: 0, gemessen: false }))
+  let window = aufgeloest.ctx
+  const modelWindow = aufgeloest.ctx
+  const isTrue = window > 0 && aufgeloest.gemessen
+
+  // ── Derselbe Nenner wie in der Nutzlast, und nicht das Modellfenster ────
+  //
+  // `resolveAgentNumCtx` liefert, was das MODELL kann. Was die Schleife
+  // gleich darauf wirklich SENDET, ist weniger: `effectiveSendWindow` nimmt
+  // einen Anteil davon und, bei bezahlten Anbietern, hoechstens die
+  // eingestellte Kappe. Genau diese Zahl ist der Nenner des Fuellbalkens
+  // (useActiveContextWindow, "meter honesty"), und genau gegen sie baut die
+  // Schleife wenige Zeilen spaeter ihre Nachrichten (useAgentChat:898).
+  //
+  // Ohne diese Umrechnung rechnete die Anzeige gegen die Kappe und der
+  // Ausloeser gegen das Modellfenster. Gemessenes Beispiel: 200k-Modell,
+  // Kappe 64k, 60k belegt, Schwelle 0.8: der Balken steht bei 94 % und
+  // sagt "triggers on the next message", der Ausloeser rechnet 0.3, urteilt
+  // 'below' und tut nie etwas. Dauerhaft, nicht nur einmal.
+  //
+  // NUR in diesem Zweig: wer `window` selbst uebergibt (der einfache Chat
+  // mit `modelWindowTokens`), hat seinen Nenner schon gewaehlt, und die
+  // Nutzlast des einfachen Chats kennt diese Kappe nicht.
+  const st = useSettingsStore.getState().settings
+  const anbieter = getProviderIdFromModel(activeModel)
+  const gekappt = effectiveSendWindow({
+    providerId: anbieter,
+    modelWindow: window,
+    sendWindowTokens: sendWindowFor(st, activeModel),
+    capEnabled: st.contextDecay !== false,
+    smallModelMode: st.smallModelMode,
+    localBackend: sendsToALanBackend(anbieter, activeModel),
+  })
+  if (gekappt > 0) window = gekappt
+  return { window, isTrue, modelWindow }
+}
+
+/**
+ * Compact before this send, when the payload nears the window.
  *
- * Called from every payload builder, and does nothing at all unless
- * `autoCompactThreshold` is set — which is the whole shape of the opt-in.
+ * Called from every payload builder. On by default since 3.0.7; does nothing
+ * at all when `autoCompact` is switched off.
  * Returns the record when one was written, else null; the caller re-reads the
  * conversation afterwards so the fresh record is applied to the payload it is
  * about to build.
@@ -242,21 +473,32 @@ export async function maybeAutoCompact(opts: {
   window?: number
   /** Whether that window is the live one rather than a fallback guess. */
   windowIsTrue?: boolean
+  /**
+   * The send budget would trim the payload as it stands (sendBudgetWouldTrim).
+   * A summary then comes first, so the trim is the safety net and not the
+   * thing that runs instead of it. See CompactTriggerInput.trimImminent.
+   */
+  trimImminent?: boolean
   signal?: AbortSignal
 }): Promise<CompactionRecord | null> {
-  const threshold = useSettingsStore.getState().settings.autoCompactThreshold
-  // The cheap question first: without an opt-in there is nothing to compute,
-  // and this runs on every single send.
-  if (!threshold) return null
+  const settings = useSettingsStore.getState().settings
+  // The cheap question first: switched off there is nothing to compute, and
+  // this runs on every single send.
+  if (!autoCompactOn(settings)) return null
   // Ohne aktives Modell gibt es niemanden, der zusammenfassen koennte. Die
   // Pruefung steht VOR dem Fenster-Aufloesen, denn das fragt das Modell.
   if (!opts.activeModel) return null
 
   const conv = useChatStore.getState().conversations.find((c) => c.id === opts.conversationId)
   if (!conv) return null
+  // A summary that just failed is not tried again on the next send. A model
+  // that cannot write one fails the same way again, and each try is a full
+  // pass over the long history (box run d307-l: five tries of 11K tokens in a
+  // row). The own failure notice marks the try; the next one waits as long as
+  // after a summary that worked. The send budget still trims meanwhile.
+  if (recentAutoFailure(conv.messages)) return null
 
   const visible = conv.messages.filter(isModelVisible)
-  const sent = useSendSizeStore.getState().byConv[opts.conversationId]
   // ── Warum hier die UNGEFILTERTE Liste steht ──────────────────────────────
   //
   // `atMessageCount` wird von beiden Agentenschleifen als
@@ -270,59 +512,23 @@ export async function maybeAutoCompact(opts: {
   // die beiden liefen also genau dann auseinander, wenn die App selbst geredet
   // hatte. Dass die Hinweise nicht mitzaehlen, erledigt jetzt
   // `computeContextFill` selbst und fuer BEIDE Aufrufer gleich.
-  const fill = computeContextFill(
-    conv.messages as unknown as FillMessage[],
-    sent ? { tokens: sent.tokens + sent.toolsTokens, atMessageCount: sent.atMessageCount } : undefined,
-  )
+  const fill = contextFillOf(conv)
 
   let window = opts.window
   let windowIsTrue = opts.windowIsTrue ?? false
+  // The model window, for the 32K rule of the default threshold. A window
+  // handed in is already the model window (plain chat).
+  let modelWindow = window ?? 0
   if (window === undefined) {
-    const { modelId } = getProviderForModel(opts.activeModel)
-    // Der Aufloeser sagt jetzt selbst, ob er gemessen oder geraten hat. Hier
-    // stand `window !== 8192` — ein Ratespiel an der Zahl, und in beide
-    // Richtungen falsch: 8192 ist Ollamas Voreinstellung UND ein legitimer
-    // Override, ein wirklich mit 8192 laufendes Modell galt also dauerhaft
-    // als unsicher und wurde acht Prozentpunkte zu frueh zusammengefasst.
-    const aufgeloest = await resolveAgentNumCtxWithConfidence(
-      modelId,
-      getProviderIdFromModel(opts.activeModel),
-      useSettingsStore.getState().settings.contextWindowOverride,
-      opts.activeModel,
-    ).catch(() => ({ ctx: 0, gemessen: false }))
-    window = aufgeloest.ctx
-    windowIsTrue = window > 0 && aufgeloest.gemessen
-
-    // ── Derselbe Nenner wie in der Nutzlast, und nicht das Modellfenster ────
-    //
-    // `resolveAgentNumCtx` liefert, was das MODELL kann. Was die Schleife
-    // gleich darauf wirklich SENDET, ist weniger: `effectiveSendWindow` nimmt
-    // einen Anteil davon und, bei bezahlten Anbietern, hoechstens die
-    // eingestellte Kappe. Genau diese Zahl ist der Nenner des Fuellbalkens
-    // (useActiveContextWindow, "meter honesty"), und genau gegen sie baut die
-    // Schleife wenige Zeilen spaeter ihre Nachrichten (useAgentChat:898).
-    //
-    // Ohne diese Umrechnung rechnete die Anzeige gegen die Kappe und der
-    // Ausloeser gegen das Modellfenster. Gemessenes Beispiel: 200k-Modell,
-    // Kappe 64k, 60k belegt, Schwelle 0.8 — der Balken steht bei 94 % und
-    // sagt "triggers on the next message", der Ausloeser rechnet 0.3, urteilt
-    // 'below' und tut nie etwas. Dauerhaft, nicht nur einmal.
-    //
-    // NUR in diesem Zweig: wer `window` selbst uebergibt (der einfache Chat
-    // mit `modelWindowTokens`), hat seinen Nenner schon gewaehlt, und die
-    // Nutzlast des einfachen Chats kennt diese Kappe nicht.
-    const st = useSettingsStore.getState().settings
-    const anbieter = getProviderIdFromModel(opts.activeModel)
-    const gekappt = effectiveSendWindow({
-      providerId: anbieter,
-      modelWindow: window,
-      sendWindowTokens: st.codexSendWindowTokens,
-      capEnabled: st.contextDecay !== false,
-      smallModelMode: st.smallModelMode,
-      localBackend: sendsToALanBackend(anbieter),
-    })
-    if (gekappt > 0) window = gekappt
+    const resolved = await resolveSendWindow(opts.activeModel)
+    window = resolved.window
+    windowIsTrue = resolved.isTrue
+    modelWindow = resolved.modelWindow
   }
+
+  // The threshold follows the window unless the user fixed one, so it is
+  // resolved only now that the window is known.
+  const threshold = resolveCompactThreshold(settings, window, modelWindow) ?? undefined
 
   const verdict = shouldAutoCompact({
     used: fill.used,
@@ -333,20 +539,23 @@ export async function maybeAutoCompact(opts: {
     messageCount: visible.length,
     threshold,
     lastCompactAtMessageCount: newestCompaction(conv.compactions)?.atMessageCount,
+    trimImminent: opts.trimImminent,
   })
   if (!verdict.shouldCompact) return null
 
+  // runCompactForConversation shows "Compacting conversation…" while the
+  // summary is written, and the record it stores is the line that stays.
   const outcome = await runCompactForConversation({
     conversationId: opts.conversationId,
     activeModel: opts.activeModel,
     trigger: 'auto',
     signal: opts.signal,
+    window,
   })
   if (!outcome.ok) {
     meldeAutoFehlschlag(opts.conversationId, outcome)
     return null
   }
-  meldeAutoErfolg(opts.conversationId, outcome)
   return outcome.record
 }
 
@@ -403,41 +612,22 @@ export async function maybeAutoCompact(opts: {
  */
 const AUTO_FAIL_PREFIX = 'autocompact-fail-'
 
-/**
- * Same prefix trick for the case that WORKED.
- *
- * The asymmetry was the bug. A failed auto-compaction has written a visible
- * notice into the transcript since it existed; a successful one wrote nothing
- * — although success is the case that changes what the model can still see.
- * The window kept showing the full conversation, the request no longer carried
- * it, and the only way to find out was to read the network traffic. A tester
- * put the cost plainly on 2026-09-03: „Ich glaube, das Werkzeug hat alles, und
- * uebernehme falsche Zahlen in einen Artikel."
- *
- * `notice: 'info'`, not 'warn': nothing went wrong. Something happened, and the
- * person it happened to gets to know. The wording is `compactOutcomeMessage`,
- * the same sentence the manual /compact has always shown — including the half
- * that takes the fright out of it: the conversation is still here, only the
- * payload got shorter.
- */
-const AUTO_OK_PREFIX = 'autocompact-ok-'
+// A successful auto-compaction wrote a notice up to 3.0.8 (prefix
+// 'autocompact-ok-'); since 3.0.9 the record itself is drawn as the line
+// "Compacted, 28.9K → 17.9K". See AUTO_OK_PREFIX in lib/compact-layers.ts.
 
-function meldeAutoErfolg(convId: string, outcome: CompactOutcome & { ok: true }): void {
-  useChatStore.getState().addMessage(convId, {
-    id: `${AUTO_OK_PREFIX}${outcome.record.id}`,
-    role: 'system',
-    notice: 'info',
-    content: compactOutcomeMessage(outcome),
-    timestamp: Date.now(),
-  })
+/** True while the newest own failure notice is fewer than
+ *  MIN_MESSAGES_SINCE_COMPACT messages back. */
+export function recentAutoFailure(messages: ReadonlyArray<{ id: string }>): boolean {
+  const letzteEigene = messages.findLastIndex((m) => m.id.startsWith(AUTO_FAIL_PREFIX))
+  return letzteEigene !== -1 && messages.length - letzteEigene < MIN_MESSAGES_SINCE_COMPACT
 }
 
 function meldeAutoFehlschlag(convId: string, outcome: CompactOutcome & { ok: false }): void {
   if (outcome.reason === 'aborted' || outcome.reason === 'nothing-to-compact') return
 
   const nachrichten = useChatStore.getState().conversations.find((c) => c.id === convId)?.messages ?? []
-  const letzteEigene = nachrichten.findLastIndex((m) => m.id.startsWith(AUTO_FAIL_PREFIX))
-  if (letzteEigene !== -1 && nachrichten.length - letzteEigene < MIN_MESSAGES_SINCE_COMPACT) return
+  if (recentAutoFailure(nachrichten)) return
 
   useChatStore.getState().addMessage(convId, {
     id: `${AUTO_FAIL_PREFIX}${Date.now()}`,

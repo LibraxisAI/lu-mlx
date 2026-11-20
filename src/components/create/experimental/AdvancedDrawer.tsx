@@ -1,21 +1,30 @@
 import { Drawer } from '../ui/Drawer'
 import { WorkflowFinder } from '../WorkflowFinder'
+import { isMlxImageHost } from '../../../api/mlx-image'
 import { useCreateStore } from '../../../stores/createStore'
 import {
   classifyModel,
-  isI2VModel,
-  isT2VCapable,
+  resolveLocalOpPick,
+  videoLaneModels,
 } from '../../../api/comfyui'
 import { ParamGroups } from './ParamGroups'
 import { StudioParams } from './StudioParams'
+import { ImproveToggle } from './ImproveToggle'
+import { ImageCount } from './ImageCount'
+import { ActiveWorkflowParams } from './WorkflowParams'
+import { isHubIntent } from '../../../lib/create/character-hub'
+import { HubSettings } from './hub/HubSettings'
 
 export function AdvancedDrawer({
   open,
   onClose,
   studioModel,
+  onOpenWorkflows,
 }: {
   open: boolean
   onClose: () => void
+  /** The Character tab offers the user's own workflows from here. */
+  onOpenWorkflows?: () => void
   /** Set only on the cloud Studio track (Portplan Abschnitt 3b): a Studio
    *  model has no sampler, scheduler, VAE or LoRA list from ComfyUI, so it
    *  REPLACES WorkflowFinder + ParamGroups below rather than adding to them.
@@ -45,14 +54,7 @@ export function AdvancedDrawer({
   let effectiveVideoModel = videoModel
 
   if (videoModels.length > 0) {
-    const compatibleModels =
-      intent === 'animate' || intent === 'extend'
-        ? videoModels.filter((model) =>
-            isI2VModel(model.name),
-          )
-        : videoModels.filter((model) =>
-            isT2VCapable(model.name),
-          )
+    const compatibleModels = videoLaneModels(videoModels, intent)
 
     const storedModelIsCompatible =
       compatibleModels.some(
@@ -68,10 +70,17 @@ export function AdvancedDrawer({
     }
   }
 
+  // Motion Control runs its own model list, and a workflow of the user's own
+  // is picked for THAT model (useCreate runs it in place of LU's graph).
+  const localOpModel = useCreateStore((state) => state.localOpModel)
+  const motionModels = useCreateStore((state) => state.motionModelList)
+
   const modelName =
-    mode === 'image'
-      ? imageModel
-      : effectiveVideoModel
+    intent === 'motion'
+      ? resolveLocalOpPick(localOpModel, motionModels)
+      : mode === 'image'
+        ? imageModel
+        : effectiveVideoModel
 
   const modelType = classifyModel(modelName)
 
@@ -82,17 +91,31 @@ export function AdvancedDrawer({
       title="Advanced settings"
       width={320}
     >
+      {/* The Character tab keeps its model, size and prompt helpers here:
+          its prompt window holds only the field, the upload and Create. */}
+      {open && isHubIntent(intent) && <HubSettings onOpenWorkflows={onOpenWorkflows} />}
+      <ImproveToggle />
+      <ImageCount />
       {studioModel ? (
         <StudioParams model={studioModel} />
       ) : (
         <>
           <ParamGroups />
 
-          {backend === 'local' && modelName && (
+          {/* Workflows are ComfyUI graphs. A Mac runs MLX and can run none,
+              so the row that asks for a tagged workflow is not shown there. */}
+          {backend === 'local' && modelName && !isMlxImageHost() && (
             <div className="border-t border-white/10 px-1 pb-4 pt-4">
               <WorkflowFinder
                 modelName={modelName}
                 modelType={modelType}
+              />
+              {/* Motion Control fills a workflow of its own way
+                  (injectLaneParameters): fewer values are LU's there. */}
+              <ActiveWorkflowParams
+                modelName={modelName}
+                modelType={modelType}
+                path={intent === 'motion' ? 'lane' : 'workflow'}
               />
             </div>
           )}

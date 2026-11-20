@@ -20,6 +20,9 @@ const here = dirname(fileURLToPath(import.meta.url))
 const conf = JSON.parse(readFileSync(resolve(here, '../../../src-tauri/tauri.conf.json'), 'utf8'))
 const csp: string = conf.app.security.csp
 const connectSrc = (csp.split(';').find((d) => d.trim().startsWith('connect-src')) ?? '').trim()
+const macosConf = JSON.parse(readFileSync(resolve(here, '../../../src-tauri/tauri.macos.conf.json'), 'utf8'))
+const macosCsp: string = macosConf.app.security.csp
+const macosConnectSrc = (macosCsp.split(';').find((d) => d.trim().startsWith('connect-src')) ?? '').trim()
 
 describe('CSP connect-src cloud provider hosts (GH #71)', () => {
   it.each([
@@ -29,6 +32,7 @@ describe('CSP connect-src cloud provider hosts (GH #71)', () => {
     'https://api.together.xyz',
     'https://api.deepseek.com',
     'https://api.mistral.ai',
+    'https://api.minimax.io',
     'https://api.anthropic.com',
   ])('connect-src whitelists %s', (host) => {
     expect(connectSrc).toContain(host)
@@ -51,11 +55,15 @@ describe('CSP connect-src cloud provider hosts (GH #71)', () => {
   // Windows/Linux custom-protocol host, so onboarding_window_open was refused
   // before it reached Rust. ipc: is the scheme; ipc://localhost is the host
   // WebKit matches. This is not a wildcard host allow-list.
-  it('allows the Tauri IPC custom protocol and nothing broader', () => {
-    expect(connectSrc).toContain('ipc:')
-    expect(connectSrc).toContain('ipc://localhost')
-    expect(connectSrc).not.toContain('ipc://*')
-    expect(connectSrc).not.toMatch(/(^|\s)\*(\s|$)/)
+  it('allows the Tauri IPC custom protocol on macOS and nothing broader', () => {
+    expect(macosConnectSrc).toContain('ipc:')
+    expect(macosConnectSrc).toContain('ipc://localhost')
+    expect(macosConnectSrc).not.toContain('ipc://*')
+    expect(macosConnectSrc).not.toMatch(/(^|\s)\*(\s|$)/)
+    const withoutMacIpc = macosCsp
+      .replace("default-src 'self' ipc:", "default-src 'self'")
+      .replace("connect-src 'self' ipc: ipc://localhost", "connect-src 'self'")
+    expect(withoutMacIpc).toBe(csp)
   })
 
   it('pins the Supabase project host and never re-widens to a wildcard', () => {

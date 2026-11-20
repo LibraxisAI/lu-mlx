@@ -1,7 +1,7 @@
 /**
  * The update path has to free our own engine before the installer runs.
  *
- * C4 came from aldrich_ironhart on 2026-08-10: the update stopped at "Error
+ * C4 came from a user on 2026-08-10: the update stopped at "Error
  * opening file for writing: llama-server.exe" with Abort, Retry, Ignore.
  * Windows locks a running image against writes and that file lives in the
  * install directory. The fix went into the NSIS hook, and on 2026-08-15 the
@@ -84,8 +84,8 @@ describe('installing an update frees our own engine first', () => {
     expect(calls).toContain('stop:embed')
     expect(calls.indexOf('stop:engine')).toBeLessThan(calls.indexOf('install'))
     expect(calls.indexOf('stop:embed')).toBeLessThan(calls.indexOf('install'))
-    // And the exit still comes last, after the installer has been handed the job.
-    expect(calls.indexOf('install')).toBeLessThan(calls.indexOf('backend:exit_app'))
+    // And the restart still comes last, after the installer has been handed the job.
+    expect(calls.indexOf('install')).toBeLessThan(calls.indexOf('backend:restart_after_update'))
   })
 
   it('installs anyway when a sidecar refuses to stop', async () => {

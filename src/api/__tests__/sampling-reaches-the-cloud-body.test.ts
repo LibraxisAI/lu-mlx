@@ -9,7 +9,7 @@
  * has no member it could be assigned to), and temperature goes on the wire,
  * when it differs from the app default.
  *
- * R5-10/R5-11 (3.0.1-Liste), David's Entscheid vom 18.09.2026: since then a
+ * R5-10/R5-11 (3.0.1-Liste), Entscheid vom 18.09.2026: since then a
  * field NEITHER this chat NOR the Settings page ever moved away from the app
  * default is left off the request entirely (src/lib/sampling.ts,
  * `buildSamplingRequest`), so the model gets the upstream's own default
@@ -146,7 +146,7 @@ describe('what a moved slider puts on the wire', () => {
 })
 
 /**
- * R5-10/R5-11: the rule the fixliste and David's Entscheid ask for. Nothing
+ * R5-10/R5-11: the rule the fixliste and the owner's decision ask for. Nothing
  * NEITHER the chat NOR the Settings page ever moved reaches the wire.
  */
 describe('what an UNTOUCHED value does NOT put on the wire', () => {
@@ -168,9 +168,17 @@ describe('what an UNTOUCHED value does NOT put on the wire', () => {
   it('NEGATIVKONTROLLE: a chat with its OWN override still sends it, only the untouched fields are omitted', async () => {
     // Counter-check for the two cases above: a body that dropped every
     // sampling field unconditionally would pass them by coincidence.
-    const body = await cloudBody({ temperature: 1.9 })
-    expect(body.temperature).toBe(1.9)
+    const body = await cloudBody({ temperature: 0.95 })
+    expect(body.temperature).toBe(0.95)
     expect(body.top_p).toBeUndefined() // still untouched
+  })
+
+  // A33 (3.0.8): the customer's 1.9 went to LU Cloud with no top_p and no
+  // top_k, the upstream read top_p 1.0, and every answer was noise.
+  it('above temperature 1 the body carries top_p 0.9, even with top P untouched', async () => {
+    const body = await cloudBody({ temperature: 1.4 })
+    expect(body.temperature).toBe(1.4)
+    expect(body.top_p).toBe(0.9)
   })
 
   it('NEGATIVKONTROLLE: a Settings-page value that really moved is not mistaken for untouched', async () => {
@@ -196,7 +204,7 @@ describe('the panel writes to the conversation the send reads', () => {
    * R5-13. The dead control is gone from the popup, and this is the guard that
    * keeps it from coming back: the popup writes nothing the OpenAI-compatible
    * body has no field for. Mirrors the web guard in
-   * apps/web/components/chat/__tests__/sampling-popup-parity.test.ts.
+   * the web app.
    */
   it('R5-13: the popup offers no Top K, and names itself the way the web app does', () => {
     const panel = src('../../components/chat/SamplingControls.tsx')
@@ -213,8 +221,12 @@ describe('the panel writes to the conversation the send reads', () => {
   })
 
   it('and the send reads sampling through buildSamplingRequest, topK straight from settings', () => {
+    // GH #175: useChat goes through speakerSamplingOptions, which adds the
+    // speaker's persona preset under the chat's own values.
     const chat = src('../../hooks/useChat.ts')
-    expect(chat).toMatch(/buildSamplingRequest\(settings, conv\??\.sampling\)/)
-    expect(chat).toMatch(/topK: settings\.topK/)
+    expect(chat).toMatch(/speakerSamplingOptions\(settings, conv,/)
+    const speaker = src('../../lib/chat-persona.ts')
+    expect(speaker).toMatch(/buildSamplingRequest\(settings, conv\.sampling, preset\)/)
+    expect(speaker).toMatch(/topK: settings\.topK/)
   })
 })

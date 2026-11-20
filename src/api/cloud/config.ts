@@ -1,6 +1,6 @@
 // LU Cloud endpoints. The anon key is public by design (it only unlocks
 // RLS-guarded, user-scoped access); real authorization is the user's session
-// token. VITE_* overrides exist for developing against a local uselu server
+// token. VITE_* overrides exist for developing against a local the web app server
 // (`VITE_LU_CLOUD_URL=http://localhost:3000 npm run dev`).
 
 export const CLOUD_BASE: string =

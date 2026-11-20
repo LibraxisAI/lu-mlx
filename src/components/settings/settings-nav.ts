@@ -45,7 +45,7 @@ export function sectionAnchorId(title: string): string {
  * benannt, damit Rail und Inhalt dieselbe Wahrheit lesen.
  */
 export interface SettingsSectionFlags {
-  /** `!isMlxImageHost()` — der GPU-Picker ist auf Apple Silicon durchweg ein No-op. */
+  /** `!isMlxImageHost()`: der GPU-Picker ist auf Apple Silicon durchweg ein No-op; der Mac bekommt an derselben Stelle die Anzeige „Hardware“ ohne Waehler. */
   gpuPicker: boolean
   /** `builtinManaged` — der Expertenblock existiert nur, wenn der openai-Slot die eigene Engine IST. */
   builtinExpert: boolean
@@ -62,6 +62,11 @@ export interface SettingsSectionFlags {
    * server-side caps. Shown on Mac too once ComfyUI is a connect target.
    */
   mediaTimeouts: boolean
+  /** Issue 177: the chat reply timeout, for local backends only, so not in
+   *  cloud mode. */
+  chatTimeout: boolean
+  /** `isTauri()`: watchers run in the desktop app only. */
+  watchers: boolean
 }
 
 /**
@@ -77,10 +82,13 @@ export function sectionsFor(tab: SettingsTab, flags: SettingsSectionFlags): stri
         'Cloud API Keys',
         'Appearance',
         'Generation',
-        ...(flags.gpuPicker ? ['Hardware (GPU picker)'] : []),
+        flags.gpuPicker ? 'Hardware (GPU picker)' : 'Hardware',
         'Import from other chatbots',
         'Chat Backup',
+        ...(flags.chatTimeout ? ['Chat Reply Timeout'] : []),
         ...(flags.mediaTimeouts ? ['Image / Video Generation Timeouts'] : []),
+        // 3.0.8 (A2): local only, the same condition as the reply timeout.
+        ...(flags.chatTimeout ? ['Pictures and Video from the Chat'] : []),
         'Privacy',
         'Onboarding',
         'Updates',
@@ -89,11 +97,12 @@ export function sectionsFor(tab: SettingsTab, flags: SettingsSectionFlags): stri
     case 'backends':
       return [
         'Providers',
-        'Model Storage',
+        'Unused models',
+        'Storage',
         'CivitAI API key',
         'Hugging Face token',
         ...(flags.builtinExpert ? ['LU Engine (expert)'] : []),
-        ...(flags.comfyui ? ['ComfyUI (Image & Video)'] : []),
+        ...(flags.comfyui ? ['ComfyUI (Image & Video)', 'ComfyUI node packs'] : []),
         ...(flags.mlxMedia ? ['Local Media (Apple MLX)'] : []),
       ]
     case 'agent':
@@ -101,12 +110,16 @@ export function sectionsFor(tab: SettingsTab, flags: SettingsSectionFlags): stri
         'Personas',
         'Memory',
         ...(flags.agentMode ? ['Agent Permissions'] : []),
+        // C60 (3.1.0): what the agent changed in LU itself, with Undo.
+        ...(flags.agentMode ? ['Changes by the agent'] : []),
+        // Watchers: the notification when one ran (desktop app only).
+        ...(flags.agentMode && flags.watchers ? ['Watchers'] : []),
         // Die Kappen fuer delegierte Agenten. Sie standen bis zum
         // 03.09.2026 unter General → Generation, zwischen Temperatur und
         // Auto-Compact; eine Persona suchte sie beim Agenten und fand sie
         // dort nicht. Ein delegierter Lauf hat keinen Zuschauer — das ist
         // ein anderer Gegenstand als die Werte des Zugs, vor dem man sitzt.
-        ...(flags.agentMode ? ['Sub-agents'] : []),
+        ...(flags.agentMode ? ['Sub-agents', 'Skills', 'Allowed commands'] : []),
         ...(flags.agentWorkflows ? ['Agent Workflows'] : []),
         ...(flags.agentMode ? ['MCP Servers', 'Coding Agent', 'Search Provider'] : []),
       ]

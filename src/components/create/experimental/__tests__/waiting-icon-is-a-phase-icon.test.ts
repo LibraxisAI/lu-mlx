@@ -16,7 +16,7 @@
  * call it a repair. The device is stated in words by the Create tab banner
  * (comfyCpuBannerText), which round 14 made honest.
  *
- * 19.09.2026 (Portplan Studio, Paket P5): David dropped the per-phase COLOR
+ * 19.09.2026 (Portplan Studio, Paket P5): the owner dropped the per-phase COLOR
  * (sky for loading, green for sampling) in favor of one lu-accent purple
  * everywhere, "damit sichtbar ist, dass da etwas passiert", see
  * OutputView.tsx's phaseIcon/phaseBeat. Sampling and idle always rendered the

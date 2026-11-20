@@ -1,7 +1,7 @@
 /**
  * Die Zeilen, die frueher IM Eingabefeld standen.
  *
- * David, 21.09.2026, am echten Windows-Bau, mehrfach und veraergert: „NICHTS
+ * 21.09.2026, am echten Windows-Bau, mehrfach und veraergert: „NICHTS
  * im prompt fenster!" Gemeint ist woertlich alles, was ueber, in oder
  * unmittelbar an der Eingabezeile hing. Gemessen am Bau stand dort unter
  * anderem eine Leiste mit x und dem Satz „…is gone from the model list, so
@@ -30,10 +30,11 @@
 
 import { create } from 'zustand'
 import type { HinweisTon } from '../lib/hinweis'
+import { useChatStore } from './chatStore'
 
 /** Die Zeilen, die es gibt. Kein freier Schluessel: eine Aufzaehlung laesst
  *  sich nachzaehlen, ein String-Schluessel waechst unbemerkt. */
-export type ChatNoticeId = 'attachment-is-not-an-image' | 'model-cannot-see-images'
+export type ChatNoticeId = 'document-belongs-in-docs' | 'model-cannot-see-images' | 'image-attach' | 'file-attach' | 'binary-summary-only' | 'file-cut' | 'agent-outside-workspace' | 'agent-for-local-files' | 'create-save' | 'file-mention' | 'rewind' | 'agent-start-failed' | 'cost-brake'
 
 export interface ChatNotice {
   id: ChatNoticeId
@@ -50,8 +51,8 @@ interface ChatNoticeState {
   /**
    * Zeigen. Derselbe Name zweimal ersetzt die Zeile, statt sie zu stapeln.
    *
-   * `ttlMs` ist fuer Zeilen ueber ein EREIGNIS ("der Clip hat dein PDF nicht
-   * genommen"): die sind nach dem Lesen erledigt. Eine Zeile ueber einen
+   * `ttlMs` ist fuer Zeilen ueber ein EREIGNIS ("diese Datei ist zu gross"):
+   * die sind nach dem Lesen erledigt. Eine Zeile ueber einen
    * ZUSTAND ("dieses Modell sieht keine Bilder") bekommt keine Uhr, sonst
    * ginge sie weg, waehrend sie noch stimmt; sie wird von dem geraeumt, der
    * sie gesetzt hat, sobald der Zustand endet.
@@ -91,3 +92,17 @@ export const useChatNoticeStore = create<ChatNoticeState>((set, get) => ({
     set({ notices: [] })
   },
 }))
+
+/**
+ * Zeilen ueber die LETZTE Nachricht einer Unterhaltung. Sie gehoeren zu dieser
+ * Unterhaltung: in der 3.0.4-Box blieb "The agent can only open files in this
+ * chat's folder" in einem neuen Chat mit ausgeschaltetem Agent stehen.
+ */
+export const CONVERSATION_BOUND: ReadonlySet<ChatNoticeId> = new Set(['agent-outside-workspace', 'agent-for-local-files', 'binary-summary-only', 'file-cut'])
+
+// Wechselt die Unterhaltung, gehen sie. Von "keine" zur gerade angelegten
+// nicht: das ist dieselbe Unterhaltung, die erste Nachricht legt sie erst an.
+useChatStore.subscribe((s, prev) => {
+  if (prev.activeConversationId === null || s.activeConversationId === prev.activeConversationId) return
+  for (const id of CONVERSATION_BOUND) useChatNoticeStore.getState().dismiss(id)
+})

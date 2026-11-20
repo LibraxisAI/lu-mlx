@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Bot, Loader2, PanelRightClose, PanelRightOpen, Square, Check, X, ChevronDown } from 'lucide-react'
+import { StatusChip } from '../status/StatusChip'
+import { toolFace } from '../status/run-status'
+import type { StatusKind } from '../status/glyph-motifs'
 import { useUIStore } from '../../stores/uiStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useAgentTaskStore } from '../../stores/agentTaskStore'
@@ -25,13 +28,25 @@ import { HINWEIS_TEXT } from '../../lib/hinweis'
  * etwas" auch dann sichtbar ist, wenn jemand die Spalte weggeklappt hat.
  */
 
+/**
+ * A task's activity line ("thinking", "working", or the tools of its current
+ * step by name) as a state of the status mark.
+ */
+export function taskFace(activity: string): { kind: StatusKind; word: string; detail?: string } {
+  if (activity === 'thinking') return { kind: 'thinking', word: 'Thinking' }
+  if (activity === 'working') return { kind: 'working', word: 'Working' }
+  const first = activity.split(',')[0].replace(/\s\+\d+$/, '').trim()
+  return { ...toolFace(first), detail: activity }
+}
+
 function statusIcon(t: AgentTask) {
   // 'queued' (Folgeauftrag, bau/review-w2lane.md Runde 4): ohne einen eigenen
   // Zweig fiel diese Zeile durch bis zum letzten `return`, dem roten X fuer
   // "gescheitert", eine wartende Aufgabe haette also wie eine fehlgeschlagene
   // ausgesehen, obwohl noch gar nichts versucht wurde.
   if (t.status === 'queued') return <Loader2 size={10} className="text-gray-400 shrink-0" />
-  if (t.status === 'running') return <Loader2 size={10} className="animate-spin text-blue-400 shrink-0" />
+  // A running task shows the status mark in its own line below.
+  if (t.status === 'running') return <span className="w-[10px] shrink-0" aria-hidden="true" />
   if (t.status === 'done') return <Check size={10} className="text-green-500 shrink-0" />
   if (t.status === 'cancelled') return <Square size={10} className="text-gray-500 shrink-0" />
   return <X size={10} className="text-red-400 shrink-0" />
@@ -62,11 +77,10 @@ function TaskRow({ task, now }: { task: AgentTask; now: number }) {
               keine Auskunft mehr, sondern ein stehengebliebener Zeiger, das
               ERGEBNIS steht dann eine Zeile tiefer und ist das, was zaehlt. */}
           {task.status === 'running' && task.activity && (
-            <div
-              className="t-mono text-blue-500/70 dark:text-blue-400/60 truncate"
-              data-testid="agent-task-activity"
-            >
-              {task.activity}
+            // The same sign as the run status line of the chat: the mark, one
+            // word for what the agent does, and the tools by name behind it.
+            <div className="-ml-1 min-w-0 overflow-hidden" data-testid="agent-task-activity" data-status={taskFace(task.activity).kind}>
+              <StatusChip {...taskFace(task.activity)} />
             </div>
           )}
         </button>
@@ -118,7 +132,7 @@ function ElsewhereBar({ byConv, activeConvId }: {
   return (
     <div
       data-testid="agent-panel-elsewhere-bar"
-      // Kein Gelb (David, 04.09.2026, Hausregel in lib/hinweis.ts): das ist
+      // Kein Gelb (04.09.2026, Hausregel in lib/hinweis.ts): das ist
       // eine ruhige Auskunft, kein Fehler, also derselbe gedaempfte Ton wie
       // jede andere Hinweiszeile im Haus, nicht eine dritte Farbe.
       className={`flex items-center gap-1.5 px-2 py-1 border-b border-gray-200 dark:border-white/[0.04] ${HINWEIS_TEXT.ruhig}`}

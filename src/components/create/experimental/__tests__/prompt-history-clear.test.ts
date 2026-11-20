@@ -3,7 +3,7 @@
  *
  * Bug A10: the prompt history in Create could not be deleted.
  *
- * pardy22 asked twice, in #general and in #help-18, and a moderator pointed at
+ * A user asked twice, in #general and in #help-18, and a moderator pointed at
  * a "Clear" button at the top of the clock list. That button existed on the web
  * app only; the desktop dropdown was a read-only list and the store had no
  * delete action at all, so there was nothing to find.

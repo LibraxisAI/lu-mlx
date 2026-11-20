@@ -32,6 +32,28 @@ export function parseHfUrl(url: string): HfRef | null {
 }
 
 /**
+ * The repo path a HuggingFace download address names, in the spelling the tree
+ * API uses: everything behind `/resolve/<rev>/`, without query or fragment,
+ * percent decoding undone. `UD-Q3_K_M/GLM-5.2-UD-Q3_K_M-00001-of-00009.gguf`
+ * stays a path with its folder.
+ *
+ * This is what the download resolver compares against the tree, so a catalog
+ * entry that names a file gets that file and not a neighbour of the same quant.
+ * Null for an address that is not a HuggingFace file address.
+ */
+export function hfUrlToTreePath(url: string): string | null {
+  const parsed = parseHfUrl(url)
+  if (!parsed) return null
+  const raw = parsed.filename.replace(/[?#].*$/, '')
+  if (!raw) return null
+  try {
+    return decodeURIComponent(raw)
+  } catch {
+    return raw
+  }
+}
+
+/**
  * Extract the quantisation tag from a GGUF filename.
  *
  * Recognises the formats bartowski / mradermacher / unsloth / QuantFactory
@@ -45,7 +67,7 @@ export function extractGgufQuant(filename: string): string | undefined {
   // Recognise unsloth "UD" dynamic quants (Q4_K_XL / Q4_K_XS) and bare K-quants
   // (Q6_K) in addition to the classic Q*_K_{M,S,L}. Without the XL/XS arm,
   // unsloth files like `...-UD-Q4_K_XL.gguf` produced NO quant tag, so the
-  // Ollama HF ref fell back to a tag-less `hf.co/<repo>` pull (Aldrich Ironhart,
+  // Ollama HF ref fell back to a tag-less `hf.co/<repo>` pull (a user,
   // Discord 2026-06-07 — "Gemma 4 26B MoE" → ollama 400).
   //
   // Multi-part names put the shard counter AFTER the quant
@@ -65,7 +87,7 @@ export function extractGgufQuant(filename: string): string | undefined {
  * as a flat single-file GGUF — split into shards or "not compatible with
  * llama.cpp" (ollama/ollama#5245). Such models download fine via LM Studio.
  * A bare HTTP 400 is handled separately by the caller (it's more often an
- * out-of-date Ollama than a bad repo — Aldrich Ironhart, Discord 2026-06-07:
+ * out-of-date Ollama than a bad repo — a user, Discord 2026-06-07:
  * "Gemma 4 26B MoE → ollama: 400", yet the same pull succeeds on current Ollama).
  */
 export function isShardedOrIncompatibleGguf(errMsg: string): boolean {
@@ -76,8 +98,18 @@ export function isShardedOrIncompatibleGguf(errMsg: string): boolean {
  * Build the Ollama HF reference for a HuggingFace GGUF download URL.
  *
  * Returns e.g. "hf.co/bartowski/Meta-Llama-3.1-8B-Instruct-abliterated-GGUF:Q5_K_M".
- * Falls back to no quant tag (Ollama then auto-selects) when the filename
- * doesn't match a known quant pattern.
+ *
+ * A name that does not end on a known quant gets the FILE NAME as its tag:
+ * "hf.co/<repo>:RVN-Q4_K_M-multilingual.gguf". The registry behind hf.co
+ * accepts that spelling and answers with exactly that file. The tag-less
+ * reference this function used to return in that case lets the registry pick,
+ * and it picks by quant: asked on 2026-10-08, the bare reference of the
+ * Qwen 3.8 27B Heretic repo answered with `Qwen3.8-27B-Heretic-Q4_K_M.gguf`,
+ * the older file next to the one the card names, and `:Q4_K_P` was refused as
+ * no quantization scheme at all.
+ *
+ * Only a file at the repo root gets the name tag. For a file inside a folder
+ * the spelling is unproven, so that case stays tag-less as before.
  *
  * Returns null for non-HF URLs — callers should treat that as "this URL
  * cannot go through ollama pull, use direct download".
@@ -85,9 +117,12 @@ export function isShardedOrIncompatibleGguf(errMsg: string): boolean {
 export function hfUrlToOllamaRef(url: string, filename?: string): string | null {
   const parsed = parseHfUrl(url)
   if (!parsed) return null
-  const quant = extractGgufQuant(filename || parsed.filename)
+  const name = filename || parsed.filename
+  const quant = extractGgufQuant(name)
   const base = `hf.co/${parsed.user}/${parsed.repo}`
-  return quant ? `${base}:${quant}` : base
+  if (quant) return `${base}:${quant}`
+  const atRoot = hfUrlToTreePath(url) === name
+  return atRoot && /^[\w.-]+\.gguf$/i.test(name) ? `${base}:${name}` : base
 }
 
 /**

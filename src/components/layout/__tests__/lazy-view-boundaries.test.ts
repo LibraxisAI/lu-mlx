@@ -41,6 +41,7 @@ const LAZY_VIEWS = [
   ['SettingsPage', '../settings/SettingsPage'],
   ['CreateExperimental', '../create/experimental/CreateExperimental'],
   ['Onboarding', '../onboarding/Onboarding'],
+  ['VoiceView', '../voice/VoiceView'],
 ] as const
 
 describe('der Boot-View bleibt statisch', () => {
@@ -61,7 +62,7 @@ describe('der Boot-View bleibt statisch', () => {
   })
 })
 
-describe('die übrigen fünf Views sind wirklich draußen', () => {
+describe('die übrigen sechs Views sind wirklich draußen', () => {
   it.each(LAZY_VIEWS)('%s wird dynamisch geladen', (_name, path) => {
     expect(appShell).toContain(`import('${path}')`)
   })

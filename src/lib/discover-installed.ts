@@ -2,7 +2,7 @@
  * Is a Discover row already on this machine, and if so, which local model is it.
  *
  * Pulled out of DiscoverModels.tsx (GH #118) because the answer is the whole
- * bug. nayffy's fresh Windows 11 install downloaded a chat model, the tile said
+ * bug. a user's fresh Windows 11 install downloaded a chat model, the tile said
  * Installed, a restart flipped it back to "Get", and the button then did
  * nothing while the multi-gigabyte file sat on the disk the entire time.
  *

@@ -81,7 +81,7 @@ export function useBenchmark() {
 
                 // The brake aborts the request itself, not just our reading
                 // of it: dropping the stream would leave the model
-                // generating into nothing, still holding the GPU (ElBiggus,
+                // generating into nothing, still holding the GPU (a user,
                 // issue #106).
                 const controller = abortRef.current
                 const m = await measureRun(stream, prompt.check, {

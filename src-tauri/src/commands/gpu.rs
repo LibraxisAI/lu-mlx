@@ -1,4 +1,4 @@
-// Bug BB v2.5.0 — BobbyT Discord 2026-05-26. BobbyT has AMD RX 6800XT 16GB +
+// Bug BB v2.5.0 — Discord 2026-05-26. has AMD RX 6800XT 16GB +
 // Intel Arc Pro B60 24GB and wants to pin the Arc Pro for inference. LU
 // previously had no GPU picker — Ollama and ComfyUI just used whatever the
 // driver picked first, which on multi-vendor / multi-GPU systems is often
@@ -44,7 +44,7 @@ pub struct DetectedGpu {
     pub source: String,
     /// Set when the card was found but its compute stack was not, so the
     /// settings can say that instead of showing a card as if it were ready.
-    /// numbrain (forum help-image-gen) had a correctly configured RX 9070 XT
+    /// A user (forum help-image-gen) had a correctly configured RX 9070 XT
     /// the picker did not list at all, and spent days breaking his install
     /// trying to fix what looked like a driver problem.
     pub note: Option<String>,
@@ -71,6 +71,16 @@ pub struct DetectedGpu {
     /// whereas the UUID names one physical card independent of enumeration
     /// order.
     pub uuid: Option<String>,
+    /// The one memory pool of an Apple Silicon Mac in MiB: processor and
+    /// graphics unit share it, so this is the whole installed memory and the
+    /// basis for "which model fits this Mac". `None` on every PC card.
+    ///
+    /// A field of its own and not `memory_mib`, on purpose: `memory_mib` is
+    /// read as graphics memory by `engine_vram_reading` (which documents
+    /// `None` on Apple as the answer it relies on) and by `getMaxVramGb` in
+    /// the frontend. Filling it on a Mac would make the engine plan its layer
+    /// split against the whole pool as if it were a free card.
+    pub shared_memory_mib: Option<u64>,
 }
 
 fn run_cmd(program: &str, args: &[&str]) -> Option<String> {
@@ -85,6 +95,20 @@ fn run_cmd(program: &str, args: &[&str]) -> Option<String> {
     // lspci on a slow bus scan all block indefinitely, and Command::output()
     // would wait for all of it while the hardware picker shows a spinner.
     crate::commands::shell::output_bounded(cmd, std::time::Duration::from_secs(5))
+}
+
+/// (free, total) MiB of the biggest NVIDIA card right now, for the tray
+/// menu's memory line. `None` without nvidia-smi.
+pub(crate) fn nvidia_memory_mib() -> Option<(u64, u64)> {
+    run_cmd("nvidia-smi", &["--query-gpu=memory.free,memory.total", "--format=csv,noheader,nounits"])
+        .as_deref()
+        .and_then(parse_nvidia_memory)
+}
+
+/// nvidia-smi's cards alone, for a caller that needs only those (the chat
+/// role's engine device, gpu_roles.rs).
+pub(crate) fn detect_nvidia_cards() -> Vec<DetectedGpu> {
+    detect_nvidia()
 }
 
 fn detect_nvidia() -> Vec<DetectedGpu> {
@@ -115,6 +139,7 @@ fn detect_nvidia() -> Vec<DetectedGpu> {
                 note_severity: None,
                 arch: None,
                 uuid: None,
+                shared_memory_mib: None,
             })
         })
         .collect();
@@ -320,6 +345,7 @@ fn parse_rocm_smi_csv(raw: &str) -> Vec<DetectedGpu> {
                 note_severity: None,
                 arch,
                 uuid: None,
+                shared_memory_mib: None,
             });
         }
     }
@@ -347,7 +373,7 @@ fn note_for(vendor: &str) -> Option<String> {
 /// rustc still reports them as dead code. Gating at run time on a constant
 /// keeps the chain intact everywhere (the early return folds away) and lets
 /// `-D warnings` stay on without an `allow` per parser.
-fn detect_other_via_lspci(have_rocm: bool) -> Vec<DetectedGpu> {
+fn detect_other_via_lspci(have_rocm: bool, have_nvidia: bool) -> Vec<DetectedGpu> {
     if !cfg!(target_os = "linux") {
         return vec![];
     }
@@ -357,11 +383,15 @@ fn detect_other_via_lspci(have_rocm: bool) -> Vec<DetectedGpu> {
     // AlderLake-S GT1 [Intel UHD Graphics 770] [8086:4680]". We parse the
     // vendor ID ([8086:...] = Intel, [10de:...] = NVIDIA fallback,
     // [1002:...] = AMD).
-    let raw = match run_cmd("lspci", &["-nn"]) {
-        Some(s) => s,
-        None => return vec![],
-    };
-    detect_other_via_lspci_from(&raw, have_rocm, &read_sysfs_drm_cards())
+    let sysfs = read_sysfs_drm_cards();
+    match run_cmd("lspci", &["-nn"]) {
+        Some(raw) => detect_other_via_lspci_from(&raw, have_rocm, &sysfs),
+        // C74: kein lspci (Distrobox, Toolbox, Container, Minimalsystem ohne
+        // pciutils). Bis 3.1.0 blieb die Liste dann leer, und der
+        // ComfyUI-Installer nahm still die Prozessor-Wheels. Der Kernel
+        // listet die Karten trotzdem unter /sys/class/drm.
+        None => detect_via_sysfs_from(&sysfs, have_rocm, have_nvidia, &read_pci_ids()),
+    }
 }
 
 /// The parser, split from the command so it can be run against real captured
@@ -417,7 +447,7 @@ fn detect_other_via_lspci_from(
         // nvidia-smi ships with the driver, so its entry is always the better
         // one. rocm-smi does NOT: it comes with the ROCm dev packages, which a
         // customer running a ROCm Ollama or a ZLUDA ComfyUI has no reason to
-        // install. Skipping AMD unconditionally is why numbrain's RX 9070 XT
+        // install. Skipping AMD unconditionally is why a user's RX 9070 XT
         // was invisible in the picker while his system reported it correctly.
         if vendor == "nvidia" { continue }
         if vendor == "amd" && have_rocm { continue }
@@ -448,6 +478,7 @@ fn detect_other_via_lspci_from(
             note_severity: note_for(vendor).map(|_| "warn".to_string()),
             arch: None,
             uuid: None,
+            shared_memory_mib: None,
         });
         *index += 1;
     }
@@ -512,11 +543,10 @@ fn lspci_device_name(line: &str) -> String {
 // auch. Die Maschine, die den Fehler zeigt, ist nicht die Maschine, auf der
 // die Tests laufen: hier steckt keine AMD-Karte.
 //
-// Wo das hier aufhoert, ausgeschrieben statt verschwiegen: gelesen wird nur
-// fuer Karten, die lspci schon gefunden hat. Fehlt lspci selbst, weil pciutils
-// nicht installiert ist, bleibt die Liste leer wie bisher. sysfs kennt zwar
-// die Groesse, aber keinen Namen, nur die Geraetenummer, und eine Liste aus
-// Nummern ist eine zweite Aenderung mit einer eigenen Beweislast.
+// Wo das hier aufhoert: gelesen wird nur fuer Karten, die lspci schon
+// gefunden hat. Fehlt lspci selbst, weil pciutils nicht installiert ist,
+// uebernimmt seit 3.1.0 (C74) `detect_via_sysfs_from` weiter unten die ganze
+// Liste aus denselben Eintraegen.
 
 /// Die PCI-Herstellernummer von AMD, wie sie in /sys/.../vendor steht. lspci
 /// druckt dieselbe Zahl als [1002:....].
@@ -560,6 +590,10 @@ struct SysfsDrmCard {
     pci_address: String,
     /// Inhalt von "vendor", oder None wenn die Datei fehlt oder zu ist.
     vendor_id: Option<String>,
+    /// Inhalt von "device", also die PCI-Geraetenummer ("0x73bf"). Nur der
+    /// sysfs-Rueckfall ohne lspci (C74) braucht sie, um der Karte einen Namen
+    /// zu geben.
+    device_id: Option<String>,
     /// Inhalt von "mem_info_vram_total", ungeprueft.
     vram_total: Option<String>,
 }
@@ -714,6 +748,7 @@ fn read_sysfs_drm_cards_at(root: &std::path::Path) -> Vec<SysfsDrmCard> {
         cards.push(SysfsDrmCard {
             pci_address,
             vendor_id: read_sysfs_value(&device.join("vendor")),
+            device_id: read_sysfs_value(&device.join("device")),
             vram_total: read_sysfs_value(&device.join("mem_info_vram_total")),
         });
     }
@@ -731,6 +766,246 @@ fn read_sysfs_drm_cards() -> Vec<SysfsDrmCard> {
     read_sysfs_drm_cards_at(std::path::Path::new("/sys/class/drm"))
 }
 
+// ----------------------------------------------------------------------
+// C74 (3.1.0): Linux ganz ohne lspci
+//
+// c1rrus, help-chat 10.11.2026: Bazzite, RX 6900 XT, LU in einer Distrobox.
+// Dort fehlen pciutils und rocm-smi, die Liste der Karten blieb leer, und der
+// ComfyUI-Installer hat ohne ein Wort die Prozessor-Wheels genommen. Der
+// Kernel kennt die Karte trotzdem: /sys/class/drm/card<N>/device traegt
+// Hersteller- und Geraetenummer, bei amdgpu auch die Speichergroesse.
+//
+// Den Namen liefert sysfs nicht. Liegt die Namensliste pci.ids (Paket hwdata,
+// oft auch ohne pciutils vorhanden) auf der Platte, kommt er von dort, in
+// derselben Form, die lspci druckt, sodass `amd_gfx_target` ihn genauso liest.
+// Sonst steht die Nummer im Namen und die Notiz sagt, was fehlt.
+
+/// Die PCI-Herstellernummern, die der Rueckfall kennt.
+const PCI_VENDOR_NVIDIA: u16 = 0x10de;
+const PCI_VENDOR_INTEL: u16 = 0x8086;
+
+/// Hoechstens so viel wird aus pci.ids gelesen. Die Datei hat heute rund
+/// 1,4 MB; das Vierfache ist Luft, ein Vielfaches davon ist keine Namensliste.
+const PCI_IDS_READ_LIMIT: u64 = 8 * 1024 * 1024;
+
+/// Wo die Distributionen pci.ids ablegen (hwdata bzw. pciutils).
+const PCI_IDS_PATHS: &[&str] = &[
+    "/usr/share/hwdata/pci.ids",
+    "/usr/share/misc/pci.ids",
+    "/usr/share/pci.ids",
+];
+
+/// pci.ids als Text, oder leer, wenn keine der Dateien lesbar ist.
+fn read_pci_ids() -> String {
+    use std::io::Read;
+    for path in PCI_IDS_PATHS {
+        let Ok(file) = std::fs::File::open(path) else { continue };
+        let mut bytes = Vec::new();
+        if file.take(PCI_IDS_READ_LIMIT).read_to_end(&mut bytes).is_ok() {
+            // pci.ids ist UTF-8, alte Fassungen hatten Latin-1-Reste. Lossy
+            // statt ganz verwerfen: ein kaputtes Zeichen in einem fremden
+            // Herstellernamen darf den Namen dieser Karte nicht kosten.
+            return String::from_utf8_lossy(&bytes).into_owned();
+        }
+    }
+    String::new()
+}
+
+/// (Herstellername, Geraetename) aus pci.ids, oder None.
+///
+/// Das Format: eine Herstellerzeile "1002  Advanced Micro Devices, ..." am
+/// Zeilenanfang, darunter Geraete mit einem Tab ("\t73bf  Navi 21 [...]") und
+/// Untergeraete mit zwei Tabs, die hier nicht gebraucht werden. Kommentare
+/// beginnen mit '#', und nach den Herstellern folgen Klassenlisten ("C 03 ..."),
+/// an denen die Suche endet.
+fn pci_ids_names(pci_ids: &str, vendor: u16, device: u16) -> Option<(String, String)> {
+    let vendor_hex = format!("{vendor:04x}");
+    let device_hex = format!("{device:04x}");
+    let mut vendor_name: Option<String> = None;
+    for line in pci_ids.lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        if !line.starts_with('\t') {
+            if vendor_name.is_some() {
+                // Naechster Hersteller: das Geraet steht nicht in der Liste.
+                return None;
+            }
+            if line.starts_with("C ") {
+                return None;
+            }
+            let (id, name) = line.split_once(char::is_whitespace)?;
+            if id.eq_ignore_ascii_case(&vendor_hex) {
+                vendor_name = Some(name.trim().to_string());
+            }
+            continue;
+        }
+        let Some(vname) = vendor_name.as_ref() else { continue };
+        if line.starts_with("\t\t") {
+            continue;
+        }
+        let body = &line[1..];
+        let Some((id, name)) = body.split_once(char::is_whitespace) else { continue };
+        if id.eq_ignore_ascii_case(&device_hex) {
+            let name = name.trim();
+            if name.is_empty() {
+                return None;
+            }
+            return Some((vname.clone(), name.to_string()));
+        }
+    }
+    None
+}
+
+/// Der Name einer Karte, die nur sysfs kennt.
+fn sysfs_card_name(vendor: &str, vendor_id: u16, device_id: Option<u16>, pci_ids: &str) -> (String, bool) {
+    if let Some(dev) = device_id {
+        if let Some((vname, dname)) = pci_ids_names(pci_ids, vendor_id, dev) {
+            return (format!("{vname} {dname}"), true);
+        }
+    }
+    let label = match vendor {
+        "amd" => "AMD Radeon GPU",
+        "nvidia" => "NVIDIA GPU",
+        _ => "Intel GPU",
+    };
+    let name = match device_id {
+        Some(dev) => format!("{label} (PCI {vendor_id:04x}:{dev:04x})"),
+        None => label.to_string(),
+    };
+    (name, false)
+}
+
+/// Was der Nutzer zu einer Karte lesen soll, die nur sysfs gefunden hat.
+fn sysfs_card_note(vendor: &str, named: bool) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    match vendor {
+        "amd" => parts.push(note_for("amd").unwrap_or_default()),
+        "nvidia" => parts.push(
+            "Found without nvidia-smi, so LU cannot confirm the NVIDIA driver here. Inside a \
+             container (Distrobox, Toolbox) the driver has to be passed through for ComfyUI \
+             and Ollama to use the card."
+                .to_string(),
+        ),
+        _ => {}
+    }
+    parts.push(if named {
+        "Listed from the kernel (/sys/class/drm) because lspci is not installed.".to_string()
+    } else {
+        "Listed from the kernel (/sys/class/drm) because lspci is not installed. Install \
+         pciutils to see the card's full name."
+            .to_string()
+    });
+    parts.retain(|p| !p.is_empty());
+    parts.join(" ")
+}
+
+/// Die Karten aus sysfs, wenn lspci fehlt. Rein, damit ein Test einen
+/// gefaelschten Baum (oder schon eingelesene Eintraege) hineingeben kann.
+///
+/// Dieselben Regeln wie auf dem lspci-Weg: NVIDIA nur, wenn nvidia-smi nichts
+/// gesagt hat, AMD nur, wenn rocm-smi nichts gesagt hat, Zaehler je Hersteller.
+/// Die Reihenfolge ist die der PCI-Adressen, nicht die von read_dir, damit
+/// HIP_VISIBLE_DEVICES und CUDA_VISIBLE_DEVICES (mit PCI_BUS_ID) auf dieselbe
+/// Karte zeigen wie die Liste.
+fn detect_via_sysfs_from(
+    cards: &[SysfsDrmCard],
+    have_rocm: bool,
+    have_nvidia: bool,
+    pci_ids: &str,
+) -> Vec<DetectedGpu> {
+    let mut sorted: Vec<(String, &SysfsDrmCard)> = cards
+        .iter()
+        .filter_map(|c| normalised_pci_address(&c.pci_address).map(|a| (a, c)))
+        .collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    // Eine Karte mit zwei DRM-Knoten (selten, aber moeglich) einmal.
+    sorted.dedup_by(|a, b| a.0 == b.0);
+
+    let mut gpus: Vec<DetectedGpu> = Vec::new();
+    let mut next: HashMap<&str, u32> = HashMap::new();
+    for (_, card) in sorted {
+        let Some(vendor_id) = card.vendor_id.as_deref().and_then(parse_sysfs_hex_id) else {
+            continue;
+        };
+        let vendor = match vendor_id {
+            PCI_VENDOR_AMD => "amd",
+            PCI_VENDOR_NVIDIA => "nvidia",
+            PCI_VENDOR_INTEL => "intel",
+            // virtio-gpu, QXL, Aspeed-BMC und Co. rechnen nicht.
+            _ => continue,
+        };
+        if vendor == "nvidia" && have_nvidia {
+            continue;
+        }
+        if vendor == "amd" && have_rocm {
+            continue;
+        }
+        let device_id = card.device_id.as_deref().and_then(parse_sysfs_hex_id);
+        let (name, named) = sysfs_card_name(vendor, vendor_id, device_id, pci_ids);
+        let memory_mib = match vendor {
+            "amd" => card.vram_total.as_deref().and_then(parse_sysfs_vram_mib),
+            _ => None,
+        };
+        let note = sysfs_card_note(vendor, named);
+        let index = next.entry(vendor).or_insert(0);
+        gpus.push(DetectedGpu {
+            index: *index,
+            vendor: vendor.into(),
+            name,
+            memory_mib,
+            source: "sysfs".into(),
+            note: Some(note),
+            note_severity: Some("warn".to_string()),
+            arch: None,
+            uuid: None,
+            shared_memory_mib: None,
+        });
+        *index += 1;
+    }
+    gpus
+}
+
+/// Der Satz fuer eine leere Kartenliste, wenn sie wahrscheinlich nur leer ist,
+/// weil das Werkzeug fehlt. Nur Linux, nur ohne lspci, nur wenn auch sysfs
+/// nichts lieferte. Rein, damit jeder Fall ohne Linux-Maschine pruefbar ist.
+fn pciutils_hint_for(os: &str, gpus_found: usize, lspci_available: bool) -> Option<String> {
+    if os != "linux" || gpus_found > 0 || lspci_available {
+        return None;
+    }
+    Some(
+        "No graphics card found, and the lspci tool is missing on this system, so LU may simply \
+         not see your card. Install pciutils (Fedora/Bazzite: sudo dnf install pciutils, \
+         Debian/Ubuntu: sudo apt install pciutils, Arch: sudo pacman -S pciutils). Inside a \
+         container (Distrobox, Toolbox) install it there, and make sure the GPU is passed \
+         through. Without a detected card ComfyUI gets the slow processor build of PyTorch."
+            .to_string(),
+    )
+}
+
+/// Ist lspci aufrufbar? Eigener, kurzer Aufruf statt einer Schlussfolgerung
+/// aus der leeren Liste: leer ist auch eine Maschine ohne Karte.
+fn lspci_available() -> bool {
+    cfg!(target_os = "linux") && run_cmd("lspci", &["--version"]).is_some()
+}
+
+/// Der Hinweis fuer diese Maschine, oder None.
+pub(crate) fn pciutils_hint_here(gpus_found: usize) -> Option<String> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    pciutils_hint_for(std::env::consts::OS, gpus_found, lspci_available())
+}
+
+/// C74: der Satz unter "Detected GPUs", wenn die Liste leer ist, weil unter
+/// Linux lspci fehlt. None ueberall sonst. Eigener Befehl, damit
+/// `detect_gpus` seine Form behaelt, auf die sich ein Dutzend Aufrufer stuetzt.
+#[tauri::command(async)]
+pub fn gpu_probe_hint() -> Option<String> {
+    let found = detect_gpus().map(|g| g.len()).unwrap_or(0);
+    pciutils_hint_here(found)
+}
+
 #[cfg(target_os = "macos")]
 fn detect_macos() -> Vec<DetectedGpu> {
     // macOS uses Metal/MPS via the unified GPU. We surface a single entry so
@@ -739,7 +1014,19 @@ fn detect_macos() -> Vec<DetectedGpu> {
     let name = run_cmd("sysctl", &["-n", "machdep.cpu.brand_string"])
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "Apple GPU".into());
-    vec![DetectedGpu {
+    vec![apple_entry(name, crate::commands::system::total_memory_bytes())]
+}
+
+/// The single entry a Mac reports, from its chip name and installed memory.
+///
+/// Split from `detect_macos` so the shape is tested on every platform: the
+/// onboarding reads `shared_memory_mib` to recommend a model, and a Mac that
+/// reported nothing there got the smallest default no matter how much memory
+/// it had. A reading of zero means "not measured" and stays `None`.
+#[cfg(any(target_os = "macos", test))]
+fn apple_entry(name: String, total_memory_bytes: u64) -> DetectedGpu {
+    let mib = total_memory_bytes / MIB;
+    DetectedGpu {
         index: 0,
         vendor: "apple".into(),
         name,
@@ -749,7 +1036,8 @@ fn detect_macos() -> Vec<DetectedGpu> {
         note_severity: None,
         arch: None,
         uuid: None,
-    }]
+        shared_memory_mib: (mib > 0).then_some(mib),
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -843,6 +1131,7 @@ fn detect_other_via_registry_from(
             note_severity: note_for(vendor).map(|_| "warn".to_string()),
             arch: None,
             uuid: None,
+            shared_memory_mib: None,
         });
         *index += 1;
     }
@@ -924,7 +1213,7 @@ fn detect_other_via_wmic_from(
     // and ONEAPI_DEVICE_SELECTOR are vendor-scoped, so a box with an Intel
     // iGPU listed first and an AMD card second must not hand the AMD card the
     // number 1: it is the only HIP device there is, and HIP device 1 does not
-    // exist. That is lapbo's machine (Win11 plus ZLUDA, no rocm-smi), which is
+    // exist. That is a user's machine (Win11 plus ZLUDA, no rocm-smi), which is
     // the whole reason this branch lists AMD at all.
     let mut next: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
     // wmic `/format:csv` emits a LEADING blank line before the header row
@@ -942,7 +1231,7 @@ fn detect_other_via_wmic_from(
         let vendor = vendor_from_adapter_name(&name);
         // See the lspci path: rocm-smi is not part of the AMD driver, so an
         // AMD card must survive its absence. ROCm on Windows is rare and ZLUDA
-        // users have no rocm-smi at all (lapbo, Win11 + ZLUDA).
+        // users have no rocm-smi at all (Win11 + ZLUDA).
         if vendor == "nvidia" { continue }
         if vendor == "amd" && have_rocm { continue }
         let from_registry = registry_vram
@@ -970,6 +1259,7 @@ fn detect_other_via_wmic_from(
             note_severity: note_for(vendor).map(|_| "warn".to_string()),
             arch: None,
             uuid: None,
+            shared_memory_mib: None,
         });
         *index += 1;
     }
@@ -1077,12 +1367,12 @@ fn parse_reg_hex(value: &str) -> Option<u64> {
 // no longer a side probe that patches wmic's broken uint32 AdapterRAM, it IS
 // the adapter list, so `detect_other_via_registry_from` reads both values off
 // the same subkey directly. WMI's `AdapterRAM` cannot express more than 4 GiB
-// (bobbyt5667's 24 GB Arc Pro B60 came out of it as 2 GB), which is why the
+// (a user's 24 GB Arc Pro B60 came out of it as 2 GB), which is why the
 // qword is still the number we believe.
 
 // ── ROCm on Windows: the HIP SDK, not rocm-smi ────────────────────────
 //
-// Zhorts, GitHub #123 (2026-09-01, Windows 11, RX 9070 XT, HIP SDK 7.1.1):
+// GitHub #123 (2026-09-01, Windows 11, RX 9070 XT, HIP SDK 7.1.1):
 // the SDK was installed correctly, `hipinfo.exe` reported gfx1201, and LU still
 // told him "Found without ROCm tools". `detect_amd()` above is the only thing
 // that ever set that verdict and it runs one command, `rocm-smi`, which the
@@ -1090,7 +1380,7 @@ fn parse_reg_hex(value: &str) -> Option<u64> {
 // `hipinfo.exe` under its own tree and exports HIP_PATH, so that is what has to
 // be asked. Linux keeps rocm-smi, macOS has neither and is untouched.
 //
-// Nothing here writes down a version. Zhorts' own suspicion was a renamed DLL
+// Nothing here writes down a version. a user's own suspicion was a renamed DLL
 // (`amdhip64.dll` became `amdhip64_7.dll` in 7.1.1), which is exactly what a
 // hardcoded name does to a detector a year later, so the install root comes out
 // of the environment or out of a directory listing, and the version is read off
@@ -1405,6 +1695,7 @@ fn apply_rocm_facts(gpus: &mut Vec<DetectedGpu>, facts: Option<&RocmFacts>) {
             note_severity: Some("info".to_string()),
             arch,
             uuid: None,
+            shared_memory_mib: None,
         });
     }
 }
@@ -1417,7 +1708,7 @@ fn apply_rocm_facts(gpus: &mut Vec<DetectedGpu>, facts: Option<&RocmFacts>) {
 /// looked like the tolerant choice and was the dangerous one: "AMD Radeon RX
 /// 7900 XT" is contained in "AMD Radeon RX 7900 XTX", and a box holding both
 /// would have paired them.
-fn names_agree(a: &str, b: &str) -> bool {
+pub(crate) fn names_agree(a: &str, b: &str) -> bool {
     normalised_adapter_name(a) == normalised_adapter_name(b)
 }
 
@@ -1507,13 +1798,14 @@ fn detect_rocm_facts() -> Option<RocmFacts> {
 pub fn detect_gpus() -> Result<Vec<DetectedGpu>, String> {
     let mut gpus = Vec::new();
     gpus.extend(detect_nvidia());
+    let have_nvidia = !gpus.is_empty();
     let amd = detect_amd();
     // The fallbacks list AMD cards only when rocm-smi produced nothing, so a
     // machine WITH ROCm keeps the richer entry (it carries VRAM) and a machine
     // without it still sees its card instead of an empty picker.
     let have_rocm = !amd.is_empty();
     gpus.extend(amd);
-    gpus.extend(detect_other_via_lspci(have_rocm));
+    gpus.extend(detect_other_via_lspci(have_rocm, have_nvidia));
     gpus.extend(detect_other_on_windows(have_rocm));
     gpus.extend(detect_macos());
     // The HIP SDK answers LAST and never suppresses a probe, which is the whole
@@ -1610,8 +1902,14 @@ pub struct GpuSelection {
 
 #[tauri::command]
 pub fn set_gpu_selection(state: State<'_, AppState>, selection: GpuSelection) -> Result<(), String> {
-    let mut sel = state.gpu_selection.lock().map_err(|e| e.to_string())?;
-    *sel = selection;
+    {
+        let mut sel = state.gpu_selection.lock().map_err(|e| e.to_string())?;
+        *sel = selection.clone();
+    }
+    // 3.1.0: kept across a restart, so the boot starts of ComfyUI and Ollama
+    // have it before the frontend is up (gpu_roles.rs, "The picks across a
+    // restart").
+    crate::commands::gpu_roles::persist_pick(crate::commands::gpu_roles::CONFIG_KEY_SELECTION, &selection);
     Ok(())
 }
 
@@ -1685,6 +1983,34 @@ impl Default for GpuSelection {
 mod tests {
     use super::*;
 
+    /// Fund 3: a Mac reported no memory at all, so the onboarding could not
+    /// tell a 64 GB machine from an 8 GB one.
+    #[test]
+    fn a_mac_reports_its_shared_memory_and_no_card_memory() {
+        let mac = apple_entry("Apple M2 Pro".into(), 32 * 1024 * 1024 * 1024);
+        assert_eq!(mac.shared_memory_mib, Some(32 * 1024));
+        assert_eq!(mac.vendor, "apple");
+        // The engine start reads `memory_mib` as a card it may fill.
+        assert_eq!(mac.memory_mib, None);
+        let json = serde_json::to_value(&mac).expect("serializes");
+        assert_eq!(json["shared_memory_mib"], 32 * 1024);
+        assert!(json["memory_mib"].is_null());
+    }
+
+    #[test]
+    fn an_unmeasured_mac_reports_no_shared_memory() {
+        assert_eq!(apple_entry("Apple GPU".into(), 0).shared_memory_mib, None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn this_mac_is_detected_with_its_memory() {
+        let found = detect_macos();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].shared_memory_mib.is_some_and(|m| m >= 4096), "{found:?}");
+        assert!(engine_vram_reading().is_none(), "the engine must still see no card on a Mac");
+    }
+
     #[test]
     fn the_engine_reads_free_memory_off_the_biggest_card() {
         // Two cards, the second one larger and busier. The plan has to be
@@ -1707,7 +2033,7 @@ mod tests {
     }
 
     /// Real `reg query … /s /v DriverDesc` shape from a two-GPU box: an Arc Pro
-    /// alongside a Radeon (bobbyt5667's machine, Discord 2026-07-28).
+    /// alongside a Radeon (a user's machine, Discord 2026-07-28).
     const DRIVER_DESC_OUT: &str = r"
 HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000
     DriverDesc    REG_SZ    Intel(R) Arc(TM) Pro B60 Graphics
@@ -1929,6 +2255,8 @@ End of search: 3 match(es) found.
     #[test]
     fn gpu_selection_lock_is_never_held_across_apply_gpu_env() {
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        // 3.0.8 (A2): the spawn sites ask gpu_roles.rs for the selection of
+        // their service, and the clone-then-drop read moved in there with it.
         for rel in ["src/commands/process.rs", "src/commands/engine.rs"] {
             let path = manifest.join(rel);
             let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
@@ -1937,12 +2265,22 @@ End of search: 3 match(es) found.
                 "{rel} still has the old lock-wraps-apply_gpu_env shape (the MutexGuard \
                  was alive for the whole call, including any nvidia-smi I/O inside it)"
             );
-            let safe_pattern = "state.gpu_selection.lock().ok().map(|sel| sel.clone())";
+            // 3.1.0: process.rs reads it through gpu_roles::apply_role_env,
+            // which calls effective_selection (checked below).
             assert!(
-                src.contains(safe_pattern),
-                "{rel} has no clone-then-drop call site at all -- did the B2 fix move or get reverted?"
+                src.contains("gpu_roles::effective_selection(state,") || src.contains("gpu_roles::apply_role_env(state,"),
+                "{rel} has no call site that reads the selection through gpu_roles::effective_selection"
             );
         }
+        let roles = std::fs::read_to_string(manifest.join("src/commands/gpu_roles.rs")).expect("read gpu_roles.rs");
+        let body = roles.split("pub fn effective_selection(").nth(1).expect("effective_selection in gpu_roles.rs");
+        let body = &body[..body.find("\n}\n").expect("end of effective_selection")];
+        assert!(body.contains("state.gpu_selection.lock().ok().map(|s| s.clone())"), "the selection is not cloned out of its lock");
+        assert!(body.contains("state.gpu_roles.lock().ok().map(|r| r.clone())"), "the roles are not cloned out of their lock");
+        assert!(!body.contains("apply_gpu_env"), "effective_selection must not forward while it holds a lock");
+        let helper = roles.split("pub fn apply_role_env(").nth(1).expect("apply_role_env in gpu_roles.rs");
+        let helper = &helper[..helper.find("\n}\n").expect("end of apply_role_env")];
+        assert!(helper.contains("effective_selection(state, role)") && !helper.contains(".lock()"), "apply_role_env must read through effective_selection and hold no lock");
     }
 
     #[test]
@@ -2004,6 +2342,7 @@ End of search: 3 match(es) found.
             note_severity: None,
             arch: None,
             uuid: uuid.map(|u| u.to_string()),
+            shared_memory_mib: None,
         }
     }
 
@@ -2088,7 +2427,7 @@ End of search: 3 match(es) found.
     }
 
 
-    // ── AMD Instinct auf echter Hardware (MI325X, DigitalOcean tor1,
+    // ── AMD Instinct auf echter Hardware (MI325X,
     // 2026-09-03) ────────────────────────────────────────────────────────
     //
     // Alles hier ist abgeschrieben, nicht ausgedacht: `lspci -nn`, die
@@ -2121,6 +2460,7 @@ card0,AMD Instinct Mi325X VF,0x74b9,0x00,0x74a5,43855,274542362624,299687936,AMD
         let sysfs = vec![SysfsDrmCard {
             pci_address: "0000:83:00.0".into(),
             vendor_id: Some("0x1002".into()),
+            device_id: None,
             vram_total: Some("274542362624".into()),
         }];
         let gpus = detect_other_via_lspci_from(LSPCI_INSTINCT, false, &sysfs);
@@ -2148,7 +2488,7 @@ card0,AMD Instinct Mi325X VF,0x74b9,0x00,0x74a5,43855,274542362624,299687936,AMD
         assert_eq!(gpus[0].memory_mib, Some(261824));
         assert_eq!(gpus[0].source, "rocm-smi");
         // rocm-smi druckt das gfx-Ziel selbst. Es zu ignorieren und danach zu
-        // sagen, man kenne es nicht, ist genau der Satz, den Zhorts las.
+        // sagen, man kenne es nicht, ist genau der Satz, den ein Nutzer las.
         assert_eq!(gpus[0].arch.as_deref(), Some("gfx942"));
     }
 
@@ -2181,16 +2521,16 @@ GPU[0] : Memory: 16368 MiB
         assert!(parse_rocm_smi_csv("").is_empty());
     }
 
-    // ── AMD without ROCm tools (numbrain forum help-image-gen, lapbo Win11 +
-    // ZLUDA, nosferatue412 asking before buying a 9060 XT) ────────────────
+    // ── AMD without ROCm tools (a user forum help-image-gen, a user Win11 +
+    // ZLUDA, a user asking before buying a 9060 XT) ────────────────
     //
-    // numbrain's RX 9070 XT was reported correctly by his system and did not
+    // a user's RX 9070 XT was reported correctly by his system and did not
     // appear in LU's picker at all, so he spent days rebuilding his install
     // chasing a driver problem that was not there. rocm-smi is not part of the
     // AMD driver; it ships with the ROCm dev packages, which nobody running a
     // prebuilt ROCm Ollama or a ZLUDA ComfyUI has a reason to install.
 
-    /// numbrain's card, in the exact shape `lspci -nn` prints it.
+    /// a user's card, in the exact shape `lspci -nn` prints it.
     const LSPCI_AMD: &str = "03:00.0 VGA compatible controller [0300]: Advanced Micro Devices, Inc. [AMD/ATI] Navi 48 [Radeon RX 9070 XT] [1002:7550] (rev c0)";
     const LSPCI_INTEL: &str = "00:02.0 VGA compatible controller [0300]: Intel Corporation AlderLake-S GT1 [Intel UHD Graphics 770] [8086:4680]";
     const LSPCI_NVIDIA: &str = "01:00.0 VGA compatible controller [0300]: NVIDIA Corporation GA104 [GeForce RTX 3060] [10de:2487] (rev a1)";
@@ -2266,7 +2606,7 @@ GPU[0] : Memory: 16368 MiB
     /// does. HIP_VISIBLE_DEVICES is vendor-scoped, so on a box that lists an
     /// Intel iGPU first and an AMD card second, a shared counter hands the AMD
     /// card the number 1 while it is the only HIP device there is. That is
-    /// lapbo's machine (Win11 plus ZLUDA, no rocm-smi), which is the entire
+    /// a user's machine (Win11 plus ZLUDA, no rocm-smi), which is the entire
     /// reason this branch reports AMD at all.
     #[test]
     fn wmic_counts_per_vendor_not_across_them() {
@@ -2318,7 +2658,7 @@ GPU[0] : Memory: 16368 MiB
     // Windows an AMD card fell out of detection entirely: no entry in the
     // picker, and every decision downstream taken as if the box had no GPU.
 
-    /// `reg query … /v DriverDesc` on lapbo's kind of box: one AMD card, no
+    /// `reg query … /v DriverDesc` on a user's kind of box: one AMD card, no
     /// vendor CLI anywhere.
     const DRIVER_DESC_AMD_ONLY: &str = r"
 HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000
@@ -2410,9 +2750,87 @@ End of search: 1 match(es) found.
     }
 
 
-    // ── A5: the Windows HIP SDK, GitHub #123 (Zhorts, RX 9070 XT, 7.1.1) ──
+    // ── 3.0.8: kinghebes, simulated end to end ──────────────────────────
     //
-    // Zhorts had a correct HIP SDK 7.1.1 install and LU said "Found without
+    // Windows 11, Ryzen 9 9900X3D (its Raphael iGPU reports itself as "AMD
+    // Radeon(TM) Graphics") and an RX 9070 XT, ComfyUI on the processor with
+    // Auto and with Force GPU. We own neither, so the registry answer such a
+    // machine gives is written out here and run through the real detection,
+    // the real plan and the real pip arguments.
+    const DRIVER_DESC_KINGHEBES: &str = r"
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000
+    DriverDesc    REG_SZ    AMD Radeon(TM) Graphics
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0001
+    DriverDesc    REG_SZ    AMD Radeon RX 9070 XT
+
+End of search: 2 match(es) found.
+";
+
+    #[test]
+    fn kinghebes_machine_gets_amds_rocm_build_for_the_9070_xt_and_only_for_it() {
+        use crate::commands::install::pytorch_pip_args;
+        use crate::commands::torch_wheels::{
+            amd_rocm_served, comfy_wheel_plan_for, resolve_plan_with, WheelPlan, ROCM_WINDOWS_CHANNELS,
+        };
+        let names = parse_reg_query(DRIVER_DESC_KINGHEBES, "DriverDesc");
+        let found = windows_fallback_from(&names, &[], None, false);
+        let amd: Vec<&str> = found.iter().filter(|g| g.vendor == "amd").map(|g| g.name.as_str()).collect();
+        assert_eq!(amd, vec!["AMD Radeon(TM) Graphics", "AMD Radeon RX 9070 XT"], "{found:?}");
+
+        let plan = comfy_wheel_plan_for(false, None, true, &amd, &[], "windows");
+        let WheelPlan::IndexOrCpu { candidates, .. } = &plan else {
+            panic!("an RX 9070 XT on Windows must reach AMD's index, got {plan:?}");
+        };
+        assert_eq!(*candidates, ROCM_WINDOWS_CHANNELS);
+        let (index, packages, note) = resolve_plan_with(&plan, |_| true);
+        assert_eq!(index, Some("https://stable.repo.amd.com/rocm/whl-next/"));
+        // gfx1201 for the 9070 XT, and nothing for the iGPU nobody can place:
+        // no device-all, no guess.
+        assert_eq!(
+            packages,
+            vec![
+                "torch[device-gfx1201]>=2.13,<2.14".to_string(),
+                "torchvision[device-gfx1201]>=0.28,<0.29".to_string(),
+                "torchaudio>=2.11,<2.12".to_string(),
+            ],
+        );
+        assert!(note.contains("gfx1201"), "{note}");
+        let refs: Vec<&str> = packages.iter().map(String::as_str).collect();
+        let args = pytorch_pip_args(index, &refs);
+        let at = args.iter().position(|a| a == "--index-url").expect("an index");
+        assert_eq!(args[at + 1], "https://stable.repo.amd.com/rocm/whl-next/");
+        assert!(!args.iter().any(|a| a.contains("device-all")), "{args:?}");
+
+        // The warnings know LU serves this card, so they point at Repair.
+        assert!(amd_rocm_served(&amd, "windows"));
+        let warn = crate::commands::process::force_gpu_warning_for(
+            crate::commands::process::ComfyGpuMode::ForceGpu,
+            Some(false),
+            true,
+            amd_rocm_served(&amd, "windows"),
+            "windows",
+        )
+        .expect("Force GPU on a processor torch is worth a word");
+        assert!(warn.contains("Repair environment"), "{warn}");
+        assert!(!warn.contains("ZLUDA"), "the wrong door for a card LU serves: {warn}");
+
+        // NEGATIVE CONTROL: AMD's index down, so the processor build and the
+        // sentence that says so, never a dead channel.
+        let (dead, dead_packages, dead_note) = resolve_plan_with(&plan, |_| false);
+        assert_eq!(dead, None);
+        assert_eq!(dead_packages, vec!["torch", "torchvision", "torchaudio"]);
+        assert!(dead_note.contains("did not answer"), "{dead_note}");
+
+        // NEGATIVE CONTROL: the iGPU alone is not enough for the ROCm build.
+        let igpu_only = comfy_wheel_plan_for(false, None, true, &["AMD Radeon(TM) Graphics"], &[], "windows");
+        assert!(matches!(igpu_only, WheelPlan::Cpu { .. }), "{igpu_only:?}");
+        assert!(!amd_rocm_served(&["AMD Radeon(TM) Graphics"], "windows"));
+    }
+
+    // ── A5: the Windows HIP SDK, GitHub #123 (RX 9070 XT, 7.1.1) ──
+    //
+    // A user had a correct HIP SDK 7.1.1 install and LU said "Found without
     // ROCm tools" anyway, because the only ROCm probe in this file ran
     // `rocm-smi`, which the Windows SDK does not ship. The output below is the
     // shape hipinfo really prints: labels padded to 34 columns, `device#`
@@ -2553,7 +2971,7 @@ non-peers:                        device#0
         assert_eq!(hip_version_from_root("/opt/rocm"), None);
     }
 
-    /// The bug as Zhorts hit it, end to end through the pure halves: a Windows
+    /// The bug as a user hit it, end to end through the pure halves: a Windows
     /// box whose registry reports the card and its true 16 GB, and a HIP SDK
     /// that rocm-smi knows nothing about.
     #[test]
@@ -2562,7 +2980,7 @@ non-peers:                        device#0
         let sizes = vec![("0000".to_string(), "0x400000000".to_string())];
         let mut gpus = windows_fallback_from(&names, &sizes, None, false);
 
-        // NEGATIVE CONTROL: this is the message Zhorts saw, and the state the
+        // NEGATIVE CONTROL: this is the message a user saw, and the state the
         // fix has to leave behind.
         assert_eq!(gpus.len(), 1);
         assert!(gpus[0].note.as_deref().unwrap().contains("Found without ROCm tools"));
@@ -2879,6 +3297,7 @@ gcnArchName:                      gfx942:sramecc+:xnack-
         SysfsDrmCard {
             pci_address: pci.to_string(),
             vendor_id: Some(vendor.to_string()),
+            device_id: None,
             vram_total: Some(vram.to_string()),
         }
     }
@@ -2972,6 +3391,7 @@ gcnArchName:                      gfx942:sramecc+:xnack-
             let cards = vec![SysfsDrmCard {
                 pci_address: "0000:03:00.0".to_string(),
                 vendor_id: Some(AMD_VENDOR_FILE.to_string()),
+                device_id: None,
                 vram_total: vram.map(|s| s.to_string()),
             }];
             let found = detect_other_via_lspci_from(LSPCI_AMD, false, &cards);
@@ -3089,6 +3509,7 @@ gcnArchName:                      gfx942:sramecc+:xnack-
         let silent = vec![SysfsDrmCard {
             pci_address: "0000:03:00.0".to_string(),
             vendor_id: None,
+            device_id: None,
             vram_total: Some(VRAM_16_GB.to_string()),
         }];
         assert_eq!(
@@ -3157,6 +3578,7 @@ gcnArchName:                      gfx942:sramecc+:xnack-
             SysfsDrmCard {
                 pci_address: "0000:03:00.0".to_string(),
                 vendor_id: Some("0x1002".to_string()),
+                device_id: None,
                 vram_total: Some(VRAM_16_GB.to_string()),
             },
         );
@@ -3176,5 +3598,203 @@ gcnArchName:                      gfx942:sramecc+:xnack-
         assert!(read_sysfs_drm_cards_at(&tmp.path().join("no/such/place")).is_empty());
         assert!(read_sysfs_value(&tmp.path().join("no/such/file")).is_none());
         assert!(sysfs_pci_address(&tmp.path().join("no/such/link")).is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // C74: Linux ohne lspci (c1rrus, Bazzite + Distrobox, RX 6900 XT)
+
+    /// Ein Ausschnitt aus pci.ids in der echten Form: Kommentar, Hersteller,
+    /// Geraete mit Tab, Untergeraete mit zwei Tabs, danach die Klassenliste.
+    const PCI_IDS_SAMPLE: &str = "# List of PCI ID's\n\
+#\n\
+1002  Advanced Micro Devices, Inc. [AMD/ATI]\n\
+\t73a5  Navi 21 [Radeon RX 6950 XT]\n\
+\t73bf  Navi 21 [Radeon RX 6800/6800 XT / 6900 XT]\n\
+\t\t1002 0e3a  Radeon RX 6900 XT\n\
+\t7550  Navi 48 [Radeon RX 9070/9070 XT/9070 GRE]\n\
+10de  NVIDIA Corporation\n\
+\t2684  AD102 [GeForce RTX 4090]\n\
+8086  Intel Corporation\n\
+\t56a0  DG2 [Arc A770]\n\
+C 03  Display controller\n\
+\t00  VGA compatible controller\n";
+
+    /// Legt /sys/class/drm so an, wie es auf einer Bazzite-Maschine aussieht:
+    /// card<N>/device ist ein Verweis auf das PCI-Verzeichnis, darin vendor,
+    /// device und bei amdgpu mem_info_vram_total.
+    #[cfg(unix)]
+    fn fake_drm_tree(root: &std::path::Path, cards: &[(&str, &str, &str, &str, Option<&str>)]) -> std::path::PathBuf {
+        use std::os::unix::fs::symlink;
+        let drm = root.join("sys/class/drm");
+        let pci = root.join("sys/devices/pci0000:00");
+        std::fs::create_dir_all(&drm).expect("drm dir");
+        for (card, addr, vendor, device, vram) in cards {
+            let dir = pci.join(addr);
+            std::fs::create_dir_all(&dir).expect("pci dir");
+            std::fs::write(dir.join("vendor"), format!("{vendor}\n")).expect("vendor");
+            std::fs::write(dir.join("device"), format!("{device}\n")).expect("device");
+            if let Some(v) = vram {
+                std::fs::write(dir.join("mem_info_vram_total"), format!("{v}\n")).expect("vram");
+            }
+            std::fs::create_dir_all(drm.join(card)).expect("card dir");
+            symlink(&dir, drm.join(card).join("device")).expect("device link");
+            // Ein Anschluss zur Karte, wie er auf jeder echten Maschine danebenliegt.
+            std::fs::create_dir_all(drm.join(format!("{card}-DP-1"))).expect("connector");
+        }
+        drm
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn c1rrus_rx_6900_xt_is_found_from_sysfs_when_lspci_is_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let drm = fake_drm_tree(
+            tmp.path(),
+            &[("card1", "0000:03:00.0", "0x1002", "0x73bf", Some(VRAM_16_GB))],
+        );
+        let cards = read_sysfs_drm_cards_at(&drm);
+        let found = detect_via_sysfs_from(&cards, false, false, PCI_IDS_SAMPLE);
+        assert_eq!(found.len(), 1, "{found:?}");
+        let g = &found[0];
+        assert_eq!(g.vendor, "amd");
+        assert_eq!(g.index, 0);
+        assert_eq!(g.source, "sysfs");
+        assert_eq!(g.memory_mib, Some(16368));
+        assert_eq!(g.name, "Advanced Micro Devices, Inc. [AMD/ATI] Navi 21 [Radeon RX 6800/6800 XT / 6900 XT]");
+        // Der Name ist in der Form, die die Wheel-Wahl liest: die Karte bekommt
+        // ihr gfx-Ziel und damit die ROCm-Wheels statt der Prozessor-Wheels.
+        assert_eq!(crate::commands::torch_wheels::amd_gfx_target(&g.name), Some("gfx1030"));
+        let note = g.note.as_deref().unwrap_or("");
+        assert!(note.contains("/sys/class/drm"), "{note}");
+        assert!(!note.contains("Install pciutils"), "named card needs no pciutils advice: {note}");
+
+        // Und ComfyUI bekommt fuer diese Karte unter Linux die ROCm-Wheels.
+        let plan = crate::commands::torch_wheels::comfy_wheel_plan(false, None, true, &[g.name.as_str()], "linux");
+        assert_eq!(crate::commands::torch_wheels::plan_kind(&plan), "rocm", "{plan:?}");
+    }
+
+    #[test]
+    fn a_card_without_a_name_list_keeps_its_number_and_points_at_pciutils() {
+        let cards = vec![SysfsDrmCard {
+            pci_address: "0000:03:00.0".into(),
+            vendor_id: Some("0x1002".into()),
+            device_id: Some("0x73bf".into()),
+            vram_total: Some(VRAM_16_GB.into()),
+        }];
+        let found = detect_via_sysfs_from(&cards, false, false, "");
+        assert_eq!(found[0].name, "AMD Radeon GPU (PCI 1002:73bf)");
+        assert_eq!(found[0].memory_mib, Some(16368));
+        assert!(found[0].note.as_deref().unwrap_or("").contains("Install pciutils"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sysfs_lists_nvidia_amd_and_intel_in_pci_order_with_per_vendor_numbers() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // read_dir-Reihenfolge ist zufaellig; card-Nummern absichtlich verdreht.
+        let drm = fake_drm_tree(
+            tmp.path(),
+            &[
+                ("card0", "0000:0b:00.0", "0x1002", "0x7550", Some(VRAM_16_GB)),
+                ("card1", "0000:00:02.0", "0x8086", "0x56a0", None),
+                ("card2", "0000:03:00.0", "0x1002", "0x73bf", Some(VRAM_24_GB)),
+                ("card3", "0000:41:00.0", "0x10de", "0x2684", None),
+                // virtio-gpu einer VM: keine Rechenkarte.
+                ("card4", "0000:00:01.0", "0x1af4", "0x1050", None),
+            ],
+        );
+        let cards = read_sysfs_drm_cards_at(&drm);
+        let found = detect_via_sysfs_from(&cards, false, false, PCI_IDS_SAMPLE);
+        let summary: Vec<(String, u32)> = found.iter().map(|g| (g.vendor.clone(), g.index)).collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("intel".to_string(), 0),
+                ("amd".to_string(), 0),
+                ("amd".to_string(), 1),
+                ("nvidia".to_string(), 0),
+            ],
+        );
+        assert!(found[1].name.contains("6900 XT"), "{:?}", found[1].name);
+        assert!(found[2].name.contains("9070"), "{:?}", found[2].name);
+        assert_eq!(found[3].name, "NVIDIA Corporation AD102 [GeForce RTX 4090]");
+        assert!(found[3].note.as_deref().unwrap_or("").contains("nvidia-smi"));
+        assert_eq!(found[3].memory_mib, None, "sysfs has no size for NVIDIA");
+        assert!(crate::commands::torch_wheels::is_intel_arc(&found[0].name));
+    }
+
+    #[test]
+    fn the_vendor_tools_still_win_over_sysfs() {
+        let cards = vec![
+            SysfsDrmCard { pci_address: "0000:03:00.0".into(), vendor_id: Some("0x1002".into()), device_id: Some("0x73bf".into()), vram_total: None },
+            SysfsDrmCard { pci_address: "0000:41:00.0".into(), vendor_id: Some("0x10de".into()), device_id: Some("0x2684".into()), vram_total: None },
+        ];
+        // rocm-smi und nvidia-smi haben geantwortet: sysfs fuegt nichts doppelt hinzu.
+        assert!(detect_via_sysfs_from(&cards, true, true, PCI_IDS_SAMPLE).is_empty());
+        let only_amd = detect_via_sysfs_from(&cards, false, true, PCI_IDS_SAMPLE);
+        assert_eq!(only_amd.len(), 1);
+        assert_eq!(only_amd[0].vendor, "amd");
+    }
+
+    #[test]
+    fn broken_sysfs_entries_invent_no_cards() {
+        let cards = vec![
+            SysfsDrmCard { pci_address: "not-an-address".into(), vendor_id: Some("0x1002".into()), device_id: None, vram_total: None },
+            SysfsDrmCard { pci_address: "0000:03:00.0".into(), vendor_id: None, device_id: None, vram_total: None },
+            SysfsDrmCard { pci_address: "0000:04:00.0".into(), vendor_id: Some("garbage".into()), device_id: None, vram_total: None },
+        ];
+        assert!(detect_via_sysfs_from(&cards, false, false, PCI_IDS_SAMPLE).is_empty());
+        // Gleiche Karte zweimal (zwei DRM-Knoten): einmal gelistet.
+        let twice = vec![
+            SysfsDrmCard { pci_address: "0000:03:00.0".into(), vendor_id: Some("0x1002".into()), device_id: None, vram_total: None },
+            SysfsDrmCard { pci_address: "03:00.0".into(), vendor_id: Some("0x1002".into()), device_id: None, vram_total: None },
+        ];
+        let found = detect_via_sysfs_from(&twice, false, false, "");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "AMD Radeon GPU");
+    }
+
+    #[test]
+    fn pci_ids_lookup_stays_inside_its_vendor() {
+        assert_eq!(
+            pci_ids_names(PCI_IDS_SAMPLE, 0x10de, 0x2684),
+            Some(("NVIDIA Corporation".to_string(), "AD102 [GeForce RTX 4090]".to_string())),
+        );
+        // 73bf ist eine AMD-Nummer und darf unter NVIDIA nicht gefunden werden.
+        assert_eq!(pci_ids_names(PCI_IDS_SAMPLE, 0x10de, 0x73bf), None);
+        // Untergeraete-Zeilen sind keine Geraete.
+        assert_eq!(pci_ids_names(PCI_IDS_SAMPLE, 0x1002, 0x0e3a), None);
+        // Klassenliste beendet die Suche.
+        assert_eq!(pci_ids_names(PCI_IDS_SAMPLE, 0x0003, 0x0000), None);
+        assert_eq!(pci_ids_names("", 0x1002, 0x73bf), None);
+    }
+
+    #[test]
+    fn the_pciutils_hint_only_speaks_on_linux_with_nothing_found_and_no_lspci() {
+        let hint = pciutils_hint_for("linux", 0, false).expect("hint");
+        assert!(hint.contains("pciutils") && hint.contains("dnf") && hint.contains("Distrobox"), "{hint}");
+        assert_eq!(pciutils_hint_for("linux", 1, false), None, "a card was found");
+        assert_eq!(pciutils_hint_for("linux", 0, true), None, "lspci ran, the machine has no card");
+        assert_eq!(pciutils_hint_for("windows", 0, false), None);
+        assert_eq!(pciutils_hint_for("macos", 0, false), None);
+    }
+
+    #[test]
+    fn the_processor_plan_names_the_missing_tool_and_other_plans_stay_untouched() {
+        use crate::commands::torch_wheels::{with_probe_gap_hint, WheelPlan};
+        let cpu = WheelPlan::Cpu { note: "No GPU detected, installing the processor build of PyTorch.".into() };
+        let WheelPlan::Cpu { note } = with_probe_gap_hint(cpu, Some("Install pciutils.".into())) else { panic!() };
+        assert!(note.ends_with("Install pciutils."), "{note}");
+        let cpu = WheelPlan::Cpu { note: "x".into() };
+        let WheelPlan::Cpu { note } = with_probe_gap_hint(cpu, None) else { panic!() };
+        assert_eq!(note, "x");
+    }
+
+    /// Auf diesem Rechner (kein Linux) bleibt alles still.
+    #[test]
+    fn no_hint_outside_linux() {
+        if !cfg!(target_os = "linux") {
+            assert_eq!(pciutils_hint_here(0), None);
+        }
     }
 }

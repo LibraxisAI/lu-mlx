@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
  * C1 (Desktop Create parity, web reference:
- * apps/web/components/create/experimental/OutputView.tsx +
+ * the web app +
  * createStore.animateFrom in lu-300-web): a finished image's result view had
  * no "Animate this image" affordance on Desktop: Edit-with-mask, Download
  * and Fullscreen were the only hover actions. Desktop's own createStore

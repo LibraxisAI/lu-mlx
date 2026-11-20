@@ -1,5 +1,6 @@
 import type { AppMode } from '../types/settings'
 import { canAutoSelectChat, type ChatSizeCandidate } from './chat-model-minimum'
+import { isCompatProviderId } from '../api/providers/compat-id'
 
 /**
  * Which chat model may stay selected under the current Local/Cloud switch.
@@ -33,7 +34,7 @@ export interface ModePick {
   change: boolean
   /** What to write when it does. null clears the selection on purpose: a
    *  lu-cloud model left active in Local mode kept spending credits after the
-   *  switch said Local (Discord 2026-08-09, helpslowlydying). */
+   *  switch said Local (Discord 2026-08-09). */
   next: string | null
   /** True when `requested` is what landed, so the caller knows the request was
    *  answered and can drop it. False whenever the request was absent, not in
@@ -82,8 +83,9 @@ export function pickForMode(
    * letzte Wolkenwahl des Nutzers.
    *
    * Zwei getrennte Erinnerungen loesen beides: jeder Modus bekommt zurueck, was
-   * er zuletzt hatte, und der Kopf der Liste springt nur noch ein, wenn es dort
-   * wirklich noch keine Wahl gab.
+   * er zuletzt hatte, und der Kopf der Liste springt nur noch lokal ein, und nur
+   * wenn es dort wirklich noch keine Wahl gab. In der Cloud springt er gar nicht
+   * mehr ein (05.10.2026, Begruendung unten am `fallback`).
    */
   remembered: RememberedPicks = { local: null, cloud: null },
 ): ModePick {
@@ -118,7 +120,18 @@ export function pickForMode(
     return { change: activeModel !== behalten.name, next: behalten.name, usedRequest: false }
   }
 
-  const fallback = models.find(model => wanted(model) && canAutoSelectChat(model))
+  // Der Kopf der Liste springt nur lokal ein. In der Cloud waehlt die App nie
+  // selbst: der Kopf des Katalogs ist `Llama 3.1 8B Turbo`, besteht die
+  // 7B-Regel, und ein neues Konto hat darauf geschrieben, ohne es je gewaehlt
+  // zu haben (gemessen 05.10.2026: es lehnt Erwachsenen-Fiktion ab, und eine
+  // Ablehnung im Verlauf uebernehmen danach auch die guten Modelle). Die
+  // benannte Zeile und die letzte eigene Cloud-Wahl oben bleiben.
+  const fallback = appMode === 'cloud'
+    ? undefined
+    // Kein Modell eines zusaetzlichen Steckplatzes mit eigenem Schluessel
+    // (`openai-<slug>`): es rechnet je Nachricht ab und wird nur gewaehlt,
+    // nie eingesetzt.
+    : models.find(model => wanted(model) && !isCompatProviderId(model.provider ?? '') && canAutoSelectChat(model))
   if (activeModel === null && !fallback) return { change: false, next: null, usedRequest: false }
   return { change: true, next: fallback ? fallback.name : null, usedRequest: false }
 }

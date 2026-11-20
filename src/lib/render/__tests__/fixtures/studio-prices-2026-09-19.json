@@ -1717,22 +1717,11 @@
   {
     "model": "nucleus-image",
     "options": {
-      "aspect_ratio": "16:9",
-      "num_images": 1
+      "aspect_ratio": "16:9"
     },
     "seconds": 3,
     "promptLength": 100,
     "usd": 0.01
-  },
-  {
-    "model": "nucleus-image",
-    "options": {
-      "aspect_ratio": "16:9",
-      "num_images": 2
-    },
-    "seconds": 3,
-    "promptLength": 100,
-    "usd": 0.02
   },
   {
     "model": "nucleus-image",

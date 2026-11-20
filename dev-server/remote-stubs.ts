@@ -1,10 +1,10 @@
 import type { Connect } from 'vite'
 import type { RouteMount } from './routes'
 
-/** Die zwölf Remote-Access-Endpunkte, die es im reinen Vite-Prozess nicht gibt. */
+/** Die vierunddreissig Remote-Access-Endpunkte, die es im reinen Vite-Prozess nicht gibt. */
 export function registerRemoteStubs(routes: RouteMount): void {
   // ─── Remote Access stubs (dev mode) ───────────────────────────
-  // Reported by @phantomderp on v2.4.2: clicking LAN/Internet from
+  // Reported by a user on v2.4.2: clicking LAN/Internet from
   // `npm run dev` returned an HTML 404 page that the frontend then
   // tried to JSON.parse, producing a cryptic
   // "SyntaxError: unexpected character at line 1 column 1" stacktrace.
@@ -34,9 +34,34 @@ export function registerRemoteStubs(routes: RouteMount): void {
     '/local-api/remote-connected-devices',
     '/local-api/disconnect-remote-device',
     '/local-api/set-remote-permissions',
+    '/local-api/set-remote-page-title',
     '/local-api/start-tunnel',
     '/local-api/stop-tunnel',
     '/local-api/tunnel-status',
+    '/local-api/remote-pairing-qr',
+    '/local-api/remote-pairing-window',
+    '/local-api/remote-paired-devices',
+    '/local-api/remote-forget-device',
+    '/local-api/remote-set-device-rights',
+    '/local-api/remote-set-new-device-rights',
+    '/local-api/remote-firewall-status',
+    '/local-api/remote-firewall-allow',
+    '/local-api/remote-pair-decide',
+    '/local-api/remote-pair-requests',
+    '/local-api/remote-set-anywhere',
+    '/local-api/remote-set-legacy-access',
+    '/local-api/remote-signin-requests',
+    '/local-api/remote-signin-decide',
+    '/local-api/remote-create-progress',
+    '/local-api/remote-create-finish',
+    '/local-api/remote-create-capabilities-reply',
+    '/local-api/remote-create-gallery-reply',
+    '/local-api/remote-e2e-mode',
+    '/local-api/remote-chats-sync',
+    '/local-api/remote-chats-event',
+    '/local-api/remote-chats-reply',
+    '/local-api/remote-create-cancel',
+    '/local-api/remote-create-snapshot',
   ]
   const remoteDevModeStub: Connect.SimpleHandleFunction = (_req, res) => {
     res.writeHead(501, { 'Content-Type': 'application/json' })
@@ -44,5 +69,60 @@ export function registerRemoteStubs(routes: RouteMount): void {
   }
   for (const path of remoteStubPaths) {
     routes.use(path, remoteDevModeStub)
+  }
+
+  // The Local API usage counter (local_api_usage) and the download speed
+  // limit (set_download_limit) live in the Rust process as well. Both callers
+  // already tolerate a failure: the panel shows no numbers, and the limit is
+  // only sent from the desktop app.
+  const DESKTOP_ONLY_BODY = JSON.stringify({
+    error: 'This needs the installed desktop app. The plain vite dev server has no Rust backend.',
+    devModeOnly: true,
+  })
+  // The training photos of a local character (character_photos) too: the
+  // caller asks only inside the desktop app. The GGUF file dialog of the
+  // Model Manager (pick_gguf_file) is a native dialog of the Rust process.
+  // The node pack manager (list_custom_nodes, remove_custom_node,
+  // custom_node_log) too: listing, the trash and the install log are Rust.
+  // Check files and Repair of the Model Manager (GH #113): the digest job
+  // and the Trash are Rust. So is the idle unload of the LU Engine
+  // (set_engine_idle_unload), which the app sends only from the desktop app.
+  // The card per task (3.0.8, A2) too: only the Rust process starts ComfyUI
+  // and the chat engine that read it.
+  // Remove refusals (A14) as well: its runs are Python processes the Rust
+  // side starts, reads and stops.
+  // Dictation through an external transcription endpoint (N1) is a Rust
+  // multipart request as well.
+  // The chat's workflow tools (C60-S5): the fetch with its host allowlist and
+  // the node pack install by key are Rust; the tools say so before calling.
+  // Watchers: the clock, the list and the notification live in Rust.
+  // The LoRA folder of "New character" and a LoRA file dropped there (3.1.0):
+  // the folder, the file manager and the copy are Rust.
+  for (const path of [
+    '/local-api/character-lora-folder', '/local-api/character-lora-folder-open',
+    '/local-api/character-lora-import', '/local-api/character-lora-import-cancel',
+    '/local-api/watchers-list', '/local-api/watchers-create', '/local-api/watchers-update', '/local-api/watchers-delete',
+    '/local-api/watchers-run-now', '/local-api/watchers-finished', '/local-api/watchers-runner-ready',
+    '/local-api/watchers-dismiss-hint', '/local-api/watchers-notify',
+    '/local-api/workflow-fetch', '/local-api/install-lu-node-pack',
+    '/local-api/local-api-usage', '/local-api/set-download-limit', '/local-api/character-photos', '/local-api/pick-gguf-file',
+    '/local-api/list-custom-nodes', '/local-api/remove-custom-node', '/local-api/custom-node-log',
+    '/local-api/verify-model-files', '/local-api/verify-model-files-status', '/local-api/verify-model-files-cancel',
+    '/local-api/comfy-model-info',
+    '/local-api/comfy-model-reveal',
+    '/local-api/chat-backup-clear', '/local-api/chat-backup-reveal',
+    '/local-api/bundled-model-delete-plan',
+    '/local-api/trash-model-file', '/local-api/set-engine-idle-unload', '/local-api/transcribe-external',
+    '/local-api/parakeet-status', '/local-api/parakeet-install', '/local-api/parakeet-cancel', '/local-api/parakeet-stop', '/local-api/parakeet-transcribe',
+    '/local-api/set-gpu-roles', '/local-api/describe-gpu-roles',
+    '/local-api/abliterate-plan', '/local-api/abliterate-start', '/local-api/abliterate-status',
+    '/local-api/abliterate-cancel', '/local-api/abliterate-dismiss', '/local-api/abliterate-runs',
+    '/local-api/abliterate-trash-copy',
+    '/local-api/neuron-presets', '/local-api/neuron-info', '/local-api/neuron-build', '/local-api/neuron-feature-add', '/local-api/neuron-mlp-add', '/local-api/neuron-delete', '/local-api/neuron-sae-download', '/local-api/neuron-sae-search', '/local-api/neuron-status', '/local-api/neuron-cancel', '/local-api/neuron-dismiss', '/local-api/neuron-apply', '/local-api/neuron-plugin-set', '/local-api/neuron-plugin-status', '/local-api/neuron-compare',
+  ]) {
+    routes.use(path, (_req, res) => {
+      res.writeHead(501, { 'Content-Type': 'application/json' })
+      res.end(DESKTOP_ONLY_BODY)
+    })
   }
 }

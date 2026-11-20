@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * Redesign guard (Bauer, 19.09.2026): David asked for the sheet to carry the
+ * Redesign guard (Bauer, 19.09.2026): the owner asked for the sheet to carry the
  * real house logo instead of a pulsing gradient square, to lose the Sparkles
  * icon and every other decorative "magic" glyph, and to keep working for an
  * entry written before groups existed. Four things are pinned here so a later
@@ -30,11 +30,12 @@ import { readFileSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { ReleaseNoteBody, ReleaseNotesModal } from '../ReleaseNotesModal'
 import { MONOGRAM } from '../../layout/brand'
 import { useReleaseNotesStore } from '../../../stores/releaseNotesStore'
 import { useSettingsStore } from '../../../stores/settingsStore'
+import { useHfLinkStore } from '../../../stores/hfLinkStore'
 import type { ReleaseNote } from '../../../lib/release-notes'
 
 const SRC = readFileSync(
@@ -231,19 +232,34 @@ describe('the wired-up sheet, end to end', () => {
     cleanup()
     useReleaseNotesStore.setState({ lastNotesVersion: null })
     useSettingsStore.setState((s) => ({ settings: { ...s.settings, onboardingDone: true } }))
+    useHfLinkStore.getState().clear()
+  })
+
+  // P9 (3.0.9), found on the Mac: a Hugging Face link that started the app
+  // after an update had its download question hidden under this sheet.
+  it('waits while a Hugging Face link is being asked about, and opens after', async () => {
+    useHfLinkStore.getState().offer({ repo: 'a/b', file: 'm.gguf' }, false)
+    render(<ReleaseNotesModal />)
+    expect(screen.queryByTestId('release-heading')).toBeNull()
+    act(() => useHfLinkStore.getState().clear())
+    await waitFor(() => expect(screen.getByTestId('release-heading')).toBeTruthy())
   })
 
   it('opens for the shipping version and Escape closes it, stamping the version so it does not return', async () => {
     render(<ReleaseNotesModal />)
-    // package.json pins the running version to 3.0.2, and RELEASE_NOTES
-    // carries an entry for it, so the sheet is open on mount.
+    // The running version is the one in package.json, read and never typed:
+    // a number written here was wrong at every release. RELEASE_NOTES carries
+    // an entry for it, so the sheet is open on mount.
+    const shipping = JSON.parse(
+      readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../../package.json'), 'utf8'),
+    ).version as string
     await waitFor(() => expect(screen.getByTestId('release-heading')).toBeTruthy())
-    expect(screen.getByTestId('release-heading').textContent).toBe("What's new in 3.0.2")
-    expect(useReleaseNotesStore.getState().lastNotesVersion).not.toBe('3.0.2')
+    expect(screen.getByTestId('release-heading').textContent).toBe(`What's new in ${shipping}`)
+    expect(useReleaseNotesStore.getState().lastNotesVersion).not.toBe(shipping)
 
     fireEvent.keyDown(document, { key: 'Escape' })
 
-    await waitFor(() => expect(useReleaseNotesStore.getState().lastNotesVersion).toBe('3.0.2'))
+    await waitFor(() => expect(useReleaseNotesStore.getState().lastNotesVersion).toBe(shipping))
     await waitFor(() => expect(screen.queryByTestId('release-heading')).toBeNull())
   })
 })

@@ -180,6 +180,10 @@ describe('the box answer that killed the video discovery', () => {
     expect(names).toContain(WAN5B)
     // the SD1.5 half of both AnimateDiff bundles, in the video lane too
     expect(names).toContain(SD15)
+    // and only that one: sd_turbo is an image checkpoint no video bundle
+    // ships, and the box listed it under Video on 03.10.2026 because every
+    // image checkpoint was taken along once a motion module was on disk.
+    expect(names).not.toContain('sd_turbo.safetensors')
     expect(new Set(names).size).toBe(names.length)
     expect(names.length).toBeGreaterThan(0) // the box showed 0
   })

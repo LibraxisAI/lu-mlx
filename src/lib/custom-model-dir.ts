@@ -1,7 +1,7 @@
 /**
- * The folder under Settings → Model Storage, handed to ComfyUI.
+ * The folder under Settings → Storage, handed to ComfyUI.
  *
- * GH #122 (zrmdsxa) and the Discord thread "Read me first" (ever.noob) are one
+ * GH #122 and the Discord thread "Read me first" are one
  * folder apart: a chat GGUF in a folder of your own, and a LoRA in one. The
  * GGUF side is ours: `list_bundled_models` scans the folder now. The LoRA
  * side is not: LU never reads image or video models off the disk, that

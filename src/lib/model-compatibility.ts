@@ -5,6 +5,7 @@
  * calling. Ollama models need explicit compatibility checks.
  */
 
+import { isCompatProviderId } from '../api/providers/compat-id'
 import { getProviderIdFromModel } from '../api/providers'
 import type { ProviderId } from '../api/providers/types'
 
@@ -27,7 +28,9 @@ import type { ProviderId } from '../api/providers/types'
 const NATIVE_TOOL_PROVIDERS: readonly string[] = ['openai', 'anthropic', 'lu-cloud']
 
 export function isNativeToolProvider(providerId: string): boolean {
-  return NATIVE_TOOL_PROVIDERS.includes(providerId)
+  // An extra OpenAI-compatible slot (`openai-<slug>`) is a hosted API with
+  // the user's own key, and speaks the same tool schema as the shared slot.
+  return NATIVE_TOOL_PROVIDERS.includes(providerId) || isCompatProviderId(providerId)
 }
 
 const AGENT_COMPATIBLE = [
@@ -39,7 +42,7 @@ const AGENT_COMPATIBLE = [
   'mistral', 'mistral-nemo', 'mistral-small', 'mistral-large',
   // Ministral (Mistral's 3B/8B edge line) has native tool calling like its
   // bigger siblings but the name isn't a substring of 'mistral', so it was
-  // wrongly rejected from Agent Mode (AnonN10, GitHub #65 — custom
+  // wrongly rejected from Agent Mode (GitHub #65 — custom
   // ministral-8b GGUF, "incompatible with agent mode even though it supports
   // tool calls"). normalizeFamily keeps the leading 'ministral' token intact.
   'ministral',
@@ -53,6 +56,9 @@ const AGENT_COMPATIBLE = [
   // this, the sub-4GB Granite 4.0 Micro tool-caller had Agent Mode grayed out.
   'granite',
   'nemotron',
+  // Liquid LFM3 (N1, 30.10.2026): every Ollama manifest of the family (lfm3,
+  // lfm3-vl, lfm3-omni, lfm3-audio) names the capability "tools".
+  'lfm3',
 ]
 
 /**
@@ -61,7 +67,7 @@ const AGENT_COMPATIBLE = [
  * The Ollama / HuggingFace ecosystem ships the same base under wildly
  * different cosmetic surface forms — `gemma4:e4b`, `gemma-4-it-uncensored`,
  * `huihui_ai/gemma-4-26b-a4b-heretic`, `mradermacher/Gemma-4-31B-it-abliterated-GGUF`.
- * leonsk29 (Discord 2026-05-24) reported Thinking + Agent both grayed out on
+ * A user (Discord 2026-05-24) reported Thinking + Agent both grayed out on
  * community uncensored Gemma 4 variants because the previous normalizer only
  * handled the dash-less family form (`gemma4`) and missed the dashed form
  * (`gemma-4`) that mradermacher / TrevorJS / Stabhappy / LiconStudio repos
@@ -90,7 +96,7 @@ function normalizeFamily(modelName: string): string {
   // `:tag` strip below would otherwise cut at the FIRST colon and reduce
   // `lu-cloud::qwen3-32b` to `lu-cloud` — every family check then silently
   // says no.
-  let s = modelName.toLowerCase().replace(/^[a-z0-9_-]+::/, '').replace(/^.*\//, '')
+  let s = modelName.toLowerCase().replace(/^[a-z0-9_-]+(?::[a-z0-9-]+)?::/, '').replace(/^.*\//, '')
   // Suffix markers — drop wherever they appear
   s = s
     .replace(/-abliterated/g, '')
@@ -174,7 +180,7 @@ const THINKING_COMPATIBLE = [
   'gemma4',
   // Families below all take Ollama's `think` param (they shipped after the
   // list above was written and the Think toggle stayed wrongly grayed out —
-  // David 2026-07-12: "guck, dass jedes Schema von den Models gedeckt ist").
+  // 2026-07-12: "guck, dass jedes Schema von den Models gedeckt ist").
   // A false positive is caught by the retry-without-think fallback in
   // useChat, so listing errs on the side of enabling the toggle.
   'gpt-oss',            // OpenAI gpt-oss 20b/120b — thinking levels
@@ -187,7 +193,14 @@ const THINKING_COMPATIBLE = [
   'glm4.5', 'glm4.6', 'glm4.7',  // GLM hybrid reasoning (NOT plain glm4:9b)
   'kimi-k2-thinking',
   'minimax-m2',
+  // Liquid LFM3 text and VL: "thinking" in their Ollama manifests. The `lfm3`
+  // word also matches lfm3-omni and lfm3-audio, whose manifests do NOT name
+  // it, so those two stand in THINKING_EXCLUDED below.
+  'lfm3',
 ]
+
+/** Members of a THINKING_COMPATIBLE family that do not think (N1). */
+const THINKING_EXCLUDED = ['lfm3-omni', 'lfm3-audio']
 
 /**
  * Check if a model supports thinking/chain-of-thought mode.
@@ -238,6 +251,7 @@ export function isThinkingCompatible(modelName: string | null): boolean {
   if (isNativeToolProvider(providerId)) return true
 
   const baseName = normalizeFamily(modelName)
+  if (THINKING_EXCLUDED.some(f => containsFamily(f, baseName))) return false
   return THINKING_COMPATIBLE.some(f => containsFamily(f, baseName))
 }
 
@@ -268,6 +282,9 @@ const VISION_COMPATIBLE = [
   // alone misses the real `internvl2` / `internvl2.5` / `internvl3` tags
   // (trailing digit breaks the word boundary), so list those prefixes.
   'granite3.2-vision', 'internvl', 'internvl2', 'internvl3', 'glm4v',
+  // Liquid LFM3 VL and Omni: "vision" in their Ollama manifests (N1). The
+  // text model and LFM3 Audio take no images.
+  'lfm3-vl', 'lfm3-omni',
 ]
 
 /**

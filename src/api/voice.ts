@@ -1,6 +1,10 @@
 import { backendCall, isTauri } from "./backend";
 import { asString, prop } from "../types/json-guards";
+import { blobFromUrl } from "../lib/render/data-url";
 import { cloudFetch, jsonOrError, CloudJobError } from "./cloud/client";
+import { assertCloudContentConsent } from "../lib/cloud-content-gate";
+import { hasLocalVoice } from "../lib/capabilities";
+import { openMicrophone } from "./microphone";
 
 /**
  * Voice API.
@@ -121,7 +125,7 @@ export function speak(
  * utterances and chain them, which hit the well-known Chromium/WebView2 bug
  * where speak() issued right after cancel() silently no-ops — so onend for the
  * 2nd sentence never fired and playback died after the FIRST sentence (#77c,
- * ElBiggus: only "What do you call a fake noodle?" was read, never the punch
+ * A user: only "What do you call a fake noodle?" was read, never the punch
  * line). One utterance removes the chaining entirely; stopSpeaking() (cancel)
  * still interrupts instantly. A periodic resume() counters Chromium pausing the
  * synthesizer after ~15 s on a long answer.
@@ -177,7 +181,7 @@ export function stopSpeaking(): void {
  * A dictation failure whose message is already written FOR THE USER, so
  * useVoice shows it verbatim instead of the generic microphone hint.
  *
- * GitHub #115 (graysoncooper) had a second half behind the 415: the browser
+ * GitHub #115 had a second half behind the 415: the browser
  * transcribe path called res.json() on every answer. The /local-api gates
  * reply in text/plain, so a refusal died in the JSON parser, the thrown
  * SyntaxError carried no reason, and the bubble told the user to check the
@@ -225,6 +229,9 @@ export async function checkWhisperAvailable(): Promise<{
   loading?: boolean;
   error?: string;
 }> {
+  // A phone has no faster-whisper and no Python to run it. The command behind
+  // this probe is a stub there, so the answer is known without asking.
+  if (!hasLocalVoice()) return { available: false, backend: null };
   try {
     if (isTauri()) {
       return await backendCall("whisper_status");
@@ -302,12 +309,82 @@ export async function transcribeAudio(audioBlob: Blob): Promise<string> {
   return data.transcript || "";
 }
 
+/**
+ * Dictation through an OpenAI-compatible /v1/audio/transcriptions endpoint
+ * (N1): Ollama 0.40.13+ serves it for models that take audio, such as
+ * lfm3-audio and lfm3-omni. The take is the WAV createAudioRecorder writes,
+ * which is the one format Ollama accepts.
+ */
+export async function transcribeExternal(audioBlob: Blob, url: string, model: string): Promise<string> {
+  const bytes = new Uint8Array(await audioBlob.arrayBuffer());
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  const data: unknown = await backendCall("transcribe_external", {
+    audioBase64: btoa(binary),
+    contentType: audioBlob.type || "audio/wav",
+    url,
+    model,
+  });
+  return asString(prop(data, "transcript")) ?? "";
+}
+
+// --- Parakeet dictation (#233) ---
+
+/** What the desktop knows about Parakeet: whether it can run here, whether it
+ *  is installed, and the download in progress. Written by commands/parakeet.rs. */
+export interface ParakeetStatus {
+  supported: boolean;
+  reason: string | null;
+  installed: boolean;
+  running: boolean;
+  download_bytes: number;
+  model: string;
+  license: string;
+  /** The credit CC BY 4.0 asks for, shown next to the choice. */
+  attribution: string;
+  /** "NeMo-Speech.cpp 0.3.0" and its licence. */
+  runtime: string;
+  runtime_license: string;
+  job: { running: boolean; done_bytes: number; total_bytes: number; error: string | null };
+}
+
+/** Parakeet's status, or null where there is none (a phone, the browser dev server). */
+export async function parakeetStatus(): Promise<ParakeetStatus | null> {
+  if (!isTauri()) return null;
+  try {
+    const data: unknown = await backendCall("parakeet_status");
+    return data && typeof data === "object" && "installed" in data ? (data as ParakeetStatus) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** One take through Parakeet. The desktop starts its server on first use. */
+export async function transcribeParakeet(audioBlob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await audioBlob.arrayBuffer());
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  const data: unknown = await backendCall("parakeet_transcribe", { audioBase64: btoa(binary) });
+  return asString(prop(data, "transcript")) ?? "";
+}
+
+/** The Ollama addresses for speech in and speech out, from its base URL. */
+export function ollamaSpeechUrls(base: string): { stt: string; tts: string } {
+  const b = base.replace(/\/+$/, "");
+  return { stt: `${b}/v1/audio/transcriptions`, tts: `${b}/v1/audio/speech` };
+}
+
+/** The Ollama model LU fills in for speech in and out: Liquid AI LFM3 Audio (N1). */
+export const OLLAMA_SPEECH_MODEL = "lfm3-audio:2b";
+
 // --- LU Cloud voice (appMode 'cloud') ---
 
 /** Cloud STT: POST the recorded clip to /api/voice/transcribe (Whisper
  *  large-v3-turbo, flat-metered per request — so useVoice disables the
  *  interim-streaming cadence in cloud mode and only sends the final take). */
 export async function transcribeAudioCloud(audioBlob: Blob): Promise<string> {
+  // A recording is content: it leaves only with the consent of the user (phone, M1).
+  assertCloudContentConsent();
   const res = await cloudFetch("/api/voice/transcribe", {
     method: "POST",
     headers: { "content-type": audioBlob.type || "audio/wav" },
@@ -383,6 +460,8 @@ export function chunkForTts(text: string, max = TTS_MAX_CHARS): string[] {
  *  object URL for playNeuralAudio (which revokes it when the clip settles).
  *  `signal` aborts the in-flight synthesis — the server cancels un-metered. */
 export async function synthesizeCloud(text: string, voice?: string, signal?: AbortSignal): Promise<string> {
+  // The text of an answer is content as well.
+  assertCloudContentConsent();
   const res = await cloudFetch("/api/voice/tts", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -390,10 +469,13 @@ export async function synthesizeCloud(text: string, voice?: string, signal?: Abo
     signal,
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}) as { error?: string });
+    const body = await res.json().catch(() => ({}) as { error?: string; code?: string });
+    // The code travels along: 429 means a burst guard, a provider throttle or
+    // an empty wallet, and only the code tells them apart (see CloudJobError).
     throw new CloudJobError(
       typeof body.error === "string" ? body.error : `cloud TTS failed (${res.status})`,
       res.status,
+      typeof body.code === "string" ? { code: body.code } : undefined,
     );
   }
   const blob = await res.blob();
@@ -421,6 +503,8 @@ export function getLastTtsStatus(): { available: boolean; piper?: boolean; voice
 /** Probe neural TTS. Pass the SELECTED voice — readiness is per voice: having
  *  some other voice on disk says nothing about the one that is about to speak. */
 export async function checkTtsAvailable(voice?: string): Promise<{ available: boolean; piper?: boolean; voice?: boolean }> {
+  // No Piper on a phone, see checkWhisperAvailable.
+  if (!hasLocalVoice()) return { available: false };
   try {
     if (isTauri()) return await backendCall("tts_status", { voice });
     return { available: false };
@@ -434,7 +518,7 @@ export async function initTtsCheck(voice?: string): Promise<boolean> {
   // race — resolve_lu_python / the ComfyUI venv may not be ready when App.tsx
   // fires this — and caching `false` would stick for the whole session, so
   // every read-aloud silently fell back to the Windows SAPI voice and Piper
-  // never spoke at all (#77, ElBiggus). On a negative we leave ttsChecked
+  // never spoke at all (#77). On a negative we leave ttsChecked
   // false so the next caller (the lazy re-probe in useVoice, or Settings)
   // gets a fresh probe instead of the stale miss.
   // The cache is per voice: a positive for the voice that was selected earlier
@@ -484,8 +568,8 @@ export async function synthesizeNeural(text: string, voice?: string): Promise<st
  * http://localhost:8880/v1/audio/speech); `voice` is that engine's voice name.
  * Returns a playable blob URL (the Rust side honors the returned audio type).
  */
-export async function synthesizeExternal(text: string, url: string, voice?: string): Promise<string> {
-  const data = await backendCall<{ audio_base64?: string; mime?: string }>("synthesize_external", { text, url, voice });
+export async function synthesizeExternal(text: string, url: string, voice?: string, model?: string): Promise<string> {
+  const data = await backendCall<{ audio_base64?: string; mime?: string }>("synthesize_external", { text, url, voice, model: model?.trim() || undefined });
   if (!data?.audio_base64) throw new Error("external TTS returned no audio");
   return base64ToBlobUrl(data.audio_base64, data.mime || "audio/wav");
 }
@@ -497,6 +581,7 @@ export async function downloadPiperVoice(voice: string): Promise<void> {
 
 /** Voice ids already present on disk — used to mark the Settings picker. */
 export async function listInstalledPiperVoices(): Promise<string[]> {
+  if (!hasLocalVoice()) return [];
   try {
     if (isTauri()) return (await backendCall<string[]>("installed_piper_voices")) || [];
     return [];
@@ -559,11 +644,11 @@ export function parseWavPcm(
 
 /** Codec-free playback path: hand-parsed PCM into Web Audio, with Chromium's
  *  bundled decodeAudioData for compressed formats. Used when the media element
- *  fails (ElBiggus GH #77: on a Windows N edition without the Media Feature
+ *  fails (GH #77: on a Windows N edition without the Media Feature
  *  Pack, `new Audio(wav)` errors even though piper wrote a perfect wav —
  *  HTMLAudioElement decodes through Media Foundation, Web Audio does not). */
-async function playViaWebAudio(dataUrl: string): Promise<void> {
-  const bytes = await (await fetch(dataUrl)).arrayBuffer();
+async function playViaWebAudio(url: string): Promise<void> {
+  const bytes = await (await blobFromUrl(url)).arrayBuffer();
   const ctx = new AudioContext();
   try {
     const pcm = parseWavPcm(bytes);
@@ -753,7 +838,7 @@ export function createAudioRecorder(): AudioRecorder {
   return {
     start: async () => {
       pcmChunks = [];
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await openMicrophone();
       const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       audioCtx = new Ctx();
       inputRate = audioCtx.sampleRate;

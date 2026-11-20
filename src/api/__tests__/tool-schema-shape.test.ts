@@ -1,7 +1,7 @@
 /**
  * Schema-shape guard for every registered tool, on every transport (2026-08-05).
  *
- * David's bar: a tool is only finished when its schema arrives intact on every
+ * The owner's bar: a tool is only finished when its schema arrives intact on every
  * transport, for every model and every provider. The parity test compares
  * desktop against mobile and the roster test compares prompt against registry.
  * Neither one ever asks the simpler question: is the schema itself something
@@ -31,7 +31,7 @@ const TOOLS: MCPToolDefinition[] = toolRegistry.getAll()
 /** The permission map that hides nothing, so the transport checks see everything. */
 const ALL_ALLOWED = {
   filesystem: 'auto', terminal: 'auto', desktop: 'auto', web: 'auto',
-  system: 'auto', image: 'auto', video: 'auto', workflow: 'auto',
+  system: 'auto', image: 'auto', video: 'auto', workflow: 'auto', mcp: 'auto',
 } as const
 
 /** JSON-Schema types every one of the four transports understands. */

@@ -64,6 +64,8 @@ export interface CapturedArtifact {
 export interface AgentRunContext {
   /** Unique per run. Ownership token for the singleton mirror below. */
   token: string
+  /** Epoch ms of the start. A stop of computer control binds every run that was already going. */
+  startedAt?: number
   chatId: string | null
   conversationId: string | null
   workspace: AgentWorkspace | null
@@ -76,7 +78,7 @@ export interface AgentRunContext {
   mode: string | null
   /**
    * Die Freigabe-Entscheidung dieses Laufs, EINMAL beim Start aufgeloest
-   * (Auftrag 2.3, David 04.09.2026).
+   * (Auftrag 2.3, 04.09.2026).
    *
    * `confirmExec` ist codexModeKnobs().confirmExec, also die Antwort auf "fragt
    * dieser Lauf vor Werkzeugen mit beliebiger Ausfuehrung nach". Alles, was der
@@ -107,6 +109,12 @@ export interface AgentRunContext {
    */
   abortSignal?: AbortSignal
   /**
+   * A run that stays open while the user decides what to ask next: a voice
+   * session is one run from Start to Stop. That such a run is open does not
+   * mean it is working on anything (see `isAgentRunOpen`).
+   */
+  standing?: boolean
+  /**
    * Der Beweis fuer `run-slot.ts`s `runsInHeldLane` (Opus-Review Runde 4,
    * bau/review-w2lane.md): gesetzt, sobald DIESER Lauf die lokale Spur
    * wirklich haelt (`null` fuer einen Cloud-Lauf, der keine haelt). Ein
@@ -117,6 +125,53 @@ export interface AgentRunContext {
    * `abortSignal`): so ein Aufruf kann nur normal buchen, nie mitfahren.
    */
   heldLocalLane?: HeldLocalLane | null
+  /**
+   * This surface draws the confirmation card of set_setting in its tool calls
+   * (A11): the chat, Agent and Code. Unset for a voice session, a workflow and
+   * every caller outside a loop, so a change of an app setting there is
+   * refused instead of waiting for a card nobody sees. A sub-agent inherits
+   * its parent's run and is refused in sub-agent.ts by name.
+   */
+  settingsCard?: boolean
+  /**
+   * A long tool says how far it is, in one short line. Set by a surface that
+   * can pass it on while the call runs (the voice session hands it to the
+   * model's context). Undefined elsewhere; a tool calls it and never needs it.
+   */
+  onToolProgress?: (text: string) => void
+  /**
+   * The tool call that is running, as the surface knows it (the id of its card
+   * in the conversation). Set per call by the executor, see `runForCall`.
+   */
+  toolCallId?: string
+  /**
+   * Who owns a generation this call starts, in vram-handoff's cancel book.
+   * Unset: the conversation, so the turn's Stop reaches it. Set for a call
+   * that may go on in the background (lib/background-tools.ts): a Stop of a
+   * later turn in the same chat must not cancel it.
+   */
+  generationOwner?: string
+  /**
+   * C60 S3: the first tool of this run whose output came from outside LU (a
+   * web page, a file, a sub-agent). Set by the executor (lib/run-taint.ts),
+   * read by the self-control tools before they show a card.
+   */
+  taint?: { tool: string; at: number }
+  /** C60: cards the self-control tools showed in this run, capped there. */
+  selfControlCards?: number
+}
+
+/**
+ * The run as one tool call sees it: the same object, plus the id of the call.
+ * A view and not a copy, because tools write to the run (its workspace, its
+ * artifacts) and read fields the hook sets after the start; both must reach
+ * the one run object.
+ */
+export function runForCall(run: AgentRunContext, toolCallId: string): AgentRunContext {
+  return new Proxy(run, {
+    get: (target, key, receiver) => (key === 'toolCallId' ? toolCallId : Reflect.get(target, key, receiver)),
+    has: (target, key) => key === 'toolCallId' || Reflect.has(target, key),
+  })
 }
 
 interface AgentCtxState {
@@ -147,6 +202,55 @@ let _runSeq = 0
  * does not thread (standalone tool calls, older surfaces). Returns the object
  * the caller must pass down to its tool calls.
  */
+/** Runs between beginAgentRun and endAgentRun. */
+const openRuns = new Set<string>()
+
+/**
+ * The last runs of each conversation, newest last (C60 S3). The self-control
+ * tools ask whether the run BEFORE this one read foreign content: when the
+ * user answers "ja" to the model's own question, the question must not have
+ * come out of a web page. Only in memory: after a restart there is no earlier
+ * run, and the answer is "unknown", which counts as foreign.
+ */
+const runsByConversation = new Map<string, AgentRunContext[]>()
+
+function rememberRun(run: AgentRunContext): void {
+  if (!run.conversationId) return
+  const list = [...(runsByConversation.get(run.conversationId) ?? []), run].slice(-3)
+  runsByConversation.set(run.conversationId, list)
+}
+
+/**
+ * Work that has to wait until this run is over (C60): a model switch or an
+ * engine restart in the middle of the agent's own run would take the engine
+ * from under the run that asked for it. Runs at once when the run is already
+ * closed, or when there is no run.
+ */
+const afterRunJobs = new Map<string, (() => unknown)[]>()
+
+export function afterAgentRun(run: AgentRunContext | null | undefined, job: () => unknown): 'now' | 'after-run' {
+  if (!run || !openRuns.has(run.token)) {
+    void Promise.resolve().then(job).catch(() => {})
+    return 'now'
+  }
+  afterRunJobs.set(run.token, [...(afterRunJobs.get(run.token) ?? []), job])
+  return 'after-run'
+}
+
+/** The run of this conversation that started before `token`, if this app
+ *  session saw it. */
+export function previousRunOf(conversationId: string | null, token: string): AgentRunContext | undefined {
+  if (!conversationId) return undefined
+  const list = runsByConversation.get(conversationId) ?? []
+  const i = list.findIndex((r) => r.token === token)
+  return i > 0 ? list[i - 1] : undefined
+}
+
+/** Is this run still going? False for a token no run was opened with. */
+export function isAgentRunOpen(token: string | null | undefined): boolean {
+  return !!token && openRuns.has(token)
+}
+
 export function beginAgentRun(init: {
   chatId?: string | null
   conversationId?: string | null
@@ -154,10 +258,12 @@ export function beginAgentRun(init: {
   artifactMode?: boolean
   readOnlyShellTurn?: boolean
   mode?: string | null
+  settingsCard?: boolean
 }): AgentRunContext {
   _runSeq += 1
   const run: AgentRunContext = {
     token: `run-${Date.now().toString(36)}-${_runSeq}`,
+    startedAt: Date.now(),
     chatId: init.chatId ? String(init.chatId) : null,
     conversationId: init.conversationId ? String(init.conversationId) : null,
     workspace: normalizeWorkspace(init.workspace),
@@ -165,7 +271,10 @@ export function beginAgentRun(init: {
     readOnlyShellTurn: init.readOnlyShellTurn === true,
     mode: init.mode ?? null,
     artifacts: [],
+    ...(init.settingsCard ? { settingsCard: true } : {}),
   }
+  openRuns.add(run.token)
+  rememberRun(run)
   ctx.runToken = run.token
   ctx.chatId = run.chatId
   ctx.conversationId = run.conversationId
@@ -187,6 +296,14 @@ export function endAgentRun(run: AgentRunContext | null | undefined): void {
     return
   }
   run.artifacts = []
+  openRuns.delete(run.token)
+  const after = afterRunJobs.get(run.token)
+  if (after) {
+    afterRunJobs.delete(run.token)
+    // After the close, so a job that starts a new run (a model switch, an
+    // engine restart) does not race the run that asked for it.
+    for (const job of after) queueMicrotask(() => { void Promise.resolve().then(job).catch(() => {}) })
+  }
   if (ctx.runToken !== run.token) return
   clearActiveChatId()
 }
@@ -270,7 +387,7 @@ export function isReadOnlyShellTurn(run?: AgentRunContext | null): boolean {
   return pick(run, 'readOnlyShellTurn')
 }
 
-// ── Chat-tools artifact mode (David 2026-06-12) ────────────────
+// ── Chat-tools artifact mode (2026-06-12) ────────────────
 //
 // In PLAIN chat, "file writes" must behave like ChatGPT: the content is shown
 // IN the chat with a preview + download, never silently dumped to a folder.
@@ -313,7 +430,7 @@ export function takeChatArtifacts(run?: AgentRunContext | null): CapturedArtifac
   return out
 }
 
-// ── Multi-Repo Agent (Sprint C #8 from uselu) ──────────────────
+// ── Multi-Repo Agent (Sprint C #8 from the web app) ──────────────────
 //
 // When the agent loop runs in a 'folder' workspace (vs the per-chat
 // sandbox), the bridge resolves relative paths against `ws.path` and

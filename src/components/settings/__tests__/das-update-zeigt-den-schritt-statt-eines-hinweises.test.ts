@@ -4,7 +4,7 @@
  * Zen, Arch Linux, 06.09.2026: the update downloaded, asked for his password
  * and then failed. He had installed LU from the AUR package
  * locally-uncensored-bin, and the updater plugin cannot tell that apart from a
- * Debian install (UPDATER-LINUX-BEFUND.md).
+ * Debian install.
  *
  * The fix is not a sentence explaining that to him. On his install the same
  * two buttons now run LU's own install, and this is about what he SEES while

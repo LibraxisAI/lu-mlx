@@ -56,6 +56,7 @@ vi.mock('../../../../api/comfyui', () => ({
     type: string = 'output',
   ) =>
     `http://127.0.0.1:8188/view?filename=${filename}&subfolder=${subfolder ?? ''}&type=${type}`),
+  checkComfyConnection: vi.fn(async () => false),
 }))
 
 vi.mock('../../../../api/cloud/jobs', () => ({
@@ -136,10 +137,53 @@ describe('fetchGalleryItemBlob', () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
     await expect(fetchGalleryItemBlob(baseItem)).rejects.toThrow(/ComfyUI/)
   })
+
+  // Mac hand test of 3.0.6, 10.10.2026: an image made in the running session
+  // could not be picked as the Edit source ("Could not load that gallery
+  // image: Load failed"), one from an earlier day could. A fresh local render
+  // carries its bytes as a data: URL, and the webview's connect-src has no
+  // data: entry, so fetch() refuses it. After a restart the same tile holds a
+  // blob: URL read back from disk, which fetch() may read.
+  it('reads a render of the running session, whose address is a data: URL the webview will not fetch', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.startsWith('data:')) throw new TypeError('Load failed')
+      return { ok: true, blob: async () => new Blob(['wrong']) }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const item = { ...baseItem, dataUrl: `data:image/png;base64,${btoa('PNGBYTES')}`, localPath: '/renders/out.png' }
+
+    const blob = await fetchGalleryItemBlob(item)
+    expect(blob.type).toBe('image/png')
+    expect(await blob.text()).toBe('PNGBYTES')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  // Extend Video on the Mac (14.10.2026) picks a clip of the gallery. After a
+  // restart an MLX clip has its path and no blob: URL yet, and an empty file
+  // name, which galleryItemUrl would turn into a ComfyUI address.
+  it('reads an MLX render from disk when it has no blob: URL, and never asks ComfyUI', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    vi.mocked(backendCall).mockReset()
+    vi.mocked(backendCall).mockResolvedValueOnce(btoa('MP4BYTES') as never)
+    const item = { ...baseItem, type: 'video' as const, filename: '', localPath: '/videos/abc.mp4' }
+    const blob = await fetchGalleryItemBlob(item)
+    expect(vi.mocked(backendCall)).toHaveBeenCalledWith('read_media_file', { path: '/videos/abc.mp4' })
+    expect(blob.type).toBe('video/mp4')
+    expect(await blob.text()).toBe('MP4BYTES')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('an MLX render that left the disk says so in words', async () => {
+    vi.mocked(backendCall).mockReset()
+    vi.mocked(backendCall).mockRejectedValueOnce(new Error('No such file') as never)
+    const item = { ...baseItem, type: 'video' as const, filename: '', localPath: '/videos/gone.mp4' }
+    await expect(fetchGalleryItemBlob(item)).rejects.toThrow('This render is no longer on disk. Pick another one, or upload the file from disk.')
+  })
 })
 
 // Cloud renders are deleted after seven days (the Create banner says so, and
-// services/render-worker/src/reaper.ts now does it). A tile whose render is
+// the render worker now does it). A tile whose render is
 // gone must settle into an honest state, not retry a dead re-sign forever.
 describe('recoverGalleryUrl — expired cloud renders', () => {
   beforeEach(() => {
@@ -256,6 +300,19 @@ describe('recoverGalleryUrl — local MLX renders on disk', () => {
     await flush()
     expect(vi.mocked(backendCall)).not.toHaveBeenCalled()
     expect(useCreateStore.getState().gallery[0].unavailable).toBe(true)
+    // The engine did not answer, so the tile says offline (and comes back
+    // with it, see gallery-engine-recovery.test.ts).
+    expect(useCreateStore.getState().gallery[0].unavailableReason).toBe('offline')
+  })
+
+  it('an engine that answers but lacks the file says the file is gone', async () => {
+    const { checkComfyConnection } = await import('../../../../api/comfyui')
+    vi.mocked(checkComfyConnection).mockResolvedValueOnce(true)
+    const item = { ...baseItem, id: 'comfy-gone' }
+    useCreateStore.setState({ gallery: [item] })
+    recoverGalleryUrl(item)
+    await flush()
+    expect(useCreateStore.getState().gallery[0].unavailableReason).toBe('gone')
   })
 })
 

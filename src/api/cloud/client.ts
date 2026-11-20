@@ -6,6 +6,7 @@
 import { CLOUD_BASE } from './config'
 import { getAccessToken } from './supabase'
 import { parseRetryAfter } from '../../lib/http-status'
+import { refreshOutage } from '../../lib/cloud-outage-watch'
 
 export class CloudJobError extends Error {
   readonly status: number
@@ -18,10 +19,12 @@ export class CloudJobError extends Error {
   /** What `retry-after` asked for, in ms, the burst guard's window is fixed
    *  and up to a minute long, so the number is worth showing. */
   readonly retryAfterMs?: number
+  /** With `code: 'quote_changed'` (409): the price the server quotes now. */
+  readonly credits?: number
   constructor(
     message: string,
     status: number,
-    meta?: { code?: string; retryAfterMs?: number; cause?: unknown },
+    meta?: { code?: string; retryAfterMs?: number; cause?: unknown; credits?: number },
   ) {
     // Opus-Review Nachbesserung 7 (3.0.1, D2): the reworded network-failure
     // message below intentionally loses the engine's own text, `cause`
@@ -33,6 +36,7 @@ export class CloudJobError extends Error {
     this.status = status
     this.code = meta?.code
     this.retryAfterMs = meta?.retryAfterMs
+    this.credits = meta?.credits
   }
 }
 
@@ -204,8 +208,14 @@ export async function cloudFetch(path: string, init: CloudFetchInit = {}): Promi
     if (!token) throw new CloudJobError('not signed in', 401)
     const headers = new Headers(init.headers)
     headers.set('authorization', `Bearer ${token}`)
-    return await fetch(`${CLOUD_BASE}${path}`, { ...rest, headers, signal: ac.signal })
+    const res = await fetch(`${CLOUD_BASE}${path}`, { ...rest, headers, signal: ac.signal })
+    // A failure on the server's side may be part of an outage: ask whether
+    // one is announced, so the line and the sentences are up to date
+    // (lib/cloud-outage.ts). Not awaited, the caller gets its answer as is.
+    if (res.status >= 500) void refreshOutage({ force: false })
+    return res
   } catch (err) {
+    if (!callerAborted && !(err instanceof CloudJobError && err.status === 401)) void refreshOutage({ force: false })
     // Engines disagree on whether a fetch rejects with the abort *reason*, so
     // the deadline is remembered here instead of read back off the signal.
     // 408 keeps pollJob's policy intact, a timeout is worth another try.

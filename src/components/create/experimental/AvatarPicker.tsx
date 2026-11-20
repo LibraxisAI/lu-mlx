@@ -1,6 +1,6 @@
 // Der Presenter-Waehler.
 //
-// 19.09.2026, Entscheid von David: "man muss ja irgendwie den Charakter vorher
+// 19.09.2026, Entscheid des Inhabers: "man muss ja irgendwie den Charakter vorher
 // auswaehlen, bevor man Geld ausgibt fuer eine Generation". Eine Namensliste
 // mit 500 Eintraegen leistet das nicht. Also Kacheln mit Gesicht, Suche ueber
 // den Namen, und die Person steht als Ueberschrift ueber ihren Posen: dieselbe

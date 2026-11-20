@@ -12,7 +12,7 @@ const req = (command: string, cloudReason = false) => ({
 })
 
 beforeEach(() => {
-  useCodexConfirmStore.setState({ pending: null, resolve: null })
+  useCodexConfirmStore.setState({ pending: null, resolve: null, queue: [] })
 })
 
 describe('codexConfirmStore', () => {
@@ -36,15 +36,40 @@ describe('codexConfirmStore', () => {
     expect(useCodexConfirmStore.getState().resolve).toBeNull()
   })
 
-  it('never strands a resolver when a second request arrives', async () => {
-    // Two tools racing would otherwise leave the first awaiting forever, and
-    // that tool call hangs with no visible cause. Deny the older one.
-    const first = useCodexConfirmStore.getState().ask(req('first'))
+  // Bug hunt 01.10.2026 (C4). A second request used to answer the first "no"
+  // and take its place: a command the user never saw was refused in their
+  // name. Two runs in two conversations, or a run and its sub-agent, ask at
+  // the same time. The second waits behind the first; nobody is stranded.
+  it('a second request waits behind the first instead of refusing it', async () => {
+    let firstAnswer: boolean | null = null
+    const first = useCodexConfirmStore.getState().ask(req('first')).then((a) => { firstAnswer = a; return a })
     const second = useCodexConfirmStore.getState().ask(req('second'))
-    await expect(first).resolves.toBe(false)
-    expect(useCodexConfirmStore.getState().pending?.command).toBe('second')
+    await Promise.resolve()
+    expect(firstAnswer).toBeNull()
+    expect(useCodexConfirmStore.getState().pending?.command).toBe('first')
+
     useCodexConfirmStore.getState().answer(true)
-    await expect(second).resolves.toBe(true)
+    await expect(first).resolves.toBe(true)
+    expect(useCodexConfirmStore.getState().pending?.command).toBe('second')
+
+    useCodexConfirmStore.getState().answer(false)
+    await expect(second).resolves.toBe(false)
+    expect(useCodexConfirmStore.getState().pending).toBeNull()
+  })
+
+  it('a stopped run takes only its own request out of the line', async () => {
+    const ac = new AbortController()
+    const first = useCodexConfirmStore.getState().ask(req('first'))
+    const second = useCodexConfirmStore.getState().ask(req('second'), ac.signal)
+    const third = useCodexConfirmStore.getState().ask(req('third'))
+    ac.abort()
+    await expect(second).resolves.toBe(false)
+    expect(useCodexConfirmStore.getState().queue.map((w) => w.req.command)).toEqual(['first', 'third'])
+    useCodexConfirmStore.getState().answer(true)
+    await expect(first).resolves.toBe(true)
+    expect(useCodexConfirmStore.getState().pending?.command).toBe('third')
+    useCodexConfirmStore.getState().answer(true)
+    await expect(third).resolves.toBe(true)
   })
 
   it('carries the cloud reason through, since it picks which setting to clear', () => {

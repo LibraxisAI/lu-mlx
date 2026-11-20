@@ -1,7 +1,7 @@
 /**
  * Regression: the Motion Control card kept printing "add a character image and
  * a driving dance/pose video above, then hit Create" while both chips were
- * filled and the sampler was already counting steps (David, 2026-07-26, live
+ * filled and the sampler was already counting steps (2026-07-26, live
  * run on the 2.5.9 ship exe). The caption hung off `!needsPrompt` alone, so it
  * never reacted to the inputs or to a run being in flight.
  *
@@ -35,7 +35,7 @@ describe('shouldShowLaneHint', () => {
   })
 
   it('hides every caption while a run is in flight', () => {
-    // The exact case David watched: ready inputs plus a running sampler.
+    // The exact case the owner watched: ready inputs plus a running sampler.
     expect(show('motion', { specialReady: true, isGenerating: true })).toBe(false)
     // And the incomplete case too, because mid run it is not an instruction.
     expect(show('motion', { specialReady: false, isGenerating: true })).toBe(false)
@@ -68,7 +68,19 @@ describe('noPromptHint', () => {
   it('names the inputs each lane is waiting for', () => {
     expect(noPromptHint('motion')).toContain('driving dance/pose video')
     expect(noPromptHint('lipsync')).toContain('voice')
-    expect(noPromptHint('character')).toContain('4 to 30 photos')
+    // GH #121: the local trainer takes 100, the cloud job API 30.
+    expect(noPromptHint('character', 'local')).toContain('4 to 100 photos')
+    expect(noPromptHint('character', 'cloud')).toContain('4 to 30 photos')
+  })
+
+  it('speaks of a style, not of one person, in the style mode (FEHLER-P8 #1)', () => {
+    const style = noPromptHint('character', 'local', false, 'style')
+    expect(style).toBe('Add 4 to 100 pictures that share the style above, give it a name, then hit Create to train.')
+    expect(style).not.toMatch(/person|trigger|photos/)
+    expect(noPromptHint('character', 'local', true, 'style')).toBe(style)
+    // The cloud has no style mode: a leftover choice changes nothing there.
+    expect(noPromptHint('character', 'cloud', false, 'style')).toBe(noPromptHint('character', 'cloud'))
+    expect(noPromptHint('character', 'local', false, 'character')).toContain('photos of one person or character')
   })
 
   it('keeps the eraser on its own line instead of the cutout default', () => {

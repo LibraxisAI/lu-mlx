@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Create in Locally Uncensored: Image, Video, Audio, Character Studio and Trainer</title>
+<title>Create in Locally Uncensored: Image, Video, Audio and Trainer</title>
 <meta name="description" content="How the Create tab works in Locally Uncensored: image generation and editing, video, music and speech, the Character Studio and the LoRA trainer, with local requirements and the hosted alternative.">
 <meta name="robots" content="index, follow">
 <meta name="theme-color" content="#0a0a0a">
@@ -15,15 +15,18 @@
 <meta property="og:image" content="https://locallyuncensored.com/social-preview.png">
 <meta name="twitter:card" content="summary_large_image">
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"TechArticle","headline":"Create in Locally Uncensored: Image, Video, Audio, Character Studio and Trainer","description":"How the Create tab works in Locally Uncensored: image generation and editing, video, music and speech, the Character Studio and the LoRA trainer, with local requirements and the hosted alternative.","url":"https://locallyuncensored.com/guide/create/","dateModified":"2026-09-22","inLanguage":"en","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/guide/create/"},"isPartOf":{"@type":"WebPage","name":"Locally Uncensored Handbook: Install, Chat, Agent, Code, Create, Cloud","url":"https://locallyuncensored.com/guide/"},"about":{"@type":"SoftwareApplication","name":"Locally Uncensored","operatingSystem":"Windows, Linux","applicationCategory":"UtilitiesApplication"}}
+{"@context":"https://schema.org","@type":"TechArticle","headline":"Create in Locally Uncensored: Image, Video, Audio, Character Studio and Trainer","description":"How the Create tab works in Locally Uncensored: image generation and editing, video, music and speech, the Character Studio and the LoRA trainer, with local requirements and the hosted alternative.","url":"https://locallyuncensored.com/guide/create/","dateModified":"2026-10-15","inLanguage":"en","author":{"@type":"Person","name":"PurpleDoubleD","url":"https://github.com/PurpleDoubleD"},"publisher":{"@type":"Organization","name":"Locally Uncensored","url":"https://locallyuncensored.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://locallyuncensored.com/guide/create/"},"isPartOf":{"@type":"WebPage","name":"Locally Uncensored Handbook: Install, Chat, Agent, Code, Create, Cloud","url":"https://locallyuncensored.com/guide/"},"about":{"@type":"SoftwareApplication","name":"Locally Uncensored","operatingSystem":"Windows, Linux, macOS","applicationCategory":"UtilitiesApplication"}}
 </script>
 <link rel="icon" href="/favicon.png">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://locallyuncensored.com/"},{"@type":"ListItem","position":2,"name":"Guide","item":"https://locallyuncensored.com/guide/"},{"@type":"ListItem","position":3,"name":"Create: images, video, audio and characters","item":"https://locallyuncensored.com/guide/create/"}]}
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/assets/lu.css">
 <script defer src="/assets/lu.js"></script>
-  <script data-goatcounter="https://lu-uncensored.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+  <script data-goatcounter="https://purple47.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
 </head>
 <body>
 <nav class="lu-nav">
@@ -33,15 +36,17 @@
   </a>
   <div class="lu-nav-links" id="lu-nav-links">
     <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/pricing/">Pricing</a>
     <a class="lu-nav-link" href="/blog/">Blog</a>
     <a class="lu-nav-link" href="/guide/">Guide</a>
     <a class="lu-nav-link" href="/remote-access/">Remote</a>
   </div>
   <div class="lu-nav-right">
-    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">1600+&#8202;⭐</span></a>
-    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">800+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">4200+&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">1700+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
     <span class="lu-nav-sep"></span>
     <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="he-cta" href="/pricing/" aria-label="LU Cloud plans and what they include"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>Cloud</a>
     <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
     <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
   </div>
@@ -61,6 +66,7 @@
 <a href="#music">Music</a>
 <a href="#character">Character Studio and the trainer</a>
 <a href="#advanced">Advanced settings and LoRAs</a>
+<a href="#workflows">Your own ComfyUI workflows</a>
 <a href="#gallery">The gallery</a>
 <a href="#wrong">When it goes wrong</a>
 </nav>
@@ -78,7 +84,7 @@
 <tr><td>Erase (Erase Object)</td><td>Removes a painted area and fills it in.</td><td>Hosted only</td></tr>
 <tr><td>Video</td><td>A short clip from a text prompt.</td><td>Local and hosted</td></tr>
 <tr><td>Animate (Animate Image)</td><td>Turns a still picture into a clip.</td><td>Local and hosted</td></tr>
-<tr><td>Character (Character Studio)</td><td>Trains a character from photos, then uses it in prompts.</td><td>Local (12 GB card) and hosted</td></tr>
+<tr><td>Character (Character Studio)</td><td>Trains a character from photos, then uses it in prompts.</td><td>Local (12 GB card, or a Mac with 24 GB) and hosted</td></tr>
 <tr><td>Lipsync (Talking Character)</td><td>A face that speaks an audio clip.</td><td>Local and hosted</td></tr>
 <tr><td>Music</td><td>A track from a description, with optional lyrics.</td><td>Local and hosted</td></tr>
 <tr><td>Extend (Extend Video)</td><td>Continues a clip.</td><td>Local and hosted</td></tr>
@@ -89,7 +95,7 @@
 
 <h2 id="comfyui">ComfyUI, the program behind the lanes</h2>
 
-<p>Every local lane runs on ComfyUI, an open source image and video program that the app installs, starts, repairs and updates for you. You never see its node graphs; the app builds them. If you skipped it in the wizard, the first local lane you open shows a setup card, and Settings, AI Backends, ComfyUI (Image &amp; Video) has the buttons "Install ComfyUI", "Start", "Stop", "Restart", "Repair environment" and "Update ComfyUI".</p>
+<p>Every local lane runs on ComfyUI, an open source image and video program that the app installs, starts, repairs and updates for you. You never have to see its node graphs; the app builds them. If you have a ComfyUI workflow of your own, you can import it and run it from Create, as the section <a href="#workflows">Your own ComfyUI workflows</a> below describes. If you skipped it in the wizard, the first local lane you open shows a setup card, and Settings, AI Backends, ComfyUI (Image &amp; Video) has the buttons "Install ComfyUI", "Start", "Stop", "Restart", "Repair environment" and "Update ComfyUI".</p>
 
 <p>What "Install ComfyUI" does, in the order the status line shows it: it checks for Python (on Windows it installs Python 3.12 through winget if there is none), then "Step 1/4: Downloading ComfyUI repository...", "Step 2/4" downloads PyTorch built for your graphics card ("Downloading PyTorch + Torchvision + Torchaudio (~2 GB total)", which the status line says takes ten to fifteen minutes on a typical home connection, with the live pip output below it), "Step 3/4: Installing ComfyUI dependencies", and "Step 4/4: Checking that the environment really starts...". At the end: "Install finished. ComfyUI is ready to start." The whole install needs about 5 GB of disk. ComfyUI itself listens on port 8188 on your machine.</p>
 
@@ -166,13 +172,13 @@
 
 <h2 id="character">Character Studio and the trainer</h2>
 
-<p>The Character Studio trains a LoRA, a small add-on file for the image model that knows one person or character, from your photos. Afterwards a trigger word in a prompt summons that character. The lane has two tabs: "Train new" and "Use character".</p>
+<p>The Character Studio trains a LoRA, a small add-on file for the image model that knows one person or character, from your photos. Afterwards a trigger word in a prompt summons that character. The lane has two tabs: "Train new" and "Use character". The steps below are for Windows and Linux. A Mac with 24 GB of memory or more trains with its own engine and needs no trainer setup; the <a href="/guide/character-studio/#train-mac">Character Studio guide</a> has the Mac steps, the Low VRAM setting and the text field under each photo.</p>
 
 <div class="step">
 <span class="step-num">1</span>
 <span class="step-title">Add photos and a trigger word</span>
 <div class="step-body">
-<p>The stage reads "Drop 4 to 30 photos of your character here" and "One person or character, varied angles and lighting works best". Add between 4 and 30 photos (png, jpg or webp, up to 40 MB each). The counter reads "7/30 photos" and, below four, "need at least 4". Type a trigger word into the field "Trigger word, e.g. davechar": one word, no spaces, up to 30 characters. It becomes the character's name and the word you put in prompts.</p>
+<p>The stage reads "Drop 4 to 100 photos of your character here" in Local mode ("Drop 4 to 30 photos…" in Cloud mode) and "One person or character, varied angles and lighting works best". Add between 4 and 100 photos locally, or 4 and 30 on LU Cloud (png, jpg or webp, up to 40 MB each). The counter reads, for example, "7/100 photos" and, below four, "need at least 4". Type a trigger word into the field "Trigger word, e.g. davechar": one word, no spaces, up to 30 characters. It becomes the character's name and the word you put in prompts.</p>
 </div>
 </div>
 
@@ -200,7 +206,7 @@
 <span class="step-num">4</span>
 <span class="step-title">Use the character</span>
 <div class="step-body">
-<p>The "Use character" tab lists your characters as chips with the trigger word ("Trigger word: davechar" on hover). Pick one; the footer reads "Put "davechar" in your prompt. Works best with a Z Image base model." Then switch to the Image lane, keep the LoRA active in the LoRA stack under the advanced settings, and write a prompt that contains the trigger word. Trained characters land in ComfyUI's <code>models/loras</code> folder as <code>char_&lt;trigger&gt;_zimage.safetensors</code>.</p>
+<p>The "Use character" tab lists your characters as chips with the trigger word ("Trigger word: davechar" on hover). Pick one: its LoRA is switched on, and the Z Image model it was trained for is selected when one is installed. The footer reads "Put "davechar" in your prompt and describe the key features too. The trigger word alone often does not hold the look." Then switch to the Image lane and write a prompt that contains the trigger word. The Image, Edit and video lanes also have a character chip next to the model chip, which picks the character right there. Trained characters land in ComfyUI's <code>models/loras</code> folder as <code>char_&lt;trigger&gt;_zimage.safetensors</code>.</p>
 </div>
 </div>
 
@@ -208,7 +214,56 @@
 
 <p>"Advanced settings" under the composer opens the controls the Quality preset hides: Steps, CFG scale (or Guidance), Width and Height, Seed (-1 = random; the gallery shows the seed a picture used, so you can repeat it), Batch size, and for video Frames and FPS. An Expert group has Sampler, Scheduler, Denoise, Mask edge feather, VAE and Skip CLIP layers. Leave those alone until you know what they do; the presets are tuned.</p>
 
-<p>The LoRA stack lists the add-on files in ComfyUI's <code>models/loras</code> folder, each with a strength. Empty, it reads "No LoRAs found yet. Drop .safetensors files into ComfyUI's models/loras folder and hit Rescan. Characters trained in Character Studio land there automatically." Models has a LoRAs tab of its own: "Get new" searches CivitAI for LoRAs and downloads what you pick straight into that folder, "Installed" lists what is there with its size and deletes a file you no longer want. A LoRA from Hugging Face still goes into the folder by hand. The CivitAI API key and the Hugging Face token under Settings, AI Backends unlock downloads those sites gate behind a login.</p>
+<p>The LoRA stack lists the add-on files in ComfyUI's <code>models/loras</code> folder, each with a strength. Empty, it reads "No LoRAs found yet. Drop .safetensors files into ComfyUI's models/loras folder and hit Rescan. Characters trained in Character Studio land there automatically." Models has a LoRAs tab of its own: "Get new" searches CivitAI for LoRAs and downloads what you pick straight into that folder, "Installed" lists what is there with its size and deletes a file you no longer want. The card "Add a LoRA from a link" in Get new takes a CivitAI model link or a Hugging Face link to a .safetensors file: "Check link" reads the file name, base model and size before anything is downloaded, and a file that is not a LoRA is refused. The CivitAI API key and the Hugging Face token under Settings, AI Backends unlock downloads those sites gate behind a login.</p>
+
+<h2 id="workflows">Your own ComfyUI workflows</h2>
+
+<p>If a workflow already does what you want in ComfyUI, you can import it and run it from Create without opening the node graph. This runs on Windows and Linux, in Local mode; a Mac runs no ComfyUI workflows.</p>
+
+<div class="step">
+<span class="step-num">1</span>
+<span class="step-title">Save it in ComfyUI</span>
+<div class="step-body">
+<p>Use "Save", "Export" or "Save (API Format)" in ComfyUI. The regular save format is converted with the node definitions of the running ComfyUI, so ComfyUI has to be started while you import. If it is not, the import says "ComfyUI has to be running to import a workflow saved in the regular format, because the node settings are read from it."</p>
+<p>Reroute and Primitive nodes are resolved, notes and muted nodes are left out, and bypassed nodes pass their input through. Subgraphs are unpacked the way ComfyUI unpacks them when it runs a workflow, nested ones and ones used more than once included, so the stock templates built on subgraphs can be imported. A workflow with the older group nodes is turned down: export it with "Save (API Format)" instead.</p>
+</div>
+</div>
+
+<div class="step">
+<span class="step-num">2</span>
+<span class="step-title">Import one file or a folder</span>
+<div class="step-body">
+<p>In Create, the workflow button sits among the controls of the lane. On Video, Animate and Motion Control it reads "Use your own ComfyUI workflow"; on the other lanes it is a small icon named "Workflows and tags". It opens the window "Workflows &amp; tags". Under "Install a workflow", "Choose files" picks one or several .json files, "Choose folder" imports every .json in a folder, and the box "Or paste the workflow JSON here" with "Install pasted workflow" takes pasted JSON.</p>
+<p>A workflow from a file is named after the file. With several files, each one gets its own result line under a count such as "Imported 3 of 4". A converted file says so, for example "Converted from the regular ComfyUI format (2 subgraphs unpacked)". Importing again under the same name updates the workflow in place and keeps its tags.</p>
+</div>
+</div>
+
+<div class="step">
+<span class="step-num">3</span>
+<span class="step-title">Install the node packs it needs</span>
+<div class="step-body">
+<p>When ComfyUI does not know a node of the workflow, the import names it, and a box "Missing node packs" appears. For a node whose pack LU knows, it offers the install right there; for any other, it points you to Settings, AI Backends, ComfyUI node packs, where you paste the pack's link. LU says before the install that a node pack is code that runs inside ComfyUI with the same access to your computer as ComfyUI itself. Install only packs you trust. Then press "Restart ComfyUI" and import the workflow again.</p>
+<p>The section ComfyUI node packs (Windows and Linux) lists every pack in the custom_nodes folder with where it came from, its branch, commit and date. It installs a pack from an https link to a repository on github.com, gitlab.com or codeberg.org, updates it, and removes it to the trash. A ComfyUI on another machine is not managed from here.</p>
+</div>
+</div>
+
+<div class="step">
+<span class="step-num">4</span>
+<span class="step-title">Pair it with a model and pick it</span>
+<div class="step-body">
+<p>A tag pairs a workflow with a model. Create one on the Tags view of the same window, for example the model family the workflow was built for, and give it to the workflow on the Workflows view and to a model on the Models view. Then open "Advanced settings" in Create. The Workflow selector lists every workflow whose tags match the current model. Pick yours instead of Auto and the next render runs through your graph. Your prompt, size, steps and seed still go in. On Motion Control only the model, prompt, seed, character picture and driving video are filled in; the rest runs as you saved it. Set the selector back to Auto for the built-in graph.</p>
+</div>
+</div>
+
+<div class="step">
+<span class="step-num">5</span>
+<span class="step-title">Change any setting of the workflow</span>
+<div class="step-body">
+<p>With your workflow picked, "Advanced settings" shows "Workflow parameters": each node with its values, such as the VAE, CLIP skip, LoRA strength, denoise or a value of a custom node. Numbers keep the limits ComfyUI states, and lists offer the choices ComfyUI has. What LU sets on its own (prompt, seed, size, steps, CFG, sampler, scheduler, model) is named on its node and not offered twice. Nodes fold, and "Search by name" finds a setting. Changes are kept per workflow and go into every run; "Reset" goes back to the values in the file.</p>
+</div>
+</div>
+
+<p>What has run: on Windows, stock templates without subgraphs were imported in the app, one by file and several from a folder, and one of them made a picture. Subgraphs have run in automated tests only, not yet against a running ComfyUI.</p>
 
 <h2 id="gallery">The gallery</h2>
 
@@ -258,6 +313,15 @@
   <div class="footer-row footer-links">
     <a href="https://locallyuncensored.com/blog/">Blog</a>
     <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/pricing/">Pricing</a>
+    <a href="https://locallyuncensored.com/cloud/">LU Cloud</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-chat-online/">Uncensored AI chat online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-image-generator-online/">Image generator online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-video-generator-online/">Video generator online</a>
+    <a href="https://locallyuncensored.com/unrestricted-ai/">Unrestricted AI</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-coding-agent/">AI coding agent</a>
+    <a href="https://locallyuncensored.com/alternatives/">Alternatives</a>
+    <a href="https://locallyuncensored.com/is-locally-uncensored-safe/">Is it safe?</a>
     <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
     <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
     <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
@@ -265,6 +329,9 @@
     <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
     <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
     <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+    <a href="https://locallyuncensored.com/privacy/">Privacy</a>
+    <a href="https://locallyuncensored.com/terms/">Terms</a>
+    <a href="https://locallyuncensored.com/impressum/">Impressum</a>
   </div>
 </footer>
 </body>

@@ -11,7 +11,7 @@
  * createStore, mocked network/catalog layer) with a hardcore adult prompt.
  * Before the fix, this prompt passed the client gate silently and went on to
  * call uploadInput/submitCloudJob; after the fix it is refused before either
- * runs, exactly like uselu's own useCloudCreate.
+ * runs, exactly like the web app's own useCloudCreate.
  *
  * Run: npx vitest run src/hooks/__tests__/useCloudCreate-b3-adult-gate-fires-before-upload.test.ts
  */
@@ -63,6 +63,9 @@ vi.mock('../../stores/cloudCatalogStore', () => ({
   resolveOpPick: () => 'test-model',
   cloudModelById: () => undefined,
   cloudMediaLive: () => true,
+  // No rule by length for the test model: the start sends no ceiling.
+  lengthPrice: () => undefined,
+  lengthCredits: () => 0,
 }))
 
 import { useCloudCreate } from '../useCloudCreate'

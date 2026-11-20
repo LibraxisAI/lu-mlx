@@ -22,7 +22,7 @@ describe('comfyCorsSignature', () => {
 
   it('separates two different ComfyUIs and two different versions', () => {
     expect(comfyCorsSignature('localhost', 8188, '0.33.0'))
-      .not.toBe(comfyCorsSignature('192.168.0.54', 8188, '0.33.0'))
+      .not.toBe(comfyCorsSignature('192.168.1.54', 8188, '0.33.0'))
     expect(comfyCorsSignature('localhost', 8188, '0.33.0'))
       .not.toBe(comfyCorsSignature('localhost', 8188, '0.34.0'))
   })
@@ -60,7 +60,7 @@ describe('shouldShowCorsNotice', () => {
 
   it('comes back once for a different ComfyUI or a new version', () => {
     expect(shouldShowCorsNotice(true, 'localhost:8188|0.34.0', SIG)).toBe(true)
-    expect(shouldShowCorsNotice(true, 'lu-box:8188|0.33.0', SIG)).toBe(true)
+    expect(shouldShowCorsNotice(true, 'otherbox:8188|0.33.0', SIG)).toBe(true)
   })
 })
 

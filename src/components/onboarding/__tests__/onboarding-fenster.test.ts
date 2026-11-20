@@ -113,10 +113,18 @@ describe('die Dekoration folgt dem Hauptfenster der jeweiligen Plattform', () =>
   it('Windows: rahmenlos und transparent ohne DWM-Schatten, wie das Hauptfenster', () => {
     expect(win.decorations).toBe(false)
     expect(win.transparent).toBe(true)
-    expect(RUST).toContain('#[cfg(not(target_os = "macos"))]')
-    expect(RUST).toContain('.decorations(false).transparent(true)')
+    expect(RUST).toContain('#[cfg(target_os = "windows")]\n    let builder = builder.decorations(false).transparent(true);')
     expect(RUST).toContain('#[cfg(target_os = "windows")]')
     expect(RUST).toContain('window.set_shadow(false)')
+  })
+
+  // GH #145 (Bazzite, RX 9060 XT, Wayland und X11): ein transparentes
+  // WebKitGTK-Fenster verschwindet, sobald es den Fokus hat.
+  it('Linux: rahmenlos wie Windows, aber deckend, Haupt- und Onboarding-Fenster', () => {
+    const lin = JSON.parse(read('src-tauri', 'tauri.linux.conf.json')).app.windows[0]
+    expect(lin.decorations).toBe(false)
+    expect(lin.transparent).toBe(false)
+    expect(RUST).toContain('#[cfg(target_os = "linux")]\n    let builder = builder.decorations(false);')
   })
 
   it('rahmenlos braucht eine Ziehfläche — der Streifen bleibt, festgenagelt', () => {
@@ -126,7 +134,12 @@ describe('die Dekoration folgt dem Hauptfenster der jeweiligen Plattform', () =>
 
   it('im eigenen Fenster gibt es kein Maximieren, auf dem Mac keine eigenen Knöpfe', () => {
     expect(ONBOARDING_TSX).toContain("const ownWindow = hostWindow === 'onboarding'")
-    expect(ONBOARDING_TSX).toContain('{!(ownWindow && isMacOS()) && (<>')
+    // Seit dem 09.10.2026 gilt das auf dem Mac auch im Hauptfenster (der
+    // Notweg ohne eigenes Fenster): dort zeichnet das System die Ampeln
+    // ebenfalls, und die drei Knoepfe rechts waren ein zweiter Satz.
+    // e2e/mac-persona-walk.spec.ts haelt es im Browser fest, samt Windows.
+    expect(ONBOARDING_TSX).toContain('{!isMacOS() && (<>')
+    expect(ONBOARDING_TSX).not.toContain('{!(ownWindow && isMacOS()) && (<>')
     expect(ONBOARDING_TSX).toContain('{!ownWindow && (')
     expect(RUST).toContain('.resizable(false)')
     expect(RUST).toContain('.maximizable(false)')
@@ -202,7 +215,8 @@ describe('die Größe ist gemessen, nicht geraten', () => {
 
 describe('„Re-run onboarding" bringt das kleine Fenster zurück — über den Marker', () => {
   it('die Einstellungen löschen den Marker, und die Fenster folgen ihm', () => {
-    const settings = codeOnly(read('src', 'components', 'settings', 'SettingsPage.tsx'))
+    expect(codeOnly(read('src', 'components', 'settings', 'SettingsPage.tsx'))).toContain('rerunOnboarding()')
+    const settings = codeOnly(read('src', 'lib', 'onboarding-rerun.ts'))
     expect(settings).toContain("await backendCall('set_onboarding_done', { done: false })")
     const system = read('src-tauri', 'src', 'commands', 'system.rs')
     expect(system).toContain('crate::onboarding_window::follow_marker(&app, done);')
@@ -228,11 +242,14 @@ describe('das Fenster selbst', () => {
     expect(open).toContain('WebviewUrl::default()')
   })
 
-  it('zu heißt Ende, solange das Onboarding nicht fertig ist', () => {
+  it('zu heißt Ende, solange die erste Einrichtung nicht fertig ist', () => {
     const open = RUST.slice(RUST.indexOf('pub fn open('), RUST.indexOf('fn quit('))
     expect(open).toContain('tauri::WindowEvent::CloseRequested')
-    expect(open).toContain('if !is_onboarding_done()')
-    expect(open).toContain('quit(&handle)')
+    expect(open).toContain('on_close(is_onboarding_done(), RERUN.load(Ordering::SeqCst))')
+    expect(open).toContain('OnClose::Quit => quit(&handle)')
+    // B6: ein abgebrochener erneuter Durchlauf fuehrt zurueck in die App.
+    expect(open).toContain('(false, false) => OnClose::Quit')
+    expect(open).toContain('OnClose::BackToTheApp => back_to_the_app(&handle)')
     const quit = RUST.slice(RUST.indexOf('fn quit('), RUST.indexOf('#[tauri::command]'))
     expect(quit).toContain('shutdown_subprocesses()')
     expect(quit).toContain('app.exit(0)')

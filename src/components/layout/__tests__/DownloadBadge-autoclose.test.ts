@@ -48,6 +48,15 @@ describe('DownloadBadge tray auto-close', () => {
     expect(src).not.toMatch(/autoOpened/)
   })
 
+  it('counts a cancelled bundle as something to show, so a cancel does not shut the tray', () => {
+    // The box, 03.10.2026: "Cancel all" removed the last row, `any` went
+    // false, and the tray that had opened itself closed on the spot. The
+    // cancelled files are listed (lib/download-tray) and count here.
+    expect(src).toMatch(/const cancelledShown = comfyBundles\.reduce\(\(n, b\) => n \+ b\.cancelled\.length, 0\)/)
+    expect(src).toMatch(/const listed = textEntries\.length \+ comfyEntries\.length \+ mlxEntries\.length \+ cancelledShown/)
+    expect(src).toMatch(/const hasAny = listed > 0/)
+  })
+
   it('leaves a hand-opened tray alone', () => {
     // Clicking the trigger drops the flag, so the close branch skips it.
     expect(src).toMatch(/onClick=\{\(\) => setTray\(\{ open: !open, auto: false \}\)\}/)

@@ -1,5 +1,5 @@
 /**
- * GH #129, "[Bug]: token" (nicolasoliver1jclj1, 2026-09-11).
+ * GH #129, "[Bug]: token" (2026-09-11).
  *
  * Ein eigener OpenAI-kompatibler Server, ein Modell mit 256k Kontext. LU zeigte
  * "6.4K", bot keinen Fensterwaehler an, und nach dem Umbenennen des Modells auf
@@ -267,7 +267,7 @@ describe('GH #129: max_tokens wird nicht mehr geraten', () => {
   it('ein benanntes Modell aus der gepflegten Liste behaelt seinen Deckel (Bug 5)', async () => {
     // Die Ausnahme mit Namen: `KNOWN_CONTEXT` ist eine Liste exakter Ids mit
     // veroeffentlichten Fenstern, keine Teilzeichenketten-Heuristik. Sie
-    // schuetzt seit dem 2026-07-11 vor DeepInfras Ueberdeckelung, und #129
+    // schuetzt seit dem 2026-07-11 vor der Ueberdeckelung des Upstreams, und #129
     // nimmt ihr das nicht weg.
     const provider = new OpenAIProvider({
       id: 'openai', name: 'Remote', enabled: true,
@@ -319,7 +319,7 @@ describe('GH #129: max_tokens wird nicht mehr geraten', () => {
  * Bericht.
  */
 const BOX_MODEL =
-  'C:\\Users\\ddrob\\AppData\\Roaming\\Locally Uncensored\\models\\Qwen3-4B-Q4_K_M.gguf'
+  'C:\\Users\\alice\\AppData\\Roaming\\Locally Uncensored\\models\\Qwen3-4B-Q4_K_M.gguf'
 const BOX_PROPS = {
   default_generation_settings: { id: 0, n_ctx: 16384, params: { n_predict: -1 } },
   total_slots: 1,

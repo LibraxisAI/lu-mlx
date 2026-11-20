@@ -13,7 +13,11 @@ import { bundledEngineStatus, swapBundledModel, ENGINE_PORT } from '../../api/en
 import { useBuiltinEngineStatus } from '../../hooks/useBuiltinEngineStatus'
 import { enginePortLine } from '../../lib/engine-port'
 import { engineOffloadLine } from '../../lib/engine-offload'
+import { fitActionsOf } from '../../lib/engine-fit'
+import { FitActionButtons } from '../ui/FitActionButtons'
 import type { BuiltinEngineTuning } from '../../types/settings'
+import { isMacOS, isWindows } from '../../api/backend'
+import { engineOffloadWords, gpuLayersHint, gpuLayersLabel, gpuLayersTitle } from '../../lib/mac-pc-words'
 
 type KvType = BuiltinEngineTuning['cacheTypeK']
 
@@ -121,6 +125,12 @@ export function BuiltinEngineSettings() {
           'Engine not running, settings apply automatically on the next start.'
         )}
       </div>
+      {/* C81 (3.1.0): the last engine died on its own; say how, until the next start. */}
+      {!running && status?.lastExit ? (
+        <div className="t-micro text-red-600 dark:text-red-400 leading-relaxed" data-testid="builtin-engine-last-exit">
+          {status.lastExit}
+        </div>
+      ) : null}
       {/* A13: which port the engine really holds. It starts its walk at 8127
           and takes the next free one when that is held, and until now the only
           place that said so was the log. */}
@@ -134,7 +144,24 @@ export function BuiltinEngineSettings() {
           walks away, while this stays true for as long as the process runs. */}
       {engineOffloadLine(status) ? (
         <div className="t-micro text-gray-500" data-testid="builtin-engine-offload">
-          {engineOffloadLine(status)}
+          {engineOffloadWords(engineOffloadLine(status), isMacOS())}
+        </div>
+      ) : null}
+      {/* 3.0.8 (A25): how the model fits, with the numbers and one click for
+          each change that would help. The same sentence the model menu shows. */}
+      {running && status?.memoryNote ? (
+        <div className="t-micro text-gray-500 leading-relaxed" data-testid="builtin-engine-fit">
+          {status.memoryNote}
+          <FitActionButtons
+            actions={fitActionsOf(status.fitActions)}
+            modelPath={status.model_path}
+            onApplied={() => {
+              void bundledEngineStatus().then(setStatus).catch(() => {})
+              setDirty(false)
+              setApplied(true)
+            }}
+            className="mt-1"
+          />
         </div>
       ) : null}
 
@@ -144,7 +171,12 @@ export function BuiltinEngineSettings() {
         <input
           type="number"
           value={tuning.ctx}
-          onChange={(e) => patch({ ctx: Math.max(0, parseInt(e.target.value) || 0) })}
+          onChange={(e) => {
+            // A number typed here is a choice (GH #129): the plan keeps it as
+            // it is, and the agent mode does not raise it (3.0.8, A25).
+            const ctx = Math.max(0, parseInt(e.target.value) || 0)
+            patch({ ctx, ctxChosen: ctx > 0 })
+          }}
           min={0}
           step={1024}
           placeholder="8192"
@@ -152,7 +184,7 @@ export function BuiltinEngineSettings() {
         />
       </div>
       <div className="text-[0.6rem] text-gray-500 leading-relaxed">
-        0 = default (8192). Raise to 16384 / 32768 for long chats and RAG if you have the memory; KV-cache size grows linearly with it.
+        0 = default (8192), raised up to 32768 when the graphics card has room for it. A number you type here is kept; if it costs layers on the graphics card, the line above says how many.
       </div>
 
       {/* Flash attention */}
@@ -214,9 +246,9 @@ export function BuiltinEngineSettings() {
         />
       </div>
 
-      {/* GPU layers */}
+      {/* GPU layers. A Mac reads its own words (lib/mac-pc-words). */}
       <div className="flex items-center justify-between">
-        <span className="text-[0.7rem] text-gray-700 dark:text-gray-400" title="-1 = offload every layer to the GPU (default). 0 = CPU only. N = offload the first N layers — use when the model + KV cache doesn't fit your VRAM.">GPU layers</span>
+        <span className="text-[0.7rem] text-gray-700 dark:text-gray-400" title={gpuLayersTitle(isMacOS())}>{gpuLayersLabel(isMacOS())}</span>
         <input
           type="number"
           value={tuning.gpuLayers}
@@ -227,7 +259,7 @@ export function BuiltinEngineSettings() {
         />
       </div>
       <div className="text-[0.6rem] text-gray-500 leading-relaxed">
-        -1 = all layers on GPU · 0 = CPU only · N = partial offload for models bigger than your VRAM.
+        {gpuLayersHint(isMacOS())}
       </div>
 
       {/* mlock / mmap */}
@@ -242,7 +274,10 @@ export function BuiltinEngineSettings() {
         <input type="checkbox" checked={tuning.noMmap} onChange={(e) => patch({ noMmap: e.target.checked })} className="mt-0.5" />
         <div>
           <div className="text-[0.65rem] text-gray-300">Load fully into RAM (disable mmap)</div>
-          <div className="text-[0.55rem] text-gray-500 leading-relaxed">Slower start, but can smooth out generation on slow disks / network drives.</div>
+          <div className="text-[0.55rem] text-gray-500 leading-relaxed">
+            Slower start, but can smooth out generation on slow disks / network drives.
+            {isWindows() && ' On Windows LU already loads without mmap whenever layers go to the graphics card, so the model is not held in RAM a second time.'}
+          </div>
         </div>
       </label>
 
@@ -261,7 +296,7 @@ export function BuiltinEngineSettings() {
             disabled={!running || busy || vQuantNeedsFa}
             className="shrink-0 px-2.5 py-1 rounded-md text-[0.6rem] font-medium bg-white dark:bg-white/10 text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-white/15 border border-gray-200 dark:border-white/15 transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
           >
-            {busy ? <Loader2 size={10} className="animate-spin" /> : applied ? <Check size={10} className="text-emerald-400" /> : null}
+            {busy ? <Loader2 size={10} className="animate-spin" /> : applied ? <Check size={10} className="text-emerald-600 dark:text-emerald-400" /> : null}
             {busy ? 'Restarting…' : 'Apply & Restart Engine'}
           </button>
         </div>

@@ -69,7 +69,7 @@ describe('runCredits, Studio-Zweig', () => {
   // video reaching the gallery Lightbox's separate "Sharpen/Enhance" action
   // (Lightbox.tsx: runCredits('video', 'upscale', item.model, ...)) fell
   // through to the caller's fallback too, hiding the real per-second
-  // WaveSpeed rate for a wholly unrelated endpoint. The guard now sits only
+  // render-service rate for a wholly unrelated endpoint. The guard now sits only
   // in front of the generic model-credits branch it was written to protect;
   // 'upscale'/'eraser'/'removebg'/'music' price from the flat `ops` table or
   // their own per_s/base fields, never from a Studio model's own formula, so

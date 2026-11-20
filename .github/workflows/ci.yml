@@ -23,6 +23,11 @@ on:
 # compromised or retagged upstream release can't silently run in our CI with
 # secrets in scope. The trailing comment records the human-readable version.
 # To bump: resolve the new tag to its SHA (`gh api repos/<owner>/<repo>/commits/<tag> --jq .sha`).
+
+# CI only reads the repository (OpenSSF Scorecard, Token-Permissions).
+permissions:
+  contents: read
+
 jobs:
   lint-and-build:
     runs-on: ubuntu-22.04
@@ -96,6 +101,14 @@ jobs:
 
   e2e:
     runs-on: ubuntu-22.04
+    # Four machines, a quarter of the specs each: one serial run took about
+    # 3 h (1.8k tests, workers 1), and the release gate runs this job too.
+    # Inside a shard it stays one worker, as playwright.config.ts sets it.
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
 
     steps:
       - name: Checkout repository
@@ -114,13 +127,89 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
+      # WebKit too: playwright.config.ts has a webkit project (chat look and
+      # dialog focus, 3.1.0). Both come from the pinned @playwright/test, so
+      # they are the browser builds of that one version.
+      - name: Install Playwright Chromium and WebKit
+        run: npx playwright install --with-deps chromium webkit
 
       # The harness stubs the Tauri IPC in-page (e2e/support/tauri-mock.ts) —
       # no Rust sidecar, Ollama or ComfyUI processes needed.
-      - name: Playwright e2e (Tauri-mocked)
-        run: npm run test:e2e
+      - name: Playwright e2e (Tauri-mocked), shard ${{ matrix.shard }} of 4
+        run: npm run test:e2e -- --shard=${{ matrix.shard }}/4
+
+  # The voice sidecar is Python and ships as source (src-tauri/resources/
+  # voice_loop). Its tests need no voice models: they run against hollow model
+  # folders, and the three that want the real ones skip. Installing from
+  # requirements.txt is half the point of this job: it is the same lock the
+  # Voice setup hands to pip on a user's machine, so a pin that stops
+  # resolving on Linux fails here and not there. Python 3.12 is the line the
+  # app's private Python is on (python.json).
+  voice-sidecar:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: src-tauri/resources/voice_loop
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # Empty on push/pull_request (checkout falls back to the triggering
+          # commit); the release tag when release.yml calls this workflow.
+          ref: ${{ inputs.ref }}
+
+      - name: Setup Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: src-tauri/resources/voice_loop/requirements*.txt
+
+      - name: Install the sidecar's locked packages and the test tools
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Sidecar tests
+        run: python -m pytest
+
+  # Known vulnerabilities in what we ship, checked against the lockfiles on
+  # every push, pull request and release gate. npm: the packages the app
+  # bundles (devDependencies are build tools that never reach a user), failing
+  # from "high" up; the low and moderate ones still print. Cargo: `cargo deny`
+  # holds advisories, licences and crate sources to src-tauri/deny.toml, and
+  # `cargo audit` reads the same advisory database with src-tauri/.cargo/
+  # audit.toml. Each accepted advisory is listed there with its reason.
+  dependency-audit:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: '.nvmrc'
+
+      - name: npm audit (shipped packages)
+        run: npm audit --package-lock-only --omit=dev --audit-level=high
+
+      - name: Install cargo-audit and cargo-deny
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: cargo-audit@0.22.2,cargo-deny@0.20.2
+
+      - name: cargo deny (advisories, licences, sources)
+        working-directory: src-tauri
+        run: cargo deny --locked check
+
+      - name: cargo audit
+        working-directory: src-tauri
+        run: cargo audit
 
   cargo-check:
     runs-on: ${{ matrix.platform }}
@@ -165,6 +254,7 @@ jobs:
             libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev \
             libxdo-dev \
+            libxkbcommon-dev \
             build-essential \
             curl \
             wget \
@@ -188,6 +278,13 @@ jobs:
           case "$triple" in
             *-windows-*) touch "src-tauri/bin/lu-llama-server-$triple.exe" ;;
             *)           touch "src-tauri/bin/lu-llama-server-$triple" ;;
+          esac
+          # The Neuron tweaker's vector tool (3.0.9, P11) is a second
+          # externalBin on Windows and Linux (tauri.windows.conf.json,
+          # tauri.linux.conf.json), so it needs its stub too.
+          case "$triple" in
+            *-windows-*) touch "src-tauri/bin/lu-llama-cvector-generator-$triple.exe" ;;
+            *)           touch "src-tauri/bin/lu-llama-cvector-generator-$triple" ;;
           esac
           ls -la src-tauri/bin/
           # K1 (3.0.1): tauri.windows.conf.json / tauri.linux.conf.json now
@@ -417,6 +514,7 @@ jobs:
             libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev \
             libxdo-dev \
+            libxkbcommon-dev \
             build-essential \
             curl \
             wget \
@@ -442,6 +540,13 @@ jobs:
           case "$triple" in
             *-windows-*) touch "src-tauri/bin/lu-llama-server-$triple.exe" ;;
             *)           touch "src-tauri/bin/lu-llama-server-$triple" ;;
+          esac
+          # The Neuron tweaker's vector tool (3.0.9, P11) is a second
+          # externalBin on Windows and Linux (tauri.windows.conf.json,
+          # tauri.linux.conf.json), so it needs its stub too.
+          case "$triple" in
+            *-windows-*) touch "src-tauri/bin/lu-llama-cvector-generator-$triple.exe" ;;
+            *)           touch "src-tauri/bin/lu-llama-cvector-generator-$triple" ;;
           esac
           ls -la src-tauri/bin/
           # K1 (3.0.1): this job runs a REAL `tauri build`, which resolves
@@ -481,3 +586,153 @@ jobs:
             export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/src-tauri/resources/llama/$triple${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           fi
           bash scripts/ci-tauri-build.sh
+
+  # ── macOS (Apple Silicon), behind a switch ─────────────────────────────────
+  #
+  # The keyless half of the Mac lane: the same three questions cargo-check and
+  # tauri-build ask on Windows and Linux (does the crate compile, do the Rust
+  # tests pass, does the product bundle without a signing key), asked once on
+  # an Apple Silicon runner. It reads no secret, so it can run long before an
+  # Apple Developer ID exists, and that is its point: the day the certificate
+  # arrives must not be the first day anything Mac-shaped runs in Actions.
+  #
+  # Skipped unless the repository variable LU_MAC_CI or LU_MAC_RELEASE is `1`
+  # (Settings, Secrets and variables, Actions, Variables):
+  #
+  #   LU_MAC_CI=1        this job only. Safe to set today.
+  #   LU_MAC_RELEASE=1   this job AND release.yml's build-tauri-macos, which
+  #                      needs the Apple secrets. A Mac release is therefore
+  #                      always held to this gate, never beside it.
+  #
+  # Why a switch and not simply on: this workflow is also the release gate
+  # (release.yml, job `gate`). A job that has never run on a hosted macOS
+  # runner would, switched on blind, be able to block a Windows and Linux
+  # release for a reason that concerns neither. Whoever sets the variable has
+  # decided that the Mac counts. A skipped job is shown as skipped, it is not
+  # a passed check, and no `continue-on-error` is involved.
+  #
+  # One job, not two, because a macOS runner is the scarce one: stub, test,
+  # then bundle, on the same checkout.
+  #
+  # VERIFICATION LIMIT: never run in Actions. Locally on a Mac the same
+  # commands are known good (`cargo test`, and `tauri build` with a zero-byte
+  # sidecar stub, measured 2026-09-01, see the stub step in tauri-build).
+  macos-gate:
+    if: vars.LU_MAC_CI == '1' || vars.LU_MAC_RELEASE == '1'
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      # Same value as release.yml's build-tauri-macos and
+      # bundle.macOS.minimumSystemVersion (mac-release-lane.test.ts compares).
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # Empty on push/pull_request (checkout falls back to the triggering
+          # commit); the release tag when release.yml calls this workflow.
+          ref: ${{ inputs.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      # ── The media engines, which are not in the .app ────────────────────
+      # Image sidecar, mflux, mlx-video and ltx-2-mlx are installed by pip on
+      # the customer's Mac, from exact pins. Nothing in the bundle can prove
+      # those pins still resolve, so pip is asked here: the whole list of each
+      # engine as the app passes it, and its pins once more for the oldest
+      # macOS LU supports (the runner is newer). `--dry-run`: pip resolves and
+      # reads metadata, nothing is installed. The lists are read from the Rust
+      # constants and the requirements file by scripts/mac-engine-pins.mjs,
+      # not kept a second time (guard: mac-engine-pins.test.ts).
+      #
+      # Python is the line of the app's own interpreter (python.json); the
+      # script refuses any other. These two steps come first because they are
+      # the cheap ones: a pin that went away is known after minutes, not after
+      # the bundle.
+      - name: Setup Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Engine pins still resolve (pip install --dry-run, five engines)
+        shell: bash
+        timeout-minutes: 20
+        env:
+          PYTHON: python3
+          WORK_DIR: ${{ runner.temp }}/engine-pins
+        run: bash scripts/mac-engine-pins-dry-run.sh
+
+      # The image sidecar's own tests: Cancel, against a mocked pipeline, so
+      # neither torch nor a model is needed. They ran in no job before.
+      - name: Image sidecar tests (mocked, no torch)
+        run: python3 -m unittest discover -v -s src-tauri/resources/mlx/tests
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      # Same stubs as cargo-check and tauri-build, for the same reasons: the
+      # externalBin file has to exist, not work, and build.rs wants a dist
+      # directory. macOS has no resources/llama glob (one static binary), so
+      # there is no companion stub. The real `tauri build` below replaces the
+      # placeholder dist through beforeBuildCommand.
+      - name: Stub llama-server sidecar and the frontend bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          triple="$(rustc -vV | awk '/^host:/{print $2}')"
+          [ "$triple" = "aarch64-apple-darwin" ] || { echo "FAIL: expected an Apple Silicon runner, got $triple" >&2; exit 1; }
+          mkdir -p src-tauri/bin dist
+          touch "src-tauri/bin/lu-llama-server-$triple"
+          # The refusal-removal tool's quantizer (A14) is a second externalBin
+          # on macOS only (tauri.macos.conf.json), so it needs its stub too.
+          touch "src-tauri/bin/lu-llama-quantize-$triple"
+          # And the Neuron tweaker's vector tool (3.0.9, P11), same file list.
+          touch "src-tauri/bin/lu-llama-cvector-generator-$triple"
+          printf '<!doctype html><title>ci placeholder</title>' > dist/index.html
+          ls -la src-tauri/bin/
+
+      - name: Cargo check
+        working-directory: src-tauri
+        run: cargo check
+
+      - name: Cargo test
+        working-directory: src-tauri
+        run: cargo test
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # No `continue-on-error`, no secret: the exit code is the verdict, as in
+      # tauri-build. Ad hoc signed (`signingIdentity: "-"`), .app and .dmg.
+      #
+      # TAURI_BUNDLER_DMG_IGNORE_CI: with CI=true the bundler skips the step
+      # that lays out the .dmg window through the Finder. The release lane
+      # does not skip it (tauri-action set this variable, and release.yml's
+      # build-tauri-macos sets it for the same reason), so without it here
+      # this gate would bundle the .dmg on another path than the release and
+      # say nothing about whether a hosted runner gets through the Finder
+      # step.
+      - name: Tauri build (unsigned, exit code is the verdict)
+        shell: bash
+        env:
+          TAURI_BUNDLER_DMG_IGNORE_CI: 'true'
+        run: bash scripts/ci-tauri-build.sh
+
+      # The bundle that was just built, judged by the script the release lane
+      # runs before it uploads: arm64 only, minimum OS of every binary, every
+      # file of bundle.resources under Contents/Resources, Info.plist. The
+      # sidecar is the empty placeholder from the stub step, hence the flag;
+      # the release lane runs the same script without it.
+      - name: Verify the bundle (architecture, minimum OS, resources, Info.plist)
+        shell: bash
+        run: bash scripts/verify-mac-bundle.sh --allow-stub-sidecar src-tauri/target/release/bundle/macos/LU.app

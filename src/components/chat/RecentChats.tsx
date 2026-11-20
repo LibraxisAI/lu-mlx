@@ -1,7 +1,7 @@
 /**
  * The recent-chats list on the empty chat screen.
  *
- * Ported from apps/web/components/chat/CloudLauncher.tsx:66-115. David asked
+ * Ported from the web app. The owner asked
  * for the web behaviour: while the side panel is collapsed the latest chats
  * live in the main area, and the moment the panel is expanded they belong to
  * the panel again and disappear from here. ChatView owns that condition; this
@@ -16,36 +16,63 @@ import { useCodexStore } from '../../stores/codexStore'
 import { timeAgo } from '../../lib/time-ago'
 import { conversationMode } from '../../lib/conversation-mode'
 
-/** Same cut as the web list: plain chats only, newest first, eight rows. */
+/** Same cut as the web list: newest first, eight rows. */
 const MAX_ROWS = 8
+
+/** GH #141: the list follows the mode picked in the rail, exactly
+ *  like the expanded panel does (Sidebar.tsx filters its rows by chatMode).
+ *  It used to show plain chats under Code and Remote too. */
+const HEADING: Record<string, string> = {
+  lu: 'Recent chats',
+  codex: 'Recent code chats',
+  remote: 'Recent remote chats',
+  openclaw: 'Recent agent chats',
+}
+const EMPTY: Record<string, string> = {
+  lu: 'No chats yet.',
+  codex: 'No code chats yet.',
+  remote: 'No remote chats yet.',
+  openclaw: 'No agent chats yet.',
+}
+/** The open chat is the only one of its mode: there IS a chat, it is just
+ *  not listed (it is where the user already is). "No chats yet" above the
+ *  composer of that very chat read as wrong (how-it-works session, 3.0.7). */
+const NO_OTHER: Record<string, string> = {
+  lu: 'No other chats yet.',
+  codex: 'No other code chats yet.',
+  remote: 'No other remote chats yet.',
+  openclaw: 'No other agent chats yet.',
+}
 
 export function RecentChats() {
   const conversations = useChatStore((s) => s.conversations)
   const activeConversationId = useChatStore((s) => s.activeConversationId)
   const setActiveConversation = useChatStore((s) => s.setActiveConversation)
   const setView = useUIStore((s) => s.setView)
-  const setChatMode = useCodexStore((s) => s.setChatMode)
+  const chatMode = useCodexStore((s) => s.chatMode)
 
   const recents = conversations
     // The chat you are already looking at is not a place to go back to. On the
     // no-chat screen nothing is active, so nothing is dropped there.
     .filter((c) => c.id !== activeConversationId)
-    .filter((c) => conversationMode(c) === 'lu')
+    .filter((c) => conversationMode(c) === chatMode)
     .sort((a, b) => b.updatedAt - a.updatedAt)
     .slice(0, MAX_ROWS)
 
-  // Opening a row is the same three steps as in the web launcher: back to
-  // plain chat mode, select the conversation, land on the chat view.
+  // Opening a row is what a click on the same row in the panel does: the
+  // mode is already the right one (the list is filtered by it), so select the
+  // conversation and land on the chat view.
   const openChat = (id: string) => {
-    setChatMode('lu')
     setActiveConversation(id)
     setView('chat')
   }
 
   if (recents.length === 0) {
+    const openOneOnly = conversations.some((c) => c.id === activeConversationId && conversationMode(c) === chatMode)
+    const line = openOneOnly ? (NO_OTHER[chatMode] ?? NO_OTHER.lu) : (EMPTY[chatMode] ?? EMPTY.lu)
     return (
       <p data-testid="home-recent-chats" className="t-micro text-gray-400 dark:text-gray-500">
-        No chats yet.
+        {line}
       </p>
     )
   }
@@ -59,7 +86,7 @@ export function RecentChats() {
       transition={{ duration: MOTION_S.base, ease: 'easeOut' }}
     >
       <div className="mb-1 px-1 t-label font-medium text-gray-400 dark:text-gray-600">
-        Recent chats
+        {HEADING[chatMode] ?? HEADING.lu}
       </div>
       <ul>
         {recents.map((c, i) => (

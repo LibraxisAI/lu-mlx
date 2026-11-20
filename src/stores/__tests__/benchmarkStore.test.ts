@@ -164,7 +164,7 @@ describe('benchmarkStore', () => {
     })
   })
 
-  // ── getLatestSpeed (Bug W — nightmare13740 2026-05-24) ─────
+  // ── getLatestSpeed (Bug W — a user 2026-05-24) ─────
 
   describe('getLatestSpeed', () => {
     it('returns null for missing or empty results', () => {
@@ -193,7 +193,7 @@ describe('benchmarkStore', () => {
     })
 
     it('IGNORES previous session when a new one starts (>10 s gap)', () => {
-      // nightmare13740 scenario: ten Run Benchmark clicks. Old sessions
+      // A user scenario: ten Run Benchmark clicks. Old sessions
       // should not pollute the displayed number for the most recent click.
       const t0 = 1_000_000
       const r = {
@@ -286,7 +286,7 @@ describe('benchmarkStore', () => {
     })
   })
 
-  // ── computeGenerationTps (Bug M — v2.4.7, nightmare13740) ──
+  // ── computeGenerationTps (Bug M — v2.4.7) ──
 
   describe('computeGenerationTps', () => {
     it('excludes time-to-first-token from the denominator', () => {
@@ -297,7 +297,7 @@ describe('benchmarkStore', () => {
       expect(tps).toBeCloseTo(33.333, 2)
     })
 
-    it('matches nightmare13740 RTX 4070 Laptop scenario', () => {
+    it('matches a user RTX 4070 Laptop scenario', () => {
       // nightmare's report: 23-25 tok/s in chat, 12 tok/s in pre-v2.4.7 benchmark.
       // Reconstruct: ~60 tokens, total ~5000ms (so 12 tok/s under old math),
       // TTFT ~2500ms → generation ~2500ms → 24 tok/s in new math.
@@ -337,7 +337,7 @@ describe('benchmarkStore', () => {
     })
   })
 
-  // ── token economy (B6 — David 2026-08-05) ──────────────────
+  // ── token economy (B6 — 2026-08-05) ──────────────────
 
   describe('getAverageTokens', () => {
     it('averages the total token spend, rounded', () => {

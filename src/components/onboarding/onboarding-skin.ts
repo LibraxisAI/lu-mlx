@@ -39,13 +39,14 @@ export function onboardingSkin(isDark: boolean): OnboardingSkin {
   const cardClass = isDark ? 'bg-[#202020] border-white/[0.08]' : 'bg-gray-50 border-gray-200'
 
   // D-S36: `primaryBtn` war `bg-white text-black hover:bg-gray-200` (dunkel)
-  // bzw. `bg-gray-900 text-white hover:bg-gray-800` (hell). Der Hover machte
+  // bzw. gray-900 mit weisser Schrift und gray-800 im Hover (hell; hier in
+  // Worten, damit Tailwind aus dem Kommentar keine Klasse baut). Der Hover machte
   // den Knopf also DUNKLER als seinen Ruhezustand — im Screenshot des Audits
   // liest Schritt 2 deshalb als deaktiviert. Das Rezept dafuer existiert seit
   // f336b91e genau einmal, in index.css als `.lu-primary`, und rechnet seinen
   // Kontrast nach (#a094f8 auf #111827 = 6.83:1 in Ruhe, #b1a6ff auf #111827
   // = 8.25:1 im Hover — der Hover wird HELLER, nicht dunkler). Er hatte das
-  // Onboarding nur nie erreicht; AUDIT-COVERAGE fuehrt das unter D-A8 als
+  // Onboarding nur nie erreicht; das Audit fuehrt das unter D-A8 als
   // ausdruecklichen Rest. Kein eigenes Rezept hier, sondern jenes.
   const primaryBtn = 'lu-primary mx-auto flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[0.7rem] transition-all'
   const secondaryBtn = `mx-auto flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[0.7rem] font-medium transition-colors ${

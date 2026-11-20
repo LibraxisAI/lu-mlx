@@ -1,7 +1,7 @@
 /**
  * Who gets the Docs button, how it looks, and what its tooltip may honestly say.
  *
- * A9 (aldrich_ironhart, Discord #general 2026-09-01): "There's no document tab
+ * A9 (Discord #general 2026-09-01): "There's no document tab
  * in cloud chat to add documents and audio clips". He was right, and the
  * reason it was missing did not hold up. Document Chat needs an EMBEDDING
  * backend, not a chat backend, and the embedding backend is the bundled
@@ -28,6 +28,7 @@
  *     opposite of what happens.
  */
 import type { AppMode } from '../types/settings'
+import { platformText } from './platform-text'
 import type { EmbedLane, EmbedLaneInfo } from '../api/embed-availability'
 
 export interface DocsAvailability {
@@ -48,8 +49,7 @@ export const DOCS_TITLE_PLAIN = 'Document Chat (RAG)'
 
 /** Cloud mode, indexing on this machine. Short on purpose (review N2); the
  *  panel carries the full statement once it is open. */
-export const DOCS_TITLE_CLOUD_LOCAL =
-  'Document Chat (RAG). Files stay on this computer, only matching passages go to the cloud model.'
+export const DOCS_TITLE_CLOUD_LOCAL = platformText('docsTitleCloudLocal')
 
 /** Cloud mode, indexing on a remote Ollama. Names the host, because that is
  *  where whole documents would go (B2). */
@@ -57,9 +57,8 @@ export function docsTitleRemote(endpoint: string | null): string {
   return `Document Chat (RAG). Indexing runs on ${endpoint ?? 'your configured Ollama host'}, so whole documents are sent there. Matching passages then go to the cloud model.`
 }
 
-/** No embedding lane. The wording David asked for, plus the way out. */
-export const DOCS_TITLE_NO_EMBEDDINGS =
-  'Documents need the local embeddings engine. Click to install it.'
+/** No embedding lane. The wording the owner asked for, plus the way out. */
+export const DOCS_TITLE_NO_EMBEDDINGS = platformText('docsTitleNoEmbeddings')
 
 /**
  * @param appMode  the global Local/Cloud switch

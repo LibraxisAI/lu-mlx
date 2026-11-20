@@ -67,9 +67,11 @@ async function boot(page: Page, width: number, height: number): Promise<void> {
   await expect(cloudSwitch(page)).toBeVisible()
   await signInViaGate(page)
   await expect(cloudSwitch(page)).toBeChecked()
-  await page.getByRole('button', { name: /New Chat/i }).first().click()
+  // The model first, then the chat: in Cloud the app picks no model by
+  // itself (3.0.5), and "New Chat" without one stays on the landing page.
   await page.getByRole('button', { name: 'Select chat model', exact: true }).click()
   await page.getByRole('button', { name: /Llama 3.1 8B Turbo/ }).click()
+  await page.getByRole('button', { name: /New Chat/i }).first().click()
   if (!REACHABLE_AT_TARGET_WIDTH) await page.setViewportSize({ width, height })
 }
 

@@ -103,7 +103,7 @@ export interface ThinkStreamSplitter {
 
 /**
  * Route `<think>` spans out of a live stream and into the thinking channel
- * (G35, David 2026-08-07: the thought must stream inside the same bounded
+ * (G35, 2026-08-07: the thought must stream inside the same bounded
  * 3-line window everywhere, never full-height into the bubble).
  *
  * `startInThink` exists because the Qwen3 chat templates put the OPENING

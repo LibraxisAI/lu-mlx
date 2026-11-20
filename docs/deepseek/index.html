@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeepSeek Locally and Online: Every Guide (V4, V4.1, V4 Pro)</title>
+<meta name="description" content="Every DeepSeek guide in one place: V4 Flash and V4.1 Flash on your own hardware, the abliterated build, the hardware math, V4 Pro and the hosted route.">
+<meta name="keywords" content="deepseek local, run deepseek locally, deepseek v4 flash, deepseek v4.1 flash, deepseek abliterated, deepseek v4 pro">
+<meta property="og:title" content="DeepSeek Locally and Online: Every Guide (V4, V4.1, V4 Pro)">
+<meta property="og:description" content="Every DeepSeek guide in one place: V4 Flash and V4.1 Flash on your own hardware, the abliterated build, the hardware math, V4 Pro and the hosted route.">
+<meta property="og:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<meta property="og:url" content="https://locallyuncensored.com/deepseek/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Locally Uncensored">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="DeepSeek Locally and Online: Every Guide (V4, V4.1, V4 Pro)">
+<meta name="twitter:description" content="Every DeepSeek guide in one place: V4 Flash and V4.1 Flash on your own hardware, the abliterated build, the hardware math, V4 Pro and the hosted route.">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<link rel="canonical" href="https://locallyuncensored.com/deepseek/">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="/favicon.png">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://locallyuncensored.com/"},{"@type":"ListItem","position":2,"name":"DeepSeek models, local and online","item":"https://locallyuncensored.com/deepseek/"}]}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Can I run DeepSeek V4 Flash at home?","acceptedAnswer":{"@type":"Answer","text":"Only on very large machines. The abliterated build is a single Q4_K file of 154 GB and wants the 192 GB memory class. The hardware guide has the numbers."}},{"@type":"Question","name":"Is there an uncensored DeepSeek?","acceptedAnswer":{"@type":"Answer","text":"Yes. DeepSeek V4 Flash Abliterated is the most downloaded uncensored model of 2026 so far. It is under the MIT license."}},{"@type":"Question","name":"Can I use DeepSeek without a GPU?","acceptedAnswer":{"@type":"Answer","text":"Yes, through a hosted service. DeepSeek V4 Flash 0731, DeepSeek V4.1 Flash and DeepSeek V4 Pro 0813 are in the LU Cloud catalog, which opens in a browser."}}]}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/lu.css">
+<script defer src="/assets/lu.js"></script>
+  <script data-goatcounter="https://purple47.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</head>
+<body>
+
+<nav class="lu-nav">
+  <a class="lu-nav-brand" href="/" aria-label="Locally Uncensored">
+    <span class="lu-mono" data-mono="nav" data-size="40" aria-hidden="true"></span>
+    <span class="lu-nav-word">Locally <span class="accent">Uncensored</span></span>
+  </a>
+  <div class="lu-nav-links" id="lu-nav-links">
+    <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/pricing/">Pricing</a>
+    <a class="lu-nav-link" href="/blog/">Blog</a>
+    <a class="lu-nav-link" href="/guide/">Guide</a>
+    <a class="lu-nav-link" href="/remote-access/">Remote</a>
+  </div>
+  <div class="lu-nav-right">
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">4200+&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">1700+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <span class="lu-nav-sep"></span>
+    <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="he-cta" href="/pricing/" aria-label="LU Cloud plans and what they include"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>Cloud</a>
+    <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
+    <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </div>
+</nav>
+<div class="container lu-doc">
+  <div class="breadcrumb"><a href="/">Locally Uncensored</a> / DeepSeek models, local and online</div>
+
+  <div class="post-meta">
+    <span class="post-tag">Model Family</span>
+    <span>Updated October 10, 2026</span>
+    <span>·</span>
+    <span>3 min read</span>
+  </div>
+
+  <article>
+    <h1>DeepSeek models, local and online</h1>
+
+    <p>Every guide we have written about the DeepSeek family, newest generation first. This page keeps its address when the next version arrives, so it is the one to bookmark.</p>
+
+    <aside class="lu-cloud-box">
+      <span class="lu-cloud-kicker">No GPU? Run it online</span>
+      <p>DeepSeek V4 Flash 0731, DeepSeek V4.1 Flash and DeepSeek V4 Pro 0813 are in the hosted catalog. They are part of <a href="/uncensored-ai-chat-online/">40 chat models online</a>, paid from credit packs that start at 15 EUR and need no subscription. <a href="/pricing/">See what it costs</a>.</p>
+    </aside>
+
+    <h2>Every guide</h2>
+
+    <div class="post-card"><h2><a href="/blog/deepseek-v4-1-flash-uncensored.html">DeepSeek V4.1 Flash Uncensored in LU Cloud: What It Is and How to Use It</a></h2><p>DeepSeek V4.1 Flash with the refusals removed in the weights, online in Chat, Agent and Code with no GPU of your own.</p></div>
+
+    <div class="post-card"><h2><a href="/blog/how-to-use-deepseek-v4-1-flash-uncensored.html">How to Use DeepSeek V4.1 Flash Uncensored in LU, Step by Step</a></h2><p>The Cloud switch, the Uncensored group, Think and effort, Agent mode and the Code tab.</p></div>
+
+    <div class="post-card"><h2><a href="/blog/run-deepseek-v4-1-flash-locally.html">Can You Run DeepSeek V4.1 Flash Locally? The Honest Hardware Math</a></h2><p>DeepSeek V4.1 Flash weights went public on 10 September 2026 under MIT. 510.3 GB of originals, 168.9 GB for the smallest quant on the Hub, and the runtime that does not exist yet.</p></div>
+
+    <div class="post-card"><h2><a href="/blog/deepseek-v4-1-flash-explained.html">DeepSeek V4.1 Flash Explained: 552B Backbone, 16B of Compute</a></h2><p>DeepSeek V4.1 Flash went open weight under MIT on 10 September 2026. The encoder decoder split, the 890 byte KV cache, the benchmark claims, and what we measured ourselves.</p></div>
+
+    <div class="post-card"><h2><a href="/blog/how-to-run-deepseek-v4-flash-locally.html">How to Run DeepSeek V4 Flash Locally: GGUF, Hardware, and Setup</a></h2><p>Run DeepSeek V4 Flash on your own hardware: the 155 GB GGUF math, the 5 GB distill shortcut, the abliterated build, and a one click setup in a local AI studio.</p></div>
+
+    <div class="post-card"><h2><a href="/blog/deepseek-v4-flash-hardware-requirements.html">Can You Run DeepSeek V4 Flash Locally? The Real Hardware Math</a></h2><p>DeepSeek V4 Flash hardware requirements: 155 GB at 4 bit, what 13B active parameters mean for speed, Mac vs workstation paths, KV cache costs, and the 5 GB fallback.</p></div>
+
+    <div class="post-card"><h2><a href="/blog/deepseek-v4-flash-abliterated.html">DeepSeek V4 Flash Abliterated: The Most Downloaded Uncensored Model of 2026</a></h2><p>The abliterated build of DeepSeek V4 Flash: what abliteration changes, why it passed 600K downloads, hardware needs, and how to run the uncensored V4 locally.</p></div>
+
+    <div class="post-card"><h2><a href="/blog/deepseek-v4-flash-0731-explained.html">DeepSeek V4 Flash 0731 Explained: Why Today&#x27;s Release Is a Big Deal</a></h2><p>DeepSeek V4 Flash 0731 landed July 31, 2026: 82.7 on Terminal Bench 2.1, open MIT weights on day one, Responses API support, and agent scores that beat V4 Pro Preview.</p></div>
+
+    <div class="post-card"><h2><a href="/blog/deepseek-v4-flash-vs-v4-pro.html">DeepSeek V4 Flash vs V4 Pro: Which One and When</a></h2><p>DeepSeek V4 Flash vs V4 Pro compared: 284B vs 1.6T, agent benchmarks where Flash 0731 wins, the 3x price gap, local runability, and which to pick for each workload.</p></div>
+
+    <div class="post-card"><h2><a href="/blog/how-to-run-deepseek-v4-pro.html">How to Run DeepSeek V4 Pro: Every Working Option</a></h2><p>How to run DeepSeek V4 Pro in July 2026: official API with code and prices, LU Labs hosted plans, OpenRouter, and the math on hosting a 1.6T MoE yourself.</p></div>
+
+    <div class="post-card"><h2><a href="/blog/deepseek-v4-flash-cloud.html">DeepSeek V4 Flash in the Cloud: LU Labs, API, OpenRouter</a></h2><p>Every cloud route to DeepSeek V4 Flash: the official API with working code and cache pricing, LU Labs hosted plans with EU billing, and OpenRouter.</p></div>
+
+    <div class="post-card"><h2><a href="/blog/kimi-k3-vs-deepseek-v4.html">Kimi K3 vs DeepSeek V4: price, thinking, vision, plan</a></h2><p>One of these reads pictures and one costs almost nothing per token. Where the gap is real, where it is not, and which plans and packs reach all three.</p></div>
+
+    <h2>FAQ</h2>
+
+    <h3>Can I run DeepSeek V4 Flash at home?</h3>
+    <p>Only on very large machines. The abliterated build is a single Q4_K file of 154 GB and wants the 192 GB memory class. The <a href="/blog/deepseek-v4-flash-hardware-requirements.html">hardware guide</a> has the numbers.</p>
+
+    <h3>Is there an uncensored DeepSeek?</h3>
+    <p>Yes. DeepSeek V4 Flash Abliterated is the most downloaded uncensored model of 2026 so far. It is under the MIT license.</p>
+
+    <h3>Can I use DeepSeek without a GPU?</h3>
+    <p>Yes, through a hosted service. DeepSeek V4 Flash 0731, DeepSeek V4.1 Flash and DeepSeek V4 Pro 0813 are in the LU Cloud catalog, which opens in a browser.</p>
+  </article>
+
+  <div class="post-footer">
+    <p>Run it on your own hardware. Free and open source.</p>
+    <a href="https://lu-labs.ai/api/download/windows?src=luc-deepseek" class="cta-btn" download>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Download for Windows, free
+    </a>
+    <p style="margin-top:14px;margin-bottom:0">No GPU? LU Cloud runs in a browser, paid from credit packs that start at 15 EUR and need no subscription. <a href="/pricing/">See what it costs</a>.</p>
+  </div>
+</div>
+
+<footer>
+  <div class="footer-row footer-meta"><span>&copy; 2026 &middot; Locally Uncensored &middot; AGPL-3.0</span></div>
+  <div class="footer-row footer-links">
+    <a href="https://locallyuncensored.com/blog/">Blog</a>
+    <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/pricing/">Pricing</a>
+    <a href="https://locallyuncensored.com/cloud/">LU Cloud</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-chat-online/">Uncensored AI chat online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-image-generator-online/">Image generator online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-video-generator-online/">Video generator online</a>
+    <a href="https://locallyuncensored.com/unrestricted-ai/">Unrestricted AI</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-coding-agent/">AI coding agent</a>
+    <a href="https://locallyuncensored.com/alternatives/">Alternatives</a>
+    <a href="https://locallyuncensored.com/is-locally-uncensored-safe/">Is it safe?</a>
+    <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
+    <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/discussions">Discussions</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
+    <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
+    <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+    <a href="https://locallyuncensored.com/privacy/">Privacy</a>
+    <a href="https://locallyuncensored.com/terms/">Terms</a>
+    <a href="https://locallyuncensored.com/impressum/">Impressum</a>
+  </div>
+</footer>
+</body>
+</html>

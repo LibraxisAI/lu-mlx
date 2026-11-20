@@ -1,4 +1,7 @@
+import { isCompatProviderId } from '../api/providers/compat-id'
 import { create } from 'zustand'
+import { yieldSilentLocalRuns } from '../lib/silent-runs'
+import { noteModelSwitch } from '../lib/model-switch-stop'
 import { persist } from 'zustand/middleware'
 import { safeJSONStorage } from '../lib/storage-quota'
 import { canAutoSelectChat } from '../lib/chat-model-minimum'
@@ -10,9 +13,11 @@ import { activateBuiltinModel } from '../api/engine'
 import { isLmStudioProvider } from '../lib/hf-to-provider'
 import { isTauri, backendCall } from '../api/backend'
 import { useChatStore } from './chatStore'
+import { useSettingsStore } from './settingsStore'
 import { useGenerationStore } from './generationStore'
 import { log } from '../lib/logger'
 import { isLuEngineName } from '../lib/engine-name'
+import { isGroupChat } from '../lib/group-chat'
 import { offloadWhenLocalLaneFree } from '../lib/cloud-offload-defer'
 // Which provider slot a model name routes to. There is exactly one answer to
 // that question in this app and it lives in api/providers/registry, the same
@@ -21,8 +26,9 @@ import { offloadWhenLocalLaneFree } from '../lib/cloud-offload-defer'
 // ('sdxl::x.safetensors' → null vs 'sdxl', 'a::b::c' → null vs 'ollama'), which
 // is the worst possible place for two answers: the guard below would decline to
 // clear a pick that the send path would then route to a dead backend.
-import { getProviderIdFromModel } from '../api/providers/model-name'
-import { onProviderSlotsDarkened } from '../lib/provider-slot-darkening'
+import { modelBackendKey } from '../api/providers/model-name'
+import { onProviderSlotsDarkened, type BackendKey } from '../lib/provider-slot-darkening'
+import { setChatModelSource } from '../lib/phone-sub-agents'
 import {
   announceChatPickLostItsEngine,
   onBuiltinSlotLostToForeignBackend,
@@ -30,7 +36,6 @@ import {
 } from '../lib/builtin-slot-handover'
 import { ensureBuiltinEngineAlive, builtinSlotSwitchedOff } from '../api/builtin-ensure'
 import { isBuiltinEngineEntry, type InstalledModelLike } from '../lib/lmstudio-match'
-import type { ProviderId } from '../api/providers/types'
 
 /**
  * B6 followup (Auflage 1.1, lu-301/bau/review-offload2.md): `stop_bundled_engine`
@@ -71,6 +76,28 @@ function deferLocalUnload(target: string, stillWanted: () => boolean, unload: ()
   if (!fired) pendingLocalUnloads.set(target, cancel)
 }
 
+/**
+ * Does the chat on screen still use this model as a speaker of its group?
+ *
+ * GH #168: a group chat with an LM Studio model and a KoboldCpp model (behind
+ * the Ollama API) on separate GPUs. Picking the KoboldCpp model as the main
+ * model unloaded the LM Studio one, although the very next round of the same
+ * group sends to it again; LM Studio then loaded it once more, at a size the
+ * person had not picked. One model in VRAM at a time stays the rule for a
+ * plain switch. A model the group on screen still speaks with is not the
+ * previous model, it is a current one, and only the person removes it (from
+ * the group, or with its On switch). Read at fire time, like `stillWanted`.
+ */
+function speaksInActiveGroup(model: string): boolean {
+  try {
+    const chat = useChatStore.getState()
+    const conv = chat.conversations.find((c) => c.id === chat.activeConversationId)
+    return isGroupChat(conv?.groupModels) && conv.groupModels.includes(model)
+  } catch {
+    return false
+  }
+}
+
 /** Test-only (R2-6, lu-301/bau/review-offload2.md, Runde 2): forget every
  *  pending deferred unload so tests stay isolated, the same role
  *  `__resetBuiltinSlotOffloadForTests` plays for `builtin-slot-eviction.ts`'s
@@ -88,6 +115,15 @@ export interface PullState {
   paused: boolean
   complete: boolean
 }
+
+/**
+ * The hosted model the app picked by itself until 3.0.5: the head of the
+ * catalogue and the first row that passed the 7B rule (setModels and
+ * lib/active-model-mode). It declines adult fiction, and a refusal in the
+ * history is copied by better models in the same chat (measured 2026-10-05).
+ * No other hosted model was ever handed out that way.
+ */
+export const RETIRED_AUTO_CLOUD_PICK = 'lu-cloud::meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo'
 
 interface ModelState {
   models: AIModel[]
@@ -115,6 +151,12 @@ interface ModelState {
    * des anderen.
    */
   lastCloudModel: string | null
+  /**
+   * The one-time clearing of the old automatic Cloud pick has run (see
+   * `RETIRED_AUTO_CLOUD_PICK`). Stored, so that a later deliberate pick of
+   * that same model stays.
+   */
+  autoCloudPickCleared: boolean
   activePulls: Record<string, PullState>
   isModelLoading: boolean
   categoryFilter: ModelCategory
@@ -175,7 +217,9 @@ interface ModelState {
    *  and the next successful refresh the composer showed a model whose backend
    *  was gone and every send failed with model-not-found. providerStore calls
    *  this the moment a slot goes dark. */
-  dropActiveModelIfServedBy: (providerId: ProviderId) => void
+  /** `providerId` is a slot, or `openai:<entry>` for an additional
+   *  OpenAI-compatible entry (GitHub #173). */
+  dropActiveModelIfServedBy: (providerId: BackendKey) => void
   /** Der geteilte lokale Steckplatz ist an ein eingeschaltetes fremdes Backend
    *  gegangen. Der Chip im Chat nennt danach weiter das GGUF, das auf 8127 lag,
    *  auf dem Port liegt nichts mehr, und die Selbstheilung des Absendewegs
@@ -213,6 +257,7 @@ export const useModelStore = create<ModelState>()(
       activeModel: null,
       lastLocalModel: null,
       lastCloudModel: null,
+      autoCloudPickCleared: false,
       activePulls: {},
       isModelLoading: false,
       categoryFilter: 'all',
@@ -260,7 +305,21 @@ export const useModelStore = create<ModelState>()(
           // Automatic choices need a known size of at least 7B. Image/video,
           // small models and opaque aliases require no implicit chat pick.
           // The valid persisted choice above remains the user's decision.
-          const firstChat = models.find(canAutoSelectChat)
+          //
+          // A hosted model is never an automatic choice, and in Cloud mode
+          // nothing is. The head of the hosted catalogue is Llama 3.1 8B
+          // Turbo, it passes the 7B rule, and a new account chatted on it
+          // without ever having picked it (measured 2026-10-05: it declines
+          // adult fiction, and a refusal in the history is then copied by
+          // every better model in the same chat). In Cloud the user names the
+          // model. Locally the rule stays: those are the user's own files.
+          const inCloud = useSettingsStore.getState().settings.appMode === 'cloud'
+          const firstChat = inCloud
+            ? undefined
+            // Nor a model of an extra slot with the user's own key
+            // (`openai-<slug>`): it bills per message, and on a phone it
+            // would win over the model that runs on the device itself.
+            : models.find((m) => m.provider !== 'lu-cloud' && !isCompatProviderId(m.provider ?? '') && canAutoSelectChat(m))
           return {
             models,
             inventoryLoaded: true,
@@ -307,7 +366,18 @@ export const useModelStore = create<ModelState>()(
           catch (e) { log.warn('[modelStore] could not note the model on the open chat', { err: e }) }
         }
         if (!prev || prev === name) return
-        // Exactly ONE local model stays in VRAM at a time (David 2026-06-12:
+        // An answer that is still being written on the local lane may lose
+        // its engine to this pick. It is not held back; if it ends unfinished
+        // it says that the switch was the reason (lib/model-switch-stop.ts).
+        noteModelSwitch()
+        // A silent run (the memory digest after a turn or a voice session)
+        // holds the local lane like any turn, and every unload below waits
+        // for that lane. The person just asked for another model: the silent
+        // run gives way first, so the old model is let go now and not after
+        // work nobody is watching. A turn somebody IS watching still holds
+        // the unload back (lib/silent-runs.ts).
+        yieldSilentLocalRuns()
+        // Exactly ONE local model stays in VRAM at a time (2026-06-12:
         // "darf niemals 2 gleichzeitig geladen sein, außer man macht Compare").
         // Compare uses its own store + provider calls, NOT setActiveModel, so it
         // is unaffected. EXCEPTION (R2-3, lu-301/bau/review-offload2.md, Runde 2):
@@ -316,13 +386,15 @@ export const useModelStore = create<ModelState>()(
         // one, because the old one's unload is held back until every local run
         // still using it has ended. That is not a break of this rule; it is the
         // documented price of never dropping a run out from under itself.
+        // And a speaker of the group chat on screen is not unloaded at all
+        // (GH #168, `speaksInActiveGroup`): the group is its own Compare.
         // Unload the PREVIOUS local model via the right provider.
         //   - Ollama (no provider prefix)  → unloadModel
         //   - LM Studio (openai:: + LM-Studio providerName) → unloadLmStudioModel
         //   - Cloud (anthropic:: / OpenRouter / OpenAI etc.) → no local VRAM, skip
         // The old `!prev.includes('::')` guard skipped LM Studio entirely, so
         // switching AWAY from an LM Studio model left it loaded → two models in
-        // VRAM at once. (David live find.)
+        // VRAM at once. (the owner live find.)
         const prevIsLms = isLmStudioProvider(
           (prevModel && 'providerName' in prevModel && prevModel.providerName) as string | undefined,
         )
@@ -336,7 +408,7 @@ export const useModelStore = create<ModelState>()(
         const prevIsBuiltin =
           !!prevModel && 'providerName' in prevModel && isLuEngineName(prevModel.providerName)
         if (prevIsLms) {
-          const bareKey = prev.replace(/^[^:]+::/, '') // strip LU's routing prefix
+          const bareKey = prev.replace(/^[^:]+(?::[a-z0-9-]+)?::/, '') // strip LU's routing prefix, an entry's (#173) too
           // B6 (klaerung-n7.md) / Auflage 1.1 (review-offload2.md): this LM
           // Studio unload sits in the SAME function as the LU Engine stop
           // below and fires on the SAME Cloud-switch click, at a model
@@ -346,7 +418,7 @@ export const useModelStore = create<ModelState>()(
           // this exact model again before the local lane freed up".
           deferLocalUnload(
             `lms:${bareKey}`,
-            () => get().activeModel === prev,
+            () => get().activeModel === prev || speaksInActiveGroup(prev),
             () => unloadLmStudioModel(bareKey).catch((e) =>
               log.warn('[modelStore] failed to unload previous LM Studio model', { model: prev, err: e }),
             ),
@@ -377,6 +449,7 @@ export const useModelStore = create<ModelState>()(
             deferLocalUnload(
               'builtin-engine',
               () => {
+                if (speaksInActiveGroup(prev)) return true
                 const stillActiveModel = get().activeModel
                 const stillActiveEntry = stillActiveModel
                   ? get().models.find((m) => m.name === stillActiveModel)
@@ -423,7 +496,7 @@ export const useModelStore = create<ModelState>()(
           // relying on an unverified assumption about Ollama's scheduler.
           deferLocalUnload(
             `ollama:${prev}`,
-            () => get().activeModel === prev,
+            () => get().activeModel === prev || speaksInActiveGroup(prev),
             () => unloadModel(prev).catch((e) =>
               log.warn('[modelStore] failed to unload previous model', { model: prev, err: e }),
             ),
@@ -475,7 +548,7 @@ export const useModelStore = create<ModelState>()(
         }),
 
       dismissPull: (name) => {
-        // Bug #5 (phantomderp v2.4.3): the X-button used to remove the
+        // Bug #5 (a user v2.4.3): the X-button used to remove the
         // entry from `activePulls` without telling Rust to stop the
         // underlying stream. The Tauri-side `pull_model_stream` kept
         // emitting `pull-progress` events that re-created the entry via
@@ -514,7 +587,9 @@ export const useModelStore = create<ModelState>()(
 
       dropActiveModelIfServedBy: (providerId) => {
         const active = get().activeModel
-        if (!active || getProviderIdFromModel(active) !== providerId) return
+        // modelBackendKey, not the provider id: switching the `openai` slot
+        // off must not clear a pick served by an additional entry (#173).
+        if (!active || modelBackendKey(active) !== providerId) return
         log.warn('[modelStore] the picked model\'s backend was switched off, clearing the pick', {
           model: active, provider: providerId,
         })
@@ -580,6 +655,7 @@ export const useModelStore = create<ModelState>()(
         activeModel: state.activeModel,
         lastLocalModel: state.lastLocalModel,
         lastCloudModel: state.lastCloudModel,
+        autoCloudPickCleared: state.autoCloudPickCleared,
         categoryFilter: state.categoryFilter,
       }),
       /**
@@ -595,7 +671,17 @@ export const useModelStore = create<ModelState>()(
        * gespeicherter Wert ist immer die bessere Auskunft.
        */
       onRehydrateStorage: () => (state) => {
-        if (!state?.activeModel) return
+        if (!state) return
+        // Once, before anything else reads the pick: a stored Cloud pick that
+        // is exactly the model the app used to hand out by itself is not a
+        // pick. Nobody can tell it from a deliberate one, so it is cleared one
+        // time and the marker keeps a later pick of the same model.
+        if (!state.autoCloudPickCleared) {
+          if (state.activeModel === RETIRED_AUTO_CLOUD_PICK) state.activeModel = null
+          if (state.lastCloudModel === RETIRED_AUTO_CLOUD_PICK) state.lastCloudModel = null
+          state.autoCloudPickCleared = true
+        }
+        if (!state.activeModel) return
         const istCloud = state.activeModel.startsWith('lu-cloud::')
         if (istCloud) {
           if (!state.lastCloudModel) state.lastCloudModel = state.activeModel
@@ -635,3 +721,8 @@ onBuiltinSlotLostToForeignBackend((taker) => {
 onBuiltinSlotRegained(() => {
   void useModelStore.getState().reviveBuiltinEngineForActivePick()
 })
+
+// The tool registry asks lib/phone-sub-agents.ts which model the chat runs on
+// (a phone offers no sub agents to a model of its own engine). The rule cannot
+// import this store, so the store hands itself over, like the two above.
+setChatModelSource(() => useModelStore.getState().activeModel)

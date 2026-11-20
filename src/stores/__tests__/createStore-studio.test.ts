@@ -1,7 +1,7 @@
 /**
  * Studio-Felder von createStore (Portplan Abschnitt 3e/3f, Paket P5).
  *
- * Vier Faelle, die David/der Plan als Waechter verlangen:
+ * Vier Faelle, die der Inhaber/der Plan als Waechter verlangen:
  *  1. Ein Zustand der Version 1 (vor dem Studio) liest cloudStudioOptions als
  *     {} ein, nie als undefined, sonst faellt Object.entries() im Composer.
  *  2. Ein LOKALER Lauf laesst den Cloud-Modellwaehler in Ruhe: im Desktop
@@ -168,11 +168,21 @@ describe('createStore Studio fields', () => {
   // ── 3. setCloudOpModel wirft die Studio-Optionen weg ────────────
 
   describe('setCloudOpModel', () => {
-    it('clears cloudStudioOptions on every model switch', () => {
+    it('clears cloudStudioOptions when the pick moves the run onto another model', () => {
+      useCreateStore.getState().setIntent('lipsync')
+      useCreateStore.getState().setCloudOpModel('latentsync')
       useCreateStore.setState({ cloudStudioOptions: { duration: 5, voice: 'x' } })
-      useCreateStore.getState().setCloudOpModel('infinitetalk-fast')
-      expect(useCreateStore.getState().cloudOpModel).toBe('infinitetalk-fast')
+      useCreateStore.getState().setCloudOpModel('lipsync-2')
+      expect(useCreateStore.getState().cloudOpModel).toBe('lipsync-2')
       expect(useCreateStore.getState().cloudStudioOptions).toEqual({})
+    })
+
+    it('keeps them when the same model is picked again', () => {
+      useCreateStore.getState().setIntent('lipsync')
+      useCreateStore.getState().setCloudOpModel('latentsync')
+      useCreateStore.setState({ cloudStudioOptions: { duration: 5 } })
+      useCreateStore.getState().setCloudOpModel('latentsync')
+      expect(useCreateStore.getState().cloudStudioOptions).toEqual({ duration: 5 })
     })
 
     it('does not touch cloudStudioCredits (a stale price is cleared by a fresh quote, not by a model switch)', () => {

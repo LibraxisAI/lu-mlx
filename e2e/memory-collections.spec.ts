@@ -1,9 +1,10 @@
 import { expect, test, type Page } from '@playwright/test'
+import { appModules, type AppWindow } from './support/ui'
 
 async function signIn(page: Page, id: string) {
-  await page.evaluate(async owner => {
-    const path = '/src/stores/cloudAuthStore.ts'
-    const { useCloudAuthStore } = await import(path) as typeof import('../src/stores/cloudAuthStore')
+  await appModules(page, ['/src/stores/cloudAuthStore.ts'])
+  await page.evaluate(owner => {
+    const { useCloudAuthStore } = (window as unknown as AppWindow).__APP__['/src/stores/cloudAuthStore.ts'] as typeof import('../src/stores/cloudAuthStore')
     useCloudAuthStore.getState().setSignedIn({ id: owner }, { licenseActive: false, tier: null, access: true, quota: null })
   }, id)
 }
@@ -34,9 +35,9 @@ test('actual collection controls isolate two owners and retain local data throug
   await expect(page.locator('#result')).not.toContainText('Owner B original')
   await page.getByRole('button', { name: 'Use local memories', exact: true }).click()
   await expect(page.getByText('Local original', { exact: true })).toBeVisible()
+  await appModules(page, ['/src/lib/idbStorage.ts'])
   await expect.poll(() => page.evaluate(async () => {
-    const path = '/src/lib/idbStorage.ts'
-    const { idbStorage } = await import(path) as typeof import('../src/lib/idbStorage')
+    const { idbStorage } = (window as unknown as AppWindow).__APP__['/src/lib/idbStorage.ts'] as typeof import('../src/lib/idbStorage')
     const raw = await idbStorage.getItem('locally-uncensored-memory')
     return raw?.includes('Owner A original') && raw.includes('Owner B original') && raw.includes('Local original')
   })).toBe(true)

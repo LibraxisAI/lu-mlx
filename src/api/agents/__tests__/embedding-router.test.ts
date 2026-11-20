@@ -185,3 +185,34 @@ describe('embedding-router — hashDescription', () => {
     expect(__internal.hashDescription('a')).not.toBe(__internal.hashDescription('b'))
   })
 })
+
+// Realtime pass 01.10.2026 (R3): the agent loop routes every step of a run on
+// the same user instruction and asked the embedding server for its vector
+// before every model call.
+describe('embedding-router: the query vector is asked for once per query', () => {
+  beforeEach(() => clearEmbeddingCache())
+
+  it('a second step with the same instruction does not call the embedding server', async () => {
+    const tools = [{ name: 'a', description: 'apple' }, { name: 'b', description: 'banana' }]
+    const embed = vi.fn(fakeEmbed)
+    await selectToolsByEmbedding('make an apple pie', tools, embed, { topN: 1 })
+    const afterFirst = embed.mock.calls.length
+    await selectToolsByEmbedding('make an apple pie', tools, embed, { topN: 1 })
+    expect(afterFirst).toBe(2) // the tool descriptions, then the query
+    expect(embed.mock.calls.length).toBe(afterFirst)
+    // A new instruction is embedded, of course.
+    await selectToolsByEmbedding('peel a banana', tools, embed, { topN: 1 })
+    expect(embed.mock.calls.length).toBe(afterFirst + 1)
+  })
+
+  it('a query cached under another embedding backend is asked for again, not compared across spaces', async () => {
+    const tools = [{ name: 'a', description: 'apple' }]
+    await selectToolsByEmbedding('apple', tools, fakeEmbed, { topN: 1 })
+    // Backend switch: the tools are re-embedded in the new 4-dim space.
+    __internal.CACHE.clear()
+    const smallEmbed = vi.fn(async (texts: string[]) => texts.map(() => [1, 0, 0, 0]))
+    const out = await selectToolsByEmbedding('apple', tools, smallEmbed, { topN: 1 })
+    expect(out).toEqual(['a'])
+    expect(smallEmbed.mock.calls.some((c) => c[0][0] === 'apple' && c[0].length === 1)).toBe(true)
+  })
+})

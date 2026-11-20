@@ -1,7 +1,7 @@
 /**
  * Stop has to stop the whole benchmark, and a failure has to be visible.
  *
- * Found reviewing the C1 fix (2026-08-14). The brake ElBiggus asked for
+ * Found reviewing the C1 fix (2026-08-14). The brake a user asked for
  * (issue #106) aborts the request in flight, and that part works. But
  * stopBenchmark only aborted the controller: the loop had no stop check, so
  * the next iteration opened a fresh controller and kept measuring the same

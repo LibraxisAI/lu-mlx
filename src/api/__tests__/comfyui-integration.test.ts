@@ -1,5 +1,5 @@
 /**
- * Integration tests: Full pipeline verification for all 14 video models.
+ * Integration tests: Full pipeline verification for all 16 video models.
  * Tests that Bundle → Strategy → Workflow is a valid end-to-end chain
  * WITHOUT requiring any real ComfyUI instance or model downloads.
  */
@@ -24,12 +24,13 @@ function allNodesAvailable(): CategorizedNodes {
     samplers: [
       'KSampler', 'KSamplerAdvanced',
       'CogVideoXSampler', 'FramePackSampler', 'PyramidFlowSampler', 'AllegroSampler',
+      'LTXVDualCFGGuider',
     ],
     latentInit: [
       'EmptyLatentImage', 'EmptySD3LatentImage', 'EmptyFlux2LatentImage',
       'EmptyHunyuanLatentVideo', 'EmptyLTXVLatentVideo',
       'EmptyMochiLatentVideo', 'EmptyCosmosLatentVideo',
-      'CogVideoXEmptyLatents', 'Wan22ImageToVideoLatent',
+      'CogVideoXEmptyLatents', 'Wan22ImageToVideoLatent', 'MiniMaxH3ImageToVideo',
     ],
     textEncoders: ['CLIPTextEncode', 'CogVideoXTextEncode', 'PyramidFlowTextEncode', 'AllegroTextEncode'],
     decoders: ['VAEDecode', 'CogVideoXVAEDecode', 'PyramidFlowDecode', 'AllegroDecoder'],
@@ -47,7 +48,7 @@ const defaultModels: AvailableModels = {
   motionModels: ['animatediff_lightning_4step.safetensors'],
 }
 
-describe('Full Pipeline: Bundle → Strategy for all 14 video bundles', () => {
+describe('Full Pipeline: Bundle → Strategy for all 16 video bundles', () => {
   const bundles = getVideoBundles()
 
   for (const bundle of bundles) {
@@ -65,9 +66,9 @@ describe('Full Pipeline: Bundle → Strategy for all 14 video bundles', () => {
       // bisher nur zur Laufzeit sichtbar — der Cast am Aufruf hat ihn genau
       // dort durchgelassen.
       const workflowToModelType: Record<string, ModelType> = {
-        wan: 'wan', wan22: 'wan22', hunyuan: 'hunyuan', ltx: 'ltx', animatediff: 'sd15',
+        wan: 'wan', wan22: 'wan22', hunyuan: 'hunyuan', ltx: 'ltx', ltx25: 'ltx25', animatediff: 'sd15',
         cogvideo: 'cogvideo', framepack: 'framepack', svd: 'svd',
-        mochi: 'mochi', cosmos: 'cosmos', pyramidflow: 'pyramidflow', allegro: 'allegro',
+        mochi: 'mochi', cosmos: 'cosmos', pyramidflow: 'pyramidflow', allegro: 'allegro', minimaxh3: 'minimaxh3',
       }
       const modelType = workflowToModelType[workflow]
       expect(modelType).toBeDefined()
@@ -86,7 +87,7 @@ describe('Bundle consistency checks', () => {
   const bundles = getVideoBundles()
 
   it('all video bundle workflows map to video model types', () => {
-    const videoWorkflows = ['wan', 'wan22', 'hunyuan', 'ltx', 'animatediff', 'cogvideo', 'framepack', 'svd', 'mochi', 'cosmos', 'pyramidflow', 'allegro']
+    const videoWorkflows = ['wan', 'wan22', 'hunyuan', 'ltx', 'animatediff', 'cogvideo', 'framepack', 'svd', 'mochi', 'cosmos', 'pyramidflow', 'allegro', 'minimaxh3', 'ltx25']
     for (const b of bundles) {
       expect(videoWorkflows).toContain(b.workflow)
     }
@@ -106,7 +107,7 @@ describe('Bundle consistency checks', () => {
 
   it('native bundles (no customNodes) use native ComfyUI strategies', () => {
     const nativeBundles = bundles.filter(b => !b.customNodes || b.customNodes.length === 0)
-    const nativeWorkflows = ['wan', 'wan22', 'hunyuan', 'ltx', 'svd', 'mochi', 'cosmos']
+    const nativeWorkflows = ['wan', 'wan22', 'hunyuan', 'ltx', 'ltx25', 'svd', 'mochi', 'cosmos', 'minimaxh3']
     for (const b of nativeBundles) {
       expect(nativeWorkflows).toContain(b.workflow)
     }
@@ -135,6 +136,7 @@ describe('Model filename classification consistency', () => {
     wan22: ['wan22'],
     hunyuan: ['hunyuan'],
     ltx: ['ltx'],
+    ltx25: ['ltx25'],
     mochi: ['mochi'],
     cosmos: ['cosmos'],
     cogvideo: ['cogvideo'],
@@ -142,6 +144,7 @@ describe('Model filename classification consistency', () => {
     framepack: ['framepack'],
     pyramidflow: ['pyramidflow'],
     allegro: ['allegro'],
+    minimaxh3: ['minimaxh3'],
     // AnimateDiff uses SD1.5 checkpoints — they classify as sd15 or unknown
     animatediff: ['sd15', 'unknown'],
   }

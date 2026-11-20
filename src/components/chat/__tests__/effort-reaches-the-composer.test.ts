@@ -56,7 +56,7 @@ const CATALOGUE = [
 const BASES = {
   'the production cloud': 'https://lu-labs.ai/api/inference/v1',
   'a cloud base on localhost, which is what the bundle ran against': 'http://localhost:3000/api/inference/v1',
-  'a cloud base on the LAN': 'http://192.168.0.54:3000/api/inference/v1',
+  'a cloud base on the LAN': 'http://192.168.1.54:3000/api/inference/v1',
 }
 
 const seen: string[] = []

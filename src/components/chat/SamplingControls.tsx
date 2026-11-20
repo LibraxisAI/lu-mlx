@@ -1,11 +1,26 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
-import { X } from 'lucide-react'
+import { usePopoverPlatz } from '../../hooks/usePopoverPlatz'
+import { X, SlidersHorizontal } from 'lucide-react'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useChatStore } from '../../stores/chatStore'
+import { useAgentModeStore } from '../../stores/agentModeStore'
 import { HINWEIS_TEXT } from '../../lib/hinweis'
 import { useDismissOnEscape } from '../../hooks/useDismissOnEscape'
-import { SAMPLING_DEFAULTS, effectiveSampling, samplingIsChanged, hasOwnSampling } from '../../lib/sampling'
+import { SAMPLING_DEFAULTS, TEMPERATURE_MAX, AGENT_TEMPERATURE_MAX, TEMPERATURE_HELP, TEMPERATURE_HELP_LABEL, effectiveSampling, samplingIsChanged, hasOwnSampling, isHighTemperature } from '../../lib/sampling'
+import { resetTemperatureToDefault } from '../../lib/temperature-reset'
+import { HighTemperatureWarning } from './HighTemperatureWarning'
+import { HelpMark } from '../ui/HelpMark'
+import { CustomParamsEditor, CUSTOM_PARAMS_LABEL } from './CustomParamsEditor'
 import type { SamplingOverrides } from '../../lib/sampling'
+import { isGroupChat } from '../../lib/group-chat'
+import { speakerSamplingLines, type SpeakerSamplingLine } from '../../lib/speaker-sampling-lines'
+import { useModelStore } from '../../stores/modelStore'
+import { useProviderStore } from '../../stores/providerStore'
+import { getProviderIdFromModel, isOpenAISlotModel } from '../../api/providers/model-name'
+import { samplerTargetOfModel } from '../../lib/lan-openai-slot'
+import {
+  THINK_BUDGET_STEP, normalizeThinkBudget, thinkBudgetHint, thinkBudgetSupport,
+} from '../../lib/think-budget'
 
 /**
  * Sampling controls next to the composer, scoped to ONE conversation.
@@ -25,7 +40,7 @@ import type { SamplingOverrides } from '../../lib/sampling'
  *
  * ## Why this is a popup and not an inline panel
  *
- * David, 2026-09-11: "der sample anklickbar im prompt fenster muss ein pop up
+ * 2026-09-11: "der sample anklickbar im prompt fenster muss ein pop up
  * sein, und nicht das prompt fenster veraendern. mit einem sauberen x zum
  * wegklicken und nicht einfach wieder auf den text klicken zum entfernen, soll
  * windows mac und webapp ueberall gleich sein."
@@ -60,10 +75,10 @@ import type { SamplingOverrides } from '../../lib/sampling'
  *
  * Top K stays on the settings page, where Ollama and Anthropic read it
  * (`ollama-provider.ts:150`, `anthropic-provider.ts:320`). That is the same
- * arrangement the web app describes in `apps/web/lib/sampling.ts:22-26`.
+ * arrangement the web app describes in the web app.
  */
 const FIELDS = [
-  { key: 'temperature', label: 'Temperature', min: 0, max: 2, step: 0.05 },
+  { key: 'temperature', label: 'Temperature', min: 0, max: TEMPERATURE_MAX, step: 0.05 },
   { key: 'topP', label: 'Top P', min: 0, max: 1, step: 0.01 },
 ] as const
 
@@ -87,7 +102,7 @@ export function normalizeMaxTokens(raw: string): number {
 }
 
 /** The close button's accessible name. Word for word the same string as in the
- *  web app (apps/web/lib/sampling.ts), which a parity test there re-reads from
+ *  web app (the web app), which a parity test there re-reads from
  *  this file: one close button on Windows, Mac and the web app. */
 export const SAMPLING_CLOSE_LABEL = 'Close sampling settings'
 
@@ -99,11 +114,61 @@ const PANEL_WIDTH = 248
 
 const FOCUSABLE = 'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
 
+/** Accessible name of the think budget field, shared with its tests. */
+export const THINK_BUDGET_LABEL = 'Think budget'
+
+/**
+ * Think budget row (D12). Global like the Think button beside the popup, so
+ * it does not follow this chat's Reset and says so in its title.
+ *
+ * Shown for every model, and disabled with a plain sentence where the backend
+ * has no budget field: a field that takes a number and then does nothing
+ * would be a control that lies (lib/think-budget.ts lists who takes what).
+ */
+function ThinkBudgetRow() {
+  const [draft, setDraft] = useState<string | null>(null)
+  const budget = useSettingsStore((s) => normalizeThinkBudget(s.settings.thinkingBudget))
+  const updateSettings = useSettingsStore((s) => s.updateSettings)
+  const activeModel = useModelStore((s) => s.activeModel)
+  const managedEngine = useProviderStore((s) => s.providers.openai?.managed === true)
+  // Only the slot itself can be our engine, never an additional entry (#173).
+  const support = thinkBudgetSupport(getProviderIdFromModel(activeModel ?? ''), managedEngine && isOpenAISlotModel(activeModel ?? ''))
+  const supported = support !== 'none'
+  return (
+    <div className="space-y-0.5" data-testid="think-budget-row">
+      <label className="flex items-center gap-2">
+        <span className="w-20 shrink-0 text-gray-400">{THINK_BUDGET_LABEL}</span>
+        <input
+          type="number"
+          className="min-w-0 flex-1 rounded border border-gray-700 bg-transparent px-1 py-0.5 disabled:opacity-40"
+          min={0}
+          step={THINK_BUDGET_STEP}
+          disabled={!supported}
+          value={draft ?? String(budget)}
+          aria-label={THINK_BUDGET_LABEL}
+          title="Most tokens the model may spend thinking while Think is on. 0 = auto. Applies to every chat."
+          onChange={(e) => {
+            const raw = e.target.value
+            const next = raw.trim() === '' ? 0 : normalizeThinkBudget(Number(raw))
+            setDraft(raw.trim() === '' ? raw : String(next))
+            updateSettings({ thinkingBudget: next })
+          }}
+          onBlur={() => setDraft(null)}
+        />
+        <span className="w-10 shrink-0 text-right text-gray-500">{supported && budget === 0 ? 'auto' : ''}</span>
+      </label>
+      <p className="text-gray-500" data-testid="think-budget-hint">{thinkBudgetHint(support, budget)}</p>
+    </div>
+  )
+}
+
 export function SamplingControls() {
   const [open, setOpen] = useState(false)
+  const [tempHelp, setTempHelp] = useState(false)
   const [draft, setDraft] = useState<string | null>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
+  const lage = usePopoverPlatz(panelRef, open, { bevorzugt: 'oben', abstand: 6, breiteDeckeln: true })
   const panelId = useId()
   const settings = useSettingsStore((s) => s.settings)
   const activeId = useChatStore((s) => s.activeConversationId)
@@ -115,16 +180,53 @@ export function SamplingControls() {
       : undefined
   )
   const setSampling = useChatStore((s) => s.setConversationSampling)
+  // GH #198: this chat's own custom rows.
+  const customRows = useChatStore((s) =>
+    s.activeConversationId
+      ? s.conversations.find((c) => c.id === s.activeConversationId)?.customParams
+      : undefined
+  )
+  const setCustomRows = useChatStore((s) => s.setConversationCustomParams)
+  const agentMode = useAgentModeStore((s) => (activeId ? s.agentModeActive[activeId] === true : false))
   const resetSampling = useChatStore((s) => s.resetConversationSampling)
+  // GH #175: who speaks in this chat, and which persona preset holds for
+  // each. Only the fields the lines read, so a streaming answer does not
+  // re-render the popup.
+  const personaId = useChatStore((s) => s.conversations.find((c) => c.id === s.activeConversationId)?.personaId)
+  const keptPrompt = useChatStore((s) => s.conversations.find((c) => c.id === s.activeConversationId)?.systemPrompt)
+  const personaEnabled = useChatStore((s) => s.conversations.find((c) => c.id === s.activeConversationId)?.personaEnabled)
+  const groupModels = useChatStore((s) => s.conversations.find((c) => c.id === s.activeConversationId)?.groupModels)
+  const groupPersonas = useChatStore((s) => s.conversations.find((c) => c.id === s.activeConversationId)?.groupPersonas)
+  const personas = useSettingsStore((s) => s.personas)
+  const activePersonaId = useSettingsStore((s) => s.activePersonaId)
+  const activeModel = useModelStore((s) => s.activeModel)
+  const providers = useProviderStore((s) => s.providers)
+  // Read so the lines follow an entry switched on, off or moved (#173).
+  useProviderStore((s) => s.openaiEntries)
+  const lines: SpeakerSamplingLine[] = speakerSamplingLines({
+    settings,
+    conv: { personaId, systemPrompt: keptPrompt, personaEnabled, groupModels, groupPersonas, sampling: overrides, customParams: customRows },
+    activeModel,
+    personas,
+    activePersonaId,
+    providers,
+    // GitHub #173: a speaker on an additional entry answers for its own server.
+    targetOf: samplerTargetOfModel,
+  })
+  // The sliders write THIS chat's own value. In a plain chat they show what
+  // holds for its one speaker, the persona preset included. In a group the
+  // moved value holds for every member, so they show the chat's own value or
+  // the Settings page, and the lines below say what each member runs on.
+  const sliderPreset = isGroupChat(groupModels) ? undefined : lines[0]?.preset
 
-  const value = effectiveSampling(settings, overrides)
-  const changed = samplingIsChanged(settings, overrides)
+  const value = effectiveSampling(settings, overrides, sliderPreset)
+  const changed = samplingIsChanged(settings, overrides, sliderPreset) || (customRows?.length ?? 0) > 0
   // F1 (review-w2ui.md, 18.09.2026): Reset only deletes THIS chat's own
   // override, so it must go by whether one exists, not by whether the
   // EFFECTIVE value differs from the shipped default (`changed` above): that
   // is also true when only the Settings page moved and this chat never
   // touched its own slider, and Reset then has nothing to delete.
-  const ownSampling = hasOwnSampling(overrides)
+  const ownSampling = hasOwnSampling(overrides) || (customRows?.length ?? 0) > 0
   const write = (patch: SamplingOverrides) => {
     if (activeId) setSampling(activeId, patch)
   }
@@ -189,12 +291,14 @@ export function SamplingControls() {
     <div className="relative text-xs" ref={wrapRef} data-testid="sampling-controls">
       <button
         type="button"
-        className="text-gray-500 hover:text-gray-300"
+        // The composer row's own recipe, like Think and Docs beside it. It
+        // was plain text-xs (12px) in a row of 9.6px controls.
+        className="lu-control"
         aria-expanded={open}
         aria-controls={panelId}
         data-testid="sampling-trigger"
-        // Word for word the web app's trigger (apps/web/components/chat/
-        // SamplingControls.tsx:82-83), so the button has one name on Windows,
+        // Word for word the web app's trigger (the web app),
+        // so the button has one name on Windows,
         // Mac and the web app instead of being read out as a bare number.
         title="Sampling for this chat"
         aria-label={`Sampling: temperature ${value.temperature}`}
@@ -202,10 +306,24 @@ export function SamplingControls() {
         // disappear under the pointer on the second click.
         onClick={() => setOpen(true)}
       >
-        Sampling: {value.temperature.toFixed(2)}
+        {/* In a narrow composer (the row is the @container, ChatInput.tsx)
+            an icon stands in for the word; title and aria-label keep it. */}
+        <SlidersHorizontal size={10} className="hidden @max-[30rem]:inline-block mr-1 -mt-px" />
+        <span className="@max-[30rem]:hidden">Sampling: </span>
+        {value.temperature.toFixed(2)}
         {/* Ein geaenderter Regler ist kein Zwischenfall, also traegt der
             Stern den ruhigen Ton und keine eigene Warnfarbe. */}
-        {changed && <span className={`ml-1 ${HINWEIS_TEXT.ruhig}`} title="Changed from the defaults">*</span>}
+        {/* A temperature that makes noise is a problem, not a preference, so
+            from TEMPERATURE_WARN up the star takes the warning colour (A33). */}
+        {changed && (
+          <span
+            className={`ml-1 ${isHighTemperature(value.temperature) ? HINWEIS_TEXT.fehler : HINWEIS_TEXT.ruhig}`}
+            title={isHighTemperature(value.temperature) ? 'Temperature is high, answers may be random text' : 'Changed from the defaults'}
+            data-testid="sampling-changed-marker"
+          >
+            {isHighTemperature(value.temperature) ? '!' : '*'}
+          </span>
+        )}
       </button>
 
       {open && (
@@ -218,14 +336,17 @@ export function SamplingControls() {
           // Placed with an inline style rather than utility classes, for the
           // same reason the web app does: `position` is then a fact a test can
           // read, instead of a class name a test would have to believe.
+          // Above the trigger while it fits there; in a short window it takes
+          // the side with room and scrolls instead of leaving the window.
           style={{
             position: 'absolute',
             right: 0,
-            bottom: '100%',
-            marginBottom: 6,
+            ...(lage.nachOben ? { bottom: '100%', marginBottom: 6 } : { top: '100%', marginTop: 6 }),
             width: PANEL_WIDTH,
+            overflowY: 'auto',
+            ...lage.style,
           }}
-          className="z-50 space-y-2 rounded-lg p-2.5 lu-elevated"
+          className="z-50 space-y-2 rounded-lg p-2.5 lu-elevated scrollbar-thin"
         >
           <div className="flex justify-end">
             <button
@@ -241,8 +362,20 @@ export function SamplingControls() {
           </div>
 
           {FIELDS.map((f) => (
-            <label key={f.key} className="flex items-center gap-2">
-              <span className="w-20 shrink-0 text-gray-400">{f.label}</span>
+            <div key={f.key}>
+            <label className="flex items-center gap-2">
+              <span className="w-20 shrink-0 flex items-center gap-1 text-gray-400">
+                {f.label}
+                {f.key === 'temperature' && (
+                  <HelpMark
+                    text={TEMPERATURE_HELP}
+                    label={TEMPERATURE_HELP_LABEL}
+                    open={tempHelp}
+                    onToggle={() => setTempHelp((v) => !v)}
+                    testId="temperature-help"
+                  />
+                )}
+              </span>
               <input
                 type="range"
                 className="min-w-0 flex-1"
@@ -255,7 +388,24 @@ export function SamplingControls() {
               />
               <span className="w-10 shrink-0 text-right tabular-nums text-gray-300">{value[f.key]}</span>
             </label>
+            {f.key === 'temperature' && tempHelp && (
+              <p className="mt-1 leading-relaxed text-gray-500" data-testid="temperature-help-text">{TEMPERATURE_HELP}</p>
+            )}
+            </div>
           ))}
+
+          <HighTemperatureWarning
+            temperature={value.temperature}
+            onReset={() => {
+              setDraft(null)
+              resetTemperatureToDefault(activeId)
+            }}
+          />
+          {agentMode && value.temperature > AGENT_TEMPERATURE_MAX && (
+            <p className="text-gray-500" data-testid="agent-temperature-hint">
+              Agent turns use at most {AGENT_TEMPERATURE_MAX.toFixed(1)}, so tool calls stay valid.
+            </p>
+          )}
 
           <label className="flex items-center gap-2">
             <span className="w-20 shrink-0 text-gray-400">Max tokens</span>
@@ -276,6 +426,39 @@ export function SamplingControls() {
             />
             <span className="w-10 shrink-0 text-right text-gray-500">{value.maxTokens === 0 ? 'auto' : ''}</span>
           </label>
+
+          <ThinkBudgetRow />
+
+          <div className="space-y-1 border-t border-gray-700/50 pt-1.5">
+            <div className="text-gray-400">{CUSTOM_PARAMS_LABEL}</div>
+            <CustomParamsEditor
+              rows={customRows ?? []}
+              onChange={(rows) => { if (activeId) setCustomRows(activeId, rows) }}
+              inherited={!isGroupChat(groupModels) && lines[0]?.personaCustom?.length
+                ? { source: lines[0].source.replace(/^Persona /, 'persona '), rows: lines[0].personaCustom }
+                : undefined}
+            />
+          </div>
+
+          {lines.length > 0 && (
+            <div data-testid="sampling-speakers" className="space-y-1 border-t border-gray-700/50 pt-1.5">
+              {lines.map((line) => (
+                <div key={line.model} data-testid="sampling-speaker" data-model={line.model} className="space-y-0.5">
+                  <div className="text-gray-300">
+                    {line.label}: <span className="text-gray-400">{line.source}</span>
+                  </div>
+                  <div className="text-gray-500 break-words">
+                    {line.values.map((v, i) => (
+                      <span key={v.label} title={v.sent ? undefined : 'This backend does not read this value, it is not sent.'}>
+                        {i > 0 && ' · '}
+                        <span>{v.label} {v.text}{v.sent ? '' : ' (not sent)'}</span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
 
           <div className="flex items-center justify-between pt-1">
             <span className="text-gray-500">Reasoning models accept these and react less to them.</span>

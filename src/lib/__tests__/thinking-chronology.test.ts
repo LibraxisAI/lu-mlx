@@ -1,5 +1,5 @@
 /**
- * Thoughts sit chronologically between the tool calls (G21-2, David live at
+ * Thoughts sit chronologically between the tool calls (G21-2, the owner live at
  * R19, 2026-08-07): "Die Denkblase ist immer ganz oben ueber den Tool Calls.
  * Es kommen ja immer mehrere Denkblasen, die muessen zwischen den Tool Calls
  * dann genau da kommen, in der richtigen Reihenfolge." The Agent loop now
@@ -24,7 +24,7 @@ const bubble = read('../../components/chat/MessageBubble.tsx')
 describe('the Agent loop emits per-round thinking blocks', () => {
   it('a continuing round writes its thought as a block and clears the top field', () => {
     expect(agent).toContain("phase: 'thinking'")
-    const emit = agent.indexOf('// G21-2 (David 2026-08-07)')
+    const emit = agent.indexOf('// G21-2 (2026-08-07)')
     expect(emit).toBeGreaterThan(-1)
     const after = agent.slice(emit, emit + 1400)
     expect(after).toContain("runState.thinking = ''")

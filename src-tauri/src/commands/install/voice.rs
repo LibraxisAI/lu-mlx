@@ -17,7 +17,7 @@
 use std::process::Stdio;
 
 
-use tauri::{Manager, State};
+use tauri::State;
 use tracing::{error, info};
 
 use crate::state::AppState;
@@ -25,7 +25,7 @@ use crate::os_error;
 use crate::python::python_command;
 
 use super::pip::pip_install_streaming_with_retry_cancellable;
-use super::venv::{is_pep668_protected, resolve_lu_python};
+use super::venv::{pip_escape_args_for, resolve_lu_python};
 
 // ── Whisper (faster-whisper) installer (§24.9 — STT install affordance) ──────
 
@@ -103,12 +103,9 @@ pub fn install_whisper(
         // Arch / Debian 12+ / Fedora 38+ system Python is PEP 668 protected, so a
         // bare `pip install` dies with externally-managed-environment. When that's
         // the target (no ComfyUI venv absorbed it), install into the user site
-        // with the escape hatch so STT installs there too (joerack, Arch). No-op
-        // on Windows/macOS/venv Pythons (not PEP 668 protected).
-        if is_pep668_protected(&target_python) {
-            args.push("--break-system-packages");
-            args.push("--user");
-        }
+        // with the escape hatch so STT installs there too (Arch). No-op
+        // on Windows/macOS and in any venv, which pip refuses `--user` for.
+        args.extend(pip_escape_args_for(&target_python));
         // No cancel flag — this single pip install is short relative to the
         // ComfyUI PyTorch download, so we run it to completion like install_python.
         match pip_install_streaming_with_retry_cancellable(&args, &target_python, 3, &install_state, None) {
@@ -208,11 +205,7 @@ pub fn install_tts(
         return Err("no_python: Python must be installed before Piper TTS.".to_string());
     }
 
-    let voices_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("no app data dir: {}", os_error::english(&e)))?
-        .join("piper_voices");
+    let voices_dir = crate::commands::tts::piper_voices_dir(&app)?;
 
     let install_state = state.tts_install.clone();
 
@@ -249,11 +242,8 @@ pub fn install_tts(
             );
             let mut args = build_tts_pip_args();
             // PEP 668 escape hatch (Arch / Debian 12+ / Fedora 38+) — see
-            // install_whisper. No-op on Windows/macOS/venv Pythons.
-            if is_pep668_protected(&target_python) {
-                args.push("--break-system-packages");
-                args.push("--user");
-            }
+            // install_whisper. No-op on Windows/macOS and in any venv.
+            args.extend(pip_escape_args_for(&target_python));
             pip_install_streaming_with_retry_cancellable(&args, &target_python, 3, &install_state, None)
         };
         match pip_result {

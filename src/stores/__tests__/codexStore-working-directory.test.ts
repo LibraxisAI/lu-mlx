@@ -48,7 +48,7 @@ const KEY = 'locally-uncensored-codex'
 const persisted = () => JSON.parse(localStorage.getItem(KEY) ?? '{}')
 
 /** What the reporters actually typed at: a drive letter, backslashes, a space. */
-const WINDOWS_PATH = 'C:\\Users\\helpslowlydying\\Documents\\My Projects'
+const WINDOWS_PATH = 'C:\\Users\\someone\\Documents\\My Projects'
 
 beforeEach(() => {
   localStorage.clear()
@@ -57,18 +57,18 @@ beforeEach(() => {
 
 describe('the folder can be given back', () => {
   it('clears the store', () => {
-    useCodexStore.getState().setWorkingDirectory('/home/dave/repo')
+    useCodexStore.getState().setWorkingDirectory('/home/alex/repo')
     // Negative control: without this the next assertion passes on a store that
     // never held a folder in the first place.
-    expect(useCodexStore.getState().workingDirectory).toBe('/home/dave/repo')
+    expect(useCodexStore.getState().workingDirectory).toBe('/home/alex/repo')
 
     useCodexStore.getState().clearWorkingDirectory()
     expect(useCodexStore.getState().workingDirectory).toBe('')
   })
 
   it('writes the empty string to disk, so a restart does not resurrect the folder', () => {
-    useCodexStore.getState().setWorkingDirectory('/home/dave/repo')
-    expect(persisted().state.workingDirectory).toBe('/home/dave/repo')
+    useCodexStore.getState().setWorkingDirectory('/home/alex/repo')
+    expect(persisted().state.workingDirectory).toBe('/home/alex/repo')
 
     useCodexStore.getState().clearWorkingDirectory()
     expect(persisted().state.workingDirectory).toBe('')
@@ -78,10 +78,10 @@ describe('the folder can be given back', () => {
   })
 
   it('unpins the open thread at its next send, which is where the folder reaches the run', () => {
-    useCodexStore.getState().setWorkingDirectory('/home/dave/repo')
-    useCodexStore.getState().initThread('conv-1', '/home/dave/repo')
+    useCodexStore.getState().setWorkingDirectory('/home/alex/repo')
+    useCodexStore.getState().initThread('conv-1', '/home/alex/repo')
     // Negative control: the thread really did carry the folder before.
-    expect(useCodexStore.getState().getThread('conv-1')!.workingDirectory).toBe('/home/dave/repo')
+    expect(useCodexStore.getState().getThread('conv-1')!.workingDirectory).toBe('/home/alex/repo')
 
     useCodexStore.getState().clearWorkingDirectory()
     useCodexStore.getState().syncThreadWorkingDirectory('conv-1')
@@ -235,7 +235,9 @@ describe('R1 DOWNGRADE-KONTRAKT still holds', () => {
     useCodexStore.getState().beginSend()
 
     const raw = persisted()
-    expect(Object.keys(raw.state).sort()).toEqual(['modeByConversation', 'workingDirectory'])
+    // lastPickedMode joined additively on 01.10.2026 (a new conversation keeps
+    // the last Ask/Bypass); removing the folder still adds nothing.
+    expect(Object.keys(raw.state).sort()).toEqual(['lastPickedMode', 'modeByConversation', 'workingDirectory'])
     expect(raw.version ?? 0).toBe(0)
     // Negative control: the threads that were just unpinned stay off the disk.
     expect(raw.state.threads).toBeUndefined()

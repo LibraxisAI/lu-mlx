@@ -34,6 +34,7 @@ beforeEach(() => {
   localStorage.clear()
   useCodexStore.setState({
     modeByConversation: {},
+    lastPickedMode: null,
     parkedModeByConversation: {},
     prePlanModeByConversation: {},
     planApprovalByConversation: {},
@@ -56,6 +57,37 @@ describe('resolution: the conversation first, then the global default', () => {
     expect(useCodexStore.getState().codexModeFor('Y', 'ask')).toBe('ask')
     // Negative control: a global write would have moved Y too.
     expect(useCodexStore.getState().modeByConversation.Y).toBeUndefined()
+  })
+})
+
+describe('a new conversation starts in the last Ask/Bypass pick (Gegenprobe 01.10.2026)', () => {
+  it('"New" after picking Bypass starts in Bypass', () => {
+    useCodexStore.getState().chooseCodexMode('old', 'bypass', false)
+    useCodexStore.getState().startConversationMode('new')
+    expect(useCodexStore.getState().codexModeFor('new', 'ask')).toBe('bypass')
+  })
+
+  it('Plan is never carried over: the new one starts in the Ask/Bypass from before', () => {
+    useCodexStore.getState().chooseCodexMode('old', 'bypass', false)
+    useCodexStore.getState().chooseCodexMode('old', 'plan', false)
+    useCodexStore.getState().startConversationMode('new')
+    expect(useCodexStore.getState().codexModeFor('new', 'ask')).toBe('bypass')
+  })
+
+  it('a pick parked during a run counts as the last pick too', () => {
+    useCodexStore.getState().chooseCodexMode('old', 'bypass', true)
+    useCodexStore.getState().startConversationMode('new')
+    expect(useCodexStore.getState().codexModeFor('new', 'ask')).toBe('bypass')
+  })
+
+  it('nothing picked yet: the global default, and the stamp does not overwrite an own pick', () => {
+    useCodexStore.getState().startConversationMode('new')
+    expect(useCodexStore.getState().modeByConversation.new).toBeUndefined()
+    expect(useCodexStore.getState().codexModeFor('new', 'ask')).toBe('ask')
+    useCodexStore.getState().chooseCodexMode('own', 'ask', false)
+    useCodexStore.getState().chooseCodexMode('other', 'bypass', false)
+    useCodexStore.getState().startConversationMode('own')
+    expect(useCodexStore.getState().codexModeFor('own', 'ask')).toBe('ask')
   })
 })
 
@@ -127,7 +159,7 @@ describe('R1 DOWNGRADE-KONTRAKT: the persist shape stays additive at version 0',
     useCodexStore.getState().setWorkingDirectory('/repo')
     useCodexStore.getState().chooseCodexMode('x', 'plan', false)
     const raw = persisted()
-    expect(Object.keys(raw.state).sort()).toEqual(['modeByConversation', 'workingDirectory'])
+    expect(Object.keys(raw.state).sort()).toEqual(['lastPickedMode', 'modeByConversation', 'workingDirectory'])
     expect(raw.state.modeByConversation).toEqual({ x: 'plan' })
     expect(raw.state.workingDirectory).toBe('/repo')
   })

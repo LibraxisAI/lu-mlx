@@ -1,5 +1,5 @@
 /**
- * OllamaProvider.chatStream error-line test (rikki Discord 2026-06-10).
+ * OllamaProvider.chatStream error-line test (Discord 2026-06-10).
  *
  * Plain chat shares the same Ollama NDJSON wire format as the agent path:
  * a mid-stream `{"error":"..."}` line inside an HTTP-200 stream means the

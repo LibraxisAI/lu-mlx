@@ -147,9 +147,20 @@ describe('the tools forced into every request are named in the prompts', () => {
     expect(PROMPTS.codex).toContain('file_edit')
   })
 
-  it('both lean prompts name todo_write, the tool a weak model needs most', () => {
-    expect(PROMPTS.codexLean).toContain('todo_write')
-    expect(PROMPTS.agentLean).toContain('todo_write')
+  it('no prompt tells the model to open a plan on its own (lib/plan-gate.ts)', () => {
+    // Customer case 30.09.2026: "plan first, then again after every step" made
+    // every tick a full-context round trip on a plan nobody asked for. The
+    // tool is offered only when planning is wanted, and the prompts say to
+    // bundle an update with real work, never to start with one.
+    for (const key of ['codex', 'codexLean', 'agent', 'agentLean'] as const) {
+      expect(PROMPTS[key], key).not.toMatch(/todo_write (?:FIRST|first)|starts with todo_write|after each step,? call todo_write/i)
+    }
+  })
+
+  it('the prompts ask for batched tool calls', () => {
+    for (const key of ['codex', 'codexLean', 'agent', 'agentLean'] as const) {
+      expect(PROMPTS[key], key).toMatch(/independent tool calls into (?:ONE|one) response/)
+    }
   })
 
   it('the hermes prompt mentions the plan when the tool is offered', () => {

@@ -58,12 +58,10 @@ describe('the agent prompt renders the platform sentence', () => {
     expect(built).not.toContain('Date and time at the start of this run')
   })
 
-  it('the loop that appends it is still there, and still appends it last', () => {
+  it('the loop still sends it, in the turn note behind the newest message (A7)', () => {
     const agent = read('hooks', 'useAgentChat.ts')
-    const clockAt = agent.indexOf('agentSystemPrompt += `\\n\\n${hostClockLine()}`')
-    const ragAt = agent.indexOf('agentSystemPrompt += ragSuffix')
-    expect(clockAt).toBeGreaterThan(-1)
-    expect(clockAt).toBeGreaterThan(ragAt)
+    expect(agent).toMatch(/clock: hostClockLine\(\)/)
+    expect(agent).not.toContain('agentSystemPrompt += `\\n\\n${hostClockLine()}`')
   })
 })
 
@@ -132,7 +130,8 @@ describe('the sub-agent prompt carries both halves', () => {
     const runnerAt = sub.indexOf('export async function defaultSubAgentRunner')
     expect(runnerAt).toBeGreaterThan(-1)
     const runner = sub.slice(runnerAt)
-    expect(runner).toContain('content: buildSubAgentSystemPrompt(),')
+    // CA K3: on the prompt transport the tool block follows the same prompt.
+    expect(runner).toMatch(/content: promptTransport\s*\?\s*`\$\{buildSubAgentSystemPrompt\(\)\}[^`]*`\s*:\s*buildSubAgentSystemPrompt\(\),/)
     expect(runner).not.toContain("'You are a focused sub-agent.")
   })
 })

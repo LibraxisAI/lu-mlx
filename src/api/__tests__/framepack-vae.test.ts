@@ -1,7 +1,7 @@
 /**
  * FramePack decodes again: the 1.0 transformer needs the 1.0 VAE.
  *
- * bob80817 (D#104): every FramePack run died with "Sizes of tensors must match
+ * A user (D#104): every FramePack run died with "Sizes of tensors must match
  * except in dimension 2. Expected size 32 but got size 16 (FramePackSampler)".
  * FramePack is a HunyuanVideo 1.0 model and its sampler allocates the history
  * buffer with 16 latent channels; the HunyuanVideo 1.5 VAE encodes 32. Commit

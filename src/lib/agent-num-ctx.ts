@@ -1,6 +1,10 @@
 /**
- * The num_ctx an agent turn runs with — resolved in ONE place because every
- * request that touches the SAME Ollama model must send the SAME value.
+ * The window an agent turn budgets with, for every provider.
+ *
+ * For an Ollama model this is the number the request builder sends for
+ * `window: 'agent'` (`ollamaNumCtx` in api/ollama.ts, which is the one place a
+ * num_ctx is sent from); both ask `ollamaWindowFor`. This file never sends
+ * anything. Why the two must agree:
  *
  * Ollama allocates the KV cache at load time and RELOADS the model whenever
  * num_ctx changes between requests. Captured off the wire on the ship exe
@@ -15,8 +19,9 @@
  */
 
 import { getModelContextCached } from '../api/ollama'
+import { isCompatProviderId } from '../api/providers/compat-id'
 import { getProviderForModel } from '../api/providers'
-import { AGENT_CONTEXT_CAP, effectiveContextWindow } from './context-window'
+import { ollamaWindowFor } from './context-window'
 import { getModelMaxTokens } from './context-compaction'
 
 /**
@@ -34,7 +39,7 @@ import { getModelMaxTokens } from './context-compaction'
  * that carries the tool catalogue, and that catalogue measured 8488 tokens on
  * the installed build, which is 52% of the chat cap before the work starts. A
  * run under the chat cap reached step 18 of 30, compacted, and restarted its
- * own plan (David, 2026-08-06: "Du kannst nicht eine Riesencoding Aufgabe in
+ * own plan (2026-08-06: "Du kannst nicht eine Riesencoding Aufgabe in
  * 'nem sechzehn k Kontext rausschicken"). See context-window.ts for the VRAM
  * measurement that says the larger ceiling offloads rather than OOMs.
  *
@@ -77,10 +82,9 @@ export async function resolveAgentNumCtxWithConfidence(
   if (!override) {
     if (providerId === 'ollama') {
       try {
-        ctx = Math.max(
-          effectiveContextWindow(await getModelContextCached(modelId), 0, AGENT_CONTEXT_CAP),
-          8192,
-        )
+        // The same function the request builder asks (`ollamaNumCtx`), so
+        // the budget and what is sent are one number.
+        ctx = ollamaWindowFor('agent', await getModelContextCached(modelId))
         gemessen = true
       } catch { /* keep the 8192 floor on failure */ }
     } else {
@@ -96,7 +100,7 @@ export async function resolveAgentNumCtxWithConfidence(
         // actually loaded, that number IS the budget — even below the 8192
         // floor, because the floor cannot grow an allocation we do not
         // control. Ollama is different: there num_ctx sets the allocation.
-        if (providerId === 'openai') {
+        if (providerId === 'openai' || isCompatProviderId(providerId)) {
           const { provider, modelId: rawId } = getProviderForModel(fullModelName ?? modelId)
           const loaded = await provider.loadedContextLength?.(rawId)
           if (typeof loaded === 'number' && loaded > 0 && loaded < ctx) {

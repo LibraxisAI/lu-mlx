@@ -1,8 +1,8 @@
 /**
- * DATA LOSS, aldrich_ironhart on 2.6.5, Discord #general 18.08.:
+ * DATA LOSS, a user on 2.6.5, Discord #general 18.08.:
  * 12:59 "Uhhh guys, has anyone lost their chats after a restart??",
  * 16:12 "My code chats are vaporised" (a coding chat around 230k tokens).
- * sockenmonster on the same build still had every chat, weeks old ones
+ * A user on the same build still had every chat, weeks old ones
  * included, so this is not a plain regression in how LU writes.
  *
  * chat-conversations and locally-uncensored-memory live in IndexedDB (2.5.0,
@@ -29,7 +29,7 @@ const MEM = 'locally-uncensored-memory'
 
 describe('deciding what to put back after an IndexedDB wipe', () => {
   it('names the store that is gone while the backup still has it', () => {
-    // aldrich's boot: localStorage whole, IndexedDB empty, backup intact.
+    // a user's boot: localStorage whole, IndexedDB empty, backup intact.
     const live = { [CHATS]: null, [MEM]: null }
     const backup = { __ts: 'yesterday', [CHATS]: '{"state":{"conversations":[1]}}', [MEM]: '{"state":{}}' }
     expect(idbKeysToRestore(live, backup).sort()).toEqual([CHATS, MEM])
@@ -61,7 +61,7 @@ describe('deciding what to put back after an IndexedDB wipe', () => {
   })
 
   it('NEGATIVE CONTROL: the old rule never asked IndexedDB at all', () => {
-    // What AppShell decided on aldrich's boot: some localStorage store is
+    // What AppShell decided on a user's boot: some localStorage store is
     // there and the restore sentinel is set, therefore nothing to restore.
     // Both true, and the chats were gone.
     const localStorageStores = { 'chat-settings': '{}', 'lu-providers': '{}' }

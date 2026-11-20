@@ -8,20 +8,20 @@ import { stripNonCanonicalTags } from './personas.js'
   // same model behaviour follows us onto mobile. Tests in
   // src/api/__tests__/tool-description-parity.test.ts pin this parity.
   var AGENT_TOOLS = [
-    {name:'todo_write', description:'Write and update the plan for a multi-step task. The list is shown to the user live, so it is how they follow a long run. USE FIRST when a task needs more than about three tool calls, then send it again after each step. Send the COMPLETE list every time: it replaces the previous one, it does not merge.',
+    {name:'todo_write', description:'Write and update the plan the user asked for. The list is shown to the user live. NEVER send it as a step of its own: send an update together with your next real tool call. Send the COMPLETE list every time: it replaces the previous one, it does not merge.',
      parameters:[{name:'todos',type:'array',description:'The complete plan, in order. Replaces the previous list.',required:true}]},
-    {name:'web_search', description:'Search the web via the configured provider (Brave, Tavily, or auto). Returns a ranked list of {title, url, snippet}. Snippets are teasers, not answers: PREFER web_fetch on the promising URLs for the real content. DO NOT run more than 3 similar queries per turn, refine instead of re-searching.',
+    {name:'web_search', description:'Search the web. Returns a ranked list of {title, url, snippet}. Snippets are teasers, not answers: PREFER web_fetch on the promising URLs for the real content. Search as often as the task needs, but never repeat an identical query: refine the words instead.',
      parameters:[{name:'query',type:'string',description:'The search query string',required:true},
                  {name:'maxResults',type:'number',description:'Maximum results to return (default: 5, max: 20)',required:false}]},
-    {name:'web_fetch', description:'Fetch a single URL and return its readable text (up to ~24 000 chars), scripts, styles and page furniture stripped. PREFER this over web_search when you already know the target URL. NEVER call it with localhost, a private IP or file://, those are refused. On an empty or 4xx response try a different URL, not the same one again.',
+    {name:'web_fetch', description:'Fetch a single URL and return its readable text (up to ~40 000 chars), the article without menus, scripts and page furniture. PREFER this over web_search when you already know the target URL. NEVER call it with localhost, a private IP or file://, those are refused. On an empty or 4xx response try a different URL, not the same one again.',
      parameters:[{name:'url',type:'string',description:'Full URL including protocol (http:// or https://)',required:true},
-                 {name:'maxLength',type:'number',description:'Max chars to return (default: 24000)',required:false}]},
-    {name:'file_read', description:'Read a file. PREFER absolute paths; relative paths resolve against the agent workspace. Omitting offset/limit returns the whole file. For LARGE files pass offset (1-based start line) and limit (number of lines): the response names the window, the total line count and the offset of the next page. A very long whole-file read gets its middle truncated, so page large files. DO NOT re-read a file you just wrote, the write response already confirmed it.',
-     parameters:[{name:'path',type:'string',description:'Path to the file (absolute preferred)',required:true},
+                 {name:'maxLength',type:'number',description:'Max chars to return (default: 40000)',required:false}]},
+    {name:'file_read', description:'Read a file. Use a path relative to the workspace; an absolute path works only inside it. Omitting offset/limit returns the whole file. For LARGE files pass offset (1-based start line) and limit (number of lines): the response names the window, the total line count and the offset of the next page. A very long whole-file read gets its middle truncated, so page large files. DO NOT re-read a file you just wrote, the write response already confirmed it.',
+     parameters:[{name:'path',type:'string',description:'Path relative to the workspace',required:true},
                  {name:'offset',type:'number',description:'1-based line to start reading from (optional)',required:false},
                  {name:'limit',type:'number',description:'Maximum number of lines to return (optional)',required:false}]},
-    {name:'file_write', description:'Write a WHOLE file: use it to CREATE a new file or fully replace one, and PREFER file_edit to change part of an existing one. Creates parent directories if missing. OVERWRITES existing content, there is no append mode. PREFER absolute paths.',
-     parameters:[{name:'path',type:'string',description:'Path to the file (absolute preferred)',required:true},
+    {name:'file_write', description:'Write a WHOLE file: use it to CREATE a new file or fully replace one, and PREFER file_edit to change part of an existing one. Creates parent directories if missing. OVERWRITES existing content, there is no append mode. Use a path relative to the workspace.',
+     parameters:[{name:'path',type:'string',description:'Path relative to the workspace',required:true},
                  {name:'content',type:'string',description:'The complete new content of the file',required:true}]},
     {name:'file_list', description:'List directory contents. Returns name, isDir, size and full path per entry. Supports recursive=true and a glob pattern ("*.ts", "**/*.py"). PREFER a specific pattern over recursing a whole home or drive, that is slow. For content search use file_search.',
      parameters:[{name:'path',type:'string',description:'Directory path to list',required:true},
@@ -31,10 +31,10 @@ import { stripNonCanonicalTags } from './personas.js'
      parameters:[{name:'path',type:'string',description:'Directory to search in (recursive by default)',required:true},
                  {name:'pattern',type:'string',description:'Regex pattern to search for',required:true},
                  {name:'maxResults',type:'number',description:'Maximum matching files (default: 50)',required:false}]},
-    {name:'shell_execute', description:'THE terminal. Run a shell command: PowerShell on Windows, bash on Unix. Returns stdout, stderr, exit code. Everything runs here: git, tests, package managers, gh, python, platform utilities, and opening files, folders or apps. A recognised test run and the common git commands come back as a parsed summary. Feed a script through `stdin` instead of quoting it: set command to `python3 -` or `bash -s` (fresh process each call, no REPL state). For long work set `background: true` to get a task id back at once, then call again with `task: "status"` and `task_id` (or "list" / "kill"). PREFER dedicated tools where available: file_read over `cat`, file_list over `ls`, file_search over `grep`. `--no-verify` is refused, and NEVER delete permanently without confirmation. Default timeout 120 s, test runs 300 s.',
+    {name:'shell_execute', description:'THE terminal. Run a shell command: PowerShell on Windows, bash on Unix. Returns stdout, stderr, exit code. Everything runs here: git, tests, package managers, gh, python, platform utilities, and opening files, folders or apps. A recognised test run and the common git commands come back as a parsed summary. Feed a script through `stdin` instead of quoting it: set command to `python3 -` or `bash -s` (fresh process each call, no REPL state). For long work set `background: true` to get a task id back at once, then call again with `task: "status"` and `task_id` (or "list" / "kill"). PREFER dedicated tools where available: file_read over `cat`, file_list over `ls`, file_search over `grep`. `--no-verify` is refused, and NEVER delete permanently without confirmation. Paths outside your folder are refused. Timeout at most 120 s, test runs 300 s. A command still running at its timeout keeps running in the background under a task id.',
      parameters:[{name:'command',type:'string',description:'The full command to execute. Omit only for task actions.',required:false},
-                 {name:'cwd',type:'string',description:'Working directory (optional, absolute preferred)',required:false},
-                 {name:'timeout',type:'number',description:'Timeout in milliseconds (default: 120000)',required:false},
+                 {name:'cwd',type:'string',description:'Working directory (optional, relative to the workspace)',required:false},
+                 {name:'timeout',type:'number',description:'Timeout in ms (at most 120000)',required:false},
                  {name:'shell',type:'string',description:'Override shell: "powershell" | "cmd" | "bash" (default: auto)',required:false},
                  {name:'stdin',type:'string',description:'Text piped to the command\x27s stdin, e.g. a Python script for `python3 -`.',required:false},
                  {name:'background',type:'boolean',description:'Run detached; returns a task id immediately instead of waiting.',required:false},
@@ -42,12 +42,12 @@ import { stripNonCanonicalTags } from './personas.js'
                  {name:'task_id',type:'string',description:'Task id for task "status" or "kill".',required:false}]},
     {name:'screenshot', description:'Capture the primary display as a base64 PNG. Zero arguments. USE for visual verification when the user asks "what\'s on my screen" or "look at X". Returns a short summary string (size + filename); the actual image is forwarded to the model via message content. NEVER call in a tight loop — screenshots are expensive and privacy-sensitive.',
      parameters:[]},
-    {name:'image_generate', description:'Generate an image from a text prompt via the local image pipeline (Apple MLX on macOS; ComfyUI elsewhere, auto-detected). Blocks up to 5 minutes. USE for "draw me", "make an image of", "generate a picture". Pass `inputImage` (a filename from an earlier image_generate result) for image-to-image — restyle / edit an existing image at the given `denoise` strength; omit it for text-to-image. First installed image model is auto-selected (or pass `model`). EXPECT A PAUSE on non-Mac (ComfyUI) single-GPU machines: LU may briefly unload the chat model from VRAM to fit the image model, then reload it after — typically a 30-90s swap. This avoids out-of-memory errors; your conversation is fully preserved across the swap. Rate-limit yourself to 1 call per turn — generations serialize internally so parallel calls will queue, not speed up. Fine-tune through the optional `settings` object; a value beyond the model\'s real limit is REJECTED with the actual limit, never silently changed.',
+    {name:'image_generate', description:'Make one picture on this computer (Apple MLX on a Mac, ComfyUI elsewhere). USE for "draw", "make an image of", and to change a picture: pass it as `inputImage`. `inputImage` takes "attachment N" for a picture the user attached, or the file name of a picture an earlier call made in this chat. Never invent a file name; an unknown one is refused with the list of pictures this chat has. It cannot remove a background, upscale, erase, extend a clip or make sound: tell the user those are in the Create tab. Takes up to the image timeout in Settings (20 minutes unless changed); the chat model may pause while the image model loads. One call per turn. Optional `settings` (size, aspectRatio, steps, LoRA): a value beyond the model\'s limit is refused with the limit.',
      parameters:[{name:'prompt',type:'string',description:'Positive text description of the desired image',required:true},
                  {name:'negativePrompt',type:'string',description:'Things to avoid (blurry, deformed, etc.)',required:false},
                  {name:'model',type:'string',description:'Optional image model filename to use. Omit to auto-select the first installed image model.',required:false},
-                 {name:'inputImage',type:'string',description:'Optional. Filename of a previously generated image (from an earlier image_generate result) to use as the base for image-to-image. Omit for text-to-image.',required:false},
-                 {name:'denoise',type:'number',description:'Image-to-image strength 0.05–1.0 (default 0.6). Lower keeps more of the input image, higher follows the prompt more. Only used together with inputImage.',required:false}]},
+                 {name:'inputImage',type:'string',description:'Optional picture to change: "attachment N", or the file name of a picture made earlier in this chat. Omit for a new picture from text.',required:false},
+                 {name:'denoise',type:'number',description:'With inputImage only, and only when the user asks for a light or strong change: how much changes, 0.05 to 0.95. Omit it otherwise (default 0.75).',required:false}]},
   ];
 
   // ── Tool-set constants ──
@@ -347,10 +347,58 @@ import { stripNonCanonicalTags } from './personas.js'
     cleaned = stripNonCanonicalTags(cleaned).trim();
     return {content: cleaned, thinking: think};
   }
+  // ── Hourly token limit for agent runs from the phone (CA, 14.11.2026) ──
+  // The phone cannot see what the desktop's model costs (a local engine or a
+  // cloud model with the user's own paid key behind the relay), and the relay
+  // reports no token counts. One run is capped at 50 steps; runs one after
+  // another were not capped at all. So both phone loops (this page and the
+  // app, src/mobile/remote/remoteAgent.ts) count an ESTIMATE from the
+  // characters sent and received, for every model, and pause once per hour
+  // above the limit: the desktop's hourly pause in tokens instead of credits.
+  // About 250 full steps an hour, which a local model rarely meets.
+  var AGENT_HOUR_TOKEN_LIMIT = 2000000;
+  // Below the usual 4: an estimate that runs high pauses early, never late.
+  var AGENT_CHARS_PER_TOKEN = 3.5;
+  var AGENT_HOUR_KEY = 'lu-remote-agent-token-hour';
+  var AGENT_HOUR_MS = 60 * 60 * 1000;
+
+  function estimateAgentTokens(chars){
+    return chars > 0 ? Math.ceil(chars / AGENT_CHARS_PER_TOKEN) : 0;
+  }
+
+  // Count one step. True when the hour is over the limit and no pause
+  // happened in this hour yet: the caller stops, and the user's next message
+  // goes on for another hour. A failing store means a fresh hour.
+  function countAgentHourTokens(tokens, now, limit){
+    if(now === undefined) now = Date.now();
+    if(limit === undefined) limit = AGENT_HOUR_TOKEN_LIMIT;
+    var state = {entries: [], pausedAt: null};
+    try {
+      var raw = globalThis.localStorage && globalThis.localStorage.getItem(AGENT_HOUR_KEY);
+      var s = raw ? JSON.parse(raw) : {};
+      if(Array.isArray(s.entries)){
+        state.entries = s.entries.filter(function(e){
+          return e && typeof e.at === 'number' && typeof e.tokens === 'number' && isFinite(e.tokens) && now - e.at < AGENT_HOUR_MS;
+        });
+      }
+      if(typeof s.pausedAt === 'number' && now - s.pausedAt < AGENT_HOUR_MS) state.pausedAt = s.pausedAt;
+    } catch(_e){ /* a fresh hour */ }
+    if(tokens > 0) state.entries.push({at: now, tokens: tokens});
+    var sum = 0;
+    for(var i = 0; i < state.entries.length; i++) sum += state.entries[i].tokens;
+    var pause = limit > 0 && sum >= limit && state.pausedAt === null;
+    if(pause) state.pausedAt = now;
+    try { globalThis.localStorage && globalThis.localStorage.setItem(AGENT_HOUR_KEY, JSON.stringify(state)); } catch(_e){ /* a fresh hour */ }
+    return pause;
+  }
+
 /*@@LU_TOOLING_ONLY@@*/
 // Cut out by src-tauri/build.rs — see caveman.js.
 export {
   AGENT_ALL_TOOLS,
+  AGENT_CHARS_PER_TOKEN,
+  AGENT_HOUR_KEY,
+  AGENT_HOUR_TOKEN_LIMIT,
   AGENT_TOOLS,
   CODEX_TOOLS,
   DECAY_AFTER_ITERATIONS,
@@ -362,8 +410,10 @@ export {
   buildToolDefs,
   capToolResult,
   compactApiMessages,
+  countAgentHourTokens,
   decayToolResults,
   dropOldImages,
+  estimateAgentTokens,
   extractToolCallsFromContent,
   isDecayedAt,
   isSystemPromptEcho,

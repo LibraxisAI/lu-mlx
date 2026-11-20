@@ -1,5 +1,5 @@
 /**
- * Wan 2.2 TI2V-5B — unified text+image-to-video (David 2026-06-11: "wan 2.2
+ * Wan 2.2 TI2V-5B — unified text+image-to-video (2026-06-11: "wan 2.2
  * komplett in app … dann ausgiebig testen").
  *
  * Wan 2.2 5B is ONE model that does both T2V and I2V via Wan22ImageToVideoLatent
@@ -226,7 +226,7 @@ describe('buildDynamicWorkflow — Wan 2.2 graph', () => {
 })
 
 describe('findMatchingVAE — Wan 2.1 vs 2.2 (48-channel regression)', () => {
-  // David's EXACT live VAELoader enum after the Wan 2.2 bundle install. Note
+  // The owner's EXACT live VAELoader enum after the Wan 2.2 bundle install. Note
   // wan2.2_vae sorts BEFORE wan_2.1_vae — the old first-.includes('wan') hit
   // decoded Wan 2.1 (16-ch latents) with the 2.2 VAE (48-ch) and every Wan 2.1
   // generation died with "expected input to have 48 channels, but got 16".
@@ -247,7 +247,7 @@ describe('findMatchingVAE — Wan 2.1 vs 2.2 (48-channel regression)', () => {
   })
   it("'wan' without a 2.1 file falls to a 16-channel hunyuan VAE, never the 1.5 one", async () => {
     // The 1.5 VAE is 32-channel and would crash Wan 2.1 exactly the way it
-    // crashed FramePack (bob80817, D#104), so it is not a fallback at all.
+    // crashed FramePack (D#104), so it is not a fallback at all.
     vi.mocked(localFetch).mockResolvedValue({
       ok: true,
       json: async () => ({ VAELoader: { input: { required: { vae_name: [['wan2.2_vae.safetensors', 'hunyuanvideo15_vae_fp16.safetensors', 'hunyuan_video_vae_bf16.safetensors']] } } } }),
@@ -279,7 +279,7 @@ describe('resolveI2VResolution — wan22 (pixel-budget for 12 GB)', () => {
     expect(r.width).toBe(576)
   })
   it('SQUARE source is budgeted to 768² — NOT 1024² (which OOMs a 3060 at 5-7 s)', () => {
-    // David's red apple is 1024×1024. The old long-edge cap left it at 1024²
+    // The owner's red apple is 1024×1024. The old long-edge cap left it at 1024²
     // (1.05 M px, VRAM ceiling); the pixel budget pulls it to a runnable 768².
     const r = resolveI2VResolution('wan22', 1024, 1024)
     expect(r).toEqual({ width: 768, height: 768 })

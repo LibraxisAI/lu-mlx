@@ -51,6 +51,52 @@ export interface CloudScenario {
    * (both collapse to the identical client-side message).
    */
   studioQuoteStatus?: 200 | 404 | 'unreachable'
+  /**
+   * 02.10.2026: the catalog of a server that ships `tier` and `weights` on
+   * every entry plus a Studio image model (Nucleus). Leaving it unset
+   * reproduces the server of today: no entry carries either field, and the
+   * pickers must stand there neutral (no mark, no "Older models" row).
+   */
+  tierCatalog?: boolean
+  /**
+   * 08.10.2026: the media catalog names the open models with the cloud's own
+   * neutral word in `label` and sends the app's name as `native_label`. Set
+   * this to reproduce a server that sends `label` alone: the app then shows
+   * `label` as it comes.
+   */
+  catalogWithoutNativeLabel?: boolean
+  /**
+   * 09.10.2026, Create in chat. Unset reproduces a server from before it:
+   * /api/me carries no `features`, no model carries `create_in_chat`, and the
+   * app must show nothing of it. `true` is a released account (the server's
+   * switch plus its allowlist) and one released model (GLM 5.3 Flash; the
+   * other two stay unreleased so the greyed switch has a case). `false` is a
+   * server that knows the feature and says no for this account.
+   */
+  createChat?: boolean
+  /**
+   * 09.10.2026, billing by length. Set it and the media catalog carries a
+   * talking model billed by the second of its audio and the voice model
+   * billed by the character, each with the rule in `credits.length` the way
+   * the server sends it. Unset is a server from before the rule.
+   */
+  lengthCatalog?: boolean
+  /**
+   * Further entries of /api/jobs/catalog, appended as they are. For the store
+   * guard of the phone (e2e/mobile/store-waechter.mobile.ts), which plays a
+   * server whose model names carry words a store build may not show.
+   */
+  extraCatalogModels?: unknown[]
+  /**
+   * 14.11.2026, the account switch of the Character area (CHARACTER_HUB on
+   * the web side). `true`: /api/me and /api/jobs/catalog carry
+   * `features.characterHub: true`, as for a released account. Unset: both
+   * answers are the ones of a server without the switch, or of an account
+   * it is not open for.
+   */
+  characterHub?: boolean
+  /** Rows of /api/loras (the cloud characters). Unset: the route answers as before. */
+  loras?: unknown[]
 }
 
 // P9: one Studio model, shaped like a real /api/jobs/catalog entry once P0's
@@ -141,8 +187,19 @@ export async function routeCloud(page: Page, scenario: CloudScenario): Promise<v
               ? { status: 'active', tier, access, ...(scenario.paidPlan === undefined ? {} : { paidPlan: scenario.paidPlan }) }
               : { status: 'none' },
           profile: null,
+          ...(scenario.createChat === undefined && !scenario.characterHub
+            ? {}
+            : { features: { ...(scenario.createChat === undefined ? {} : { createChat: scenario.createChat }), ...(scenario.characterHub ? { characterHub: true } : {}) } }),
         }),
       )
+    }
+
+    // What an order of the chat reads before it is laid out. Only with the
+    // scenario: every other spec keeps the mock it was written against.
+    if (scenario.loras && path === '/api/loras') return route.fulfill(json(200, { loras: scenario.loras }))
+    if (scenario.createChat !== undefined && path === '/api/loras') return route.fulfill(json(200, { loras: [] }))
+    if (scenario.createChat !== undefined && path === '/api/account/content-policy') {
+      return route.fulfill(json(200, { policy: 'soft', ageConfirmedAt: null, ageConfirmationRequired: true }))
     }
 
     if (path === '/api/jobs/quota') {
@@ -165,8 +222,8 @@ export async function routeCloud(page: Page, scenario: CloudScenario): Promise<v
       return route.fulfill(
         json(200, {
           models: [
-            { id: 'flux-schnell', label: 'Flux Schnell (fast)', kind: 'image', edit: false, cfg: true, negative_prompt: false, credits: { base: 300 } },
-            { id: 'flux-dev', label: 'Flux Dev (quality)', kind: 'image', edit: true, cfg: true, negative_prompt: false, credits: { base: 1200 } },
+            { id: 'flux-schnell', label: 'Flux Schnell (fast)', kind: 'image', edit: false, cfg: true, negative_prompt: false, credits: { base: 300 }, ...(scenario.tierCatalog ? { tier: 'older', weights: 'open' } : {}) },
+            { id: 'flux-dev', label: 'Flux Dev (quality)', kind: 'image', edit: true, cfg: true, negative_prompt: false, credits: { base: 1200 }, ...(scenario.tierCatalog ? { tier: 'older', weights: 'open' } : {}) },
             {
               id: 'wan-2.2-720p', label: 'Wan 2.2 720p', kind: 'video', edit: false, cfg: false, negative_prompt: true,
               // dd29f359: clip.durations/credits.by_duration let a model book
@@ -185,13 +242,27 @@ export async function routeCloud(page: Page, scenario: CloudScenario): Promise<v
             // on EVERY scenario, not just studioCatalog, so
             // create-studio.spec.ts can prove the fallback actually resolves
             // to a real, pickable model instead of an empty list.
-            { id: 'wan-2.2-spicy-extend', label: 'Wan 2.2 Spicy Extend', kind: 'video', ops: ['extend'], t2v: false, i2v: false, adult: true, credits: { base: 15000 } },
+            // The server lists the open models under its own neutral word
+            // and sends the app's name next to it (`native_label`). A server
+            // from before that field sends `label` alone.
+            { id: 'wan-2.2-spicy-extend', label: 'Wan 2.2 Unfiltered Extend', ...(scenario.catalogWithoutNativeLabel ? {} : { native_label: 'Wan 2.2 Uncensored Extend' }), kind: 'video', ops: ['extend'], t2v: false, i2v: false, adult: true, credits: { base: 15000 } },
             { id: 'wan-2.2-animate', label: 'Wan 2.2 Animate', kind: 'video', ops: ['motion'], t2v: false, i2v: false, credits: { base: 12000 } },
             ...(scenario.studioCatalog ? [STUDIO_CATALOG_MODEL] : []),
+            ...(scenario.lengthCatalog
+              ? [{ id: 'infinitetalk-fast', label: 'InfiniteTalk Fast', kind: 'video' as const, ops: ['lipsync'], t2v: false, i2v: false, credits: { base: 3150, length: { basis: 'audio', block: 1, per_block: 315, min: 3, max: 600, quote: 10 } } },
+                 { id: 'qwen3-tts', label: 'Qwen3 TTS', kind: 'audio' as const, ops: ['tts'], credits: { base: 525, length: { basis: 'chars', block: 100, per_block: 105, min: 1, max: 4000, quote: 500 } } },
+                 { id: 'qwen3-tts-design', label: 'Qwen3 TTS Design', kind: 'audio' as const, ops: ['tts'], credits: { base: 525, length: { basis: 'chars', block: 100, per_block: 105, min: 1, max: 4000, quote: 500 } } }]
+              : []),
+            ...(scenario.tierCatalog
+              ? [{ id: 'z-image-turbo', label: 'Z-Image Turbo (fast)', kind: 'image' as const, edit: false, cfg: false, negative_prompt: false, credits: { base: 300 }, tier: 'best', weights: 'open' },
+                 { id: 'nucleus-image', label: 'Nucleus', kind: 'image' as const, adult: true, ops: ['studio'], quote_required: true, tier: 'standard', weights: 'open-family' }]
+              : []),
+            ...(scenario.extraCatalogModels ?? []),
           ],
           ops: { removebg: 1000, eraser: 2500, upscale_image: 1000, upscale_video_per_s: 500, upscale_video_min: 2500 },
           voice: { stt: 600, tts_per_1k_chars: 8000 },
           media_live: scenario.mediaLive !== false,
+          ...(scenario.characterHub ? { features: { characterHub: true } } : {}),
           tier,
           monthly_credits: 2_550_000,
         }),
@@ -266,6 +337,7 @@ export async function routeCloud(page: Page, scenario: CloudScenario): Promise<v
               input_modalities: ['text', 'image'],
               think: 'always',
               supports_tools: true,
+              ...(scenario.createChat ? { create_in_chat: true } : {}),
               reasoning_effort_levels: ['low', 'medium', 'high', 'max'],
               reasoning_effort_default: 'high',
             },
@@ -292,7 +364,7 @@ export async function routeCloud(page: Page, scenario: CloudScenario): Promise<v
             id: 'job-e2e-1',
             kind: 'image',
             model: 'flux-schnell',
-            provider: 'wavespeed',
+            provider: 'upstream',
             status: 'succeeded',
             result_url: 'https://lu-labs.ai/e2e/result.png',
             attestation: null,
@@ -395,7 +467,7 @@ export function cloudSwitchBehindModal(page: Page) {
  *  zahlt, nimmt den Textlink darunter. */
 export async function signInViaGate(page: Page): Promise<void> {
   await cloudSwitch(page).click()
-  await page.getByRole('button', { name: /Already subscribed\? Sign in/i }).click()
+  await page.getByRole('button', { name: /Already bought\? Sign in/i }).click()
   await page.getByPlaceholder('Email').fill('qa@lu-labs.ai')
   await page.getByPlaceholder('Password').fill('e2e-password')
   await page.getByRole('button', { name: /^Sign in$/i }).click()

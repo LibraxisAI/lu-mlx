@@ -1,5 +1,5 @@
 /**
- * goonerforporn, Discord #bug-reports 2026-08-28: "the field for the CivitAI
+ * Discord #bug-reports 2026-08-28: "the field for the CivitAI
  * API key is gone from the UI", and downloads from the CivitAI search end in
  * 400s.
  *
@@ -30,7 +30,7 @@ vi.mock('../backend', () => ({
 }))
 
 import {
-  isCivitaiUrl, civitaiAuthToken, startModelDownload, resumeDownload, searchCivitaiModels,
+  isCivitaiUrl, civitaiAuthToken, startModelDownload, startModelDownloadToPath, resumeDownload, searchCivitaiModels,
 } from '../discover'
 import { useWorkflowStore } from '../../stores/workflowStore'
 
@@ -120,6 +120,34 @@ describe('the download carries it', () => {
       expectedSha256: null,
       authToken: null,
     })
+  })
+})
+
+// 09.10.2026: a LoRA from the CivitAI search goes into the Mac's LoRA folder,
+// which is a download by path. That path carried no key at all, because until
+// then it only ever fetched GGUF chat models from HuggingFace.
+describe('a download by path carries it to CivitAI and to nobody else', () => {
+  it('hands the key to a CivitAI download into a folder', async () => {
+    await startModelDownloadToPath(CIVITAI, '/data/loras', 'detail.safetensors')
+    expect(backendCall).toHaveBeenCalledWith('download_model_to_path', {
+      url: CIVITAI, destDir: '/data/loras', filename: 'detail.safetensors', expectedBytes: null, expectedSha256: null, authToken: KEY,
+    })
+  })
+
+  it('COUNTER-CHECK: a HuggingFace download by path is sent exactly what it was sent before', async () => {
+    await startModelDownloadToPath(HUGGINGFACE, '/models', 'model.gguf', 123, 'abc')
+    expect(backendCall).toHaveBeenCalledWith('download_model_to_path', {
+      url: HUGGINGFACE, destDir: '/models', filename: 'model.gguf', expectedBytes: 123, expectedSha256: 'abc',
+    })
+  })
+
+  it('and Rust takes it under that name, for a CivitAI host alone', async () => {
+    const { readFileSync } = await import('node:fs')
+    const rust = readFileSync('src-tauri/src/commands/download.rs', 'utf8')
+    const command = rust.slice(rust.indexOf('pub async fn download_model_to_path('))
+    expect(command.slice(0, 900)).toContain('authToken: Option<String>,')
+    expect(command.slice(0, 6000)).toContain('CatalogClaims { expected_bytes, expected_sha256, auth_token }')
+    expect(rust).toContain('.filter(|t| !t.is_empty() && is_civitai_host(url));')
   })
 })
 

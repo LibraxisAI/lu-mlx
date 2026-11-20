@@ -4,7 +4,7 @@
  * Leaf module so the rule is testable without the icon set, framer-motion and
  * the Tauri backend that ToolCallBlock pulls in.
  *
- * David has now said this several times, most recently 2026-08-06: "Du solltest
+ * The owner has now said this several times, most recently 2026-08-06: "Du solltest
  * auch die Planbenachrichtigung und den Planfortschritt nicht im Transfer
  * haben."
  *

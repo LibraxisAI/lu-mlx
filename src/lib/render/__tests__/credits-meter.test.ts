@@ -2,7 +2,7 @@
  * The desktop credits chip, and the Create button that shares its rule.
  *
  * The desktop meter read only `remaining.credits` while the server had been
- * sending `video`, `trainings` and `topup` since migration 0029. Two things
+ * sending `video`, `trainings` and `topup` for a long time. Two things
  * followed: a user who had spent their monthly character trainings saw a
  * healthy green bar and an enabled Create button, then got a 429; and the chip
  * could never say "about N more like it", which is the one number a person
@@ -157,8 +157,8 @@ describe('B6: der gemischte Fall aus Monatsraum und Pack-Wallet', () => {
 
 describe('B6: die starter-Form der Quota (kein Plan, nur Wallet)', () => {
   it('ein reiner Pack-Kaeufer ohne Plan-Trainings kann trotzdem trainieren', () => {
-    // starter traegt trainings.limit 0 und video.limit 0 (TIER_TRAININGS,
-    // TIER_VIDEO_CREDITS in apps/web/lib/billing/credits.ts): kein Monatsraum
+    // starter traegt trainings.limit 0 und video.limit 0 (so steht es
+    // auf dem Server): kein Monatsraum
     // fuer eins von beiden, nur die Wallet. Der bestehende Test oben pruefte
     // das nur an der hosted-Form, wo ein Monatsraum existiert.
     const starter: CloudQuota = {

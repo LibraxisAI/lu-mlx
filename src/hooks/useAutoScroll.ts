@@ -3,7 +3,7 @@ import { useEffect, useRef } from 'react'
 /**
  * Keep a chat list pinned to its bottom edge while the user is following.
  *
- * G33 (David 2026-08-07): on send the list jumped down "but never all the
+ * G33 (2026-08-07): on send the list jumped down "but never all the
  * way". Two mechanisms, both height that appears BELOW the fold without the
  * `dependency` string changing: the Working anchor mounts on a prop flip
  * (isGenerating), and a reasoning model streams into a thinking BLOCK while
@@ -38,16 +38,24 @@ export function useAutoScroll(dependency: unknown, resumeKey?: unknown) {
   // Follow every content-height change, not just the ones a trigger string
   // anticipated. Pinning inside the observer cannot loop: setting scrollTop
   // does not resize the content.
+  // Re-attached on every new user message: the content element only mounts
+  // once a transcript exists (the Code tab shows its empty state before), and
+  // a one-time attach at mount never saw it. The scroll area itself is
+  // watched too: a panel opening above it (pending writes in the Code tab)
+  // shrinks it, and the bottom, with an approval card on it, slipped out of
+  // view while nothing had scrolled (UX pass 30.09.2026).
   useEffect(() => {
     const content = contentRef.current
-    if (!content || typeof ResizeObserver === 'undefined') return
+    const box = ref.current
+    if (!content || !box || typeof ResizeObserver === 'undefined') return
     const ro = new ResizeObserver(() => {
       const el = ref.current
       if (shouldScroll.current && el) el.scrollTop = el.scrollHeight
     })
     ro.observe(content)
+    ro.observe(box)
     return () => ro.disconnect()
-  }, [])
+  }, [resumeKey])
 
   useEffect(() => {
     if (resumeKey === undefined) return

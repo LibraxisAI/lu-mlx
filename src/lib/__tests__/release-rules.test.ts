@@ -160,7 +160,7 @@ describe('the workflow actually calls it', () => {
 
   it('after the binaries are attached, not before', () => {
     expect(wf).toContain('enforce-prerelease:')
-    expect(wf).toContain('needs: build-tauri')
+    expect(wf).toContain('needs: [build-tauri, build-tauri-macos]')
     expect(wf).toContain('node scripts/enforce-prerelease.mjs')
   })
 
@@ -171,7 +171,8 @@ describe('the workflow actually calls it', () => {
   it('and even when a platform of the matrix failed', () => {
     // A failed Linux lane must not leave a full release standing.
     const job = wf.slice(wf.indexOf('enforce-prerelease:'))
-    expect(job).toContain('if: always()')
+    // Everywhere but in a dry run, Mac or full, which touches no release.
+    expect(job).toContain('if: ${{ always() && !inputs.mac_dry_run && !inputs.dry_run }}')
   })
 
   it('and knows whether a release event started the run', () => {

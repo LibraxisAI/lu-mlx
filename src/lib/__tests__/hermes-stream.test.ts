@@ -76,7 +76,7 @@ describe('hermes display filter', () => {
   })
 })
 
-// ── G35 (David 2026-08-07): the thought streams in the bounded ThinkingBlock
+// ── G35 (2026-08-07): the thought streams in the bounded ThinkingBlock
 // window on the hermes path too, never full-height into the bubble. The
 // splitter routes <think> spans into the thinking channel per delta; the
 // turn-end parse on the full raw text stays authoritative.

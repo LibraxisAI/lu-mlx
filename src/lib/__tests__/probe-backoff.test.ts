@@ -83,7 +83,7 @@ describe('shouldLogRepeat', () => {
     const seen = new Map<string, number>()
     expect(shouldLogRepeat(seen, 'localhost', 0)).toBe(true)
     expect(shouldLogRepeat(seen, '127.0.0.1', 10)).toBe(true)
-    expect(shouldLogRepeat(seen, '192.168.0.54', 20)).toBe(true)
+    expect(shouldLogRepeat(seen, '192.168.1.54', 20)).toBe(true)
   })
 })
 

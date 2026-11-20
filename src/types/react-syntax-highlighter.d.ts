@@ -37,6 +37,8 @@ declare module 'react-syntax-highlighter/dist/esm/prism-light' {
     style?: Record<string, CSSProperties>
     /** Merged onto the generated `<pre>`. */
     customStyle?: CSSProperties
+    /** Props for the inner <code> element. */
+    codeTagProps?: { style?: CSSProperties; className?: string }
     /** The source to highlight. */
     children: string | string[]
   }
@@ -58,6 +60,13 @@ declare module 'react-syntax-highlighter/dist/esm/prism-light' {
 }
 
 declare module 'react-syntax-highlighter/dist/esm/styles/prism/one-dark' {
+  import type { CSSProperties } from 'react'
+  const style: Record<string, CSSProperties>
+  export default style
+}
+
+/** Light mode code colours (3.1.0, P-M): every token meets 4.5:1. */
+declare module 'react-syntax-highlighter/dist/esm/styles/prism/a11y-one-light' {
   import type { CSSProperties } from 'react'
   const style: Record<string, CSSProperties>
   export default style

@@ -4,7 +4,7 @@
  * The LU Cloud inference catalog does not expose which hosted models support
  * function calling, and local backends vary by model, so LU optimistically
  * sends `tools` and lets the provider decide. When a tool-augmented request is
- * rejected for the tools themselves (DeepInfra / LU Cloud returns HTTP 405,
+ * rejected for the tools themselves (LU Cloud returns HTTP 405,
  * Ollama returns a "does not support tools" error), the UI catch site records
  * that model here as tools-unsupported so:
  *   - the chat model dropdown can flag it with a small marker, and

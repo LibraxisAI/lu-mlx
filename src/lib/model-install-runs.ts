@@ -45,6 +45,13 @@ export function isInstalling(kind: string): boolean {
   return runs.get(kind)?.running === true
 }
 
+/** True while any install started from Create is going. Each of them may
+ *  stop and start ComfyUI on its own (a node pack, a rescan that needs it). */
+export function anyInstallRunning(): boolean {
+  for (const r of runs.values()) if (r.running) return true
+  return false
+}
+
 /**
  * Start an install for a lane, or do nothing if one is already going. Pressing
  * the button twice, or a remounted card auto-resuming, must never mean two

@@ -164,9 +164,9 @@ describe('runtime: a pick in one conversation leaves everything else alone', () 
   it('negative control: the preset-as-settings-write shape trips both assertions', () => {
     const before = JSON.stringify(useSettingsStore.getState().settings)
     // Exactly what C1 BINDUNG forbids: pushing the preset into the settings.
-    // Ask is the visible case (confirm on, stage on), and it would follow the
-    // user into every other conversation.
-    useSettingsStore.getState().updateSettings({ codexConfirmShell: true, codexStageMode: true })
+    // Ask is the visible case (confirm on), and it would follow the user into
+    // every other conversation.
+    useSettingsStore.getState().updateSettings({ codexConfirmShell: true })
     expect(JSON.stringify(useSettingsStore.getState().settings)).not.toBe(before)
     // ... and it would have reached the Agent surface through the same object.
     useSettingsStore.getState().updateSettings({ codexCloudConfirmOptIn: true })

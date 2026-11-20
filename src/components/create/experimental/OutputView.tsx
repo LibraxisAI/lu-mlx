@@ -1,16 +1,28 @@
-import { useEffect, useState } from 'react'
+import { itemHasAlpha } from '../../../lib/transparent-image'
+import { useRenderPreviewStore } from '../../../stores/renderPreviewStore'
+import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { motion } from 'framer-motion'
-import { Cpu, Sparkles, ImageDown, Maximize2, Download, Wand2, MonitorOff, AudioLines, Film } from 'lucide-react'
+import { Cpu, Sparkles, ImageDown, Maximize2, Download, Wand2, MonitorOff, AudioLines, Film, Trash2, UserRoundPlus } from 'lucide-react'
 import { coldLoadHint } from '../../../lib/cold-load-notice'
+import { slowLoadHint } from '../../../lib/vram-fit'
+import { useLocalModelFits } from '../../../hooks/useLocalModelFit'
+import { useLocalPick } from './localPick'
 import { useCreateStore, type GalleryItem, type ProgressPhase } from '../../../stores/createStore'
-import { backendCall, downloadComfyFile, isTauri } from '../../../api/backend'
 import { isMlxImageHost } from '../../../api/mlx-image'
-import { refreshResultUrl } from '../../../api/cloud/jobs'
 import { ICON_LG, ICON_STROKE_MARK } from '../../ui/icon-size'
-import { markGalleryItemAvailable } from './galleryUrl'
+import { PromptDetails } from './PromptDetails'
+import { hasPromptPanel } from '../../../lib/render/ran-prompt'
+import { markGalleryItemAvailable, playsAsVideo } from './galleryUrl'
+import { deleteTitle, unavailableLine, playerHasControls, UNAVAILABLE_VIDEO_BOX } from './galleryWording'
+import { deleteFate } from '../../../lib/gallery-trash'
+import { downloadGalleryItem } from './galleryDownload'
 import { galleryLabel } from '../../../lib/render/gallery-label'
+import { resultFacts } from '../../../lib/render/result-facts'
 import { useComfyMedia } from './useComfyMedia'
+import { BatchQueue } from './BatchStrip'
+import { FitStage } from './FitStage'
 import { cn } from '../ui/cn'
+import { LazyModelViewer } from '../../three/LazyModelViewer'
 
 // The icon in the waiting circle says which PHASE the render is in, never
 // which device it runs on. The chip is the loading phase, the spark is
@@ -19,7 +31,7 @@ import { cn } from '../ui/cn'
 // and the R14 pair caught two samplings. The device is said in words, by the
 // line at the top of the Create tab.
 //
-// 19.09.2026, Entscheid von David: das Warten traegt dasselbe Lila wie der
+// 19.09.2026, Entscheid des Inhabers: das Warten traegt dasselbe Lila wie der
 // Rest der App, damit sichtbar ist, dass da etwas passiert. Sky fuer Laden,
 // Gruen fuer Sampling waren Schmuck fuer eine Phase, keine Warnung, und genau
 // solche Stellen haben Farbe in der App bedeutungslos gemacht. Die Phase sagt
@@ -59,9 +71,22 @@ function ColdLoadLine() {
     const id = setInterval(() => setElapsedMs((ms) => ms + 1000), 1000)
     return () => clearInterval(id)
   }, [])
+  // After a minute a model that does not sit comfortably on the card gets the
+  // reason for the wait (the owner's 12 GB box, October 2026: Z-Image stood
+  // here for more than 300 s and the line said nothing about why). Same clock,
+  // same place, and silent for a model that fits or a card nobody detected.
+  const { list, value } = useLocalPick()
+  const picked = useMemo(() => list.filter((m) => m.name === value), [list, value])
+  const { fitOf } = useLocalModelFits(picked)
   const hint = coldLoadHint(true, elapsedMs)
   if (!hint) return null
-  return <p className="t-body text-gray-500 text-center max-w-[22rem]">{hint}</p>
+  const slow = slowLoadHint(fitOf(value), elapsedMs)
+  return (
+    <div className="space-y-1 text-center max-w-[22rem]">
+      <p className="t-body text-gray-500">{hint}</p>
+      {slow && <p className="t-body text-gray-500" data-testid="slow-load-hint">{slow}</p>}
+    </div>
+  )
 }
 
 // Generation progress — phase-aware animation.
@@ -69,6 +94,11 @@ export function GeneratingView() {
   const progressPhase = useCreateStore((s) => s.progressPhase)
   const progressText = useCreateStore((s) => s.progressText)
   const progress = useCreateStore((s) => s.progress)
+  // B28: the sampler's newest picture while a video renders.
+  const preview = useRenderPreviewStore((s) => s.url)
+  const previewAsked = useRenderPreviewStore((s) => s.asked)
+  // C45: asked for, the sampler is running, and still no picture.
+  const noPreview = previewAsked && !preview && (progressPhase === 'sampling' || progressPhase === 'decoding')
   const isLoading = progressPhase === 'loading-model' || progressPhase === 'loading-clip' || progressPhase === 'loading-vae'
   const beat = phaseBeat(progressPhase)
 
@@ -100,6 +130,23 @@ export function GeneratingView() {
             ) : phaseIcon(progressPhase)}
           </div>
         </div>
+        <BatchQueue />
+        {preview && (
+          <figure className="flex flex-col items-center gap-1" data-testid="render-live-preview">
+            <img src={preview} alt="Live preview of the video being rendered" className="max-h-56 max-w-[22rem] rounded-lg border border-white/10 object-contain" />
+            {/* C45 (Discord 05.11.): read as a broken video preview.
+                ComfyUI decodes one frame of the video latent per step, never
+                the motion, so the caption says it is a still on purpose. */}
+            <figcaption className="t-micro text-gray-500 text-center max-w-[22rem]">
+              Still of the first frame, not the motion: ComfyUI previews one frame while it renders. It gets sharper with every step, the video plays when it is done. Cancel if it is going the wrong way.
+            </figcaption>
+          </figure>
+        )}
+        {noPreview && (
+          <p data-testid="render-no-preview" className="t-micro text-gray-500 text-center max-w-[22rem]">
+            No preview picture for this run. ComfyUI sends one from its December 2025 versions on, and not for every model. The video shows here when it is done.
+          </p>
+        )}
         <p className="t-body text-gray-300 tracking-wide">{progressText || 'Generating…'}</p>
         {isLoading && !isMlxImageHost() && <ColdLoadLine />}
         {progress > 0 && (
@@ -115,112 +162,24 @@ export function GeneratingView() {
 interface ResultProps {
   item: GalleryItem
   onFullscreen: () => void
+  /** The Prompt word in the facts: the large view with the prompt unfolded. */
+  onShowPrompt?: () => void
   onSendToEditor?: () => void
   /** C1: adopt this finished image as the Animate intent's source, matching
-   *  web's OutputView (apps/web/components/create/experimental/OutputView.tsx,
+   *  web's OutputView (the web app,
    *  createStore.animateFrom). Absent where the Animate lane cannot actually
    *  run (see isIntentAvailable('animate', ...) in Stage's caller), same gating
    *  pattern as onSendToEditor above it. */
   onAnimate?: () => void
+  /** Pick frames of this finished video and save them as a character. */
+  onSaveCharacter?: () => void
+  /** On a tool that works from a source image: the source, its references
+   *  and the way to the next image (Stage's ResultInputs). They stand beside
+   *  the result in a wide stage and under it in a narrow one, with the result
+   *  given the height that is left (FitStage). */
+  side?: ReactNode
 }
 
-function extFor(contentType: string, kind: 'image' | 'video' | 'audio'): string {
-  if (contentType.includes('png')) return 'png'
-  if (contentType.includes('jpeg') || contentType.includes('jpg')) return 'jpg'
-  if (contentType.includes('webp')) return 'webp'
-  if (contentType.includes('mp4')) return 'mp4'
-  if (contentType.includes('webm')) return 'webm'
-  if (contentType.includes('mpeg') || contentType.includes('mp3')) return 'mp3'
-  if (contentType.includes('wav')) return 'wav'
-  if (contentType.includes('ogg')) return 'ogg'
-  return kind === 'video' ? 'mp4' : kind === 'audio' ? 'mp3' : 'png'
-}
-
-// Save a gallery item. Local ComfyUI outputs (non-empty filename) go through
-// downloadComfyFile's proxy + native dialog. Cloud items have filename '' —
-// fetch their bytes directly (re-signed first: the stored URL expires ~1 h
-// after the last read); dataUrl items decode in place. Tauri gets the native
-// Save-As dialog (WebView2 blob-anchors are unreliable); failures surface via
-// setError instead of a silent no-op.
-/** Hand bytes to the user. Tauri gets the native Save-As dialog (WebView2
- *  blob-anchors are unreliable); the browser build gets an anchor click. */
-async function saveBytes(bytes: Uint8Array, name: string, ext: string): Promise<void> {
-  if (!isTauri()) {
-    const blobUrl = URL.createObjectURL(new Blob([bytes as BlobPart]))
-    const a = document.createElement('a')
-    a.href = blobUrl
-    a.download = name
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(blobUrl)
-    return
-  }
-  const { invoke } = await import('@tauri-apps/api/core')
-  // Returns the chosen path, or null if the user cancelled — nothing to do then.
-  await invoke('save_binary_file_dialog', {
-    bytes: Array.from(bytes),
-    defaultName: name,
-    extension: ext,
-    extLabel: ext.toUpperCase(),
-  })
-}
-
-async function downloadGalleryItem(item: GalleryItem): Promise<void> {
-  // A local MLX render (Mac) carries BOTH a filename and a real file on disk.
-  // The filename is ours, not a ComfyUI output name — routing on its mere
-  // presence sent every Mac render into the ComfyUI proxy below, which cannot
-  // answer here, and downloadComfyFile swallows the failure. Disk first.
-  if (item.localPath) {
-    try {
-      const b64 = await backendCall<string>('read_media_file', { path: item.localPath })
-      const binary = atob(b64)
-      const bytes = new Uint8Array(binary.length)
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-      const ext = item.localPath.toLowerCase().endsWith('.mp4') ? 'mp4' : 'png'
-      await saveBytes(bytes, `lu-${item.id}.${ext}`, ext)
-    } catch (err) {
-      useCreateStore
-        .getState()
-        .setError(`Download failed: ${err instanceof Error ? err.message : String(err)}`)
-    }
-    return
-  }
-  if (item.filename && item.unavailable) {
-    // The item's media already failed to load — the ComfyUI fetch would only
-    // fail again (and downloadComfyFile swallows its errors). Be honest.
-    // Only reachable for a ComfyUI-backed item. On a Mac that can only be a
-    // pre-2.6.0 leftover whose file was never written — there is no engine to
-    // start there, so "start it" would be the last piece of advice a Mac user
-    // could still be given about software they never had.
-    useCreateStore.getState().setError(
-      isMlxImageHost()
-        ? 'This render is not on disk any more, so there is nothing to save.'
-        : 'Download needs the local engine. Start it and try again.',
-    )
-    return
-  }
-  try {
-    if (item.filename) {
-      await downloadComfyFile(item.filename, item.subfolder)
-      return
-    }
-    let url = item.dataUrl ?? item.remoteUrl
-    if (!item.dataUrl && item.jobId) {
-      url = (await refreshResultUrl(item.jobId)) ?? url
-    }
-    if (!url) throw new Error('no source available for this item')
-    const res = await fetch(url)
-    if (!res.ok) throw new Error(`fetch failed (${res.status})`)
-    const ext = extFor(res.headers.get('content-type') ?? '', item.type)
-    const bytes = new Uint8Array(await res.arrayBuffer())
-    await saveBytes(bytes, `lu-${item.id}.${ext}`, ext)
-  } catch (err) {
-    useCreateStore
-      .getState()
-      .setError(`Download failed: ${err instanceof Error ? err.message : String(err)}`)
-  }
-}
 
 // The stored width/height are the generation *request* dims (the sliders).
 // Utility ops (upscale/removebg/eraser) and edit ignore those — their real
@@ -235,14 +194,39 @@ function reconcileDims(item: GalleryItem, w: number, h: number) {
   }
 }
 
-export function ResultView({ item, onFullscreen, onSendToEditor, onAnimate }: ResultProps) {
+export function ResultView({ item, onFullscreen, onShowPrompt, onSendToEditor, onAnimate, onSaveCharacter, side }: ResultProps) {
   const { src: url, onError } = useComfyMedia(item)
   const download = () => void downloadGalleryItem(item)
   const isVideo = item.type === 'video'
+  // An old animated .webp clip shows as a picture, which still moves (A19).
+  const inPlayer = playsAsVideo(item)
   const isAudio = item.type === 'audio'
-  return (
-    <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin flex flex-col">
-     <div className="m-auto flex flex-col items-center p-6">
+  // What Delete does here: a local file goes to the bin, a cloud result only
+  // leaves this gallery (lib/gallery-trash.ts). A string, so the view only
+  // draws again when the answer changes.
+  const fate = useCreateStore((s) => deleteFate(item, s.gallery.filter((g) => g.id !== item.id)))
+  // A 3D model has its own view with its own bar (download menu, looks), so
+  // it skips the hover buttons of a picture.
+  if (item.type === '3d') {
+    const model = (maxHeight?: string) => (
+      <div className="w-[760px] max-w-full" style={{ height: maxHeight ?? '62vh' }} data-testid="result-3d">
+        <LazyModelViewer key={item.id} item={item} onFullscreen={onFullscreen} />
+      </div>
+    )
+    const under = (
+      <div className="flex items-center gap-3 mt-3 t-mono text-gray-600" data-testid="result-facts">
+        <span className="truncate max-w-[420px]">{galleryLabel(item)}</span>
+        <span>·</span>
+        <button type="button" className="underline underline-offset-2 hover:text-gray-300" onClick={() => useCreateStore.getState().removeFromGallery(item.id)}>
+          {deleteTitle(isMlxImageHost(), fate)}
+        </button>
+      </div>
+    )
+    return <FitStage picture={model} under={under} side={side} capVh={62} />
+  }
+  // `maxHeight` is the height the stage has left for the result (FitStage).
+  // Until the stage is measured it keeps the share of the window it always had.
+  const media = (maxHeight?: string) => (
       <div className="relative group max-w-full max-h-full">
         {isAudio ? (
           <div className="w-[420px] max-w-full flex flex-col items-center gap-3 p-6 rounded-[var(--radius-panel)] border border-white/[0.06] bg-white/[0.02]">
@@ -250,16 +234,17 @@ export function ResultView({ item, onFullscreen, onSendToEditor, onAnimate }: Re
             <p className="t-body text-gray-400 text-center line-clamp-2">{galleryLabel(item)}</p>
             {url ? <audio src={url} controls onError={onError} className="w-full" onLoadedData={() => markGalleryItemAvailable(item)} /> : null}
           </div>
-        ) : !url ? null : isVideo ? (
+        ) : !url ? null : inPlayer ? (
           <video
             src={url}
-            controls
+            controls={playerHasControls(!!item.unavailable)}
             loop
             autoPlay
             muted
             onError={onError}
             onLoadedData={(e) => { markGalleryItemAvailable(item); reconcileDims(item, e.currentTarget.videoWidth, e.currentTarget.videoHeight) }}
-            className="max-w-full max-h-[62vh] object-contain rounded-[var(--radius-panel)] border border-white/[0.06]"
+            className={cn(!maxHeight && 'max-h-[62vh]', 'max-w-full object-contain rounded-[var(--radius-panel)] border border-white/[0.06]', !playerHasControls(!!item.unavailable) && UNAVAILABLE_VIDEO_BOX)}
+            style={maxHeight ? { maxHeight } : undefined}
           />
         ) : (
           <img
@@ -267,13 +252,19 @@ export function ResultView({ item, onFullscreen, onSendToEditor, onAnimate }: Re
             alt={item.prompt}
             onError={onError}
             onLoad={(e) => { markGalleryItemAvailable(item); reconcileDims(item, e.currentTarget.naturalWidth, e.currentTarget.naturalHeight) }}
-            className={cn('max-w-full max-h-[62vh] object-contain rounded-[var(--radius-panel)] border border-white/[0.06]', item.intent === 'removebg' && 'lu-checker')}
+            // A click on the picture opens the large view, where its prompt
+            // stands unfolded.
+            onClick={onFullscreen}
+            className={cn(!maxHeight && 'max-h-[62vh]', 'max-w-full cursor-zoom-in object-contain rounded-[var(--radius-panel)] border border-white/[0.06]', itemHasAlpha(item) && 'lu-checker')}
+            style={maxHeight ? { maxHeight } : undefined}
           />
         )}
         {item.unavailable && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 rounded-[var(--radius-panel)] bg-black/60 text-gray-400 p-6 text-center">
+          <div className="lu-on-dark absolute inset-0 flex flex-col items-center justify-center gap-2 rounded-[var(--radius-panel)] bg-black/60 text-gray-400 p-6 text-center">
             <MonitorOff size={ICON_LG} />
-            <span className="t-body">This render lives on the local engine, which isn't reachable right now.</span>
+            <span className="t-body">
+              {unavailableLine(item.unavailableReason === 'gone', isMlxImageHost())}
+            </span>
           </div>
         )}
         <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -282,6 +273,9 @@ export function ResultView({ item, onFullscreen, onSendToEditor, onAnimate }: Re
           )}
           {onAnimate && item.type === 'image' && !item.unavailable && (
             <IconBtn title="Animate this image" onClick={onAnimate}><Film size={14} /></IconBtn>
+          )}
+          {onSaveCharacter && isVideo && !item.unavailable && (
+            <IconBtn title="Use frames of this video for a character" onClick={onSaveCharacter}><UserRoundPlus size={14} /></IconBtn>
           )}
           <IconBtn
             title={item.unavailable ? 'Download needs the local engine' : 'Download'}
@@ -293,22 +287,58 @@ export function ResultView({ item, onFullscreen, onSendToEditor, onAnimate }: Re
           {!isAudio && (
             <IconBtn title="Fullscreen" onClick={onFullscreen}><Maximize2 size={14} /></IconBtn>
           )}
+          {/* Discord 2026-09-28 (#feature-requests "DELETE BUTTON"):
+              delete from the big view too, not only from the tile's corner.
+              A local file goes to the Recycle Bin, on a Mac to the Trash; a
+              cloud result only leaves this gallery (lib/gallery-trash.ts). */}
+          <IconBtn title={deleteTitle(isMlxImageHost(), fate)} onClick={() => useCreateStore.getState().removeFromGallery(item.id)}>
+            <Trash2 size={14} />
+          </IconBtn>
         </div>
       </div>
-      <div className="flex items-center gap-3 mt-3 t-mono text-gray-600">
-        {!isAudio && (
+  )
+  const facts = (
+    <>
+      <div className="flex items-center gap-3 mt-3 t-mono text-gray-600" data-testid="result-facts">
+        {resultFacts(item).map((fact, i, all) => (
+          <Fragment key={fact}>
+            <span className={i === all.length - 1 ? 'truncate max-w-[280px]' : undefined}>{fact}</span>
+            {i < all.length - 1 && <span>·</span>}
+          </Fragment>
+        ))}
+        {/* The fitted stage (a tool that works from a source) has no height to give:
+            in a narrow window the picture is already at its smallest, and a
+            panel under it pushed the stage into a scroll. There the prompt
+            costs no line of its own. This opens the large view, where it
+            stands unfolded with its copy button. */}
+        {side && hasPromptPanel(item) && !isAudio && (
           <>
-            <span>{item.width}×{item.height}</span>
             <span>·</span>
-            <span>seed {item.seed}</span>
-            <span>·</span>
+            <button
+              type="button"
+              onClick={onShowPrompt ?? onFullscreen}
+              title="Show the prompt and settings of this result"
+              className="shrink-0 underline underline-offset-2 hover:text-gray-300"
+              data-testid="result-prompt-open"
+            >
+              Prompt
+            </button>
           </>
         )}
-        <span className="truncate max-w-[280px]">{prettyModel(item.model)}</span>
       </div>
-     </div>
-    </div>
+      {item.sourceName && (
+        <div className="mt-1 t-mono text-gray-500 truncate max-w-[420px]" data-testid="source-name">from {item.sourceName}</div>
+      )}
+      {item.runNote && (
+        <div className="mt-1 t-mono text-gray-500" data-testid="run-note">{item.runNote}</div>
+      )}
+      {!side && <PromptDetails item={item} className="mt-2" />}
+    </>
   )
+  // With no source beside it the result is fitted all the same: the stage is
+  // lower than 62 % of the window (451 px in a 1440 × 900 window), so a wide
+  // result and the prompt fold under it ran below its edge.
+  return <FitStage picture={media} under={facts} side={side} capVh={62} />
 }
 
 function IconBtn({ children, title, onClick, disabled }: { children: React.ReactNode; title: string; onClick: () => void; disabled?: boolean }) {
@@ -318,7 +348,7 @@ function IconBtn({ children, title, onClick, disabled }: { children: React.React
       title={title}
       disabled={disabled}
       className={cn(
-        'w-7 h-7 flex items-center justify-center rounded-lg bg-black/50 backdrop-blur transition-colors',
+        'lu-on-dark w-7 h-7 flex items-center justify-center rounded-lg bg-black/50 backdrop-blur transition-colors',
         disabled ? 'text-gray-600 cursor-not-allowed' : 'text-gray-200 hover:text-white hover:bg-black/70',
       )}
     >
@@ -327,4 +357,3 @@ function IconBtn({ children, title, onClick, disabled }: { children: React.React
   )
 }
 
-function prettyModel(f: string): string { return f.replace(/\.(safetensors|ckpt|pt)$/i, '').replace(/[_]+/g, ' ') }

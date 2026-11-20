@@ -213,7 +213,7 @@ describe('AS-09: die Zerlegung ist eine, keine Verschiebung', () => {
 
   it('der ganze Assistent haelt hoechstens 25 `useState` — vorher 58 in EINER Datei', () => {
     // Sperrklinke: die Zahl darf sinken, nicht steigen. 58 ist der Stand am
-    // HEAD (`ed9d6e52`), den AUDIT-COVERAGE unter AS-09 mit „59" fuehrt —
+    // HEAD (`ed9d6e52`), den das Audit unter AS-09 mit „59" fuehrt —
     // der Audit zaehlt die Import-Zeile mit.
     //
     // Nach W-T3 zaehlt diese Zeile den ORDNER, nicht mehr die eine Datei.

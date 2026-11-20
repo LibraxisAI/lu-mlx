@@ -14,6 +14,7 @@
  * `aria-busy` + `role="status"` mit einem sr-only-Text, damit die Ladepause
  * für Screenreader nicht stumm bleibt.
  */
+import { modelSkinName } from '../models/skin/which'
 
 function Bar({ className = '' }: { className?: string }) {
   return <div className={`rounded bg-gray-200/70 dark:bg-white/[0.06] ${className}`} />
@@ -217,20 +218,31 @@ export function OnboardingSkeleton() {
    ═══════════════════════════════════════════════════════════════════════ */
 
 /**
- * Geometrie des Modell-Rasters in DiscoverModels: `grid-cols-1 /
- * md:2 / xl:3`, `gap-2.5`, Kachel `rounded-xl border p-3` mit Titelzeile,
- * zwei Blurb-Zeilen und der Fußzeile aus Größen-Pill, Fit-Hinweis und
+ * Das Skelett des Modell-Rasters in DiscoverModels und in der Mac-Medienbahn.
+ * Es traegt die Geometrie der Kachel, die kommt, und die gibt es seit dem
+ * 08.10.2026 in zwei Fassungen: die klassische auf Windows und Linux, die
+ * neue auf dem Mac. Welche gilt, entscheidet `modelSkinName()`
+ * (models/skin/which.ts), dieselbe Stelle, die auch die Kachel auswaehlt.
+ */
+export function ModelGridSkeleton() {
+  return modelSkinName() === 'mac' ? <ModelGridSkeletonMac /> : <ModelGridSkeletonClassic />
+}
+
+/**
+ * Klassische Fassung (Windows, Linux). Geometrie des Rasters: `grid-cols-1 /
+ * lg:2 / xl:3`, `gap-2.5`, Kachel `.lu-tile` mit `p-3`, mit Titelzeile,
+ * zwei Blurb-Zeilen und der Fusszeile aus Groessen-Pill, Fit-Hinweis und
  * Get-Knopf. Sechs Kacheln, damit bei jeder Spaltenzahl mindestens zwei
  * volle Reihen stehen.
  */
-export function ModelGridSkeleton() {
+function ModelGridSkeletonClassic() {
   return (
     <ListShell label="Loading models">
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5">
+      <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-2.5">
         {[0, 1, 2, 3, 4, 5].map((i) => (
           <div
             key={i}
-            className="rounded-xl border border-gray-200 dark:border-white/[0.06] bg-gray-50 dark:bg-white/[0.03] p-3"
+            className="lu-tile pointer-events-none p-3"
           >
             <div className="flex items-start gap-2.5">
               <div className="flex-1 min-w-0 space-y-1.5">
@@ -244,6 +256,43 @@ export function ModelGridSkeleton() {
               <Bar className="w-20 h-4 rounded-md" />
               <Bar className="w-14 h-3" />
               <Bar className="ml-auto w-14 h-5 rounded-md" />
+            </div>
+          </div>
+        ))}
+      </div>
+    </ListShell>
+  )
+}
+
+/**
+ * Mac-Fassung: Flaeche und Mass der neuen Kachel (`.lu-tile`, p-3.5 in
+ * models/ModelTiles.tsx), darin Titel, zwei Zeilen Text, die Zeile mit dem
+ * Urteil und die Fusszeile mit dem Knopf.
+ */
+function ModelGridSkeletonMac() {
+  return (
+    <ListShell label="Loading models">
+      <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-2.5">
+        {[0, 1, 2, 3, 4, 5].map((i) => (
+          <div
+            key={i}
+            // The surface and the measure of the real tile (`.lu-tile`,
+            // p-3.5 in models/ModelTiles.tsx). It does not answer the
+            // pointer: there is nothing in it to point at yet.
+            className="lu-tile pointer-events-none p-3.5"
+          >
+            <div className="flex items-start gap-2">
+              <div className="flex-1 min-w-0">
+                <Bar className="w-1/2 h-4" />
+                <Bar className="mt-2.5 w-full h-2.5" />
+                <Bar className="mt-1.5 w-4/5 h-2.5" />
+                <Bar className="mt-3 w-28 h-2" />
+              </div>
+              <Bar className="w-4 h-4 shrink-0 rounded-md" />
+            </div>
+            <div className="flex items-center gap-2 pt-3.5">
+              <Bar className="w-32 h-2" />
+              <Bar className="ml-auto w-14 h-[var(--control-h-sm)] rounded-lg" />
             </div>
           </div>
         ))}
@@ -326,5 +375,24 @@ export function ImportScanSkeleton() {
         ))}
       </div>
     </ListShell>
+  )
+}
+
+/** Geometry of VoiceView: a 40px header row, then the centered main button. */
+export function VoiceSkeleton() {
+  return (
+    <Shell label="Loading voice">
+      <div className="h-full flex flex-col">
+        <div className="flex items-center justify-between h-10 px-4">
+          <Bar className="w-10 h-3" />
+          <Bar className="w-5 h-5 rounded" />
+        </div>
+        <div className="flex-1" />
+        <div className="flex flex-col items-center gap-3 pb-8">
+          <Bar className="w-[72px] h-[72px] rounded-full" />
+          <Bar className="w-12 h-2.5" />
+        </div>
+      </div>
+    </Shell>
   )
 }

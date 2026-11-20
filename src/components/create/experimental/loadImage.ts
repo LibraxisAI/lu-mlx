@@ -1,4 +1,7 @@
 import { uploadImage } from '../../../api/comfyui'
+import { blobFromUrl, dataUrlToBlob } from '../../../lib/render/data-url'
+import { isMlxImageHost } from '../../../api/mlx-image'
+import { stageStartImage } from '../../../api/mlx-video'
 import { useCreateStore } from '../../../stores/createStore'
 import type { ImageRef } from '../../../stores/createStore'
 
@@ -20,7 +23,7 @@ function imageSize(url: string): Promise<{ width: number; height: number }> {
   })
 }
 
-/** Containers the cloud upload accepts (uselu /api/jobs/upload sniffs magic
+/** Containers the cloud upload accepts (the web app /api/jobs/upload sniffs magic
  *  bytes and 415s everything else). */
 const UPLOAD_SAFE = /^image\/(png|jpe?g|webp)$/i
 
@@ -33,11 +36,19 @@ function decodeImage(url: string): Promise<HTMLImageElement> {
   })
 }
 
+/** Where the local backend keeps an input image. ComfyUI takes it through
+ *  /upload/image and answers with a name in its input folder. A Mac has no
+ *  ComfyUI: the MLX video engine reads a start image from disk, so the file
+ *  is written there and the ref carries its path. */
+function stageLocally(file: File): Promise<string> {
+  return isMlxImageHost() ? stageStartImage(file) : uploadImage(file)
+}
+
 /** File → ImageRef. Always reads a data URL for preview (and for the cloud
  *  path, which re-uploads from it at submit time). On the local backend the
- *  file is additionally uploaded to ComfyUI (/upload/image) to obtain the
- *  input/ filename the local workflow uses — on cloud there may be no
- *  ComfyUI at all, so that step is skipped and filename stays ''.
+ *  file is additionally staged (stageLocally) to obtain the name the local
+ *  run reads it under. On cloud there may be no local backend at all, so
+ *  that step is skipped and filename stays ''.
  *
  *  The backends only accept PNG/JPEG/WebP, but the WebView decodes more
  *  (HEIC on macOS — the iPhone default — AVIF, GIF): anything else the
@@ -60,19 +71,23 @@ export async function loadImageRef(file: File): Promise<ImageRef> {
     canvas.height = height
     canvas.getContext('2d')!.drawImage(img, 0, 0)
     url = canvas.toDataURL('image/png')
-    const blob = await (await fetch(url)).blob()
+    // Decoded, not fetched: connect-src of the app's CSP has no data: entry, so the
+    // fetch threw "Load failed" for every HEIC, AVIF and GIF, which is what a
+    // phone camera roll is made of.
+    const blob = dataUrlToBlob(url)
     upload = new File([blob], file.name.replace(/\.[^.]+$/, '') + '.png', { type: 'image/png' })
   }
   const backend = useCreateStore.getState().backend
-  const filename = backend === 'cloud' ? '' : await uploadImage(upload)
-  return { filename, url, width, height }
+  const filename = backend === 'cloud' ? '' : await stageLocally(upload)
+  return { filename, url, width, height, name: upload.name }
 }
 
 /** Backfill the ComfyUI filename for a ref picked while on the cloud backend
  *  (filename '') so switching cloud → local keeps edit/animate working. */
 export async function ensureLocalFilename(ref: ImageRef, name: string): Promise<ImageRef> {
   if (ref.filename) return ref
-  const blob = await (await fetch(ref.url)).blob()
-  const filename = await uploadImage(new File([blob], name, { type: blob.type || 'image/png' }))
+  // Same CSP reason as above: blobFromUrl decodes a data: URL and never fetches it.
+  const blob = await blobFromUrl(ref.url)
+  const filename = await stageLocally(new File([blob], name, { type: blob.type || 'image/png' }))
   return { ...ref, filename }
 }

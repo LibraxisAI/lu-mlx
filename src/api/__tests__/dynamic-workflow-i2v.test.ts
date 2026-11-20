@@ -1,5 +1,5 @@
 /**
- * Local Animate (I2V) restored (David 2026-07-17): a video request that
+ * Local Animate (I2V) restored (2026-07-17): a video request that
  * carries an inputImage must swap the empty latent for the family's
  * image-to-video conditioning on the MAIN builder path — WAN 2.1 i2v
  * (WanImageToVideo), Hunyuan i2v (HunyuanImageToVideo, single conditioning

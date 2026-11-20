@@ -14,7 +14,7 @@ interface Props {
 
 /**
  * Coding-Agent slash-command transcript wrapped in a collapsible, tool-call-style
- * window (David 2026-06-12: "Slash-Steps in einem tool-artigen Call-Fenster,
+ * window (2026-06-12: "Slash-Steps in einem tool-artigen Call-Fenster,
  * standardmäßig zugeklappt aber trotzdem streaming bis kein Platz mehr").
  *
  *  - Default COLLAPSED — the user sees just the header (command + step count).

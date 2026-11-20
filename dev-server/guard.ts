@@ -18,7 +18,7 @@ import { postContentTypeAllowed, postContentTypeError } from '../src/lib/local-a
  * kein zweites Mal starten (`LU_DEV_PORT`, siehe vite.config.ts).
  */
 /**
- * K8 (GH #134, eloieloie, `npm run dev --host`): a deliberate LAN-exposed dev
+ * K8 (GH #134, `npm run dev --host`): a deliberate LAN-exposed dev
  * server rejected its OWN onboarding write requests with "403 Forbidden:
  * Invalid Origin (CSRF Protection)": the page loaded from the machine's LAN
  * IP (e.g. `http://192.168.1.23:5273`), which is neither `tauri://localhost`
@@ -49,7 +49,7 @@ export function createLocalApiGuard(
     // 1. Strict Content-Type enforcement for POST requests. The rule is
     // application/json everywhere except /transcribe, whose body IS the
     // raw recorded audio and was 415'd here before the whisper handler
-    // ever saw it (GitHub #115, graysoncooper). The carve-out swaps the
+    // ever saw it (GitHub #115). The carve-out swaps the
     // JSON requirement for an audio one, it does not drop the check.
     if (req.method === 'POST') {
        const contentType = String(req.headers['content-type'] || '');
@@ -80,7 +80,7 @@ export function createLocalApiGuard(
         // the thing that authorises the caller.
         // Loopback on any port stays allowed: Vite binds 5274+ when 5273 is
         // busy and the page it serves then legitimately carries that origin
-        // (issue #51, adhney). That stays safe where the host header did
+        // (issue #51). That stays safe where the host header did
         // not, because rebinding hands the attacker a *name* — the browser
         // only stamps a literal 127.0.0.1/localhost origin on a page it
         // really loaded from loopback, and `evil.localhost` (which Vite's

@@ -29,10 +29,13 @@ vi.mock('../../../api/mlx-image', () => ({
   mlxStatus: vi.fn().mockResolvedValue({ installed: false, running: false, port: 0 }),
   listMlxImageModels: vi.fn().mockResolvedValue([]),
   installMlxImageModel: vi.fn(),
-  getMlxImageInstallStatus: vi.fn(),
+  getMlxImageInstallStatus: vi.fn().mockResolvedValue({ status: 'idle', logs: [], error: null }),
+  cancelMlxImageInstall: vi.fn(),
   deleteMlxImageModel: vi.fn(),
   installMlxImageEngine: vi.fn(),
-  getMlxImageEngineStatus: vi.fn(),
+  getMlxImageEngineStatus: vi.fn().mockResolvedValue({ status: 'idle', logs: [], error: null }),
+  mlxUnload: vi.fn(),
+  hfTokenPresent: vi.fn().mockResolvedValue(false),
 }))
 vi.mock('../../../api/mlx-video', () => ({
   getVideoStatus: vi.fn().mockResolvedValue({
@@ -41,9 +44,10 @@ vi.mock('../../../api/mlx-video', () => ({
   }),
   listVideoModels: vi.fn().mockResolvedValue([]),
   installMlxVideo: vi.fn(),
-  getMlxInstallStatus: vi.fn(),
+  getMlxInstallStatus: vi.fn().mockResolvedValue({ status: 'idle', logs: [], error: null }),
   installVideoModel: vi.fn(),
-  getModelInstallStatus: vi.fn(),
+  getModelInstallStatus: vi.fn().mockResolvedValue({ status: 'idle', logs: [], error: null }),
+  cancelVideoModelInstall: vi.fn(),
   deleteVideoModel: vi.fn(),
 }))
 

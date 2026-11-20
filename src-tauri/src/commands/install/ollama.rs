@@ -108,13 +108,13 @@ pub fn install_ollama(state: State<'_, AppState>) -> Result<serde_json::Value, S
 ///
 /// `Stdio::null()` on all three handles is the fix and it is also what the
 /// rest of the repo already does: `process::start_ollama` and
-/// `auto_start_ollama` have spawned it this way since kj103x's orphan report.
+/// `auto_start_ollama` have spawned it this way since a user's orphan report.
 /// Following that pattern to the end means keeping the `Child` (so a quit
 /// reaps it instead of orphaning a daemon we started) and registering the pid
 /// with the kill-on-close job on Windows.
 fn spawn_ollama_serve(slot: &Arc<Mutex<Option<std::process::Child>>>) -> std::io::Result<()> {
     // K14: a foreign program, never something LU bundles.
-    let mut cmd = crate::process_util::foreign_system_command("ollama");
+    let mut cmd = crate::process_util::foreign_system_command(crate::commands::process::ollama_program());
     cmd.arg("serve")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -324,7 +324,9 @@ fn install_ollama_macos_impl<F: Fn(&str, &str)>(
     serve_slot: &Arc<Mutex<Option<std::process::Child>>>,
     update: F,
 ) {
-    if crate::process_util::foreign_system_command("which").arg("ollama").output().map(|o| o.status.success()).unwrap_or(false) {
+    // Not `which ollama`: from the Finder that only searches the launchd PATH
+    // and misses an installed Ollama (Fehlerkontrolle Mac 2, Fund 2).
+    if crate::commands::process::find_ollama().is_some() {
         update("starting", "Ollama already installed — starting service...");
         if let Err(e) = spawn_ollama_serve(serve_slot) {
             update(

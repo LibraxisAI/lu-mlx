@@ -1,5 +1,9 @@
+import { resolveMessageAttachments } from './chat-attachments'
 import type { ChatMessage, ToolCall, ToolDefinition } from '../api/providers/types'
 import { ollamaUrl, localFetchStream } from '../api/backend'
+import { ollamaWindowOption } from '../api/ollama'
+import { ollamaKeepAlive } from './idle-unload'
+import type { WindowChoice } from './context-window'
 import { isLocalTransportFailure, localBackendUnreachableMessage } from './local-backend-transport'
 import { repairToolCallArgs } from './tool-call-repair'
 import { applyTemplateContract } from '../api/providers/normalize-system'
@@ -55,7 +59,7 @@ export async function streamOllamaChatWithTools(
   modelId: string,
   messages: ChatMessage[],
   tools: ToolDefinition[],
-  options: { temperature?: number; thinking?: boolean; maxTokens?: number; contextWindow?: number; signal?: AbortSignal },
+  options: { temperature?: number; thinking?: boolean; maxTokens?: number; window?: WindowChoice; signal?: AbortSignal },
   onContent: (content: string) => void,
   onThinking: (thinking: string) => void,
 ): Promise<{ content: string; toolCalls: ToolCall[]; thinking: string; promptEvalCount: number; evalCount: number; doneReason?: string }> {
@@ -64,9 +68,11 @@ export async function streamOllamaChatWithTools(
   // strategy resolution only routes here after Ollama reported the model's
   // `tools` capability), so the tool channel stays native and only the
   // system-first rule is enforced.
+  messages = await resolveMessageAttachments(messages)
   const ollamaMessages = applyTemplateContract(messages, {
     toolRole: 'native',
     alternate: false,
+    model: modelId,
   }).map((m): OllamaRequestMessage => {
     const msg: OllamaRequestMessage = { role: m.role, content: m.content }
     if (m.tool_calls) msg.tool_calls = m.tool_calls
@@ -86,15 +92,13 @@ export async function streamOllamaChatWithTools(
     // default idle. An agent step that runs a 10-minute build came back to a
     // cold model and paid a multi-GB reload before the next thought — several
     // times per long session. 30m matches the warm-up call in api/ollama.ts.
-    keep_alive: '30m',
+    keep_alive: ollamaKeepAlive('30m'),
     options: {},
   }
   if (options.temperature !== undefined) body.options.temperature = options.temperature
   if (options.maxTokens) body.options.num_predict = options.maxTokens
-  // Bug AA v2.5.0 — forward num_ctx override (0/undefined = use Ollama default).
-  if (options.contextWindow && options.contextWindow > 0) {
-    body.options.num_ctx = options.contextWindow
-  }
+  // The window, from the one place that resolves it (api/ollama.ts).
+  Object.assign(body.options, await ollamaWindowOption(modelId, options.window))
   if (options.thinking === true) body.think = true
   else if (options.thinking === false) body.think = false
 
@@ -174,7 +178,7 @@ export async function streamOllamaChatWithTools(
   // always parsed it and `ollama-provider.ts` has always handed it on as
   // `finishReason`; this transport dropped it, and the coding loop therefore
   // could not tell a turn the model never finished from a model that was done
-  // (bug D symptom 2, aldrich_ironhart, Discord 2026-09-08). A `length` cut
+  // (bug D symptom 2, Discord 2026-09-08). A `length` cut
   // arrives with no tool call, so the loop falls through `break-no-toolcalls`
   // and the run ends without a word while the plan stands on its open step.
   let doneReason: string | undefined
@@ -228,7 +232,7 @@ export async function streamOllamaChatWithTools(
       // Ollama reports mid-stream failures (runner crash, OOM, context
       // overflow on some builds) as an NDJSON line `{"error":"..."}` inside
       // an HTTP-200 stream. Swallowing it produced an EMPTY turn — the agent
-      // loop then surfaced a bare "Agent error" with zero context (rikki
+      // loop then surfaced a bare "Agent error" with zero context (a user
       // Discord 2026-06-10). Throw so the caller's retry/classify logic runs.
       if (j.error) {
         throw new Error(`Ollama: ${j.error}`)

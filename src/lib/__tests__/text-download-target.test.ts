@@ -1,5 +1,5 @@
 /**
- * GH #118 (nayffy, 2026-08-27, Windows 11, v2.6.6): "Unable to load built in
+ * GH #118 (2026-08-27, Windows 11, v2.6.6): "Unable to load built in
  * engine or models". A fresh install downloaded a chat model, the tile said
  * Installed, the Chat tab never saw it, a restart flipped the tile back to
  * Get, and the Built-in Engine test in Settings answered
@@ -15,7 +15,7 @@
  * Run: npx vitest run src/lib/__tests__/text-download-target.test.ts
  */
 import { describe, it, expect } from 'vitest'
-import { resolveTextDownloadTarget } from '../text-download-target'
+import { resolveTextDownloadTarget, textDownloadTargetLabel, chosenTextDownloadTarget } from '../text-download-target'
 
 const SHIPPED_DEFAULTS = {
   openai: { enabled: true, managed: true, name: 'Built-in Engine' },
@@ -113,5 +113,23 @@ describe('resolveTextDownloadTarget: no active model, other setups', () => {
         ollamaEnabled: false,
       }),
     ).toBe('builtin')
+  })
+})
+
+// P11 (David, 30.10.2026): the target is shown on Get, and the LU Engine can
+// be chosen for a download without switching the chat model first.
+describe('the target shown and the target chosen', () => {
+  it('names each target the way the Get button says it', () => {
+    expect(textDownloadTargetLabel('builtin')).toBe('LU Engine')
+    expect(textDownloadTargetLabel('ollama')).toBe('Ollama')
+    expect(textDownloadTargetLabel('lmstudio')).toBe('LM Studio')
+    expect(textDownloadTargetLabel('openai-compat', 'Jan')).toBe('Jan')
+    expect(textDownloadTargetLabel('openai-compat')).toBe('your server')
+  })
+
+  it('the LU Engine chosen wins over an Ollama model in the chat; no choice follows the chat', () => {
+    const input = { activeChatModel: 'llama3:8b', ollamaEnabled: true, openai: { enabled: true, managed: true } }
+    expect(chosenTextDownloadTarget(input, null)).toBe('ollama')
+    expect(chosenTextDownloadTarget(input, 'builtin')).toBe('builtin')
   })
 })

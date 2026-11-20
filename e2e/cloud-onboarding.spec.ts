@@ -40,10 +40,16 @@ test('Max account: switch → login → cloud mode with the hosted catalog', asy
   await expect(page.getByRole('button', { name: /^Models$/ })).toBeHidden()
   await expect(page.getByRole('button', { name: /^Benchmark$/ })).toBeHidden()
 
-  // The chat picker lists the hosted catalog (and only it).
+  // The chat picker lists the hosted catalog (and only it), and none of it
+  // is picked for the user: since 3.0.5 he names the model himself.
   await openNewChat(page)
-  const picker = page.getByText(/Llama 3\.1 8B Turbo/i).first()
-  await expect(picker).toBeVisible({ timeout: 20_000 })
+  const picker = page.getByRole('button', { name: 'Select chat model', exact: true })
+  await expect(picker).toContainText('Choose a model', { timeout: 20_000 })
+  await picker.click()
+  const menu = page.getByTestId('model-picker-menu')
+  await expect(menu.getByRole('button', { name: /Llama 3\.1 8B Turbo/i })).toBeVisible({ timeout: 20_000 })
+  await expect(menu.getByText(DEFAULT_MODEL_NAME)).toHaveCount(0)
+  await page.keyboard.press('Escape')
 
   // Flipping back to Local always works and restores the local tabs.
   await cloudSwitch(page).click()

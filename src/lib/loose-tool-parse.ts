@@ -24,6 +24,7 @@ import { isRecord, prop } from '../types/json-guards'
 import { repairJson } from './tool-call-repair'
 import { parseHermesToolCalls } from '../api/hermes-tool-calling'
 import { RETIRED_TOOL_NAMES } from './retired-tools'
+import { retiredToolRunsOnThisDevice } from './mobile-tools'
 
 /**
  * A9. The sixteen names the 2.6.6 merge retired are not in any `known` list
@@ -38,7 +39,9 @@ import { RETIRED_TOOL_NAMES } from './retired-tools'
  * A registered tool always wins; this list is only consulted after `known`
  * has had its full ladder, so nothing can be rerouted away from a live tool.
  */
-const RETIRED_NAMES: string[] = [...RETIRED_TOOL_NAMES]
+// On a phone only the names that still run there are recognised, so prose
+// that mentions `git_status` is not turned into a call that cannot run.
+const RETIRED_NAMES: string[] = [...RETIRED_TOOL_NAMES].filter(retiredToolRunsOnThisDevice)
 
 export interface LooseToolCall {
   name: string
@@ -103,16 +106,17 @@ function parseJsonObjectCalls(text: string, known: Set<string>): { call: LooseTo
   // closed one brace early (wrong arguments).
   const candidates: string[] = findBalancedObjects(text)
   for (const cand of candidates) {
-    if (!/["']?(?:name|tool|tool_name|tool_call|function)["']?\s*[:=]/.test(cand)) continue
+    if (!/["']?(?:name|tool|tool_name|tool_call|function|call)["']?\s*[:=]/.test(cand)) continue
     const parsed = repairJson(cand)
     if (!parsed) continue
     // Name + args may arrive in three shapes, all seen from small local models:
     //   flat     {"name":"file_list","arguments":{…}}
     //   nested   {"function":{"name":"file_list","arguments":{…}}}  (OpenAI/Phi)
     //   wrapped  {"tool_call":{"name":…}} or {"tool_call":"file_list","arguments":{…}}
+    //   call     !function_call:{"call":"file_list","arguments":{…}}  (GH #147, LU Cloud)
     // Unwrap an object-valued name carrier so the nested forms resolve too.
     let nameField: unknown = parsed.name || prop(parsed, 'tool') || prop(parsed, 'tool_name')
-      || prop(parsed, 'tool_call') || prop(parsed, 'function')
+      || prop(parsed, 'tool_call') || prop(parsed, 'function') || prop(parsed, 'call')
     let argsField: unknown = parsed.arguments ?? parsed.parameters ?? prop(parsed, 'args') ?? prop(parsed, 'params')
     if (isRecord(nameField)) {
       argsField = argsField ?? nameField.arguments ?? nameField.parameters ?? nameField.args
@@ -223,7 +227,7 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
   video_generation: 'video_generate', generate_video: 'video_generate', videogen: 'video_generate',
   create_video: 'video_generate', make_video: 'video_generate', animate: 'video_generate', animate_image: 'video_generate',
   text_to_video: 'video_generate', image_to_video: 'video_generate',
-  web: 'web_search', search: 'web_search', fetch: 'web_fetch', read_file: 'file_read', write_file: 'file_write',
+  web: 'web_search', search: 'web_search', fetch: 'web_fetch', research: 'web_research', read_file: 'file_read', write_file: 'file_write',
   list_files: 'file_list', search_files: 'file_search', run_shell: 'shell_execute', run_code: 'code_execute',
   // Retired targets (A9). These resolve only because the retired list is the
   // second ladder in canonicalToolName; while the name was registered they
@@ -297,6 +301,53 @@ export function canonicalToolName(name: string, known: string[]): string {
   return name
 }
 
+/** Names that say "this is a call" instead of naming one. */
+const GENERIC_CALL_NAMES = new Set(['function', 'functions', 'tool', 'tools', 'tool_call', 'call', 'function_call', 'invoke', 'use_tool'])
+
+/** True for a name like "function" that names no tool at all. */
+export function isGenericCallName(name: string): boolean {
+  return GENERIC_CALL_NAMES.has(name.trim().toLowerCase())
+}
+
+interface ToolShape {
+  name: string
+  inputSchema?: { properties?: Record<string, unknown>; required?: string[] }
+}
+
+/**
+ * GH #147 (LU Cloud, 2026-10-01): a model sent native calls named "function",
+ * once with {"todos": [...]}, once with {"path": "."}, and every one came back
+ * "Unknown tool: function" while it retried. A generic name is resolved from
+ * the call itself: a tool named inside the arguments, or else the one tool
+ * whose parameters the arguments fit. Two tools that fit equally leave the
+ * call as it was, and the executor says what to send instead.
+ */
+export function repairToolCall(
+  name: string,
+  args: Record<string, unknown>,
+  tools: ToolShape[],
+): { name: string; arguments: Record<string, unknown> } {
+  const known = tools.map((t) => t.name)
+  if (!isGenericCallName(name)) return { name: canonicalToolName(name, known), arguments: args }
+  for (const key of ['name', 'tool', 'tool_name', 'function', 'call']) {
+    const inner = args[key]
+    if (typeof inner !== 'string') continue
+    const hit = canonicalToolName(inner, known)
+    if (!known.includes(hit)) continue
+    const nested = args.arguments ?? args.parameters ?? args.args
+    const rest = Object.fromEntries(Object.entries(args).filter(([k]) => k !== key))
+    return { name: hit, arguments: isRecord(nested) ? nested : rest }
+  }
+  const keys = Object.keys(args)
+  if (keys.length === 0) return { name, arguments: args }
+  const fits = tools.filter((t) => {
+    const props = Object.keys(t.inputSchema?.properties ?? {})
+    const required = t.inputSchema?.required ?? []
+    return keys.every((k) => props.includes(k)) && required.every((r) => keys.includes(r))
+  })
+  return fits.length === 1 ? { name: fits[0].name, arguments: args } : { name, arguments: args }
+}
+
 /** Remove the matched call snippets from a prose answer (best-effort). */
 export function stripMatchedCalls(text: string, matched: string[]): string {
   let out = text
@@ -304,7 +355,7 @@ export function stripMatchedCalls(text: string, matched: string[]): string {
     if (snip) out = out.split(snip).join('')
   }
   // Tidy leftover empty code fences / blank lines.
-  return out.replace(/```(?:json|python|tool_code)?\s*```/gi, '').replace(/\n{3,}/g, '\n\n').trim()
+  return out.replace(/```(?:json|python|tool_code)?\s*```/gi, '').replace(/!function_call:\s*/g, '').replace(/\n{3,}/g, '\n\n').trim()
 }
 
 /**
@@ -361,4 +412,32 @@ export function stripToolCallText(text: string, known: string[]): string {
     .replace(/```(?:json|tool_code)?\s*```/gi, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
+}
+
+/**
+ * Calls that landed in the reasoning channel instead of the answer (C59 A3).
+ *
+ * A server that takes a model for a thinking model puts everything up to the
+ * end of the turn into `reasoning_content`, the calls included (llama.cpp
+ * #20809, Qwen3-2507; the same seen with Qwen3.5 templates). The turn then
+ * reads as "thought, said nothing, called nothing" and the run ended or got
+ * a continue steer the model could not act on.
+ *
+ * Deliberately narrow, because reasoning is where a model THINKS about calls
+ * it may not make: only when the turn has no call and no answer at all, only
+ * the structured forms (a <tool_call> block or Qwen's <function=…> XML), never
+ * the prose `name(arg=…)` form, and only names the run knows.
+ */
+export function toolCallsFromReasoning(
+  thinking: string,
+  answer: string,
+  existingCalls: number,
+  known: readonly string[],
+): LooseToolCall[] {
+  if (existingCalls > 0 || answer.trim() || !thinking) return []
+  if (!/<tool_call>|<function=/.test(thinking)) return []
+  const calls = parseHermesToolCalls(thinking)
+  return calls
+    .filter((c) => known.includes(c.name))
+    .map((c) => ({ name: c.name, arguments: (isRecord(c.arguments) ? c.arguments : {}) as Record<string, unknown> }))
 }

@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Is Locally Uncensored Safe? Antivirus Warnings Explained</title>
+<meta name="description" content="Locally Uncensored is open source and built in public by GitHub Actions. Why SmartScreen and antivirus tools flag the unsigned installer, and how to verify it.">
+<meta name="keywords" content="is locally uncensored safe, locally uncensored virus, locally uncensored legit, locally uncensored antivirus, locally uncensored smartscreen">
+<meta property="og:title" content="Is Locally Uncensored Safe? Antivirus Warnings Explained">
+<meta property="og:description" content="Locally Uncensored is open source and built in public by GitHub Actions. Why SmartScreen and antivirus tools flag the unsigned installer, and how to verify it.">
+<meta property="og:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<meta property="og:url" content="https://locallyuncensored.com/is-locally-uncensored-safe/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Locally Uncensored">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Is Locally Uncensored Safe? Antivirus Warnings Explained">
+<meta name="twitter:description" content="Locally Uncensored is open source and built in public by GitHub Actions. Why SmartScreen and antivirus tools flag the unsigned installer, and how to verify it.">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/PurpleDoubleD/locally-uncensored/master/docs/social-preview.png">
+<link rel="canonical" href="https://locallyuncensored.com/is-locally-uncensored-safe/">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="/favicon.png">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":"https://locallyuncensored.com/"},{"@type":"ListItem","position":2,"name":"Is it safe?","item":"https://locallyuncensored.com/is-locally-uncensored-safe/"}]}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Is Locally Uncensored a virus?","acceptedAnswer":{"@type":"Answer","text":"No. It is an open source desktop app under AGPL-3.0, built by GitHub Actions from public source. Some antivirus engines flag the unsigned Windows installer through heuristics, which is a false positive. You can check the SHA-256 from GitHub Releases on VirusTotal yourself."}},{"@type":"Question","name":"Why does Windows SmartScreen block the installer?","acceptedAnswer":{"@type":"Answer","text":"The Windows installer is not Authenticode signed yet. Without a code signing certificate SmartScreen has no reputation data and shows an \"unrecognized app\" warning on first run."}},{"@type":"Question","name":"Is Locally Uncensored legit?","acceptedAnswer":{"@type":"Answer","text":"Yes. The full source is public on GitHub under AGPL-3.0, releases are built in public by GitHub Actions, and anyone can build the same installer from source with npm ci && npm run tauri build."}},{"@type":"Question","name":"Does Locally Uncensored collect my data?","acceptedAnswer":{"@type":"Answer","text":"Local mode needs no account. Chat, agent runs, and image and video generation happen on your machine. The app has no analytics kit and sends no crash reports. It checks GitHub Releases for updates and counts each press of the Cloud switch without an identifier."}},{"@type":"Question","name":"Where is the safe place to download it?","acceptedAnswer":{"@type":"Answer","text":"The official GitHub Releases page. Every release there is built by GitHub Actions from the public master branch."}},{"@type":"Question","name":"Will the installer be signed?","acceptedAnswer":{"@type":"Answer","text":"That is the plan. SignPath Foundation has accepted the project for free code signing. The production certificate is not in place yet. Updates are already signed with a minisign key."}}]}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/lu.css">
+<script defer src="/assets/lu.js"></script>
+  <script data-goatcounter="https://purple47.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</head>
+<body>
+
+<nav class="lu-nav">
+  <a class="lu-nav-brand" href="/" aria-label="Locally Uncensored">
+    <span class="lu-mono" data-mono="nav" data-size="40" aria-hidden="true"></span>
+    <span class="lu-nav-word">Locally <span class="accent">Uncensored</span></span>
+  </a>
+  <div class="lu-nav-links" id="lu-nav-links">
+    <a class="lu-nav-link" href="/">Home</a>
+    <a class="lu-nav-link" href="/pricing/">Pricing</a>
+    <a class="lu-nav-link" href="/blog/">Blog</a>
+    <a class="lu-nav-link" href="/guide/">Guide</a>
+    <a class="lu-nav-link" href="/remote-access/">Remote</a>
+  </div>
+  <div class="lu-nav-right">
+    <a class="lu-nav-icon" href="https://github.com/PurpleDoubleD/locally-uncensored" title="GitHub" aria-label="GitHub"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg><span class="lu-nav-badge">4200+&#8202;⭐</span></a>
+    <a class="lu-nav-icon discord" href="https://locallyuncensored.com/discord" target="_blank" rel="noopener" title="Discord" aria-label="Discord"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.32 4.37A19.8 19.8 0 0 0 15.45 3c-.2.36-.44.85-.6 1.23a18.3 18.3 0 0 0-5.7 0c-.16-.38-.4-.87-.6-1.23a19.7 19.7 0 0 0-4.87 1.37C.55 8.9-.32 13.3.11 17.63a19.9 19.9 0 0 0 6 3.03c.48-.66.9-1.36 1.27-2.1-.7-.26-1.36-.58-1.99-.96.17-.12.33-.25.49-.38a14.2 14.2 0 0 0 12.24 0c.16.13.32.26.49.38-.63.38-1.3.7-2 .96.37.74.8 1.44 1.27 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.03-.85-9.39-3.55-13.26ZM8.02 15c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.95 2.42-2.15 2.42Zm7.96 0c-1.18 0-2.15-1.09-2.15-2.42 0-1.34.95-2.43 2.15-2.43 1.2 0 2.17 1.09 2.15 2.43 0 1.33-.94 2.42-2.15 2.42Z"/></svg><span class="lu-nav-badge">1700+&#8202;<span style="font-size:0.715em">🟢</span></span></a>
+    <span class="lu-nav-sep"></span>
+    <div class="switch" id="theme-switch" role="button" aria-label="Toggle theme"></div>
+    <a class="he-cta" href="/pricing/" aria-label="LU Cloud plans and what they include"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>Cloud</a>
+    <a class="lu-nav-dl" href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Download</a>
+    <button type="button" class="lu-nav-toggle" aria-label="Menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </div>
+</nav>
+<div class="container lu-doc">
+  <div class="breadcrumb"><a href="/">Locally Uncensored</a> / Is it safe?</div>
+
+  <div class="post-meta">
+    <span class="post-tag">Security</span>
+    <span>October 10, 2026</span>
+    <span>·</span>
+    <span>5 min read</span>
+  </div>
+
+  <article>
+    <h1>Is Locally Uncensored Safe?</h1>
+
+    <p><strong>The short version:</strong> Locally Uncensored is open source under AGPL-3.0, and every release is built by GitHub Actions from the public source. The Windows installer is not code signed yet, so SmartScreen and some antivirus engines warn about it. That warning is a false positive, and this page shows how to check that yourself instead of taking our word for it.</p>
+
+    <h2>What Is Verifiable Today</h2>
+
+    <table>
+      <thead><tr><th>Question</th><th>Answer</th><th>Where to check</th></tr></thead>
+      <tbody>
+        <tr><td>Is the source public?</td><td>Yes, AGPL-3.0</td><td><a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub repository</a></td></tr>
+        <tr><td>Who builds the installer?</td><td>GitHub Actions, from the <code>master</code> branch</td><td><code>.github/workflows/release.yml</code></td></tr>
+        <tr><td>Is the Windows installer code signed?</td><td>Not yet</td><td><a href="https://github.com/PurpleDoubleD/locally-uncensored/blob/master/SECURITY.md">SECURITY.md</a></td></tr>
+        <tr><td>Are updates signed?</td><td>Yes, with a minisign key</td><td>Public key below</td></tr>
+        <tr><td>Analytics or crash reports?</td><td>No analytics kit, no crash reports</td><td><a href="https://github.com/PurpleDoubleD/locally-uncensored#readme">README</a></td></tr>
+        <tr><td>Account required?</td><td>No</td><td><a href="https://github.com/PurpleDoubleD/locally-uncensored#readme">README</a></td></tr>
+      </tbody>
+    </table>
+
+    <h2>Why Windows and Antivirus Tools Warn</h2>
+
+    <p>Three reports have reached us so far. ESET blocks the installer when it runs. Avast shows the heuristic <code>Win32:NSIS_Error[Heur]</code>. Microsoft SmartScreen shows an "unrecognized app" warning on first run. All three are heuristics, and they have three causes.</p>
+
+    <ol>
+      <li><strong>The installer is not Authenticode signed yet.</strong> Without a Microsoft code signing certificate, every reputation based check starts at zero trust.</li>
+      <li><strong>The app downloads other programs on first run.</strong> Locally Uncensored is a small Tauri app packaged with NSIS. On first run it fetches Ollama, ComfyUI, Python and model files. Behavioural scanners know that pattern from droppers. Here every download path is in the public source, in <code>src-tauri/src/commands/install.rs</code> and <code>src-tauri/src/commands/ollama.rs</code>.</li>
+      <li><strong>NSIS is an installer format that scanners flag often</strong>, because some malware families have used it in the past.</li>
+    </ol>
+
+    <h2>How to Verify the Download Yourself</h2>
+
+    <ol>
+      <li><strong>Check the source.</strong> Download only from the <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases">official GitHub Releases page</a>. Every release there is built by GitHub Actions from public source.</li>
+      <li><strong>Check the SHA-256.</strong> GitHub Releases lists the exact bytes that were uploaded. Scan the file on <a href="https://www.virustotal.com/" target="_blank" rel="noopener">VirusTotal</a> and compare the hash it shows with the one on the release.</li>
+      <li><strong>Read an independent check.</strong> A community member followed up on the Avast alert with an OPSWAT deep scan and reported the result as clean. The full write up is in <a href="https://github.com/PurpleDoubleD/locally-uncensored/discussions/25">Discussion #25</a>.</li>
+      <li><strong>Build it yourself.</strong> Clone the repository and run <code>npm ci &amp;&amp; npm run tauri build</code>. You end up with an installer from the same source, built on your own machine.</li>
+    </ol>
+
+    <h2>Updates Are Signed</h2>
+
+    <p>The update channel is already signed. Under Settings, then Updates, the app reads <code>latest.json</code> from GitHub Releases and validates the bundle signature against this minisign public key:</p>
+
+    <pre><code>RWRHseb4LudtbIpBRaMDxMpSLMq+1TqeULJS/HY2/eviNqnAXVVyGsDc</code></pre>
+
+    <p>If a tampered update were ever served, the signature check would fail and the app would reject it. That leaves the first install as the one weak link, and it is the one the code signing work is meant to close.</p>
+
+    <h2>What the App Sends Over the Network</h2>
+
+    <p>In local mode, chat, agent runs, and image and video generation all happen on your machine. After the model download they work without a connection. You do not need an account. The app has no analytics kit and sends no crash reports.</p>
+
+    <p>On its own the app uses the network for two things. It checks GitHub Releases for updates shortly after start and at most every six hours after that. It also counts each press of the Cloud switch: which way, platform and app version, with no identifier. While you are signed in to LU Cloud it checks your account every five minutes. The full list is in the app under Settings, General, Privacy.</p>
+
+    <h2>Code Signing Status</h2>
+
+    <p>A signed installer is the long term fix. Free code signing is provided by SignPath.io, with a certificate by SignPath Foundation. SignPath Foundation has accepted the project. The production certificate is not in place yet, and until it is the Windows installers ship unsigned. The current state is always in <a href="https://github.com/PurpleDoubleD/locally-uncensored/blob/master/SECURITY.md">SECURITY.md</a>.</p>
+
+    <h2>Reporting a Security Issue</h2>
+
+    <p>Please do not open a public issue for a vulnerability. Use <a href="https://github.com/PurpleDoubleD/locally-uncensored/security/advisories/new">GitHub's private vulnerability reporting</a> or send a direct message on <a href="/discord">Discord</a>. Reports are acknowledged within 48 hours and assessed within one week. For critical issues the aim is a patch within two weeks.</p>
+
+    <p>If your antivirus flags the installer, you can also submit it to the vendor as a false positive. SECURITY.md lists the submission forms for ESET, Microsoft Defender, Avast and AVG, Bitdefender, Kaspersky, Norton and McAfee.</p>
+
+    <h2>FAQ</h2>
+
+    <h3>Is Locally Uncensored a virus?</h3>
+    <p>No. It is an open source desktop app under AGPL-3.0, built by GitHub Actions from public source. Some antivirus engines flag the unsigned Windows installer through heuristics, which is a false positive. You can check the SHA-256 from GitHub Releases on VirusTotal yourself.</p>
+
+    <h3>Why does Windows SmartScreen block the installer?</h3>
+    <p>The Windows installer is not Authenticode signed yet. Without a code signing certificate SmartScreen has no reputation data and shows an "unrecognized app" warning on first run.</p>
+
+    <h3>Is Locally Uncensored legit?</h3>
+    <p>Yes. The full source is public on GitHub under AGPL-3.0, releases are built in public by GitHub Actions, and anyone can build the same installer from source with <code>npm ci &amp;&amp; npm run tauri build</code>.</p>
+
+    <h3>Does Locally Uncensored collect my data?</h3>
+    <p>Local mode needs no account. Chat, agent runs, and image and video generation happen on your machine. The app has no analytics kit and sends no crash reports. It checks GitHub Releases for updates and counts each press of the Cloud switch without an identifier.</p>
+
+    <h3>Where is the safe place to download it?</h3>
+    <p>The <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases">official GitHub Releases page</a>. Every release there is built by GitHub Actions from the public <code>master</code> branch.</p>
+
+    <h3>Will the installer be signed?</h3>
+    <p>That is the plan. SignPath Foundation has accepted the project for free code signing. The production certificate is not in place yet. Updates are already signed with a minisign key.</p>
+  </article>
+
+  <div class="post-footer">
+    <p>Read the source, check the hash, then decide.</p>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/releases/latest" class="cta-btn">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Download from GitHub Releases
+    </a>
+    <p style="margin-top:14px;margin-bottom:0">AGPL-3.0 &middot; <a href="https://github.com/PurpleDoubleD/locally-uncensored/blob/master/SECURITY.md">Security policy</a> &middot; <a href="/security/">Security overview</a></p>
+  </div>
+</div>
+
+<footer>
+  <div class="footer-row footer-meta"><span>&copy; 2026 &middot; Locally Uncensored &middot; AGPL-3.0</span></div>
+  <div class="footer-row footer-links">
+    <a href="https://locallyuncensored.com/blog/">Blog</a>
+    <a href="https://locallyuncensored.com/guide/">Guide</a>
+    <a href="https://locallyuncensored.com/pricing/">Pricing</a>
+    <a href="https://locallyuncensored.com/cloud/">LU Cloud</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-chat-online/">Uncensored AI chat online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-image-generator-online/">Image generator online</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-video-generator-online/">Video generator online</a>
+    <a href="https://locallyuncensored.com/unrestricted-ai/">Unrestricted AI</a>
+    <a href="https://locallyuncensored.com/uncensored-ai-coding-agent/">AI coding agent</a>
+    <a href="https://locallyuncensored.com/alternatives/">Alternatives</a>
+    <a href="https://locallyuncensored.com/is-locally-uncensored-safe/">Is it safe?</a>
+    <a href="https://locallyuncensored.com/remote-access/">Remote access</a>
+    <a href="https://locallyuncensored.com/discord" target="_blank" rel="noopener">Discord</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored">GitHub</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/discussions">Discussions</a>
+    <a href="https://github.com/PurpleDoubleD/locally-uncensored/issues">Issues</a>
+    <a href="https://reddit.com/user/GroundbreakingMall54">Reddit</a>
+    <a href="https://www.linkedin.com/in/david-drobnitza-locallyuncensored/" rel="me noopener" target="_blank">LinkedIn</a>
+    <a href="https://locallyuncensored.com/privacy/">Privacy</a>
+    <a href="https://locallyuncensored.com/terms/">Terms</a>
+    <a href="https://locallyuncensored.com/impressum/">Impressum</a>
+  </div>
+</footer>
+</body>
+</html>

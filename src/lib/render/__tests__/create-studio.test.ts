@@ -1,6 +1,6 @@
 // Der Create-Tab und das Preset-Fenster bieten dieselben Modelle an.
 //
-// 19.09.2026, Entscheid von David: die neuen Endpunkte sollen auch in den
+// 19.09.2026, Entscheid des Inhabers: die neuen Endpunkte sollen auch in den
 // Unterkategorien von Create waehlbar sein. Bis dahin kannte der normale
 // Composer den Studio-Pfad ueberhaupt nicht, und die Unterkategorien zeigten
 // eine eigene, aeltere Liste. Der Fall unten haelt beide Seiten zusammen.
@@ -17,6 +17,7 @@ import {
 } from '../create-studio'
 import { STUDIO_MODELS } from '../studio-contract'
 import { CLOUD_MODEL_SEED } from '../cloud-models'
+import { neuerServer } from './fixtures/test-catalogs'
 import { opPickerModels, useCloudCatalogStore } from '../../../stores/cloudCatalogStore'
 import type { CreateIntent } from '../../../stores/createStore'
 
@@ -29,7 +30,7 @@ const MIT_ROLLE: StudioIntent[] = ['lipsync', 'music', 'extend', 'motion', 'vide
 // Verhalten) hat einen eigenen Fall unten ("faellt ohne quote_required im
 // Katalog auf die klassischen Mitglieder zurueck").
 beforeEach(() => {
-  useCloudCatalogStore.setState({ models: [...CLOUD_MODEL_SEED, { id: 'test-studio-marker', label: 'x', kind: 'image', quote_required: true }] })
+  useCloudCatalogStore.setState({ models: neuerServer() })
 })
 
 describe('die Unterkategorien von Create fahren dieselben Modelle wie die Presets', () => {
@@ -71,11 +72,11 @@ describe('die Unterkategorien von Create fahren dieselben Modelle wie die Preset
   })
 
   it('laesst Enhance Video auf dem Endpunkt starten, auf dem es bisher lief', () => {
-    // Ohne Auswahl lief diese Unterkategorie fest auf wavespeed-ai/video-upscaler.
+    // Ohne Auswahl lief diese Unterkategorie fest auf einem Endpunkt.
     // Wer nichts waehlt, bekommt weiterhin genau den.
     expect(intentPickerModels('video_upscale')[0].id).toBe('video-upscaler')
     expect(resolveIntentPick('video_upscale', '')).toBe('video-upscaler')
-    expect(STUDIO_MODELS['video-upscaler'].endpoint).toBe('wavespeed-ai/video-upscaler')
+    expect(STUDIO_MODELS['video-upscaler'].endpoint).toBe('base/video-upscaler')
   })
 
   it('haelt eine gueltige Wahl fest und faengt eine fremde ab', () => {
@@ -106,7 +107,7 @@ describe('die Unterkategorien von Create fahren dieselben Modelle wie die Preset
   })
 
   it('gibt keiner Absicht ohne Rolle eine Auswahl', () => {
-    for (const intent of ['image', 'video', 'animate', 'edit', 'character', 'upscale'] as CreateIntent[]) {
+    for (const intent of ['image', 'video', 'animate', 'edit', 'character'] as CreateIntent[]) {
       expect(intentRoles(intent), intent).toEqual([])
       expect(intentPickerModels(intent), intent).toEqual([])
     }

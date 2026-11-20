@@ -11,7 +11,7 @@
  *     (das Objekt existiert und ist erreichbar, aber nur von einem
  *     Nebenzweig eines ANDEREN Repos als diesem hier).
  *
- * lu-300-desktop und dieses Repo (uselu) sind zwei getrennte Repos ohne
+ * lu-300-desktop und dieses Repo (the web app) sind zwei getrennte Repos ohne
  * gemeinsame Historie, ein `git cherry-pick` laeuft hier ins Leere. Der
  * Quelltext von Header.tsx ist seither auch strukturell auseinandergelaufen
  * (`syncStaleToStore`, `checkModelCapability`-Refresh-Pfad gibt es dort

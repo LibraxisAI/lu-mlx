@@ -4,7 +4,7 @@
  * plus the Approve-and-run card that goes with it.
  *
  * Both plan pieces are here because the prompt window is the prompt window and
- * shows nothing about plans (David, 2026-08-22, fifth time of asking). They are
+ * shows nothing about plans (2026-08-22, fifth time of asking). They are
  * at the BOTTOM of the column rather than the top for the same reading, filed
  * the same day: opening the Code tab, the eye wants the files first, and a plan
  * sitting above the folder picker made no sense to him.
@@ -43,7 +43,7 @@ import { useAnyAgentLoopActive } from '../../stores/agentLoopStore'
 import { useGenerationStore } from '../../stores/generationStore'
 import { useAgentModeStore } from '../../stores/agentModeStore'
 import { useSettingsStore } from '../../stores/settingsStore'
-import { useUIStore } from '../../stores/uiStore'
+import { useUIStore, clampExplorerWidth, isNarrowViewport } from '../../stores/uiStore'
 import {
   CODEX_WORKDIR_LOCK_TITLE,
   codexBusyReason,
@@ -63,11 +63,9 @@ import {
   type ExplorerNode,
   type FsList,
 } from '../../lib/explorer-tree'
-import { PlanBar } from './PlanBar'
 import { PlanApprovalBar } from './PlanApprovalBar'
 import { FilePreview } from './FilePreview'
 import { useChatStore } from '../../stores/chatStore'
-import { useTodoStore } from '../../stores/todoStore'
 import { HINWEIS_TEXT } from '../../lib/hinweis'
 import { workspacePickRefusedMessage } from '../../lib/workspace-rejected'
 
@@ -110,7 +108,14 @@ export function ExplorerPanel({ onApprovePlan }: Props) {
   const lockReason = codexBusyReason({ sendsInFlight, threads, generating, loop })
   const lockTitle = lockReason ? CODEX_WORKDIR_LOCK_TITLE[lockReason] : null
 
-  const width = useUIStore((s) => s.explorerWidth)
+  // Issue 309 T1: gegen das aktuelle Fenster geklemmt, nicht nur beim Ziehen.
+  // Im schmalen Fenster ist das Panel zu (uiStore, NARROW_VIEWPORT_WIDTH);
+  // klappt es dort jemand auf, liegt es UEBER dem Verlauf statt daneben, sonst
+  // blieben dem Composer die ~25 px aus der Messung.
+  const viewportWidth = useUIStore((s) => s.viewportWidth)
+  const storedWidth = useUIStore((s) => s.explorerWidth)
+  const width = clampExplorerWidth(storedWidth, viewportWidth)
+  const overlay = isNarrowViewport(viewportWidth)
   const collapsed = useUIStore((s) => s.explorerCollapsed)
   const setExplorerWidth = useUIStore((s) => s.setExplorerWidth)
   const setExplorerCollapsed = useUIStore((s) => s.setExplorerCollapsed)
@@ -141,10 +146,9 @@ export function ExplorerPanel({ onApprovePlan }: Props) {
   const planWaiting = useCodexStore((s) =>
     activeConversationId ? !!s.planApprovalByConversation[activeConversationId] : false,
   )
-  const planSteps = useTodoStore((s) =>
-    activeConversationId ? (s.byConversation[activeConversationId]?.length ?? 0) : 0,
-  )
-  const planHasSomething = planWaiting || planSteps > 0
+  // The run's progress list moved into the transcript (PlanBar.tsx, CA
+  // 13.11.2026). What stays in this column is the approval card.
+  const planHasSomething = planWaiting
 
   const load = async (dir: string) => {
     setBusy((b) => (b.includes(dir) ? b : [...b, dir]))
@@ -217,7 +221,7 @@ export function ExplorerPanel({ onApprovePlan }: Props) {
     if (next.includes(node.path) && !listings[node.path]) load(node.path)
   }
 
-  // Der Ordner-Dialog der gepackten App (Fehler D, aldrich_ironhart,
+  // Der Ordner-Dialog der gepackten App (Fehler D, ein Nutzer,
   // 08.09.2026).
   //
   // `asWorkspace: true` laesst die Rust-Seite einen Ordner, den sie nicht als
@@ -293,10 +297,10 @@ export function ExplorerPanel({ onApprovePlan }: Props) {
         {planHasSomething && (
           <button
             onClick={() => setExplorerCollapsed(false)}
-            title={planWaiting ? 'A plan is waiting for your approval' : 'Show the plan'}
+            title="A plan is waiting for your approval"
             data-testid="explorer-plan-waiting"
             className={`mt-1 p-1 rounded transition-colors hover:bg-gray-100 dark:hover:bg-white/5 ${
-              planWaiting ? 'text-purple-400' : 'text-blue-400'
+              planWaiting ? 'text-lu-accent' : 'text-gray-400 dark:text-gray-500'
             }`}
           >
             <ListTodo size={12} />
@@ -310,17 +314,17 @@ export function ExplorerPanel({ onApprovePlan }: Props) {
   const rows = flattenTree(root, listings, expanded)
   const loadingRoot = busy.includes(root)
 
-  return (
+  const panel = (
     <aside
       style={{ width: `${width}px` }}
-      className="relative shrink-0 h-full flex flex-col border-l border-gray-200 dark:border-white/[0.04] bg-gray-50 dark:bg-white/[0.01]"
+      className={`${overlay ? 'absolute right-0 top-0 z-30 shadow-lg bg-gray-50 dark:bg-lu-panel' : 'relative shrink-0 bg-gray-50 dark:bg-white/[0.01]'} h-full flex flex-col border-l border-gray-200 dark:border-white/[0.04]`}
     >
       {/* Drag handle on the panel edge. */}
       <div
         onPointerDown={startDrag}
         title="Drag to resize"
         data-testid="explorer-resize-handle"
-        className="absolute left-0 top-0 h-full w-1 -ml-0.5 z-10 cursor-col-resize hover:bg-blue-500/40 active:bg-blue-500/60 transition-colors"
+        className="absolute left-0 top-0 h-full w-1 -ml-0.5 z-10 cursor-col-resize hover:bg-white/10 active:bg-white/20 transition-colors"
       />
 
       <div className="flex items-center gap-1 p-1.5 border-b border-gray-200 dark:border-white/[0.04]">
@@ -429,7 +433,7 @@ export function ExplorerPanel({ onApprovePlan }: Props) {
                     style={{ paddingLeft: `${row.depth * 8 + 4}px` }}
                     className={`flex items-center gap-1 w-full pr-1 py-[2px] text-[0.5rem] rounded transition-colors text-left ${
                       isSelected
-                        ? 'bg-blue-500/10 text-gray-800 dark:text-gray-100'
+                        ? 'bg-gray-200/70 dark:bg-white/[0.07] text-gray-800 dark:text-gray-100'
                         : row.node.isDirectory
                           ? 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/5'
                           : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-white/5'
@@ -469,15 +473,23 @@ export function ExplorerPanel({ onApprovePlan }: Props) {
         <FilePreview key={selected.path} node={selected} root={root} onClose={() => setSelected(null)} />
       )}
 
-      {/* Bottom of the column, and the only place either of these renders.
-          `shrink-0` so a long file tree can never squeeze the plan, and with
+      {/* Bottom of the column, the only place the approval card renders.
+          `shrink-0` so a long file tree can never squeeze the card, and with
           it the Approve-and-run button, down to nothing. */}
       <div className="shrink-0 border-t border-gray-200 dark:border-white/[0.04]">
         <PlanApprovalBar onApprove={onApprovePlan} />
-        <PlanBar variant="panel" />
       </div>
     </aside>
   )
+
+  // Ein Rahmen ohne eigene Breite traegt die Ueberlagerung, wie die
+  // Chatspalte in Sidebar.tsx: so braucht kein Vorfahre `relative`, und kein
+  // anderes absolut gesetztes Element bekommt einen neuen Bezugsrahmen.
+  return overlay ? (
+    <div data-testid="explorer-overlay" className="relative shrink-0 w-0 h-full">
+      {panel}
+    </div>
+  ) : panel
 }
 
 /** The two things a listing has to admit: the backend cut it off at 500, and

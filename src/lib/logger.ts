@@ -11,7 +11,7 @@
 // a real leak risk shows up; an over-aggressive scrubber hides bugs.
 //
 // Why not pino: zero extra runtime dep, no transport setup, fits the
-// uselu-on-Vercel deploy where stdout IS the transport.
+// serverless deploy where stdout IS the transport.
 //
 // Audit #01 — that last paragraph was written for a server. In the DESKTOP
 // build there is no stdout: the WebView's console only exists while DevTools
@@ -120,7 +120,6 @@ function getInvoke(): Promise<InvokeFn> {
  * path is swallowed: the synchronous body, the dynamic import, the invoke.
  */
 function mirrorToLogFile(level: LogLevel, msg: string, cleaned?: LogContext): void {
-  if (!MIRRORED_LEVELS.has(level)) return
   if (!isTauriRuntime()) return
   try {
     let message = msg
@@ -143,7 +142,7 @@ function mirrorToLogFile(level: LogLevel, msg: string, cleaned?: LogContext): vo
   }
 }
 
-function emit(level: LogLevel, msg: string, ctx?: LogContext): void {
+function emit(level: LogLevel, msg: string, ctx?: LogContext, toFile = MIRRORED_LEVELS.has(level)): void {
   if (level === 'debug' && isProd()) return
 
   const safeCtx = ctx
@@ -163,7 +162,7 @@ function emit(level: LogLevel, msg: string, ctx?: LogContext): void {
   // production bundle or a dev server — the desktop app is a production
   // bundle, and a `npm run tauri dev` session is the case where somebody is
   // actually reading the file while it is written.
-  mirrorToLogFile(level, msg, cleaned)
+  if (toFile) mirrorToLogFile(level, msg, cleaned)
 
   if (isProd()) {
     const line = JSON.stringify({
@@ -187,6 +186,12 @@ export const log = {
   info: (msg: string, ctx?: LogContext) => emit('info', msg, ctx),
   warn: (msg: string, ctx?: LogContext) => emit('warn', msg, ctx),
   error: (msg: string, ctx?: LogContext) => emit('error', msg, ctx),
+  /**
+   * An info line that also goes into the log file. For the rare moments a
+   * support log is read for although nothing went wrong, such as the end of
+   * a voice session with its reason. Never for anything that repeats.
+   */
+  event: (msg: string, ctx?: LogContext) => emit('info', msg, ctx, true),
 }
 
 /** Exported for the test only — exercise the scrubber on arbitrary input. */

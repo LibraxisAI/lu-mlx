@@ -1,5 +1,5 @@
 /**
- * GH #118 (nayffy, 2026-08-27, Windows 11, v2.6.6): "Built in engine test fails
+ * GH #118 (2026-08-27, Windows 11, v2.6.6): "Built in engine test fails
  * and console shows GET http://127.0.0.1:8127/v1/models net::ERR_CONNECTION_REFUSED".
  *
  * Since 2.6.8 the engine may take the next free port when 8127 is held, so the
@@ -66,7 +66,7 @@ describe('baseUrlNeedingEnginePort: the slot follows the engine, and only the en
   // the one being fixed.
   it('never touches a host that is not this machine', () => {
     expect(baseUrlNeedingEnginePort('https://api.together.xyz/v1', 8137)).toBeNull()
-    expect(baseUrlNeedingEnginePort('http://192.168.0.54:1234/v1', 8137)).toBeNull()
+    expect(baseUrlNeedingEnginePort('http://192.168.1.54:1234/v1', 8137)).toBeNull()
     expect(baseUrlNeedingEnginePort('http://box.local:8127/v1', 8137)).toBeNull()
   })
 

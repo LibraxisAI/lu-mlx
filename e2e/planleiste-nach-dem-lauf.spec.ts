@@ -21,12 +21,13 @@ import { openNewChat } from './support/ui'
 
 type Turn = { text?: string; toolCalls?: Array<{ name: string; args: Record<string, unknown> }> }
 
-async function bootAgent(page: Page, agentTurns: Turn[]) {
+async function bootAgent(page: Page, agentTurns: Turn[], holdTools = false) {
   await page.addInitScript(tauriMockInit, {
     assistantReply: DEFAULT_ASSISTANT_REPLY,
     modelName: DEFAULT_MODEL_NAME,
     replyChunkDelayMs: 5,
     agentTurns,
+    holdTools,
   })
   await seedOnboardingDone(page)
   await page.addInitScript(() => {
@@ -81,41 +82,64 @@ test('nach dem Lauf sagt die Planleiste, dass sie stehengeblieben ist', async ({
   await box.type('mach vier Schritte')
   await page.keyboard.press('Enter')
 
-  const band = page.getByTestId('plan-header')
+  const band = page.getByTestId('plan-pinned')
   await expect(band).toBeVisible({ timeout: 30_000 })
 
   // Der Lauf muss WIRKLICH vorbei sein, sonst prueft der Rest nichts.
   const gestoppt = page.getByTestId('plan-run-stopped')
   await expect(gestoppt).toBeVisible({ timeout: 60_000 })
-  await expect(gestoppt).toHaveText(/the run ended here, 3 of 4 steps done, 1 still open/)
+  // Seit 14.11.2026 ohne Zahlen (David: kein Zaehler, nirgends, planStoppedLabel).
+  await expect(gestoppt).toContainText('the run ended before every step was done')
 
   // Und der Kreisel steht. Gemessen war er der zweite Teil derselben Luege:
   // aufgeklappt drehte er sich nach dem Ende des Laufs unbegrenzt weiter.
-  await band.getByRole('button').first().click()
-  await expect(band.getByText('Schritt vier')).toBeVisible()
+  // Die Liste ist offen, seit sie unter der neuesten Nachricht haengt (CA).
+  await expect(band.getByTestId('plan-steps').getByText('Schritt vier')).toBeVisible()
   const drehend = await band.locator('.animate-spin').count()
   expect(drehend).toBe(0)
 })
 
 test('waehrend der Lauf laeuft, sagt sie nichts von einem Ende', async ({ page }) => {
-  // Gegenprobe. Ohne sie waere die Zusicherung oben auch dann gruen, wenn die
-  // Zeile einfach immer stuende, und dann waere sie wertlos.
-  await bootAgent(page, [
-    PLAN_MIT_LUECKE,
-    // Eine lange Kette von Werkzeugrunden haelt den Lauf offen, waehrend
-    // gemessen wird.
-    ...Array.from({ length: 12 }, () => ({
-      text: 'weiter',
-      toolCalls: [{ name: 'file_list', args: { path: '.' } }],
-    })),
-  ])
+  // The counter check. Without it the assertion above would also pass if the
+  // line simply always stood there, and then it would be worth nothing.
+  //
+  // The run is held open inside a tool call that does not answer until this
+  // spec lets it go. A chain of twelve identical tool rounds stood here
+  // before, and it did not hold anything: the loop guard halts three
+  // identical rounds in a row, so the run was over about 200 ms after the
+  // band appeared, and on a loaded machine the check came after that.
+  await bootAgent(
+    page,
+    [
+      PLAN_MIT_LUECKE,
+      { text: 'weiter', toolCalls: [{ name: 'file_list', args: { path: '.' } }] },
+      { text: 'Fertig, alles erledigt.' },
+    ],
+    true,
+  )
 
   const box = page.locator('textarea').first()
   await box.click()
   await box.type('lauf lange')
   await page.keyboard.press('Enter')
 
-  const band = page.getByTestId('plan-header')
+  const band = page.getByTestId('plan-pinned')
   await expect(band).toBeVisible({ timeout: 30_000 })
-  await expect(page.getByTestId('plan-run-stopped')).toHaveCount(0)
+
+  // The tool call has reached the bridge and is waiting: from here the run
+  // cannot end until the release below.
+  await expect
+    .poll(() => page.evaluate(() => {
+      const calls = (window as unknown as { __E2E_TOOL_CALLS__?: Array<{ cmd: string }> }).__E2E_TOOL_CALLS__ ?? []
+      return calls.some((c) => c.cmd === 'fs_list')
+    }), { timeout: 30_000 })
+    .toBe(true)
+
+  const gestoppt = page.getByTestId('plan-run-stopped')
+  await expect(gestoppt).toHaveCount(0)
+
+  // And the same run, let go, ends with the plan open and says so. That is
+  // what proves the zero above was measured on a run that was still going.
+  await page.evaluate(() => (window as unknown as { __E2E_RELEASE_TOOLS__: () => void }).__E2E_RELEASE_TOOLS__())
+  await expect(gestoppt).toBeVisible({ timeout: 60_000 })
 })

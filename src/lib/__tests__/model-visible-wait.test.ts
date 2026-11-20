@@ -1,8 +1,8 @@
 /**
  * A finished download is not a finished install.
  *
- * Voxyl AI, Discord #general 2026-08-13 17:00 UTC with a screenshot, confirmed
- * five minutes later by Aldrich Ironhart: on Extend Video and Animate Image the
+ * A user AI, Discord #general 2026-08-13 17:00 UTC with a screenshot, confirmed
+ * five minutes later by a user: on Extend Video and Animate Image the
  * Download and install button runs to the end and then sits on "Refreshing the
  * model list…" for good. Both have ComfyUI.
  *
@@ -111,8 +111,16 @@ describe('the install path uses it, and says something honest when it runs out',
     // bundle that their own gate rejects. 9.2 GB later the card was still
     // there, and pressing the button again did the same thing. Measured on the
     // box 2026-08-15.
-    expect(src).toMatch(/bundleForVideoIntent\(getVideoBundles\(\), useCreateStore\.getState\(\)\.intent\(\)\)/)
+    // GH #209: the pick moved into lib/starter-bundle.ts, because the setup
+    // card needs the same bundle to see whether it is already on disk.
+    const starterSrc = readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), '../starter-bundle.ts'),
+      'utf8',
+    )
+    expect(src).toMatch(/starterBundleFor\(kind, useCreateStore\.getState\(\)\.intent\(\)\)/)
+    expect(starterSrc).toMatch(/if \(kind === 'video'\) return bundleForVideoIntent\(getVideoBundles\(\), intent\)/)
     expect(src).not.toMatch(/kind === 'video' \? getVideoBundles\(\)/)
+    expect(starterSrc).not.toMatch(/kind === 'video' \? getVideoBundles\(\)/)
   })
 
   it('only the folders THIS engine enumerates are checked', () => {
@@ -163,7 +171,7 @@ describe('the install path uses it, and says something honest when it runs out',
     // their own copy and they drifted. 3.0.0 took the last step: the loaders
     // are COMFY_MODEL_FOLDERS in comfyui.ts, the same table the catalog's
     // download folders are checked against, so a folder cannot be written into
-    // and then not read back (.__nothing_, 2026-09-02).
+    // and then not read back (2026-09-02).
     const reader = discoverSrc.slice(
       discoverSrc.indexOf('export async function readComfyModelNames'),
       discoverSrc.indexOf('/** The folders this ComfyUI really enumerates'),

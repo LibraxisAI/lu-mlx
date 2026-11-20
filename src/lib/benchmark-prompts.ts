@@ -1,7 +1,7 @@
 /**
  * Standardized benchmark prompts for local model testing.
  *
- * A benchmark that only times tokens hides the difference that matters. David
+ * A benchmark that only times tokens hides the difference that matters. The owner
  * ran a 9B DeepSeek-V4-Flash-Distill against a 9B Qwen3.5, same quant, same
  * settings: 44 vs 41 tok/s, so a speed-only board would call it a tie. The real
  * gap was economy and correctness. Over eight tasks the distill spent 5480

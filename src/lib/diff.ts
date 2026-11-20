@@ -43,8 +43,8 @@ export function computeUnifiedDiff(
   newText: string,
   context = 3,
 ): string {
-  const a = oldText === '' ? [] : oldText.split('\n')
-  const b = newText === '' ? [] : newText.split('\n')
+  const a = toLines(oldText)
+  const b = toLines(newText)
   const ops = diffLines(a, b)
   if (ops.every((o) => o.kind === 'equal')) {
     return ''
@@ -143,6 +143,23 @@ export function computeUnifiedDiff(
     out.push(...hunkLines)
   }
   return out.join('\n')
+}
+
+/**
+ * A file's lines. The newline that ends the last line does not open another
+ * one: "a\nb\n" is two lines, not three. Split plainly, every new file showed
+ * an empty added line at the end and counted it (+4 for three lines).
+ */
+function toLines(text: string): string[] {
+  if (text === '') return []
+  const lines = text.split('\n')
+  if (lines[lines.length - 1] === '') lines.pop()
+  return lines
+}
+
+/** A path as people read it: "./src/a.ts" is "src/a.ts". */
+export function displayPath(path: string): string {
+  return path.replace(/^(?:\.\/)+/, '')
 }
 
 export function parseUnifiedDiff(diff: string): ParsedDiff {

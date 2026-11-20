@@ -1,5 +1,5 @@
 /**
- * R5-30, Entscheid David vom 12.09.2026: der Desktop bekommt den Altpfad fuer
+ * R5-30, Entscheid vom 12.09.2026: der Desktop bekommt den Altpfad fuer
  * alte Cloud-Erinnerungen, den bis dahin nur das Web hatte.
  *
  * Geprueft wird der Draht, nicht der Quelltext: welche Adresse wirklich

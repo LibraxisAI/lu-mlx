@@ -3,11 +3,11 @@
  * ihren Inhalt verleugnet.
  *
  * D-S32 — die Reglerzeile ueber dem Prompt.
- *   ZURUECKGEDREHT am 05.09.2026 auf Davids Ansage am Windows-Bau: „die
+ *   ZURUECKGEDREHT am 05.09.2026 auf Ansage des Inhabers am Windows-Bau: „die
  *   einstellungen ueber der promptbox sollen immer mittig ueber der promptbox
  *   zentriert stehen." Der Audit hatte die Zeile auf die linke Kante des
  *   Prompttextes gesetzt (`justify-start` plus 15px Polster), weil eine
- *   mittige Zeile ueber linksbuendigem Text als zweite Kante las. David sieht
+ *   mittige Zeile ueber linksbuendigem Text als zweite Kante las. Der Inhaber sieht
  *   es umgekehrt, und ihm gehoert die Entscheidung; dieser Test bewacht
  *   seither die Mitte statt der Kante.
  *   Gemessen vor der Rueckdrehung (1296x808, --ui-scale 1.15, gerenderte
@@ -57,9 +57,12 @@ describe('D-S32: die Reglerzeile steht mittig ueber der Promptbox', () => {
     const rezept = code.match(/const LANE_ROW = '([^']+)'/)
     expect(rezept, 'LANE_ROW fehlt in Composer.tsx').toBeTruthy()
     expect(rezept![1]).toContain('justify-center')
-    // Drei Verwendungen: `{LANE_ROW}` einmal und `cn(LANE_ROW, …)` zweimal.
+    // Sechs Verwendungen: `{LANE_ROW}` viermal (Audio, die Laengenzeile
+    // der Mac-Videobahn seit 09.10.2026, die Zeile von Talking Character
+    // auf dem Mac seit 3.0.8, der Hinweis von Motion Control mit eigenem
+    // Workflow seit 3.0.7) und `cn(LANE_ROW, …)` zweimal.
     const nutzungen = code.match(/LANE_ROW/g) ?? []
-    expect(nutzungen.length).toBe(4) // Definition + drei Zeilen
+    expect(nutzungen.length).toBe(7) // Definition + sechs Zeilen
   })
 
   it('die Zeile ist ein Geschwister des Promptpanels, teilt also dessen Mitte', () => {
@@ -67,9 +70,11 @@ describe('D-S32: die Reglerzeile steht mittig ueber der Promptbox', () => {
     // Promptpanel liegen in DERSELBEN Spalte (`mx-auto w-full max-w-[…]`),
     // sind damit gleich breit und haben dieselbe Mitte. Faende das hier nicht
     // mehr statt, waere die Zentrierung eine Zusage ohne Deckung.
+    // The Character tab uses this same column (David, 16.11.2026): there is
+    // one width, with no branch on `hub`.
     const spalte = code.match(/className="mx-auto w-full max-w-\[(\d+)px\] space-y-[\d.]+"/)
     expect(spalte, 'die gemeinsame Spalte von Reglerzeile und Promptpanel fehlt').toBeTruthy()
-    const panel = code.match(/className="rounded-\[var\(--radius-panel\)\][^"]*"/)
+    const panel = code.match(/["']rounded-\[var\(--radius-panel\)\][^"']*["']/)
     expect(panel, 'Promptpanel nicht gefunden').toBeTruthy()
     expect(panel![0]).toMatch(/\bborder\b/)
   })

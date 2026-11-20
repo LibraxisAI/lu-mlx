@@ -1,8 +1,8 @@
 /**
- * What Settings, AI Backends, Model Storage says about each of the three
+ * What Settings, AI Backends, Storage says about each of the three
  * places a local chat model can live.
  *
- * A14 (2.6.8), David: the panel held ONE field labelled "(auto-detect)" and a
+ * A14 (2.6.8), the owner: the panel held ONE field labelled "(auto-detect)" and a
  * paragraph that named LM Studio, Ollama and our own downloads in the same
  * breath. Nothing on screen said which of the three the folder you were about
  * to pick actually belonged to, and the honest answer is that it belongs to

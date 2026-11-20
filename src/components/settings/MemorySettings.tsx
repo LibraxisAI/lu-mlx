@@ -8,16 +8,19 @@ import { getProviderIdFromModel } from '../../api/providers/model-name'
 import type { ProviderId } from '../../api/providers/types'
 import { useChatStore, persistConversationMemoryScope } from '../../stores/chatStore'
 import { getModelMaxTokens } from '../../lib/context-compaction'
+import { LongTextField } from '../ui/LongTextField'
 // Eine Schreibweise fuer jedes Kontextfenster. Hier stand zweimal
 // `Math.round(ctx / 1024)}K`, eine eigene Rechnung: bei 32000 Token sagte
 // diese Zeile 31K und der Rest der Oberflaeche 31.3K.
 import { formatContextWindow } from '../../lib/formatters'
 import { GlowButton } from '../ui/GlowButton'
+import { saveOrShare } from '../../lib/save-or-share'
 import { HINWEIS_TEXT } from '../../lib/hinweis'
 import type { MemoryType, MemoryFile } from '../../types/agent-mode'
 import { useCloudAuthStore } from '../../stores/cloudAuthStore'
 import { synchronizeMemoryCollection, type MemorySyncResolution } from '../../lib/memory-sync'
 import { reviewPreviousMemories, finalizePreviousMemories, type LegacyMemoryReview } from '../../lib/memory-legacy'
+import { MemoryRowDelete, MemoryUndoBar, useMemoryUndo } from '../chat/MemoryDelete'
 
 // ── Subtle type indicator (internal, not user-facing) ─────────
 
@@ -38,7 +41,7 @@ const TYPE_DOT_COLORS: Record<MemoryType, string> = {
  * dem er wirklich landet.
  *
  * Die ersten beiden Saetze sind wortgleich mit
- * `apps/web/components/settings/MemorySettings.tsx`. Der dritte ist der Fall,
+ * the web app. Der dritte ist der Fall,
  * den es im Web nicht gibt: ein Server auf der eigenen Maschine schickt keine
  * Rechnung, und eine zu behaupten waere derselbe Fehler in die andere
  * Richtung.
@@ -79,7 +82,7 @@ function MemorySettingsPanel() {
   }, [])
   const [syncMessage, setSyncMessage] = useState('')
   /**
-   * Der Altpfad (R5-30, Entscheid David vom 12.09.2026). `legacyReview` ist
+   * Der Altpfad (R5-30, Entscheid vom 12.09.2026). `legacyReview` ist
    * der angesehene Befund, `confirmLegacyRemoval` das Haekchen darunter. Der
    * Befund lebt nur hier im Fenster: eine alte Kopie, die wir speichern, waere
    * wieder eine zweite Ablage.
@@ -94,9 +97,11 @@ function MemorySettingsPanel() {
   const conversation = useChatStore(s => s.conversations.find(c => c.id === s.activeConversationId))
   const [savedProject, setSavedProject] = useState<string | null>(null)
   const [projectSaveError, setProjectSaveError] = useState(false)
-  const { entries, removeMemory, updateMemory, clearAll, settings, updateMemorySettings, exportAsMarkdown, importFromMarkdown, exportAsJSON, importFromJSON } = useMemoryStore()
+  const { entries, updateMemory, settings, updateMemorySettings, exportAsMarkdown, importFromMarkdown, exportAsJSON, importFromJSON } = useMemoryStore()
   const [search, setSearch] = useState('')
   const [confirmClear, setConfirmClear] = useState(false)
+  // A27: every delete here can be undone too, same bar as the Memory panel.
+  const { removal, failed: undoFailed, remove, undo, dismiss } = useMemoryUndo()
   const [addingNew, setAddingNew] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   // Only the ASYNC half of the budget line is state; "no model selected" is a
@@ -112,7 +117,7 @@ function MemorySettingsPanel() {
   // Feature FF: reveal outdated (stale/superseded) entries, read-only.
   const [showOutdated, setShowOutdated] = useState(false)
   const [reembedState, setReembedState] = useState<'idle' | 'running' | 'done'>('idle')
-  // Import feedback (konata-session 2026-06-07): report how many memories were
+  // Import feedback (a user-session 2026-06-07): report how many memories were
   // imported — or why none were. The import used to fail silently.
   const [importMsg, setImportMsg] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -220,32 +225,21 @@ function MemorySettingsPanel() {
 
   // ── Handlers ────────────────────────────────────────────────
 
-  const handleExportMd = () => {
-    const md = exportAsMarkdown()
-    const blob = new Blob([md], { type: 'text/markdown' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'memory.md'
-    a.click()
-    URL.revokeObjectURL(url)
+  // Desktop and browser: a download, as before. Phone: the share sheet
+  // (lib/save-or-share.ts). A failure is shown where import messages are.
+  const exportMemory = async (filename: string, mime: string, text: string) => {
+    const outcome = await saveOrShare({ filename, mime, text }, { via: 'anchor' })
+    if (outcome.status === 'error') setImportMsg(`Export failed. ${outcome.error}`)
   }
 
-  const handleExportJSON = () => {
-    const json = exportAsJSON()
-    const blob = new Blob([json], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'memory.json'
-    a.click()
-    URL.revokeObjectURL(url)
-  }
+  const handleExportMd = () => { void exportMemory('memory.md', 'text/markdown', exportAsMarkdown()) }
+
+  const handleExportJSON = () => { void exportMemory('memory.json', 'application/json', exportAsJSON()) }
 
   // One Import button for BOTH .md and .json. The old UI wired the single
   // button only to the markdown picker, so the JSON path (jsonInputRef /
   // handleImportJSON) was unreachable — a user who imported a .json export saw
-  // nothing happen (konata-session 2026-06-07). Route by extension, fall back
+  // nothing happen (a user-session 2026-06-07). Route by extension, fall back
   // to sniffing the content, and always report the result.
   const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -291,7 +285,7 @@ function MemorySettingsPanel() {
       setTimeout(() => setConfirmClear(false), 3000)
       return
     }
-    clearAll()
+    remove(entries.map(e => e.id))
     setConfirmClear(false)
   }
 
@@ -421,7 +415,7 @@ function MemorySettingsPanel() {
         </div>
       )}
 
-      {/* Manual memory limit — override the context-derived count (David
+      {/* Manual memory limit — override the context-derived count (the owner
           2026-06-07: "memory limit selber setzen, nicht 32k = 15 memories").
           Blank = auto (tier-based).
 
@@ -563,12 +557,14 @@ function MemorySettingsPanel() {
             className="w-full px-2 py-1 rounded bg-white/5 border border-white/10 text-[0.65rem] text-gray-300 placeholder-gray-600 focus:outline-none focus:border-white/20"
             autoFocus
           />
-          <textarea
+          <LongTextField
             value={newContent}
-            onChange={(e) => { setNewContent(e.target.value); if (addError) setAddError(null) }}
+            onChange={(v) => { setNewContent(v); if (addError) setAddError(null) }}
+            storageKey="memory-content"
+            label="Memory details"
             placeholder="Details… (required)"
             rows={2}
-            className="w-full px-2 py-1 rounded bg-white/5 border border-white/10 text-[0.65rem] text-gray-300 placeholder-gray-600 focus:outline-none resize-none"
+            className="block w-full px-2 py-1 rounded bg-white/5 border border-white/10 text-[0.65rem] text-gray-300 placeholder-gray-600 focus:outline-none"
           />
           {addError && (
             <p className="text-[0.55rem] text-red-400 px-0.5">{addError}</p>
@@ -620,11 +616,13 @@ function MemorySettingsPanel() {
                   maxLength={60}
                   className="w-full px-2 py-0.5 rounded bg-white/5 border border-white/10 text-[0.65rem] text-gray-300 focus:outline-none"
                 />
-                <textarea
+                <LongTextField
                   value={editContent}
-                  onChange={(e) => setEditContent(e.target.value)}
+                  onChange={setEditContent}
+                  storageKey="memory-content"
+                  label="Memory details"
                   rows={2}
-                  className="w-full px-2 py-0.5 rounded bg-white/5 border border-white/10 text-[0.65rem] text-gray-300 focus:outline-none resize-none"
+                  className="block w-full px-2 py-0.5 rounded bg-white/5 border border-white/10 text-[0.65rem] text-gray-300 focus:outline-none"
                 />
                 <div className="flex gap-1.5">
                   <label className="text-xs">Project ID
@@ -666,7 +664,9 @@ function MemorySettingsPanel() {
                   Sensitive: exclude from AI requests
                 </label>
               </div>
-              <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+              {/* Always visible (A27): behind `group-hover` they never showed
+                  where WebKitGTK reports no hover (MemoryDelete.tsx). */}
+              <div className="flex items-center gap-0.5 shrink-0">
                 {/* Outdated entries are read-only — no edit affordance. */}
                 {!stale && (
                   <button
@@ -677,18 +677,14 @@ function MemorySettingsPanel() {
                     <Pencil size={10} />
                   </button>
                 )}
-                <button
-                  onClick={() => removeMemory(entry.id)}
-                  className="p-0.5 rounded hover:bg-red-500/20 text-gray-600 hover:text-red-400"
-                  aria-label="Delete entry"
-                >
-                  <Trash2 size={10} />
-                </button>
+                <MemoryRowDelete title={entry.title} onDelete={() => remove([entry.id])} />
               </div>
             </div>
           )
         })}
       </div>
+
+      <MemoryUndoBar removal={removal} failed={undoFailed} onUndo={undo} onDismiss={dismiss} />
 
       {/* Re-embed all — backfills missing memory embeddings (Feature FF) */}
       {entries.length > 0 && (
@@ -718,7 +714,7 @@ function MemorySettingsPanel() {
           onClick={handleClear}
           className="text-[0.6rem] flex items-center justify-center gap-1 px-2.5"
         >
-          <Trash2 size={10} /> {confirmClear ? 'Sure?' : 'Clear'}
+          <Trash2 size={10} /> {confirmClear ? 'Sure?' : 'Delete all'}
         </GlowButton>
         <input ref={fileInputRef} type="file" accept=".md,.txt,.json" onChange={handleImport} className="hidden" />
       </div>

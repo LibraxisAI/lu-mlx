@@ -66,7 +66,7 @@ describe('chatStore — conversation CRUD', () => {
     expect(useChatStore.getState().activeConversationId).toBeNull()
   })
 
-  it('stops the Remote session when the dispatched chat is deleted (David 2026-06-15)', () => {
+  it('stops the Remote session when the dispatched chat is deleted (2026-06-15)', () => {
     const undispatch = vi.fn()
     const id = useChatStore.getState().createConversation('gemma4', '', 'remote')
     // Simulate this chat being the live dispatched Remote session.
@@ -106,7 +106,7 @@ describe('chatStore — conversation CRUD', () => {
     // keine Anforderung, und liess die Stelle geprueft aussehen, waehrend jede
     // Code-Sitzung gleich hiess.
     //
-    // David hat am 02.09.2026 das Gegenteil bestellt. Die ausfuehrliche
+    // Der Inhaber hat am 02.09.2026 das Gegenteil bestellt. Die ausfuehrliche
     // Begruendung und die Gegenproben stehen in
     // stores/__tests__/code-sessions-heissen-verschieden.test.ts.
     const codex = useChatStore.getState().createConversation('gemma4', '', 'codex')

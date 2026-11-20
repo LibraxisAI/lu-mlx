@@ -140,7 +140,7 @@ On each pass:
 
 1. Scan the tree. Separate a definite local-environment leak from a judgment call.
 2. **Change** only unambiguous leaks: this machine's home paths and private usernames. Replacements are `/Users/tester/...` and `/workspace/...`. No other placeholder style.
-3. **Leave** fictional fixtures (`/Users/dave`, `/home/builder`), upstream changelog paths, git authors, remotes, bundle IDs, and the signing identity. A word that is also an English word (`ops`) is not a machine name.
+3. **Leave** fictional fixtures (`/Users/example`, `/home/builder`), upstream changelog paths, git authors, remotes, bundle IDs, and the signing identity. A word that is also an English word (`ops`) is not a machine name.
 4. **Review** anything that would change a symbol, test contract, URL, or runtime identifier. Write those to `~/.local/state/vetcoders/naming/need-decisions.md`. If it is not in that file, it is not a recorded decision.
 5. Do not rewrite git history to finish a scrub.
 

@@ -9,7 +9,7 @@
  *      rejects a `tools` payload (cloud 405, ollama "does not support tools")
  *   2. the server's own answer — LU Cloud `/models` returns `supports_tools`.
  *      Since 2026-07-29 that is true for the whole catalogue: the proxy serves
- *      the models DeepInfra refuses a `tools` payload for (Hermes 3, Euryale,
+ *      the models the upstream refuses a `tools` payload for (Hermes 3, Euryale,
  *      MythoMax, Llama 4 Maverick) through a prompt translation instead, so
  *      they run Agent and Code like anything else.
  *   3. the family-name heuristic in model-compatibility

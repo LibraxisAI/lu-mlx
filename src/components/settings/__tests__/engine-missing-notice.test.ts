@@ -91,7 +91,9 @@ describe('the LU Engine missing notice in Settings, AI Backends, Providers', () 
     await open()
     const notice = screen.getByTestId('engine-missing-notice')
     expect(notice.textContent).toContain('LU Engine is missing from your providers')
-    expect(notice.textContent).toContain('We are fixing the cause in the next update')
+    // 3.0.4 Gegenprobe 02.10.: the line promised a fix "in the next update"
+    // since 21.09. and no update carried it. It promises nothing now.
+    expect(notice.textContent).not.toMatch(/next update/i)
     // Opus review, Blocker 2: the notice must never claim local chat is
     // broken, since a working local backend can be sitting right there in
     // the slot Jan occupies here.

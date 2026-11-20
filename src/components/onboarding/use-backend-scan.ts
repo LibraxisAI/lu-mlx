@@ -81,7 +81,7 @@ export function useBackendScan(): BackendScan {
   // UI labelling differs.
   const [lmstudioOfflineDetected, setLmstudioOfflineDetected] = useState(false)
   // Soft-detect: GGUFs in ~/.lmstudio/models/ even when we can't locate
-  // lms.exe. Set when techx69-style users have LM Studio installed
+  // lms.exe. Set when a user-style users have LM Studio installed
   // system-wide (C:\Program Files\LM Studio) and the Rust path scan misses
   // it, but the canonical models dir is populated anyway. We surface a
   // "Start LM Studio server" CTA either way — the model count gives a
@@ -112,7 +112,7 @@ export function useBackendScan(): BackendScan {
       // ~/.lmstudio/models/ for GGUF files. We treat that as a strong
       // soft-detect signal: if the user has models in the canonical dir,
       // they obviously *have* LM Studio, regardless of whether our path
-      // scan turned up lms.exe (techx69's system-wide install reproed this).
+      // scan turned up lms.exe (a user's system-wide install reproed this).
       try {
         const status = await backendCall<LmStudioServerStatus>('lmstudio_server_status')
         const offline = status?.lms_present && !status?.running

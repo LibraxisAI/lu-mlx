@@ -87,8 +87,10 @@ describe('system prompt', () => {
     for (const file of ['hooks/useChat.ts', 'hooks/useAgentChat.ts']) {
       expect(read(file)).not.toMatch(/personaEnabled === true \? conv\.systemPrompt : ''/)
       // R5-1: der Aufruf traegt jetzt den globalen Schalter als zweites
-      // Argument, wie im Web. Die Klammer bleibt deshalb offen.
-      expect(read(file)).toContain('buildChatSystemPrompt(conv, settings.personasEnabled !== false)')
+      // Argument, wie im Web.
+      // GH #170: the chat's persona comes through withChatPersona, the same
+      // resolution the Plugins menu shows.
+      expect(read(file)).toContain('buildChatSystemPrompt(withChatPersona(conv, personas, activePersonaId), settings.personasEnabled !== false)')
     }
   })
 
@@ -121,7 +123,7 @@ describe('system prompt', () => {
 })
 
 /**
- * Die Reichweitenzeile (HOUSE_SCOPE, Davids Auftrag vom 11.09.2026).
+ * Die Reichweitenzeile (HOUSE_SCOPE, Auftrag vom 11.09.2026).
  *
  * Gemessen wird der Text, der am Ende im Nachrichtenarray steht, nicht die
  * Konstante: jede Oberflaeche setzt ihn anders zusammen, und genau dabei ist
@@ -179,7 +181,7 @@ describe('die Reichweitenzeile haengt an jeder Oberflaeche mit einem Menschen da
     }
   })
 
-  // Entscheid David 12.09.2026: der Vergleich schickt gar keine Person mehr,
+  // Entscheid vom 12.09.2026: der Vergleich schickt gar keine Person mehr,
   // nur den Grundtext. Der Fall "mit Person" steht hier weiter, weil der Chat
   // ihn hat; fuer den Vergleich zaehlt die erste Zeile.
   it('Grundtext ohne Person, und mit Person traegt die Person die Rolle', () => {

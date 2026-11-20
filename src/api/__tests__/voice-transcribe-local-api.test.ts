@@ -1,5 +1,5 @@
 /**
- * GitHub #115 (graysoncooper), browser voice recording always failed.
+ * GitHub #115, browser voice recording always failed.
  *
  * Two halves:
  *  1. The /local-api security middleware enforced application/json on EVERY

@@ -17,7 +17,7 @@
  * print the same name twice.
  *
  * It used to be a chip of its own in the composer row, printing the model name
- * under a small label. David on 2026-09-02: "mach das woanders hin, versteckter
+ * under a small label. The owner on 2026-09-02: "mach das woanders hin, versteckter
  * bitte, muss nicht so sein". So the row carries no extra text any more. The
  * information rides on the picker itself instead: a 4 px dot on its corner,
  * and the full sentence in the picker's tooltip. Nothing is lost, it is just quiet until asked.

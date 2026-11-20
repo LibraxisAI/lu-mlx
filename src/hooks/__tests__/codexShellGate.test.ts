@@ -46,12 +46,12 @@ describe('codexShellGate (H2)', () => {
   })
 
   // History: the 2.5.7 review hard-wired providerId === 'lu-cloud' into the
-  // gate, so the confirm toggle silently did nothing on a cloud model (David
+  // gate, so the confirm toggle silently did nothing on a cloud model (the owner
   // 2026-07-24, "auto approve bei cloud modellen setting nicht funktional").
   // 2.5.9 made it a visible setting that still defaulted ON, and G15a
   // (2026-08-07) carried the same default to the Agent surface.
   //
-  // David 2026-08-22 replaces that decision: bypass means bypass, on a cloud
+  // 2026-08-22 replaces that decision: bypass means bypass, on a cloud
   // model too, and the customer who picks it makes the call. The cloud arm is
   // an opt-in now and ships OFF. These lock both halves.
   describe('codexConfirmEnabled (cloud arm, opt-in since 2026-08-22)', () => {

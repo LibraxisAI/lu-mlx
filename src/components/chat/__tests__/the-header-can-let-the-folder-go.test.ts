@@ -50,7 +50,7 @@ const { useChatStore } = await import('../../../stores/chatStore')
 const { useUIStore } = await import('../../../stores/uiStore')
 const { DEFAULT_SETTINGS } = await import('../../../lib/constants')
 
-const WINDOWS_PATH = 'C:\\Users\\dielitakira\\Documents\\huge-tree'
+const WINDOWS_PATH = 'C:\\Users\\alice\\Documents\\huge-tree'
 
 // The git probe on mount resolves after the first paint, so every render is
 // awaited: without it React logs an act() warning for a state update this file
@@ -109,12 +109,12 @@ describe('the header shows the folder, so it also gives it back', () => {
   it('and names the workspace that really wins, not a sandbox it will never use', async () => {
     // review S4, the header half.
     useSettingsStore.setState({
-      settings: { ...DEFAULT_SETTINGS, defaultWorkspace: { kind: 'folder', path: '/home/dave/default' } },
+      settings: { ...DEFAULT_SETTINGS, defaultWorkspace: { kind: 'folder', path: '/home/alex/default' } },
     })
     act(() => useCodexStore.getState().setWorkingDirectory(WINDOWS_PATH))
     const { container } = await show()
     fireEvent.click(removeButton()!)
-    expect(container.textContent).toContain('/home/dave/default')
+    expect(container.textContent).toContain('/home/alex/default')
     expect(container.textContent).not.toContain('~/agent-workspace')
   })
 
@@ -150,10 +150,22 @@ describe('the header shows the folder, so it also gives it back', () => {
     act(() => {
       useCodexStore.getState().setWorkingDirectory(WINDOWS_PATH)
       useCodexStore.getState().beginSend()
+      useUIStore.getState().setExplorerCollapsed(true)
     })
     await show()
     const lock = screen.getByTestId('codex-workdir-lock')
     expect(lock.textContent).toContain('Wait for it to finish or press Stop')
+  })
+
+  it('says it once: with the explorer open, only the explorer does', async () => {
+    // Both lines stood next to each other in the UX pass 30.09.2026. The
+    // explorer's own line is covered by its tests (explorer-workdir-lock).
+    act(() => {
+      useCodexStore.getState().setWorkingDirectory(WINDOWS_PATH)
+      useCodexStore.getState().beginSend()
+    })
+    await show()
+    expect(screen.queryByTestId('codex-workdir-lock')).toBeNull()
   })
 
   it('and shows no lock line while nothing holds the folder (negative control)', async () => {

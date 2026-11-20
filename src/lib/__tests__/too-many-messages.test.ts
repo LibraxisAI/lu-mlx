@@ -1,5 +1,5 @@
 /**
- * Feedback 2026-08-21 (yaserrieh@gmail.com, hosted-pro, route /): "Error:
+ * Feedback 2026-08-21 (a user, hosted-pro, route /): "Error:
  * [network] HTTP 400 too many messages". Plain chat sends the whole
  * conversation every turn, so past the server's message-count limit the
  * chat is stuck forever. The recovery halves the sent history and retries,

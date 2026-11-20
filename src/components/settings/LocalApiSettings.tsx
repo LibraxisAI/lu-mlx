@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
-import { Copy, Check, KeyRound, Eye, EyeOff, Globe } from 'lucide-react'
+import { Copy, Check, KeyRound, Eye, EyeOff, Globe, ChevronDown, ChevronRight } from 'lucide-react'
 import { useLocalApiStore } from '../../stores/localApiStore'
 import {
   localApiBaseUrl, curlBeispiel, clientFelder, reichweiteText, kannStarten, pruefePort,
-  corsText,
+  corsText, nutzungZeilen, ohneZahlenText, clientAnleitung, type LocalApiNutzung,
 } from '../../lib/local-api'
+import { backendCall } from '../../api/backend'
 import { InlineToggle } from './InlineToggle'
 import { HINWEIS_TEXT } from '../../lib/hinweis'
 
@@ -24,14 +25,35 @@ import { HINWEIS_TEXT } from '../../lib/hinweis'
  * qualifizierter Name: wer ihn kopiert, lernt die Namensform gleich mit.
  */
 export function LocalApiSettings() {
-  const { port, lan, token, corsOrigins, laeuft, fehler, setPort, setLan, setCors, neuesToken, starten, stoppen, auffrischen } = useLocalApiStore()
+  const { port, lan, token, corsOrigins, mitLuStarten, laeuft, fehler, setPort, setLan, setCors, setMitLuStarten, neuesToken, starten, stoppen, auffrischen } = useLocalApiStore()
   const [zeigeToken, setZeigeToken] = useState(false)
   const [kopiert, setKopiert] = useState<string | null>(null)
+  const [anleitungOffen, setAnleitungOffen] = useState(false)
   // Der Rohtext bleibt lokal: gespeichert wird nur, was die Pruefung
   // uebersteht. Sonst stuende in der Datei eine Freigabe, die nie greift.
   const [corsRoh, setCorsRoh] = useState(corsOrigins.join(', '))
 
   useEffect(() => { auffrischen() }, [auffrischen])
+
+  // GH Discussion #4: what went through the API since it started.
+  // Asked every three seconds while it runs and the panel is open.
+  // Mit dem Zeitpunkt des Abrufs, damit "vor wie langem" nicht im Rendern rechnet.
+  const [nutzung, setNutzung] = useState<{ u: LocalApiNutzung; jetzt: number } | null>(null)
+  useEffect(() => {
+    // Gestoppt: nichts fragen. Das Feld blendet sich ueber `laeuft` aus, und
+    // ein Neustart holt sofort frische Zahlen.
+    if (!laeuft) return
+    let aus = false
+    const holen = async () => {
+      try {
+        const u = await backendCall<LocalApiNutzung & { running?: boolean }>('local_api_usage')
+        if (!aus) setNutzung(u.running === false ? null : { u, jetzt: Date.now() })
+      } catch { /* die Zahlen sind Beiwerk, die API laeuft auch ohne */ }
+    }
+    void holen()
+    const t = setInterval(holen, 3000)
+    return () => { aus = true; clearInterval(t) }
+  }, [laeuft])
 
   const base = localApiBaseUrl(port, lan)
   const startbar = kannStarten(token, port)
@@ -50,7 +72,8 @@ export function LocalApiSettings() {
       <p className="t-micro text-gray-600">
         One OpenAI-compatible address for every model on this machine: LU Engine, Ollama
         and LM Studio under a single URL. Anything that can talk to OpenAI can talk to your
-        local models through it.
+        local models through it. It always needs the API key LU generates below, also on
+        this machine.
       </p>
 
       <div className="flex items-center justify-between">
@@ -82,6 +105,21 @@ export function LocalApiSettings() {
       )}
       {fehler && <div className={`t-micro ${HINWEIS_TEXT.fehler}`}>{fehler}</div>}
 
+      {laeuft && nutzung && (
+        <div className="space-y-1" data-testid="local-api-usage">
+          <div className="t-micro text-gray-500">Since the API started</div>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-0.5">
+            {nutzungZeilen(nutzung.u, nutzung.jetzt).map(({ feld, wert }) => (
+              <div key={feld} className={`flex items-center justify-between gap-2 ${feld === 'Last model' ? 'col-span-2' : ''}`}>
+                <span className="t-micro text-gray-500">{feld}</span>
+                <span className="t-mono text-gray-300 truncate" title={wert}>{wert}</span>
+              </div>
+            ))}
+          </div>
+          {ohneZahlenText(nutzung.u) && <div className="t-micro text-gray-600">{ohneZahlenText(nutzung.u)}</div>}
+        </div>
+      )}
+
       <div className="grid grid-cols-2 gap-3">
         <label className="t-micro text-gray-500">
           Port
@@ -106,6 +144,18 @@ export function LocalApiSettings() {
         </div>
       </div>
 
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="t-micro text-gray-500">Start with LU</div>
+          <div className="t-micro text-gray-600">Starts the API every time LU opens, with the settings above. Useful when LU runs on a server.</div>
+        </div>
+        <InlineToggle
+          enabled={mitLuStarten}
+          onChange={() => setMitLuStarten(!mitLuStarten)}
+          label={mitLuStarten ? 'on' : 'off'}
+        />
+      </div>
+
       <div className="space-y-1">
         <div className="flex items-center gap-2">
           <Globe className="w-3 h-3 text-gray-500" />
@@ -127,7 +177,7 @@ export function LocalApiSettings() {
       <div className="space-y-1">
         <div className="flex items-center gap-2">
           <KeyRound className="w-3 h-3 text-gray-500" />
-          <span className="t-micro text-gray-500">Token. Every request needs it, including from this machine.</span>
+          <span className="t-micro text-gray-500">API key. LU makes it, you do not choose one. Every request needs it, also from this machine: paste it into your app's API key field.</span>
         </div>
         <div className="flex items-center gap-2">
           <input
@@ -170,6 +220,34 @@ export function LocalApiSettings() {
           </button>
         </div>
       )}
+
+      {/* GH Discussion #14 und C57: wer SillyTavern oder eine andere App
+          anschliesst, soll hier lesen koennen, welches Feld welches ist. */}
+      <div className="pt-1">
+        <button
+          onClick={() => setAnleitungOffen((v) => !v)}
+          aria-expanded={anleitungOffen}
+          data-testid="local-api-howto"
+          className="flex items-center gap-1 t-micro text-gray-400 hover:text-gray-200"
+        >
+          {anleitungOffen ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+          Use with SillyTavern / other apps
+        </button>
+        {anleitungOffen && (
+          <div className="mt-2 space-y-2">
+            {clientAnleitung(base).map((a) => (
+              <div key={a.titel}>
+                <div className="t-micro text-gray-400">{a.titel}</div>
+                <ol className="list-decimal pl-4 space-y-0.5">
+                  {a.schritte.map((s) => (
+                    <li key={s} className="t-micro text-gray-500 break-words">{s}</li>
+                  ))}
+                </ol>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   )
 }

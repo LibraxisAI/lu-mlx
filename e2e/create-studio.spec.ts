@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test'
 import { tauriMockInit, DEFAULT_ASSISTANT_REPLY, DEFAULT_MODEL_NAME, type TauriMockOptions } from './support/tauri-mock'
 import { routeCloud, seedOnboardingDone, signInViaGate, cloudSwitch, type CloudScenario } from './support/cloud-mock'
+import { openCharacterAction } from './support/character-hub'
 
 /**
  * P9 Integration: das Studio auf der Wolken-Spur, und sein Fehlen ueberall
@@ -178,18 +179,47 @@ test('an older server (no quote_required): Extend and Motion behave exactly as b
   // The classic twin from the mocked catalog, not a Studio id: proves
   // resolveIntentPick fell back instead of picking a model this server
   // never announced.
-  await expect(page.getByRole('button', { name: /Wan 2\.2 Spicy Extend/ })).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByRole('button', { name: /Wan 2\.2 Uncensored Extend/ })).toBeVisible({ timeout: 15_000 })
   // The old, pre-Studio failure mode: no version-gap alert, because no
   // studio-quote call was ever made for a classic pick. (This app always
   // shows an unrelated "ComfyUI is not running" banner on the cloud track
   // with no local engine mocked, hence checking the TEXT, not alert count.)
   await expect(page.getByText('This feature needs a newer LU Cloud server')).toHaveCount(0)
 
-  await page.getByRole('radio', { name: 'Motion Control' }).click()
-  await expect(page.getByRole('button', { name: /Wan 2\.2 Animate/ })).toBeVisible({ timeout: 15_000 })
+  // Motion: the classic Wan 2.2 Animate left the pickers on 24.10.2026
+  // (lib/render/retired-models.ts); its successor is a Studio model, which
+  // an older server does not announce. So Motion offers no classic pick there
+  // any more, and it still makes no studio-quote call and raises no alert.
+  await openCharacterAction(page, 'Motion Control')
+  await expect(page.getByRole('radio', { name: 'Motion Control' })).toBeChecked({ timeout: 15_000 })
+  await expect(page.getByRole('button', { name: /^Wan 2\.2 Animate$/ })).toHaveCount(0)
   await expect(page.getByText('This feature needs a newer LU Cloud server')).toHaveCount(0)
 
   expect(studioQuoteCalls, studioQuoteCalls.join(', ')).toHaveLength(0)
+})
+
+// 08.10.2026: the cloud lists the open media models under its own neutral
+// word and sends the app's name next to it (`native_label`). The app shows
+// its own name; a server that sends no such field is shown as it comes.
+test('media names: the app shows the name the server sends for it, not the server\'s own', async ({ page }) => {
+  await bootIntoCloudCreate(page, { license: 'active', access: true, mediaLive: true })
+
+  await page.getByRole('radio', { name: 'Extend Video' }).click()
+  await expect(page.getByRole('button', { name: /Wan 2\.2 Uncensored Extend/ })).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByText(/Wan 2\.2 Unfiltered Extend/)).toHaveCount(0)
+  // The stored copy of the catalog carries the app's name too, so the next
+  // start without a network reads the same.
+  const stored = await page.evaluate(() => localStorage.getItem('lu-cloud-catalog') ?? '')
+  expect(stored).toContain('Wan 2.2 Uncensored Extend')
+  expect(stored).not.toContain('Unfiltered')
+  expect(stored).not.toContain('native_label')
+})
+
+test('media names: a server without the extra field is shown under the name it sends', async ({ page }) => {
+  await bootIntoCloudCreate(page, { license: 'active', access: true, mediaLive: true, catalogWithoutNativeLabel: true })
+
+  await page.getByRole('radio', { name: 'Extend Video' }).click()
+  await expect(page.getByRole('button', { name: /Wan 2\.2 Unfiltered Extend/ })).toBeVisible({ timeout: 15_000 })
 })
 
 // Review B2 (review-studio-B.md): the Preset window used to abandon its

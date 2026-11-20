@@ -17,7 +17,7 @@ import { openNewChat } from './support/ui'
  *
  * ── Warum diese Spec zwei Faelle fahren muss ──
  *
- * Davids aeltere Anweisung P4 lautete „Empfehlungen nur, wenn der User noch
+ * Die aeltere Anweisung P4 lautete „Empfehlungen nur, wenn der User noch
  * gar kein Modell installiert hat". Das ist kein Widerspruch zu diesem
  * Auftrag, sondern die Trennlinie: die EMPFEHLUNG (das Abzeichen
  * „Recommended") verschwindet fuer erfahrene Nutzer, die AUSWAHL nicht. Eine

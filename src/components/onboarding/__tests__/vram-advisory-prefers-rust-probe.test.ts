@@ -27,7 +27,10 @@ const src = readFileSync(resolve(here, '../ModelsStep.tsx'), 'utf8')
 
 describe('R2-51: ModelsStep prefers the Rust GPU probe over ComfyUI for the VRAM advisory', () => {
   it('imports getMaxVramGb from lib/hardware', () => {
-    expect(src).toContain("import { getMaxVramGb } from '../../lib/hardware'")
+    // `getSharedMemoryGb` rides along since the Mac reads its memory pool here
+    // (mac-empfehlung-folgt-dem-speicher.test.tsx); the probe this guard is
+    // about still comes from the same file.
+    expect(src).toMatch(/import \{ getMaxVramGb(?:, getSharedMemoryGb)? \} from '\.\.\/\.\.\/lib\/hardware'/)
   })
 
   it('calls getMaxVramGb before falling back to getSystemVRAM', () => {

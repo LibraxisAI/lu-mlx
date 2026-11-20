@@ -26,7 +26,7 @@ describe('toolFailureNote', () => {
   })
 
   it('schweigt bei einer Ablehnung — die hat schon ihren eigenen Satz', () => {
-    // 'User rejected this action. Try a different approach.' steht bereits in
+    // REJECTED_CALL_FOR_MODEL (lib/rejected-call.ts) steht bereits in
     // der Historie; ein zweiter Satz davor waere nur Laerm.
     expect(toolFailureNote('rejected')).toBe('')
   })

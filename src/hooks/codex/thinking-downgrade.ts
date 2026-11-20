@@ -1,5 +1,6 @@
 import { httpStatusOf } from '../../lib/http-status'
 import { errorText } from '../../types/json-guards'
+import { contextOverflowOf } from './context-overflow'
 
 /**
  * "Dieses Modell kann nicht denken" — die eine Frage, DREIMAL gestellt.
@@ -38,7 +39,7 @@ import { errorText } from '../../types/json-guards'
  * nur EINE Kopie trug. Wer nur zaehlt, ebnet sie ein und verliert sie still.
  * Nachgemessen ist sie kein Sonderfall von useChat.ts:
  *
- *  1. WOHER er kommt. 422 ist DeepInfras Status fuer einen schlechten
+ *  1. WOHER er kommt. 422 ist der Status des Upstreams fuer einen schlechten
  *     Parameter; der LU-Cloud-Proxy reicht 400 UND 422 absichtlich durch,
  *     damit der Abstieg drinnen ueberhaupt greifen kann. Genau so steht es an
  *     der Quelle: api/providers/openai-provider.ts, `sendChat` — dort
@@ -93,6 +94,10 @@ import { errorText } from '../../types/json-guards'
  * "muss der Denkmodus herabgestuft werden?" beantwortet wird.
  */
 export function isThinkingUnsupportedError(err: unknown): boolean {
+  // A context refusal is a 400 too, and dropping the thinking flag cannot
+  // shrink the request; the agent loops cut the history for it instead
+  // (GH #140, codex/context-overflow.ts).
+  if (contextOverflowOf(err)) return false
   const status = httpStatusOf(err)
   // 400 und 422 sind hier EINE Klasse — siehe den Modulkopf, Abschnitt
   // "DIE 422-FRAGE". Dieselbe Paarung steht an der Quelle des 422, in

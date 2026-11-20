@@ -1,7 +1,7 @@
 /**
  * The Think button has to reach the built-in engine.
  *
- * David, 2026-08-29: thinking was switched on, the model plainly did not
+ * 2026-08-29: thinking was switched on, the model plainly did not
  * think, and no thinking block ever appeared. The audit found nothing on the
  * wire that asks for it. `reasoning_effort` is an OpenAI-API concept; a server
  * that renders the MODEL'S OWN Jinja template has no reasoning mode of its
@@ -124,8 +124,15 @@ describe('the built-in engine is told to think', () => {
     expect(sent[0].body.chat_template_kwargs).toEqual({ enable_thinking: true })
   })
 
-  it('reasoning_effort still rides along, so a template-less local server keeps working', async () => {
+  it('E1 (b11960): beside the template switch the engine gets no top-level reasoning_effort, it would land in the template', async () => {
     const p = await makeProvider(BUILTIN)
+    await drain(p.chatStream('kw-both', [{ role: 'user', content: 'hi' }], { thinking: true }))
+    expect(sent[0].body.chat_template_kwargs).toEqual({ enable_thinking: true })
+    expect('reasoning_effort' in sent[0].body).toBe(false)
+  })
+
+  it('a self-hosted local server still gets reasoning_effort beside the switch', async () => {
+    const p = await makeProvider({ ...BUILTIN, managed: undefined, baseUrl: 'http://127.0.0.1:8080/v1' })
     await drain(p.chatStream('kw-both', [{ role: 'user', content: 'hi' }], { thinking: true }))
     expect(sent[0].body.reasoning_effort).toBe('high')
   })
@@ -176,7 +183,7 @@ describe('a local server that refuses the field is not mistaken for one that can
  * inside <think></think> tags" to the system prompt for every OpenAI-compatible
  * endpoint that declared nothing. On a LOCAL backend that now arrives on top of
  * a template that has already opened the thought. That is the same double instruction
- * that trapped David's cloud Qwen3.6 in a reasoning loop on 2026-07-12, one
+ * that trapped the owner's cloud Qwen3.6 in a reasoning loop on 2026-07-12, one
  * layer down. Cloud endpoints that declare nothing keep the injection: it is
  * still the only thing that can ask them.
  */

@@ -1,5 +1,5 @@
 /**
- * .__nothing_, Discord help-chat 2026-09-02 (Windows 11 25H2, RTX 5060, LU
+ * Discord help-chat 2026-09-02 (Windows 11 25H2, RTX 5060, LU
  * 2.6.7, ComfyUI backend): FramePack F1 and Wan 2.1 install through our own Get
  * button and never appear in the picker. Moving the files into a different
  * ComfyUI folder by hand fixed it.
@@ -47,10 +47,11 @@ vi.mock('../backend', async (importOriginal) => ({
 
 import {
   COMFY_MODEL_FOLDERS, getVideoModels, getImageModels, getAudioModels,
-  getLipsyncModels, getMotionModels, type ClassifiedModel,
+  getLipsyncModels, getMotionModels, getUpscaleModels, getDiffusionModels, type ClassifiedModel,
 } from '../comfyui'
+import { getThreeDBundles } from '../model-bundles'
 import {
-  getImageBundles, getVideoBundles, getAudioBundles, getLipsyncBundles, getMotionBundles,
+  getImageBundles, getVideoBundles, getAudioBundles, getLipsyncBundles, getMotionBundles, getUpscaleBundles,
   modelsNotVisibleInComfy, type ModelBundle, type DiscoverModel,
 } from '../discover'
 
@@ -72,7 +73,10 @@ const SCANS: Record<string, string[]> = {
   loras: ['models/loras'],
   controlnet: ['models/controlnet'],
   upscale_models: ['models/upscale_models'],
+  latent_upscale_models: ['models/latent_upscale_models'],
   style_models: ['models/style_models'],
+  // Local 3D (3.1.0): BiRefNet, read by LoadBackgroundRemovalModel.
+  background_removal: ['models/background_removal'],
 }
 
 function filesIn(root: string, rel: string): string[] {
@@ -117,8 +121,10 @@ function serve(root: string) {
     if (url.includes('AudioEncoderLoader')) return combo('AudioEncoderLoader', 'audio_encoder_name', listFor(root, 'audio_encoders', false))
     if (url.includes('LoraLoader')) return combo('LoraLoader', 'lora_name', listFor(root, 'loras', false))
     if (url.includes('ControlNetLoader')) return combo('ControlNetLoader', 'control_net_name', listFor(root, 'controlnet', false))
+    if (url.includes('LatentUpscaleModelLoader')) return combo('LatentUpscaleModelLoader', 'model_name', listFor(root, 'latent_upscale_models', false))
     if (url.includes('UpscaleModelLoader')) return combo('UpscaleModelLoader', 'model_name', listFor(root, 'upscale_models', false))
     if (url.includes('StyleModelLoader')) return combo('StyleModelLoader', 'style_model_name', listFor(root, 'style_models', false))
+    if (url.includes('LoadBackgroundRemovalModel')) return combo('LoadBackgroundRemovalModel', 'bg_removal_name', listFor(root, 'background_removal', false))
     if (url.includes('ADE_LoadAnimateDiffModel')) {
       return combo('ADE_LoadAnimateDiffModel', 'model_name', filesIn(root, 'custom_nodes/ComfyUI-AnimateDiff-Evolved/models'))
     }
@@ -181,6 +187,18 @@ const LANES: Array<{ lane: string; bundles: () => ModelBundle[]; picker: () => P
   { lane: 'audio', bundles: getAudioBundles, picker: getAudioModels },
   { lane: 'lipsync', bundles: getLipsyncBundles, picker: getLipsyncModels },
   { lane: 'motion', bundles: getMotionBundles, picker: getMotionModels },
+  // Enhance Image (3.0.7): the upscale model is the bundle's only file and
+  // lives in upscale_models, so it is checked as a support file below.
+  {
+    lane: 'upscale', bundles: getUpscaleBundles,
+    picker: async () => (await getUpscaleModels()).map((name) => ({ name }) as ClassifiedModel),
+  },
+  // Local 3D (3.1.0): TRELLIS.2 has no picker, the graph loads it by name
+  // from UNETLoader's list (lib/local-3d-comfy comfyThreeDReady).
+  {
+    lane: '3d', bundles: getThreeDBundles,
+    picker: async () => (await getDiffusionModels()).map((name) => ({ name }) as ClassifiedModel),
+  },
 ]
 
 const allBundles = () => LANES.flatMap((l) => l.bundles())
@@ -233,6 +251,13 @@ describe('what the Get wrote, the picker offers', () => {
       const offered = (await getVideoModels()).map((m) => m.name)
       for (const f of mainFiles(bundle)) expect(offered, `${name} · ${f.filename}`).toContain(f.filename)
     }
+  })
+
+  it('the 3D model is not offered as an image model after its Get', async () => {
+    const [bundle] = getThreeDBundles()
+    serve(runTheGet(bundle.files))
+    const offered = (await getImageModels()).map((m) => m.name)
+    for (const f of mainFiles(bundle)) expect(offered).not.toContain(f.filename)
   })
 
   // ...and the same question for every other Get target in the catalog, which

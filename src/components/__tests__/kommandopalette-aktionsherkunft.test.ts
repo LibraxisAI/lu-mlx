@@ -28,7 +28,7 @@ import {
   type Command,
   type CommandContext,
 } from '../ui/command-actions'
-import { SHORTCUT_ACTIONS, shortcutKeys, type ShortcutId } from '../../hooks/useKeyboardShortcuts'
+import { SHORTCUT_ACTIONS, platformKeys, shortcutKeys, type ShortcutId } from '../../hooks/useKeyboardShortcuts'
 
 const SRC = resolve(__dirname, '..', '..')
 const read = (...p: string[]) => readFileSync(resolve(SRC, ...p), 'utf8')
@@ -69,7 +69,12 @@ describe('jeder Eintrag hat eine vorhandene Aktion dahinter', () => {
   it('und sie zeigen die Beschriftung aus DERSELBEN Liste', () => {
     const cmds = buildCommands(ctxWith())
     expect(byId(cmds, 'new-conversation')?.keys).toBe(shortcutKeys('new-conversation'))
-    expect(byId(cmds, 'toggle-theme')?.keys).toBe('Ctrl+Shift+D')
+    // In the spelling of the machine the test runs on: since the phone branch
+    // the Mac question is asked of lib/capabilities, and that answers yes
+    // under Node on a Mac. Both spellings are held by name.
+    expect(byId(cmds, 'toggle-theme')?.keys).toBe(platformKeys('Ctrl+Shift+D'))
+    expect(platformKeys('Ctrl+Shift+D', false)).toBe('Ctrl+Shift+D')
+    expect(platformKeys('Ctrl+Shift+D', true)).toBe('\u21E7\u2318D')
   })
 
   it('Navigation ruft setView der Kopfzeile, mit dem richtigen Ziel', () => {
@@ -149,6 +154,11 @@ describe('jeder Eintrag hat eine vorhandene Aktion dahinter', () => {
     expect(byId(cloud, 'view-models')).toBeUndefined()
     expect(byId(cloud, 'view-benchmark')).toBeUndefined()
     expect(byId(cloud, 'view-settings')).toBeDefined()
+  })
+
+  it('Voice has no cloud service yet: the palette offers it in Local only', () => {
+    expect(byId(buildCommands(ctxWith({ localViewsAvailable: false })), 'view-voice')).toBeUndefined()
+    expect(byId(buildCommands(ctxWith({ localViewsAvailable: true })), 'view-voice')).toBeDefined()
   })
 
   it('kein Eintrag ohne ausführbares run — nirgends eine Attrappe', () => {
@@ -345,5 +355,37 @@ describe('die Palette benutzt den Dialog-Hausstandard, statt ihn nachzubauen', (
     // absichtlich, warum hier mal ein Animationsframe stand.
     expect(palette).not.toMatch(/requestAnimationFrame\s*\(/)
     expect(palette).toContain('setTimeout(() => cmd.run(), 0)')
+  })
+})
+
+/**
+ * Persona walk, 09.10.2026, Fund 27: in Cloud mode the palette offered "Use
+ * qwen2.5-7b-instruct-q4_k_m", a local model, while the Models tab was gone.
+ * The rule holds on every platform.
+ */
+describe('in Cloud mode the palette offers no local model', () => {
+  const STORE = [
+    { name: 'openai::qwen2.5-7b-instruct-q4_k_m', provider: 'openai' },
+    { name: 'llama3.3:latest', provider: 'ollama' },
+    { name: 'lu-cloud::glm-5', provider: 'lu-cloud' },
+  ]
+
+  it('offers what the chat model picker offers there', async () => {
+    const { paletteModels } = await import('../ui/command-actions')
+    const models = paletteModels(STORE, { cloud: true })
+    expect(models.map((m) => m.name)).toEqual(['lu-cloud::glm-5'])
+    const cmds = buildCommands(ctxWith({ models, activeModel: null, localViewsAvailable: false }))
+    expect(cmds.filter((c) => c.id.startsWith('model:')).map((c) => c.id)).toEqual(['model:lu-cloud::glm-5'])
+  })
+
+  it('in Local mode the list stays whole', async () => {
+    const { paletteModels } = await import('../ui/command-actions')
+    expect(paletteModels(STORE, { cloud: false })).toBe(STORE)
+  })
+
+  it('the palette asks before it builds its entries, and asks no platform', () => {
+    const palette = read('components', 'ui', 'CommandPalette.tsx')
+    expect(palette).toContain("models: paletteModels(models, { cloud: appMode === 'cloud' }),")
+    expect(palette).not.toContain('isMacOS')
   })
 })

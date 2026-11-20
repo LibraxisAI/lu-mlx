@@ -2,8 +2,9 @@
 // tools + hosted models as tappable teasers, and THIS is what a tap opens — a
 // small sheet with an animated "show me" demo of the tool, one line of copy,
 // and the path into LU Cloud. Never blocks a local flow (it only opens from
-// explicitly cloud-tagged surfaces), never shows in cloud mode, and the
-// footer link turns the whole discovery layer off (Settings can re-enable).
+// explicitly cloud-tagged surfaces), never shows in cloud mode. Closing it is
+// only closing; the footer link is the one thing here that turns the whole
+// discovery layer off (Settings can re-enable).
 
 import { useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -15,9 +16,14 @@ import { cloudModelById } from '../../stores/cloudCatalogStore'
 import { useCreateStore, type CreateIntent } from '../../stores/createStore'
 import { isIntentAvailable, mlxOnlyCreateHost } from '../create/experimental/intents'
 import { isMlxImageHost } from '../../api/mlx-image'
-import { openExternal } from '../../api/backend'
-import { CLOUD_BASE } from '../../api/cloud/config'
-import { getMaxVramGb } from '../../lib/hardware'
+import { mlxMakesMusic } from '../../lib/mac-music'
+import { mlxFollowsMotion, mlxTalking } from '../../api/mlx-video'
+import { openExternal, isMacOS } from '../../api/backend'
+import { checkoutStartUrl } from '../../lib/cloud-links'
+import { reportCloudGate } from '../../api/funnel'
+import { BuyChoice } from './BuyChoice'
+import { getMaxVramGb, getSharedMemoryGb } from '../../lib/hardware'
+import { sharedMemoryWording } from '../../lib/shared-memory-wording'
 
 interface TeaserCopy {
   title: string
@@ -53,38 +59,85 @@ const INTENT_COPY: Record<Extract<CloudTeaserTarget, { surface: 'intent' }>['int
     title: 'Motion Control',
     line: 'Your character copies the moves from any dance or pose video.',
   },
+  swap_character: {
+    title: 'Swap Character',
+    line: 'Put a new person into a real video. Same moves, same scene, same sound.',
+  },
+}
+
+/**
+ * Where the tool on the sheet runs, as one sentence. `hasLocalLane`: it also
+ * runs on this machine. `sharedMemory`: this machine is a Mac, which is not a
+ * PC and has no VRAM. Today no lane with a sheet runs locally on a Mac (only
+ * MLX image and video do, and they open no sheet), so the Mac half of the
+ * first sentence waits for the first lane that does; it is written now so
+ * that lane cannot ship with "your PC" in it.
+ */
+export function teaserWhereLine(hasLocalLane: boolean, sharedMemory: boolean): string {
+  if (hasLocalLane) {
+    return sharedMemory
+      ? 'Runs on this Mac with downloaded models, or on LU Cloud where datacenter GPUs do the heavy lifting.'
+      : 'Runs on your PC with downloaded models, or on LU Cloud where datacenter GPUs do the heavy lifting.'
+  }
+  return sharedMemoryWording('Runs on LU Cloud, where datacenter GPUs do the heavy lifting and VRAM is not the limit.', sharedMemory)
 }
 
 export function CloudTeaserModal() {
   const target = useUIStore((s) => s.cloudTeaser)
   const setCloudTeaser = useUIStore((s) => s.setCloudTeaser)
+  const setCloudHiddenNotice = useUIStore((s) => s.setCloudHiddenNotice)
   const setIntent = useCreateStore((s) => s.setIntent)
   const comfyRunning = useCreateStore((s) => s.comfyRunning)
+  // Enhance Image runs on a Mac with an upscaler installed (SeedVR2).
+  const mlxUpscale = useCreateStore((s) => s.mlxUpscale)
+  // The one lane of these a Mac runs itself, while its music engine is there.
+  const mlxMusic = useCreateStore((s) => mlxMakesMusic(s.audioModelList))
+  // And Motion Control while an installed LTX-2.3 pack follows a motion video.
+  const mlxMotion = useCreateStore((s) => mlxFollowsMotion(s.videoModelList))
+  // And Talking Character, while a video model that talks is installed.
+  const mlxTalk = useCreateStore((s) => mlxTalking(s.videoModelList).tab)
   const { updateSettings } = useSettingsStore()
-  const teasersEnabled = useSettingsStore((s) => s.settings.cloudTeasersEnabled)
-  // The card's own number (David, 2026-09-07): "Your GPU has 6 GB" says why
+  // The card's own number (2026-09-07): "Your GPU has 6 GB" says why
   // the tool is greyed out better than any adjective. Read once per opening,
   // from the same detect_gpus the hardware settings use; null when nothing
   // was found, and then the line falls back to the wording without a number.
   const [gpuGb, setGpuGb] = useState<number | null>(null)
+  // A Mac has no card and is not a PC: one memory pool, read from the Apple
+  // entry of detect_gpus (shared_memory_mib) with system_info behind it. The
+  // sheet then says "This Mac has 16 GB of memory" and "Runs on this Mac".
+  // `gpuGb` stays null there, so the checkout tag below never files a Mac's
+  // memory as a card size.
+  const sharedMemory = isMacOS()
+  const [macMemoryGb, setMacMemoryGb] = useState<number | null>(null)
   useEffect(() => {
     if (!target) return
     let alive = true
-    void getMaxVramGb().then((gb) => {
-      if (alive) setGpuGb(gb > 0 ? Math.round(gb) : null)
-    })
+    if (sharedMemory) {
+      void getSharedMemoryGb().then((pool) => {
+        if (alive) setMacMemoryGb(pool > 0 ? Math.round(pool) : null)
+      })
+    } else {
+      void getMaxVramGb().then((gb) => {
+        if (alive) setGpuGb(gb > 0 ? Math.round(gb) : null)
+      })
+    }
     return () => { alive = false }
-  }, [target])
+  }, [target, sharedMemory])
 
-  // One-time onboarding (David 2026-07-19): the Cloud discovery layer is meant
-  // to appear ONCE per user, never again — not after updates either. Any
-  // dismissal of this sheet (button, backdrop, X, Try local / Get LU Cloud) retires
-  // the whole discovery layer permanently; the persisted flag survives updates,
-  // and Settings can re-enable it. Cloud-only *features* (upscale / eraser) stay
-  // accessible regardless — their sheet renders on tap, not on this flag.
-  const close = () => {
-    if (teasersEnabled) updateSettings({ cloudTeasersEnabled: false })
+  // Closing the sheet changes nothing (the box, 03.10.2026). From 2026-07-19
+  // until 3.0.5 every way out of it (Escape, a click beside it, X, "Not now",
+  // both buttons) also switched "Show Cloud features in Local mode" off, so
+  // one Escape silently took the LU Cloud group out of the model pickers. The
+  // setting now has exactly one control on this sheet, the link at the bottom
+  // that says what it does, and the switch in Settings, General.
+  const close = () => setCloudTeaser(null)
+  const hideCloudFeatures = () => {
+    reportCloudGate('cloud_teaser_hide')
+    updateSettings({ cloudTeasersEnabled: false })
     setCloudTeaser(null)
+    // The tabs and rows vanish with this click, so Create says where they
+    // come back (CloudHiddenNotice).
+    setCloudHiddenNotice(true)
   }
   // 2.5.8: the lanes that ALSO run locally get a "Try local" path — the sheet
   // stops being a pure upsell and becomes the fork between the two lanes.
@@ -93,7 +146,7 @@ export function CloudTeaserModal() {
   // "Try local" button for lanes the bar doesn't even show (MAC-2).
   const localLane =
     target?.surface === 'intent' &&
-    isIntentAvailable(target.intent as CreateIntent, 'local', mlxOnlyCreateHost(isMlxImageHost(), comfyRunning), isMlxImageHost())
+    isIntentAvailable(target.intent as CreateIntent, 'local', mlxOnlyCreateHost(isMlxImageHost(), comfyRunning), false, false, mlxUpscale, mlxMusic, mlxMotion, mlxTalk, isMlxImageHost())
       ? target.intent
       : null
   const copy: TeaserCopy | null =
@@ -118,7 +171,7 @@ export function CloudTeaserModal() {
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="fixed inset-0 z-[90] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          className="fixed inset-0 z-[90] flex overflow-y-auto overscroll-contain p-4 lu-dialog-scrim"
           onClick={close}
         >
           <motion.div
@@ -127,10 +180,13 @@ export function CloudTeaserModal() {
             exit={{ opacity: 0, y: 10, scale: 0.97 }}
             transition={{ duration: 0.15, ease: 'easeOut' }}
             onClick={(e) => e.stopPropagation()}
-            className="w-[360px] max-w-[92vw] rounded-2xl bg-[#232323] border border-white/[0.08] shadow-2xl shadow-black/50 overflow-hidden"
+            role="dialog"
+            aria-modal="true"
+            aria-label={copy.title}
+            className="m-auto shrink-0 w-[360px] max-w-[92vw] rounded-2xl lu-dialog overflow-hidden"
           >
             {/* Demo stage */}
-            <div className="relative h-[130px] bg-[#1b1b1b] border-b border-white/[0.06] overflow-hidden">
+            <div className="relative h-[130px] bg-black/30 border-b border-white/[0.06] overflow-hidden">
               <TeaserDemo target={target} />
               <button
                 onClick={close}
@@ -144,36 +200,35 @@ export function CloudTeaserModal() {
 
             <div className="p-4 space-y-3">
               <div className="flex items-center gap-2">
-                <Cloud size={14} className="text-violet-300" />
+                <Cloud size={14} className="text-violet-600 dark:text-violet-300" />
                 <h3 className="text-[0.85rem] font-semibold text-white">{copy.title}</h3>
                 <span className="ml-auto text-[0.55rem] font-medium uppercase tracking-widest text-violet-300/80">
                   LU Cloud
                 </span>
               </div>
-              <p className="text-[0.7rem] leading-relaxed text-gray-400">{copy.line}</p>
-              <p className="text-[0.62rem] leading-relaxed text-gray-500">
+              <p className="text-[0.7rem] leading-relaxed text-gray-400">{sharedMemoryWording(copy.line, sharedMemory)}</p>
+              <p className="text-[0.62rem] leading-relaxed text-gray-500" data-testid="cloud-teaser-where">
                 {gpuGb !== null && `Your GPU has ${gpuGb} GB. `}
-                {localLane
-                  ? 'Runs on your PC with downloaded models, or on LU Cloud where datacenter GPUs do the heavy lifting.'
-                  : 'Runs on LU Cloud, where datacenter GPUs do the heavy lifting and VRAM is not the limit.'}
+                {macMemoryGb !== null && `This Mac has ${macMemoryGb} GB of memory. `}
+                {teaserWhereLine(localLane !== null, sharedMemory)}
               </p>
-              <div className="flex items-center gap-2 pt-1">
-                <button
-                  onClick={() => {
-                    // Straight into signup and checkout with Hosted preselected
-                    // (David, 2026-09-07: "die Pricing-Seite ist eine
-                    // Entscheidung zu viel"). Until 2.6.8 this opened
-                    // CloudGateModal, which asks for a login before it shows a
-                    // single price. The src tag names the card size, so the
-                    // funnel on the server can say what this button brings.
-                    close()
-                    const src = gpuGb !== null ? `gpu${gpuGb}` : 'gpu-unknown'
-                    void openExternal(`${CLOUD_BASE}/checkout/start?plan=hosted&src=${src}`)
-                  }}
-                  className="flex-1 flex items-center justify-center gap-1.5 h-8 rounded-lg bg-white text-black text-[0.7rem] font-semibold hover:bg-gray-200 transition-colors"
-                >
-                  <Sparkles size={12} /> Get LU Cloud
-                </button>
+              {/* Abo und Paket gleichrangig (Funnel 3.1.0, Nr. 4). Bis dahin
+                  verkaufte dieses Blatt nur das Hosted-Abo. Beide Knoepfe gehen
+                  auf die Kaufseite, nicht zum Zahlungsanbieter: Hosted vorgewaehlt bzw.
+                  das Paket (2026-09-07: "die Pricing-Seite ist eine
+                  Entscheidung zu viel"). Das src-Wort nennt die Kartengroesse,
+                  damit der Zaehler auf dem Server sagen kann, was dieses
+                  Blatt bringt. */}
+              <BuyChoice
+                tone="sheet"
+                onPick={(order) => {
+                  close()
+                  reportCloudGate(order === 'sub' ? 'cloud_teaser_sub' : 'cloud_teaser_pack')
+                  const src = gpuGb !== null ? `gpu${gpuGb}` : 'gpu-unknown'
+                  void openExternal(checkoutStartUrl({ order, src, medium: 'create-sheet' }))
+                }}
+              />
+              <div className="flex items-center gap-2">
                 {localLane && (
                   <button
                     onClick={() => { close(); setIntent(localLane) }}
@@ -184,11 +239,18 @@ export function CloudTeaserModal() {
                 )}
                 <button
                   onClick={close}
-                  className="px-3 h-8 rounded-lg text-[0.7rem] text-gray-400 hover:text-gray-200 hover:bg-white/[0.06] transition-colors"
+                  className="flex-1 px-3 h-8 rounded-lg text-[0.7rem] text-gray-400 hover:text-gray-200 hover:bg-white/[0.06] transition-colors"
                 >
                   Not now
                 </button>
               </div>
+              <button
+                onClick={hideCloudFeatures}
+                title="Turns off Show Cloud features in Local mode. Settings, General turns it back on."
+                className="w-full text-center t-micro text-gray-500 hover:text-gray-300 transition-colors pt-0.5"
+              >
+                Don't show Cloud features in Local mode
+              </button>
             </div>
           </motion.div>
         </motion.div>

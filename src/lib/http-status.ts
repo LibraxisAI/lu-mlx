@@ -1,3 +1,4 @@
+import { FIRST_REPLY_TIMEOUT } from './chat-reply-timeout'
 // The HTTP status of a failed model call, whichever field happens to carry it.
 //
 // ProviderError (api/providers/types.ts) stores it as `status`; the Ollama
@@ -107,6 +108,16 @@ export function isTerminalModelError(err: unknown): boolean {
   // twelve silent minutes before the run gave up, same shape as the
   // `credits_exhausted` bug this line is modelled on.
   if (e?.code === 'credits_exhausted' || e?.code === 'signed_out' || e?.code === 'flash_timeout') return true
+  // LU Cloud ended a step that produced no visible output for ten minutes
+  // (a model run away inside a tool call). Sending it again runs the same
+  // ten minutes again, twice, on the customer's credits.
+  if (e?.code === 'stalled_runaway') return true
+  // LU Cloud has an outage the server announced (lib/cloud-outage.ts). A
+  // retry lands in the same outage and only delays the sentence that says so.
+  if (e?.code === 'outage') return true
+  // Issue 177: the first reply window the user set ran out. Another attempt
+  // waits the whole window again.
+  if (e?.code === FIRST_REPLY_TIMEOUT) return true
   const status = httpStatusOf(err)
   if (status === 429 || status === 408) return false
   if (status === 401 && e?.provider === 'lu-cloud') return false

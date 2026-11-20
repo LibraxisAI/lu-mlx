@@ -1,0 +1,385 @@
+{
+  "schema": 1,
+  "note": "Every file is fetched by pinned revision and verified against sha256 after download. Paths are relative to the voice models directory. Of the entries with role tts-voice only the chosen one is installed; the others are fetched when the user picks them.",
+  "models": [
+    {
+      "id": "stt-faster-whisper-base-en",
+      "role": "stt",
+      "name": "Whisper base.en (CTranslate2)",
+      "license": "MIT",
+      "license_url": "https://huggingface.co/Systran/faster-whisper-base.en",
+      "source": "https://huggingface.co/Systran/faster-whisper-base.en",
+      "revision": "3d3d5dee26484f91867d81cb899cfcf72b96be6c",
+      "dir": "stt/faster-whisper-base.en",
+      "files": [
+        {
+          "path": "stt/faster-whisper-base.en/config.json",
+          "url": "https://huggingface.co/Systran/faster-whisper-base.en/resolve/3d3d5dee26484f91867d81cb899cfcf72b96be6c/config.json",
+          "size": 2227,
+          "sha256": "f3bc3821e9fc76a27bae538e11ae5b677dcdd352b4600429ce7951d398569aeb"
+        },
+        {
+          "path": "stt/faster-whisper-base.en/model.bin",
+          "url": "https://huggingface.co/Systran/faster-whisper-base.en/resolve/3d3d5dee26484f91867d81cb899cfcf72b96be6c/model.bin",
+          "size": 145216508,
+          "sha256": "2a166925539a16005f14ff328359f9b9adb9dc4fb631bb3b227526862e93e2ef"
+        },
+        {
+          "path": "stt/faster-whisper-base.en/tokenizer.json",
+          "url": "https://huggingface.co/Systran/faster-whisper-base.en/resolve/3d3d5dee26484f91867d81cb899cfcf72b96be6c/tokenizer.json",
+          "size": 2128466,
+          "sha256": "929c5252409436dce1b38a75d1abbcb5e132d170d8e324e4e04ed915fa2d22df"
+        },
+        {
+          "path": "stt/faster-whisper-base.en/vocabulary.txt",
+          "url": "https://huggingface.co/Systran/faster-whisper-base.en/resolve/3d3d5dee26484f91867d81cb899cfcf72b96be6c/vocabulary.txt",
+          "size": 422309,
+          "sha256": "ff77588746d3a2595d32ab5b69ffd7b95ce2441ac57533cb66fc3eb575a115cf"
+        }
+      ]
+    },
+    {
+      "id": "tts-pocket-tts-english",
+      "role": "tts",
+      "name": "Kyutai Pocket TTS, English",
+      "license": "CC-BY-4.0",
+      "license_url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning",
+      "attribution": "Pocket TTS by Kyutai, licensed under CC BY 4.0.",
+      "source": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning",
+      "revision": "d29db7978e464fb90cb3359ee0c69a273b9142cc",
+      "dir": "tts/pocket-tts-english",
+      "files": [
+        {
+          "path": "tts/pocket-tts-english/model.safetensors",
+          "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/d29db7978e464fb90cb3359ee0c69a273b9142cc/languages/english/model.safetensors",
+          "size": 219029196,
+          "sha256": "be9c6b4876d3f30740a8225dfcaa2e43dc4aeb753c15272735bee16bbb4abb0a"
+        },
+        {
+          "path": "tts/pocket-tts-english/tokenizer.model",
+          "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/d29db7978e464fb90cb3359ee0c69a273b9142cc/languages/english/tokenizer.model",
+          "size": 59339,
+          "sha256": "d461765ae179566678c93091c5fa6f2984c31bbe990bf1aa62d92c64d91bc3f6"
+        }
+      ]
+    },
+    {
+      "id": "tts-voice-alba",
+      "role": "tts-voice",
+      "name": "alba",
+      "license": "CC-BY-4.0",
+      "license_url": "https://huggingface.co/kyutai/tts-voices",
+      "attribution": "Voice \"alba\" from recordings by Alba MacKenna (kyutai/tts-voices, alba-mackenna/casual.wav), licensed under CC BY 4.0.",
+      "source": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning",
+      "revision": "e041936c75475d350b405bc870bcf7c22da4e9e6",
+      "dir": "tts/pocket-tts-english",
+      "files": [
+        {
+          "path": "tts/pocket-tts-english/alba.safetensors",
+          "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/e041936c75475d350b405bc870bcf7c22da4e9e6/languages/english/embeddings/alba.safetensors",
+          "size": 6194424,
+          "sha256": "69c32db63ca56843d994f81f343f62e0bf2d73f7e4c9bc73e44bb1110b1d8845"
+        }
+      ],
+      "origin": "https://huggingface.co/kyutai/tts-voices/blob/main/alba-mackenna/casual.wav"
+    },
+    {
+      "id": "tts-voice-anna",
+      "role": "tts-voice",
+      "name": "anna",
+      "license": "CC-BY-4.0",
+      "license_url": "https://huggingface.co/kyutai/tts-voices",
+      "attribution": "Voice \"anna\" from the CSTR VCTK Corpus (version 0.92) by Junichi Yamagishi, Christophe Veaux and Kirsten MacDonald, University of Edinburgh, speaker p228 (kyutai/tts-voices, vctk/p228_023_enhanced.wav), licensed under CC BY 4.0.",
+      "origin": "https://huggingface.co/kyutai/tts-voices/blob/main/vctk/p228_023_enhanced.wav",
+      "source": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning",
+      "revision": "e041936c75475d350b405bc870bcf7c22da4e9e6",
+      "dir": "tts/pocket-tts-english",
+      "files": [
+        {
+          "path": "tts/pocket-tts-english/anna.safetensors",
+          "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/e041936c75475d350b405bc870bcf7c22da4e9e6/languages/english/embeddings/anna.safetensors",
+          "size": 7816440,
+          "sha256": "5ea82f78db006c9fd34e32ddd5aae82674b5b32646097977436458d00af80dfa"
+        }
+      ]
+    },
+    {
+      "id": "tts-voice-azelma",
+      "role": "tts-voice",
+      "name": "azelma",
+      "license": "CC-BY-4.0",
+      "license_url": "https://huggingface.co/kyutai/tts-voices",
+      "attribution": "Voice \"azelma\" from the CSTR VCTK Corpus (version 0.92) by Junichi Yamagishi, Christophe Veaux and Kirsten MacDonald, University of Edinburgh, speaker p303 (kyutai/tts-voices, vctk/p303_023_enhanced.wav), licensed under CC BY 4.0.",
+      "origin": "https://huggingface.co/kyutai/tts-voices/blob/main/vctk/p303_023_enhanced.wav",
+      "source": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning",
+      "revision": "e041936c75475d350b405bc870bcf7c22da4e9e6",
+      "dir": "tts/pocket-tts-english",
+      "files": [
+        {
+          "path": "tts/pocket-tts-english/azelma.safetensors",
+          "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/e041936c75475d350b405bc870bcf7c22da4e9e6/languages/english/embeddings/azelma.safetensors",
+          "size": 7963896,
+          "sha256": "9f3e69f29075f991fd47774566865ef0e0e637cb5a35992c9919761b5b84b1de"
+        }
+      ]
+    },
+    {
+      "id": "tts-voice-charles",
+      "role": "tts-voice",
+      "name": "charles",
+      "license": "CC-BY-4.0",
+      "license_url": "https://huggingface.co/kyutai/tts-voices",
+      "attribution": "Voice \"charles\" from the CSTR VCTK Corpus (version 0.92) by Junichi Yamagishi, Christophe Veaux and Kirsten MacDonald, University of Edinburgh, speaker p254 (kyutai/tts-voices, vctk/p254_023_enhanced.wav), licensed under CC BY 4.0.",
+      "origin": "https://huggingface.co/kyutai/tts-voices/blob/main/vctk/p254_023_enhanced.wav",
+      "source": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning",
+      "revision": "e041936c75475d350b405bc870bcf7c22da4e9e6",
+      "dir": "tts/pocket-tts-english",
+      "files": [
+        {
+          "path": "tts/pocket-tts-english/charles.safetensors",
+          "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/e041936c75475d350b405bc870bcf7c22da4e9e6/languages/english/embeddings/charles.safetensors",
+          "size": 6194424,
+          "sha256": "299edc20182eeccfbf94e308626f259da4fbf339daa8d5905218f2b1774639b8"
+        }
+      ]
+    },
+    {
+      "id": "tts-voice-eponine",
+      "role": "tts-voice",
+      "name": "eponine",
+      "license": "CC-BY-4.0",
+      "license_url": "https://huggingface.co/kyutai/tts-voices",
+      "attribution": "Voice \"eponine\" from the CSTR VCTK Corpus (version 0.92) by Junichi Yamagishi, Christophe Veaux and Kirsten MacDonald, University of Edinburgh, speaker p262 (kyutai/tts-voices, vctk/p262_023_enhanced.wav), licensed under CC BY 4.0.",
+      "origin": "https://huggingface.co/kyutai/tts-voices/blob/main/vctk/p262_023_enhanced.wav",
+      "source": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning",
+      "revision": "e041936c75475d350b405bc870bcf7c22da4e9e6",
+      "dir": "tts/pocket-tts-english",
+      "files": [
+        {
+          "path": "tts/pocket-tts-english/eponine.safetensors",
+          "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/e041936c75475d350b405bc870bcf7c22da4e9e6/languages/english/embeddings/eponine.safetensors",
+          "size": 6931704,
+          "sha256": "bda3b76a384ff355fe0350736387765946304ae8ca16e59f60ea3296a1c99cc6"
+        }
+      ]
+    },
+    {
+      "id": "tts-voice-eve",
+      "role": "tts-voice",
+      "name": "eve",
+      "license": "CC-BY-4.0",
+      "license_url": "https://huggingface.co/kyutai/tts-voices",
+      "attribution": "Voice \"eve\" from the CSTR VCTK Corpus (version 0.92) by Junichi Yamagishi, Christophe Veaux and Kirsten MacDonald, University of Edinburgh, speaker p361 (kyutai/tts-voices, vctk/p361_023_enhanced.wav), licensed under CC BY 4.0.",
+      "origin": "https://huggingface.co/kyutai/tts-voices/blob/main/vctk/p361_023_enhanced.wav",
+      "source": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning",
+      "revision": "e041936c75475d350b405bc870bcf7c22da4e9e6",
+      "dir": "tts/pocket-tts-english",
+      "files": [
+        {
+          "path": "tts/pocket-tts-english/eve.safetensors",
+          "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/e041936c75475d350b405bc870bcf7c22da4e9e6/languages/english/embeddings/eve.safetensors",
+          "size": 6538488,
+          "sha256": "ea9c2faf862a6c9d2cb61910fdf02842ae56940382cc8c1000fdb1b43269692b"
+        }
+      ]
+    },
+    {
+      "id": "tts-voice-fantine",
+      "role": "tts-voice",
+      "name": "fantine",
+      "license": "CC-BY-4.0",
+      "license_url": "https://huggingface.co/kyutai/tts-voices",
+      "attribution": "Voice \"fantine\" from the CSTR VCTK Corpus (version 0.92) by Junichi Yamagishi, Christophe Veaux and Kirsten MacDonald, University of Edinburgh, speaker p244 (kyutai/tts-voices, vctk/p244_023_enhanced.wav), licensed under CC BY 4.0.",
+      "origin": "https://huggingface.co/kyutai/tts-voices/blob/main/vctk/p244_023_enhanced.wav",
+      "source": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning",
+      "revision": "e041936c75475d350b405bc870bcf7c22da4e9e6",
+      "dir": "tts/pocket-tts-english",
+      "files": [
+        {
+          "path": "tts/pocket-tts-english/fantine.safetensors",
+          "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/e041936c75475d350b405bc870bcf7c22da4e9e6/languages/english/embeddings/fantine.safetensors",
+          "size": 6538488,
+          "sha256": "51a8a4355d7f912d4959e4b1918314fda85ad47eba0a33a1d78a4a505d3465f5"
+        }
+      ]
+    },
+    {
+      "id": "tts-voice-george",
+      "role": "tts-voice",
+      "name": "george",
+      "license": "CC-BY-4.0",
+      "license_url": "https://huggingface.co/kyutai/tts-voices",
+      "attribution": "Voice \"george\" from the CSTR VCTK Corpus (version 0.92) by Junichi Yamagishi, Christophe Veaux and Kirsten MacDonald, University of Edinburgh, speaker p315 (kyutai/tts-voices, vctk/p315_023_enhanced.wav), licensed under CC BY 4.0.",
+      "origin": "https://huggingface.co/kyutai/tts-voices/blob/main/vctk/p315_023_enhanced.wav",
+      "source": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning",
+      "revision": "e041936c75475d350b405bc870bcf7c22da4e9e6",
+      "dir": "tts/pocket-tts-english",
+      "files": [
+        {
+          "path": "tts/pocket-tts-english/george.safetensors",
+          "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/e041936c75475d350b405bc870bcf7c22da4e9e6/languages/english/embeddings/george.safetensors",
+          "size": 6243576,
+          "sha256": "0c1c6c57c55a98d81254b33728150c7776f40647fe95258d1a6c1a02780b5d02"
+        }
+      ]
+    },
+    {
+      "id": "tts-voice-jane",
+      "role": "tts-voice",
+      "name": "jane",
+      "license": "CC-BY-4.0",
+      "license_url": "https://huggingface.co/kyutai/tts-voices",
+      "attribution": "Voice \"jane\" from the CSTR VCTK Corpus (version 0.92) by Junichi Yamagishi, Christophe Veaux and Kirsten MacDonald, University of Edinburgh, speaker p339 (kyutai/tts-voices, vctk/p339_023_enhanced.wav), licensed under CC BY 4.0.",
+      "origin": "https://huggingface.co/kyutai/tts-voices/blob/main/vctk/p339_023_enhanced.wav",
+      "source": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning",
+      "revision": "e041936c75475d350b405bc870bcf7c22da4e9e6",
+      "dir": "tts/pocket-tts-english",
+      "files": [
+        {
+          "path": "tts/pocket-tts-english/jane.safetensors",
+          "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/e041936c75475d350b405bc870bcf7c22da4e9e6/languages/english/embeddings/jane.safetensors",
+          "size": 7374072,
+          "sha256": "37386227ca8ec5bf1b8e516c13d132ce5ff5437a304fe90129a1c62f41d9a008"
+        }
+      ]
+    },
+    {
+      "id": "tts-voice-javert",
+      "role": "tts-voice",
+      "name": "javert",
+      "license": "CC0-1.0",
+      "license_url": "https://huggingface.co/kyutai/tts-voices",
+      "attribution": "Voice \"javert\" from the Unmute Voice Donation Project (kyutai/tts-voices, voice-donations/Butter.wav), released as CC0.",
+      "origin": "https://huggingface.co/kyutai/tts-voices/blob/main/voice-donations/Butter.wav",
+      "source": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning",
+      "revision": "e041936c75475d350b405bc870bcf7c22da4e9e6",
+      "dir": "tts/pocket-tts-english",
+      "files": [
+        {
+          "path": "tts/pocket-tts-english/javert.safetensors",
+          "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/e041936c75475d350b405bc870bcf7c22da4e9e6/languages/english/embeddings/javert.safetensors",
+          "size": 6194424,
+          "sha256": "0ae88e03ca4e76a0e16cbf321a807428febda9d9e9bc0358c02e7f9c9e2c263b"
+        }
+      ]
+    },
+    {
+      "id": "tts-voice-marius",
+      "role": "tts-voice",
+      "name": "marius",
+      "license": "CC0-1.0",
+      "license_url": "https://huggingface.co/kyutai/tts-voices",
+      "attribution": "Voice \"marius\" from the Unmute Voice Donation Project (kyutai/tts-voices, voice-donations/Selfie.wav), released as CC0.",
+      "origin": "https://huggingface.co/kyutai/tts-voices/blob/main/voice-donations/Selfie.wav",
+      "source": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning",
+      "revision": "e041936c75475d350b405bc870bcf7c22da4e9e6",
+      "dir": "tts/pocket-tts-english",
+      "files": [
+        {
+          "path": "tts/pocket-tts-english/marius.safetensors",
+          "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/e041936c75475d350b405bc870bcf7c22da4e9e6/languages/english/embeddings/marius.safetensors",
+          "size": 6194424,
+          "sha256": "04f84efcb77a0547ba582c058db496f7ff4920891d49d37b9950d128422582a8"
+        }
+      ]
+    },
+    {
+      "id": "tts-voice-mary",
+      "role": "tts-voice",
+      "name": "mary",
+      "license": "CC-BY-4.0",
+      "license_url": "https://huggingface.co/kyutai/tts-voices",
+      "attribution": "Voice \"mary\" from the CSTR VCTK Corpus (version 0.92) by Junichi Yamagishi, Christophe Veaux and Kirsten MacDonald, University of Edinburgh, speaker p333 (kyutai/tts-voices, vctk/p333_023_enhanced.wav), licensed under CC BY 4.0.",
+      "origin": "https://huggingface.co/kyutai/tts-voices/blob/main/vctk/p333_023_enhanced.wav",
+      "source": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning",
+      "revision": "e041936c75475d350b405bc870bcf7c22da4e9e6",
+      "dir": "tts/pocket-tts-english",
+      "files": [
+        {
+          "path": "tts/pocket-tts-english/mary.safetensors",
+          "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/e041936c75475d350b405bc870bcf7c22da4e9e6/languages/english/embeddings/mary.safetensors",
+          "size": 6194424,
+          "sha256": "a8f2adf260cab966fe0a113d6b549d6efdeaa79de544ae0ff34b5b6a41445a59"
+        }
+      ]
+    },
+    {
+      "id": "tts-voice-michael",
+      "role": "tts-voice",
+      "name": "michael",
+      "license": "CC-BY-4.0",
+      "license_url": "https://huggingface.co/kyutai/tts-voices",
+      "attribution": "Voice \"michael\" from the CSTR VCTK Corpus (version 0.92) by Junichi Yamagishi, Christophe Veaux and Kirsten MacDonald, University of Edinburgh, speaker p360 (kyutai/tts-voices, vctk/p360_023_enhanced.wav), licensed under CC BY 4.0.",
+      "origin": "https://huggingface.co/kyutai/tts-voices/blob/main/vctk/p360_023_enhanced.wav",
+      "source": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning",
+      "revision": "e041936c75475d350b405bc870bcf7c22da4e9e6",
+      "dir": "tts/pocket-tts-english",
+      "files": [
+        {
+          "path": "tts/pocket-tts-english/michael.safetensors",
+          "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/e041936c75475d350b405bc870bcf7c22da4e9e6/languages/english/embeddings/michael.safetensors",
+          "size": 7275768,
+          "sha256": "8937f724ac4719b9aa51ea0ba1f18f9de0af7a663ad6263558266c1a53c9722d"
+        }
+      ]
+    },
+    {
+      "id": "tts-voice-paul",
+      "role": "tts-voice",
+      "name": "paul",
+      "license": "CC-BY-4.0",
+      "license_url": "https://huggingface.co/kyutai/tts-voices",
+      "attribution": "Voice \"paul\" from the CSTR VCTK Corpus (version 0.92) by Junichi Yamagishi, Christophe Veaux and Kirsten MacDonald, University of Edinburgh, speaker p259 (kyutai/tts-voices, vctk/p259_023_enhanced.wav), licensed under CC BY 4.0.",
+      "origin": "https://huggingface.co/kyutai/tts-voices/blob/main/vctk/p259_023_enhanced.wav",
+      "source": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning",
+      "revision": "e041936c75475d350b405bc870bcf7c22da4e9e6",
+      "dir": "tts/pocket-tts-english",
+      "files": [
+        {
+          "path": "tts/pocket-tts-english/paul.safetensors",
+          "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/e041936c75475d350b405bc870bcf7c22da4e9e6/languages/english/embeddings/paul.safetensors",
+          "size": 6980856,
+          "sha256": "ed7a019168f94dfe77009f1b0de59387abc6fbb0db954d38ce722ecb77da61aa"
+        }
+      ]
+    },
+    {
+      "id": "tts-voice-vera",
+      "role": "tts-voice",
+      "name": "vera",
+      "license": "CC-BY-4.0",
+      "license_url": "https://huggingface.co/kyutai/tts-voices",
+      "attribution": "Voice \"vera\" from the CSTR VCTK Corpus (version 0.92) by Junichi Yamagishi, Christophe Veaux and Kirsten MacDonald, University of Edinburgh, speaker p229 (kyutai/tts-voices, vctk/p229_023_enhanced.wav), licensed under CC BY 4.0.",
+      "origin": "https://huggingface.co/kyutai/tts-voices/blob/main/vctk/p229_023_enhanced.wav",
+      "source": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning",
+      "revision": "e041936c75475d350b405bc870bcf7c22da4e9e6",
+      "dir": "tts/pocket-tts-english",
+      "files": [
+        {
+          "path": "tts/pocket-tts-english/vera.safetensors",
+          "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/e041936c75475d350b405bc870bcf7c22da4e9e6/languages/english/embeddings/vera.safetensors",
+          "size": 6735096,
+          "sha256": "4bf50ddd957b5d218b264fdcf18efbbc7384d12da3eca98ca19b9e8dd6976acc"
+        }
+      ]
+    }
+  ],
+  "bundled": [
+    {
+      "id": "vad-silero",
+      "role": "vad",
+      "name": "Silero VAD (ONNX)",
+      "license": "MIT",
+      "license_url": "https://github.com/snakers4/silero-vad",
+      "shipped_in": "pipecat-ai wheel, pipecat/audio/vad/data/silero_vad.onnx"
+    },
+    {
+      "id": "turn-smart-turn-v3.2-cpu",
+      "role": "turn",
+      "name": "Smart Turn v3.2 (CPU, ONNX)",
+      "license": "BSD-2-Clause",
+      "license_url": "https://huggingface.co/pipecat-ai/smart-turn-v3",
+      "shipped_in": "pipecat-ai wheel, pipecat/audio/turn/smart_turn/data/smart-turn-v3.2-cpu.onnx"
+    }
+  ]
+}

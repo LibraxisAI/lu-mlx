@@ -1,7 +1,7 @@
 /**
  * Video latents decode TILED whenever the install has VAEDecodeTiled.
  *
- * Live on the 3060 (David 2026-08-02): NSFW Wan 14B GGUF sampled 12/12 steps
+ * Live on the 3060 (2026-08-02): NSFW Wan 14B GGUF sampled 12/12 steps
  * in 2:54, then the full-frame WanVAE decode sat at "GPU 100%" for 45+
  * minutes. The resident 14B UNet left the VAE 312 MB of usable VRAM; CUDA on
  * the Windows driver pages instead of throwing, so ComfyUI's own OOM-based

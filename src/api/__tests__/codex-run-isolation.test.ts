@@ -209,7 +209,7 @@ describe("a chat-artifact run does not capture the coding run's writes", () => {
     expect(backendCalls.some((c) => c.cmd === 'fs_write' && c.body?.workingDirectory === '/repo-a')).toBe(true)
 
     const bOut = await registry.execute('file_write', { path: 'note.md', content: 'hi' }, 1, b)
-    expect(bOut).toContain('nothing was written to disk')
+    expect(bOut).toContain('Nothing was written to disk')
 
     endAgentRun(b)
     endAgentRun(a)
@@ -224,7 +224,7 @@ describe("a chat-artifact run does not capture the coding run's writes", () => {
 
     backendCalls.length = 0
     const aOut = await registry.execute('file_write', { path: 'out.txt', content: 'hello' })
-    expect(aOut).toContain('nothing was written to disk')
+    expect(aOut).toContain('Nothing was written to disk')
     expect(backendCalls.some((c) => c.cmd === 'fs_write')).toBe(false)
 
     endAgentRun(b)

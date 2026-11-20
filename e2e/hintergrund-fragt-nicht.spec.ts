@@ -7,7 +7,7 @@ import { openNewChat } from './support/ui'
  * Drei Unteragenten in einem Zug, und der Nutzer wird kein einziges Mal
  * unterbrochen.
  *
- * Auftrag 2.3 (David, 04.09.2026): "hintergrund bzw multiagents sollen NIEMALS
+ * Auftrag 2.3 (04.09.2026): "hintergrund bzw multiagents sollen NIEMALS
  * freigabe brauchen. ist bei claude code desktop auch nicht so richtig?"
  *
  * Gemessen wurde vorher genau das Gegenteil: delegate_task liegt in der
@@ -100,5 +100,6 @@ test('drei Delegationen erzeugen keine einzige Freigabefrage', async ({ page }) 
   // Und es waren wirklich drei Delegationen, nicht eine. Die Leiste faltet
   // gleichartige Aufrufe zusammen, also erst aufklappen.
   await page.getByRole('button', { name: /3 steps/ }).click()
-  await expect(page.getByText('delegate_task', { exact: true })).toHaveCount(3)
+  // CA U1: the rows read "Handed off …"; the tool's own name is the tooltip.
+  await expect(page.getByTitle('delegate_task', { exact: true })).toHaveCount(3)
 })

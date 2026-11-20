@@ -1,5 +1,5 @@
 /**
- * Context-fill semantics for the TokenCounter (David, 2026-07-12): a looping
+ * Context-fill semantics for the TokenCounter (2026-07-12): a looping
  * cloud reasoner burned its whole 16,384-token completion budget as hidden
  * thinking; the old high-water over usage.totalTokens pinned the counter at
  * "16.5k" for the rest of the conversation while the next real prompt cost

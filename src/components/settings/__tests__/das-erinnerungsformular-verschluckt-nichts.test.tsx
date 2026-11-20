@@ -9,7 +9,7 @@
  *      Das sind genau die Datensaetze, die der Kunde in der Liste nicht mehr
  *      sieht, also wurde er gegen einen Zwilling abgewiesen, den es fuer ihn
  *      nicht gibt. Das Web hat die drei Bedingungen schon
- *      (apps/web/stores/memoryStore.ts:356-357).
+ *      (the web app).
  *   2. Die Aufrufstelle las den Rueckgabewert nicht. Bei einer Abweisung
  *      leerte sie trotzdem beide Felder und schloss das Formular, also sah die
  *      Oberflaeche aus wie nach einem erfolgreichen Speichern, waehrend der

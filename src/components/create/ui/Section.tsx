@@ -12,13 +12,23 @@ interface Props {
   help?: string
   collapsible?: boolean
   defaultOpen?: boolean
+  /** Given together: the caller keeps whether the section is open, so it can
+   *  outlive the panel this section sits in. Without them the section keeps
+   *  it itself and starts from `defaultOpen` on every mount. */
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
   right?: React.ReactNode
   children: React.ReactNode
 }
 
-export function Section({ title, icon: Icon, help, collapsible = true, defaultOpen = true, right, children }: Props) {
-  const [open, setOpen] = useState(defaultOpen)
-  const toggle = () => collapsible && setOpen((o) => !o)
+export function Section({ title, icon: Icon, help, collapsible = true, defaultOpen = true, open: heldOpen, onOpenChange, right, children }: Props) {
+  const [ownOpen, setOwnOpen] = useState(defaultOpen)
+  const open = heldOpen ?? ownOpen
+  const toggle = () => {
+    if (!collapsible) return
+    if (onOpenChange) onOpenChange(!open)
+    else setOwnOpen(!open)
+  }
 
   return (
     <div className="border-b border-white/[0.05] last:border-b-0">

@@ -78,7 +78,7 @@ const SECOND_GGUF = 'openai::gemma-3-4b-it-Q4_K_M'
 const OLLAMA = 'llama3.2:3b'
 const SWITCH_NOTE = 'Switched your chat provider to the LU Engine for this model.'
 
-/** The Installed list as David's Mac draws it: an Ollama model in front, two
+/** The Installed list as the owner's Mac draws it: an Ollama model in front, two
  *  GGUFs from the LU Engine folder beside it. */
 function installedList() {
   return [

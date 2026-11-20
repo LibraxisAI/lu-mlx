@@ -10,7 +10,7 @@
  *
  * Web gilt: die Zeile gehoert neben den Schalter, den sie beschreibt, in
  * ruhigem Grau. Der Web-Waechter dazu ist
- * `apps/web/components/settings/__tests__/memory-tab.test.tsx:215-217`; hier
+ * the web app; hier
  * steht er gespiegelt, dazu die drei Wortlaute an der neuen Stelle.
  *
  * Lauf: npx vitest run src/components/settings/__tests__/die-kostenzeile-steht-am-schalter.test.tsx

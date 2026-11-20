@@ -1,25 +1,35 @@
-import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { AlertTriangle, Cloud, Cpu } from 'lucide-react'
 import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
 import { useCloudNoticeStore, CLOUD_RETENTION_DAYS, shouldShowRetentionNotice } from '../../../stores/cloudNoticeStore'
 import { useComfyNoticeStore } from '../../../stores/comfyNoticeStore'
 import { loadComfyCorsSignature, shouldShowCorsNotice } from '../../../lib/comfy-cors-notice'
-import { comfyIdleNotice, shouldWatchComfyIdle, IDLE_WATCH_INTERVAL_MS } from '../../../lib/comfy-idle-watch'
+import { comfyIdleNotice, shouldWatchComfyIdle, IDLE_WATCH_INTERVAL_MS, IDLE_STARTING } from '../../../lib/comfy-idle-watch'
 import type { ComfyGuardStatus } from '../../../lib/comfy-restart-guard'
+import { anyInstallRunning, subscribeInstallRuns } from '../../../lib/model-install-runs'
+import { useComfyInstallStore } from '../../../stores/comfyInstallStore'
+import { setRenderSurfaceOpen } from '../../../api/vram-handoff'
 import { useWorkflowStore } from '../../../stores/workflowStore'
 import { CreateExpProvider, useCreateExp } from './CreateContext'
 import { IntentBar } from './IntentBar'
 import { Stage } from './Stage'
 import { Composer } from './Composer'
+import { CharacterHub } from './hub/CharacterHub'
+import { isHubIntent } from '../../../lib/create/character-hub'
 import { CreatePanel } from './CreatePanel'
 import { Lightbox } from './Lightbox'
+import { SaveCharacterModal } from './SaveCharacterModal'
 import { AdvancedDrawer } from './AdvancedDrawer'
 import { WorkflowsModal } from '../WorkflowsModal'
 import { Hinweis } from '../../ui/Hinweis'
 import { BannerText } from './BannerText'
+import { MacVideoMemoryNotice } from './MacVideoMemoryNotice'
+import { ThreeDHardwareNotice } from './ThreeDHardwareNotice'
+import { CreateCloudOffer } from './CreateCloudOffer'
 import { MaskEditor } from './MaskEditor'
 import { VhsInstallModal } from './VhsInstallModal'
+import { CloudHiddenNotice } from '../../cloud/CloudHiddenNotice'
 import { PresetShelf } from './PresetShelf'
 import type { CreatePreset } from '../../../lib/render/create-presets'
 import { Modal } from '../../ui/Modal'
@@ -35,11 +45,13 @@ import { Modal } from '../../ui/Modal'
 const PresetWorkshop = lazy(() =>
   import('./PresetWorkshop').then((m) => ({ default: m.PresetWorkshop })),
 )
-import { INTENT_MAP, intentNeedsComfyGraph, isIntentAvailable, mlxOnlyCreateHost } from './intents'
-import { intentRoles, isStudioModel, resolveIntentPick } from '../../../lib/render/create-studio'
-import { modelForOp } from '../../../stores/cloudCatalogStore'
+import { INTENT_MAP, intentNeedsComfyGraph, intentNeedsSource, isIntentAvailable, mlxOnlyCreateHost } from './intents'
+import { studioIntentOf, studioPickFor } from '../../../lib/render/create-studio'
+import { modelForOp, useCloudCatalogStore } from '../../../stores/cloudCatalogStore'
 import { stageShowsSetupCard, laneModelCount } from './stageGate'
 import { isMlxImageHost, isMlxImageModel } from '../../../api/mlx-image'
+import { mlxTakesStartImage } from '../../../api/mlx-video'
+import { mlxTakesEditImage } from '../../../lib/image-engines'
 import { fetchGalleryItemBlob } from './galleryUrl'
 import { loadImageRef } from './loadImage'
 
@@ -72,6 +84,7 @@ function CreateExperimentalInner() {
   const lipsyncModelList = useCreateStore((s) => s.lipsyncModelList)
   const motionModelList = useCreateStore((s) => s.motionModelList)
   const comfyRunning = useCreateStore((s) => s.comfyRunning)
+  const upscaleModelList = useCreateStore((s) => s.upscaleModelList)
   const { modelLoadError, connected, modelsLoaded, mlxMissing, comfyOnCpu, comfyCpuBanner } = useCreateExp()
 
   // P9: AdvancedDrawer needs the same studioModel Composer.tsx derives
@@ -84,21 +97,45 @@ function CreateExperimentalInner() {
   // Composer.tsx, kept in sync by hand (both read the same store getters and
   // pure functions, no new state).
   const intent = useCreateStore((s) => s.intent())
-  const characterTab = useCreateStore((s) => s.characterTab)
+  const threeDWay = useCreateStore((s) => s.threeDWay)
+  // The Character area (3.1.0 part B) takes the place of the stage and the
+  // prompt window for its four intents; gallery and presets stay beside it.
+  const hubOpen = isHubIntent(intent)
+  // The Character tab stands on the middle axis of the prompt window: the
+  // room the rails take at the right is kept free at the left as well
+  // (index.css, .lu-hub-row reads --hub-rails).
+  const rails = useRef<HTMLDivElement>(null)
+  const [railsWidth, setRailsWidth] = useState(0)
+  useEffect(() => {
+    const el = rails.current
+    if (!hubOpen || !el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(() => setRailsWidth(el.offsetWidth))
+    ro.observe(el)
+    setRailsWidth(el.offsetWidth)
+    return () => ro.disconnect()
+  }, [hubOpen])
   const cloudOpModel = useCreateStore((s) => s.cloudOpModel)
-  // characterUse never resolves to a Studio pick (Composer.tsx: roleIntent
-  // excludes it outright, character-use stays on its fixed -lora family via
-  // resolveCharacterModel), so this derivation does not need
-  // selectedCharacter at all.
-  const characterUse = intent === 'character' && characterTab === 'use'
-  const roleIntent = backend === 'cloud' && !characterUse && intentRoles(intent).length > 0
-  const rolePick = roleIntent ? resolveIntentPick(intent, cloudOpModel) : undefined
-  const studioPick = rolePick && isStudioModel(rolePick) ? rolePick : undefined
+  const cloudImageModel = useCreateStore((s) => s.cloudImageModel)
+  const cloudVideoModel = useCreateStore((s) => s.cloudVideoModel)
+  // Der Katalog kommt vom Server; die Studio-Wahl liest ihn, also zeichnet sich
+  // diese Flaeche neu, sobald er eintrifft.
+  useCloudCatalogStore((s) => s.models)
+  // Seit 02.10.2026 faehrt nicht nur eine Rollen-Absicht ein Studio-Modell,
+  // sondern auch Image, Edit, Video und Animate (Web-Paritaet). Eine Funktion
+  // traegt die Regel fuer Composer, Zaehler, Start und diese Schublade; der
+  // Character-Weg bleibt davon ausgenommen. Auf der lokalen Spur gibt es nie
+  // eine Studio-Wahl.
+  const studioPick = backend === 'cloud' ? studioPickFor(studioIntentOf(intent, threeDWay), { cloudImageModel, cloudVideoModel, cloudOpModel }) : undefined
 
   const [shownId, setShownId] = useState<string | null>(null)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [maskOpen, setMaskOpen] = useState(false)
   const [lightbox, setLightbox] = useState<GalleryItem | null>(null)
+  // The large view opens with the prompt folded; the Prompt word in the
+  // facts asks for the prompt, so it opens it unfolded.
+  const [lightboxPrompt, setLightboxPrompt] = useState(false)
+  // The video whose frames are being saved as a character (SaveCharacterModal).
+  const [characterFrom, setCharacterFrom] = useState<GalleryItem | null>(null)
   const [panelOpen, setPanelOpen] = useState(false)
   const [workflowsOpen, setWorkflowsOpen] = useState(false)
 
@@ -115,7 +152,7 @@ function CreateExperimentalInner() {
   const [selectedPreset, setSelectedPreset] = useState<CreatePreset | null>(null)
   const [presetStarted, setPresetStarted] = useState(false)
 
-  // One-click CORS fix (David 2026-07-17): restart the user-managed ComfyUI
+  // One-click CORS fix (2026-07-17): restart the user-managed ComfyUI
   // under LU's management so it carries --enable-cors-header. On success the
   // banner clears; if LU can't do it (unknown path / remote host) the backend
   // error explains the manual route and stays visible in the banner.
@@ -156,6 +193,18 @@ function CreateExperimentalInner() {
   // A glance every 30s while this tab is open and idle, no restart of its own:
   // holding an engine warm for work nobody asked for costs RAM and VRAM, and
   // the render path already fixes it on demand. Wording in lib/comfy-idle-watch.
+  //
+  // Silent while LU restarts ComfyUI itself: the setup card or the update line
+  // is already saying what happens, and the look comes back when it is done.
+  const setupRunning = useSyncExternalStore(subscribeInstallRuns, anyInstallRunning)
+  const comfyUpdating = useComfyInstallStore((s) => s.phase !== 'idle' && s.phase !== 'error')
+  const luIsRestartingComfy = setupRunning || comfyUpdating || corsFixing
+  // While this view is open a finished render keeps the graphics card for the
+  // next one; leaving it brings the chat model back (api/vram-handoff).
+  useEffect(() => {
+    setRenderSurfaceOpen(true)
+    return () => setRenderSurfaceOpen(false)
+  }, [])
   const [idleNotice, setIdleNotice] = useState('')
   const idleTimerRef = useRef<(() => void) | null>(null)
   useEffect(() => {
@@ -164,7 +213,7 @@ function CreateExperimentalInner() {
     void (async () => {
       const { isMacOS } = await import('../../../api/backend')
       if (cancelled) return
-      if (!shouldWatchComfyIdle(backend === 'local', isMacOS(), isGenerating)) { clear(); return }
+      if (!shouldWatchComfyIdle(backend === 'local', isMacOS(), isGenerating, luIsRestartingComfy)) { clear(); return }
       const { backendCall } = await import('../../../api/backend')
       const look = async () => {
         const st = await backendCall<ComfyGuardStatus>('comfyui_status').catch(() => null)
@@ -175,7 +224,7 @@ function CreateExperimentalInner() {
       idleTimerRef.current = () => clearInterval(timer)
     })()
     return () => { cancelled = true; idleTimerRef.current?.(); idleTimerRef.current = null }
-  }, [backend, isGenerating])
+  }, [backend, isGenerating, luIsRestartingComfy])
 
   const fixCorsForMe = useCallback(async () => {
     setCorsFixing(true)
@@ -192,16 +241,23 @@ function CreateExperimentalInner() {
     }
   }, [])
 
-  // David 2026-07-11: the Stage starts EMPTY and never auto-surfaces a persisted
+  // 2026-07-11: the Stage starts EMPTY and never auto-surfaces a persisted
   // gallery item — not on mount, not on a mode/intent switch. It fills only on an
   // explicit pick (a gallery tile, or a result's "Edit" action) or a fresh
   // generation made in THIS session. Seed prevTop with whatever is already on top
   // so a persisted item is never mistaken for a just-made result; only a genuinely
   // new top id (an in-session generation) auto-shows.
   const prevTop = useRef<string | undefined>(gallery[0]?.id)
+  // 3.1.0 (C27): the full list from IndexedDB, or entries restored from the
+  // output folder, can put an older entry on top. Only one made in this
+  // session counts as a new result.
+  const sessionStart = useRef(Date.now() - 60_000)
   useEffect(() => {
-    const top = gallery[0]?.id
-    if (top && top !== prevTop.current) { setShownId(top); prevTop.current = top }
+    const top = gallery[0]
+    if (top && top.id !== prevTop.current) {
+      prevTop.current = top.id
+      if (top.createdAt >= sessionStart.current) setShownId(top.id)
+    }
   }, [gallery])
 
   // Switching intent/mode returns the Stage to empty — the newest gallery item
@@ -227,27 +283,39 @@ function CreateExperimentalInner() {
   const videoForLane = intentNeedsComfyGraph(intent)
     ? videoModelList.filter((m) => !isMlxImageModel(m.name))
     : videoModelList
+  const comfyStarting = idleNotice === IDLE_STARTING
   const setupCardOwnsStage = stageShowsSetupCard({
     backend,
     requiresModels: INTENT_MAP[intent].requiresModels,
     mlxMissing,
     connected,
+    comfyStarting,
     modelsLoaded,
     comfyRunning,
     laneModelCount: laneModelCount(intent, INTENT_MAP[intent].requiresModels, {
       image: imageForLane, video: videoForLane, audio: audioModelList,
-      lipsync: lipsyncModelList, motion: motionModelList,
+      lipsync: lipsyncModelList, motion: motionModelList, upscale: upscaleModelList,
     }),
   })
-  const banner = error ?? (setupCardOwnsStage ? null : modelLoadError)
+  // While ComfyUI starts, "ComfyUI is starting up." is the one voice; the
+  // load error "is not running" said the opposite in red next to it
+  // (3.0.4 Gegenprobe 8).
+  //
+  // In Cloud mode nothing renders on this machine. `modelLoadError` is the
+  // state of the LOCAL model list, which is fetched whatever the mode is, so
+  // on a Windows or Linux machine with no ComfyUI running the Cloud tab stood
+  // under "ComfyUI is not running. Start it from Settings or wait for
+  // auto-start." (how-to recording 12.10.2026). It belongs to the local lane.
+  // 3D on a Mac runs its own engine (commands/mesh3d.rs): the state of the
+  // image engine is its business only for "From text", which paints first.
+  const threeDOwnEngine = intent === '3d' && isMlxImageHost() && threeDWay !== 'text'
+  const banner = error ?? (backend === 'cloud' ? null : setupCardOwnsStage || comfyStarting || threeDOwnEngine ? null : modelLoadError)
 
-  // "Edit with mask" on a finished image force-sets the 'edit' intent. On the
-  // MLX Mac that lane does not exist (no ComfyUI inpaint nodes, and MLX
-  // generate DROPS the source + mask — it silently produced an unrelated fresh
-  // text-to-image instead of an edit). Hide the action where the lane can't
-  // run, using the same rule the IntentBar renders from.
-  const editAvailable = isIntentAvailable('edit', backend, mlxOnlyCreateHost(isMlxImageHost(), comfyRunning))
-  const animateAvailable = isIntentAvailable('animate', backend, mlxOnlyCreateHost(isMlxImageHost(), comfyRunning))
+  const mlxOnly = mlxOnlyCreateHost(isMlxImageHost(), comfyRunning)
+  const mlxEdit = useCreateStore((s) => mlxTakesEditImage(s.imageModelList))
+  const editAvailable = isIntentAvailable('edit', backend, mlxOnly, false, mlxEdit)
+  const mlxAnimate = useCreateStore((s) => mlxTakesStartImage(s.videoModelList))
+  const animateAvailable = isIntentAvailable('animate', backend, mlxOnly, mlxAnimate)
 
   // Pull a finished result back in as the working source (ImageRef). Needed
   // because a text-to-image run leaves `source` empty — without this, "Edit
@@ -293,7 +361,7 @@ function CreateExperimentalInner() {
     }
   }, [adoptResult, setError])
 
-  // David 2026-07-10: source-needing ops must start EMPTY — never silently
+  // 2026-07-10: source-needing ops must start EMPTY — never silently
   // adopt a gallery image as the input. Adoption is always explicit: the
   // InputSlot's "pick from gallery" strip, drag&drop, the file picker, or a
   // result's "Edit" action. While an op intent owns the stage, clicking a
@@ -302,7 +370,9 @@ function CreateExperimentalInner() {
   const openGalleryItem = useCallback((id: string) => {
     const item = useCreateStore.getState().gallery.find((g) => g.id === id)
     if (!item) return
-    if (INTENT_MAP[intent].needsSource) setLightbox(item)
+    // 3D from a picture or a video owns a source too, and a model opens in
+    // the large view, where it can be turned.
+    if (intentNeedsSource(intent, useCreateStore.getState().threeDWay) || item.type === '3d') setLightbox(item)
     else setShownId(id)
   }, [intent])
 
@@ -337,7 +407,7 @@ function CreateExperimentalInner() {
 
       {/* CPU-mode warning, persistent while LU's ComfyUI runs with --cpu.
           Without it a user sees "Ready to generate" and then a bare 20-minute
-          timeout (shd_scorpion, RX 7900 XTX). Local renders only, cloud jobs
+          timeout (RX 7900 XTX). Local renders only, cloud jobs
           never touch the local ComfyUI.
 
           The sentence itself lives in lib/comfy-cpu-banner.ts, because it is
@@ -358,6 +428,20 @@ function CreateExperimentalInner() {
         </Hinweis>
       )}
 
+      {/* A Mac with less memory than the lane's video model is recommended
+          for. The run is not held back, so it is said before it starts. */}
+      <MacVideoMemoryNotice />
+
+      {/* Local 3D on a PC whose card is under TRELLIS.2's 12 GB, or with
+          ComfyUI on the processor: one line before setup and run, with the
+          way to LU Cloud 3D. A hint, the setup and the run stay possible. */}
+      <ThreeDHardwareNotice />
+
+      {/* The run on screen does not fit this machine (too big for the card,
+          only partly on it for a video, or a long Mac run): one quiet line
+          that LU Cloud runs it, closable for the session. */}
+      <CreateCloudOffer />
+
       {/* Idle outage (R18 Befund 2): ComfyUI died while nobody was rendering
           and the tab said nothing about it for 180 seconds. One quiet line,
           no button: the render path restarts it and this says so. Nothing is
@@ -366,10 +450,10 @@ function CreateExperimentalInner() {
         <Hinweis className="px-4 py-2 shrink-0">{idleNotice}</Hinweis>
       )}
 
-      {/* Cross-origin block (#75, cinemazverev): a user-managed ComfyUI 0.19+
+      {/* Cross-origin block (#75): a user-managed ComfyUI 0.19+
           answers the WebView's media/WS requests with a Sec-Fetch 403, so results
           couldn't be viewed. LU proxies the bytes so they still display, but the
-          live progress bar + native video seeking degrade. David 2026-07-17: keep
+          live progress bar + native video seeking degrade. 2026-07-17: keep
           the message short and offer a one-click fix — LU restarts ComfyUI under
           its own management, which always passes the CORS flag. Local only,
           dismissible; the long manual-flag hint only appears if the fix fails.
@@ -402,7 +486,9 @@ function CreateExperimentalInner() {
         </Hinweis>
       )}
 
-      {/* Cloud gallery retention (David 2026-07-24). Cloud renders live on our
+      <CloudHiddenNotice />
+
+      {/* Cloud gallery retention (2026-07-24). Cloud renders live on our
           servers, not on this machine, so the gallery is not permanent storage.
           Cloud mode only. One time ever: no close X and no auto-hide, the only
           way out is the explicit "Do not show again", and it stays dismissed
@@ -424,30 +510,61 @@ function CreateExperimentalInner() {
           always the exact same height; the prompt window spans the full width
           beneath them. (Previously the Gallery ran full-height alongside both the
           viewer AND the composer, so it was taller than the viewer.) */}
-      <div className="flex-1 min-h-0 flex overflow-hidden">
-        <Stage
-          displayed={displayed}
-          onOpenMaskEditor={() => setMaskOpen(true)}
-          onEditResult={editAvailable ? (it) => { void editResultWithMask(it) } : undefined}
-          onAnimateResult={animateAvailable ? (it) => { void animateResult(it) } : undefined}
-          onFullscreen={(it) => setLightbox(it)}
-        />
-        <CreatePanel open={panelOpen} onOpenChange={setPanelOpen} activeId={shownId} onSelect={openGalleryItem} />
-        <PresetShelf
-          open={presetsOpen}
-          onOpenChange={setPresetsOpen}
-          onSelect={(p) => { setSelectedPreset(p); setPresetStarted(false); setPresetDialogOpen(true) }}
-          resume={selectedPreset && presetStarted && !presetDialogOpen ? { title: selectedPreset.title, onResume: () => setPresetDialogOpen(true) } : null}
-        />
+      {/* The Character tab: its column stands exactly over the prompt window
+          (index.css, .lu-hub-row), the rails stay at the right. */}
+      <div
+        className={hubOpen ? 'lu-hub-row flex-1 min-h-0 overflow-hidden' : 'flex-1 min-h-0 flex overflow-hidden'}
+        style={hubOpen ? { ['--hub-rails' as string]: `${Math.max(16, railsWidth)}px` } : undefined}
+      >
+        {hubOpen ? (
+          <CharacterHub
+            stage={{
+              displayed,
+              onOpenMaskEditor: () => setMaskOpen(true),
+              onEditResult: editAvailable ? (it) => { void editResultWithMask(it) } : undefined,
+              onAnimateResult: animateAvailable ? (it) => { void animateResult(it) } : undefined,
+              onFullscreen: (it) => { setLightboxPrompt(false); setLightbox(it) },
+              onShowPrompt: (it) => { setLightboxPrompt(true); setLightbox(it) },
+              onSaveCharacter: setCharacterFrom,
+              comfyStarting,
+            }}
+            onOpenGallery={() => setPanelOpen(true)}
+          />
+        ) : (
+          <Stage
+            displayed={displayed}
+            onOpenMaskEditor={() => setMaskOpen(true)}
+            onEditResult={editAvailable ? (it) => { void editResultWithMask(it) } : undefined}
+            onAnimateResult={animateAvailable ? (it) => { void animateResult(it) } : undefined}
+            onFullscreen={(it) => { setLightboxPrompt(false); setLightbox(it) }}
+            onShowPrompt={(it) => { setLightboxPrompt(true); setLightbox(it) }}
+            onSaveCharacter={setCharacterFrom}
+            comfyStarting={comfyStarting}
+          />
+        )}
+        {/* On a phone-wide window the Character area takes the whole width
+            (its rails would leave the column 200 px). */}
+        <div ref={rails} className={hubOpen ? 'lu-hub-rails max-[520px]:hidden' : 'contents'}>
+          <CreatePanel open={panelOpen} onOpenChange={setPanelOpen} activeId={shownId} onSelect={openGalleryItem} />
+          <PresetShelf
+            open={presetsOpen}
+            onOpenChange={setPresetsOpen}
+            onSelect={(p) => { setSelectedPreset(p); setPresetStarted(false); setPresetDialogOpen(true) }}
+            resume={selectedPreset && presetStarted && !presetDialogOpen ? { title: selectedPreset.title, onResume: () => setPresetDialogOpen(true) } : null}
+          />
+        </div>
       </div>
 
-      {/* Prompt window — full width, beneath the viewer + gallery. */}
+      {/* Prompt window — full width, beneath the viewer + gallery. The same
+          one in every tab, the Character tab included (David, 16.11.2026). */}
       <Composer
+        hub={hubOpen}
         onOpenAdvanced={() => setAdvancedOpen(true)}
         onOpenWorkflows={() => { setWorkflowsOpen(true); setManagerNoticeSeen(true) }}
       />
 
-      <AdvancedDrawer open={advancedOpen} onClose={() => setAdvancedOpen(false)} studioModel={studioPick} />
+      <AdvancedDrawer open={advancedOpen} onClose={() => setAdvancedOpen(false)} studioModel={studioPick}
+        onOpenWorkflows={() => { setAdvancedOpen(false); setWorkflowsOpen(true); setManagerNoticeSeen(true) }} />
       <WorkflowsModal open={workflowsOpen} onClose={() => setWorkflowsOpen(false)} />
       <MaskEditor open={maskOpen} onClose={() => setMaskOpen(false)} />
 
@@ -483,7 +600,7 @@ function CreateExperimentalInner() {
           // also ist dies die letzte fehlende Haelfte.
           keepMounted
         >
-          <div className="flex h-[min(600px,90vh)] flex-col overflow-hidden rounded-2xl bg-lu-base">
+          <div className="flex h-[min(600px,calc(90vh/var(--ui-scale)))] flex-col overflow-hidden rounded-2xl bg-lu-base dark:bg-transparent">
             <Suspense fallback={<div className="flex flex-1 items-center justify-center t-control text-gray-400">Loading…</div>}>
               <PresetWorkshop
                 key={selectedPreset.id}
@@ -496,7 +613,8 @@ function CreateExperimentalInner() {
         </Modal>
       )}
 
-      <Lightbox item={lightbox} onClose={() => setLightbox(null)} />
+      <Lightbox item={lightbox} promptOpen={lightboxPrompt} onClose={() => { setLightbox(null); setLightboxPrompt(false) }} onSaveCharacter={setCharacterFrom} onNavigate={(it) => { setLightboxPrompt(false); setLightbox(it) }} />
+      <SaveCharacterModal item={characterFrom} onClose={() => setCharacterFrom(null)} />
       <VhsInstallModal />
     </div>
   )

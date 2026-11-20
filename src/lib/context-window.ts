@@ -1,7 +1,7 @@
 /**
  * Effective context-window resolution — single source of truth so the value we
  * SEND to the model (Ollama `num_ctx`) and the value we DISPLAY (TokenCounter
- * denominator) can never disagree (David 2026-06-05: "muss immer stimmen").
+ * denominator) can never disagree (2026-06-05: "muss immer stimmen").
  *
  * Leaf module — imports NOTHING from api/* so it can be used by both the
  * provider layer and the UI without an import cycle.
@@ -43,10 +43,11 @@ export const DEFAULT_CONTEXT_CAP = 16384
  * restarts its own plan at step 18 never does.
  *
  * The model's real maximum still wins downward, and a user override still wins
- * outright. Switching between a chat and an agent conversation on the same
- * model now changes num_ctx and costs one Ollama reload, which is the price of
- * the two surfaces having genuinely different needs. Within a run the value is
- * constant, which is the invariant `resolveAgentNumCtx` exists to hold.
+ * outright. A chat turn and an agent turn on the same model therefore send
+ * two different windows, and Ollama loads the model again between them. That
+ * is the price of the two surfaces having genuinely different needs, and it
+ * is the ONLY reload left: everything else follows one of the two, see
+ * `ollamaWindowFor` below and `ollamaNumCtx` in api/ollama.ts.
  */
 export const AGENT_CONTEXT_CAP = 32768
 
@@ -70,4 +71,41 @@ export function effectiveContextWindow(
   // ever reached by a model that has told us it can take it.
   const max = modelMax && modelMax > 0 ? modelMax : DEFAULT_CONTEXT_CAP
   return Math.min(max, cap)
+}
+
+/**
+ * The two windows an Ollama model is ever asked to run with.
+ *
+ *   - `chat`:  a turn that starts with a persona and a question. Chat, Voice,
+ *              the comparison view.
+ *   - `agent`: a turn that carries the tool catalogue. Agent mode, the Code
+ *              tab, a workflow.
+ *
+ * Nothing else may pick a window. A call nobody sees (memory extraction, a
+ * title, a prompt rewrite, a sub-agent, the screen model, a compaction) names
+ * neither and is sent the window the model was last sent, so it can never be
+ * the reason Ollama loads a model again.
+ */
+export type WindowUse = 'chat' | 'agent'
+
+/**
+ * What a caller may say about the window of one call. `backend-default` sends
+ * none at all and is for exactly one case: a call that follows a turn the app
+ * did not send itself (the phone talks to the backend through the remote
+ * bridge and names no window).
+ */
+export type WindowChoice = WindowUse | 'backend-default'
+
+/** An agent turn never runs below this, so a picture fed back for a look still fits. */
+export const AGENT_CONTEXT_FLOOR = 8192
+
+/**
+ * The num_ctx of one use on one Ollama model. Pure; the one caller that sends
+ * it is `ollamaNumCtx` (api/ollama.ts), and whoever only shows or budgets the
+ * number calls this with the same three values.
+ */
+export function ollamaWindowFor(use: WindowUse, modelMax: number | undefined, override?: number): number {
+  if (override && override > 0) return override
+  if (use === 'chat') return effectiveContextWindow(modelMax, 0)
+  return Math.max(effectiveContextWindow(modelMax, 0, AGENT_CONTEXT_CAP), AGENT_CONTEXT_FLOOR)
 }

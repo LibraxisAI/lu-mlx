@@ -39,7 +39,7 @@ const read = (...p: string[]) => readFileSync(resolve(SRC, ...p), 'utf8')
 const byId = (items: readonly MenuAction[], id: string) => items.find(i => i.id === id)
 
 function messageHandlers(over: Partial<MessageMenuHandlers> = {}): MessageMenuHandlers {
-  return { copy: vi.fn(), edit: vi.fn(), regenerate: vi.fn(), remove: vi.fn(), ...over }
+  return { copy: vi.fn(), edit: vi.fn(), regenerate: vi.fn(), branch: vi.fn(), remove: vi.fn(), ...over }
 }
 
 describe('Nachricht: das Menü ruft die Funktionen der Aktionsleiste', () => {
@@ -51,6 +51,7 @@ describe('Nachricht: das Menü ruft die Funktionen der Aktionsleiste', () => {
     expect(byId(items, 'copy')?.run).toBe(h.copy)
     expect(byId(items, 'edit')?.run).toBe(h.edit)
     expect(byId(items, 'regenerate')?.run).toBe(h.regenerate)
+    expect(byId(items, 'branch')?.run).toBe(h.branch)
     expect(byId(items, 'delete')?.run).toBe(h.remove)
   })
 
@@ -61,9 +62,16 @@ describe('Nachricht: das Menü ruft die Funktionen der Aktionsleiste', () => {
     // Antwort, die (noch) nicht bearbeitbar ist: kein Edit.
     const noEdit = buildMessageMenu(messageHandlers({ edit: null }), state)
     expect(byId(noEdit, 'edit')).toBeUndefined()
-    // Kopieren und Löschen kann man immer.
+    // GH #174: no branch where the bar has no branch button.
+    const noBranch = buildMessageMenu(messageHandlers({ branch: null }), state)
+    expect(byId(noBranch, 'branch')).toBeUndefined()
+    // Kopieren und Löschen kann man sonst immer.
     expect(byId(noEdit, 'copy')).toBeDefined()
     expect(byId(noEdit, 'delete')).toBeDefined()
+    // 3.0.9: eine fruehere Compact-Ebene ist nur lesbar. Kopieren ja,
+    // Loeschen nicht (Mac-Lauf 28.10.: der Muelleimer stand noch da).
+    const readOnly = buildMessageMenu(messageHandlers({ edit: null, regenerate: null, branch: null, remove: null }), state)
+    expect(readOnly.map((i) => i.id)).toEqual(['copy'])
   })
 
   it('Löschen ist als zerstörend markiert — nichts anderes ist es', () => {
@@ -162,7 +170,10 @@ describe('ein Menü, ein Aufrufweg — Gegenprobe an der Quelle', () => {
 
   it('ModelCard: Knöpfe und Menü lesen aus DEMSELBEN actions-Objekt', () => {
     const src = read('components', 'models', 'ModelCard.tsx')
-    expect(src).toContain('const actions: ModelMenuHandlers = { select: onSelect, info: onInfo, remove: onDelete }')
+    // A14 brought a fourth action, Remove refusals, and W33 a fifth, Show in
+    // folder (ComfyUI files), through the same object.
+    expect(src).toContain('const actions: ModelMenuHandlers = { select: onSelect, info: onInfo, remove: onDelete, removeRefusals: onRemoveRefusals, reveal: onReveal, rename: onRename }')
+    expect(src).toContain('actions.removeRefusals?.()')
     expect(src).toContain('buildModelCardMenu(actions,')
     expect(src).toContain('actions.info()')
     expect(src).toContain('actions.remove()')

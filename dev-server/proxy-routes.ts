@@ -13,7 +13,7 @@ import { defaultComfyPort } from '../src/lib/comfy-default-port'
  */
 export function registerProxyRoutes(routes: RouteMount): void {
   // API: ComfyUI POST proxy (workaround for Vite 8 blocking POST via proxy).
-  // David 2026-06-16 — konata's "Failed to upload image: HTTP 400" (web build
+  // 2026-06-16 — a user's "Failed to upload image: HTTP 400" (web build
   // via SSH-tunneled `npm run dev`) reproduced HERE: this proxy used to buffer
   // the body as a STRING (`body += chunk` corrupts binary image bytes) and
   // HARDCODE Content-Type: application/json (strips the multipart/form-data
