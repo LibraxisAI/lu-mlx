@@ -597,7 +597,7 @@ pub struct Nutzung {
     seit: std::sync::atomic::AtomicU64,
 }
 
-fn jetzt_ms() -> u64 {
+pub(crate) fn jetzt_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -614,7 +614,7 @@ impl Nutzung {
 
     /// Eine Anfrage beginnt. Der Waechter zaehlt sie als laufend, bis er
     /// faellt, beim Streaming also erst mit dem letzten Byte.
-    fn beginn(self: &Arc<Self>, modell: &str) -> Laufend {
+    pub(crate) fn beginn(self: &Arc<Self>, modell: &str) -> Laufend {
         use std::sync::atomic::Ordering::Relaxed;
         self.anfragen.fetch_add(1, Relaxed);
         self.laufend.fetch_add(1, Relaxed);
@@ -624,12 +624,12 @@ impl Nutzung {
         Laufend { nutzung: Arc::clone(self) }
     }
 
-    fn fehler(&self) {
+    pub(crate) fn fehler(&self) {
         self.fehlgeschlagen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Das `usage` einer fertigen Antwort, oder keins.
-    fn zahlen(&self, usage: Option<(u64, u64)>) {
+    pub(crate) fn zahlen(&self, usage: Option<(u64, u64)>) {
         use std::sync::atomic::Ordering::Relaxed;
         match usage {
             Some((p, a)) => {
@@ -706,6 +706,11 @@ pub struct LocalApiState {
     pub engine: Option<Arc<dyn EngineHost>>,
     /// One load decision at a time (`local_api_engine::bereitstellen`).
     pub lade_schloss: LadeSchloss,
+    /// The responses of `POST /v1/responses` that a later request may continue
+    /// with `previous_response_id` (local_api_responses.rs). In memory only,
+    /// bounded, and gone when the API stops: what a client asked never lands
+    /// in a file, the same promise as `Nutzung`.
+    pub response_store: Arc<RwLock<super::local_api_responses::ResponseStore>>,
 }
 
 /// Die Upstreams, wie sie JETZT gelten: `cfg.upstreams`, wo die App fuer eine
@@ -772,13 +777,13 @@ impl LocalApiServer {
 
 /// Kopfzeilen einer axum-Anfrage in die Form, die die reinen Funktionen oben
 /// lesen. Kleingeschrieben, weil HTTP das ohnehin so meint.
-fn header_map_to_btree(h: &HeaderMap) -> BTreeMap<String, String> {
+pub(crate) fn header_map_to_btree(h: &HeaderMap) -> BTreeMap<String, String> {
     h.iter()
         .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.as_str().to_ascii_lowercase(), s.to_string())))
         .collect()
 }
 
-fn fehler(code: StatusCode, typ: &str, msg: &str) -> Response {
+pub(crate) fn fehler(code: StatusCode, typ: &str, msg: &str) -> Response {
     fehler_mit(code, typ, msg, None, None)
 }
 
@@ -789,7 +794,7 @@ fn fehler(code: StatusCode, typ: &str, msg: &str) -> Response {
 /// das falsche Feld markieren will, bekam nichts. `null` ist in OpenAIs Form
 /// erlaubt und heisst „trifft hier nicht zu" — wir hatten es als „haben wir
 /// nicht ausgefuellt" benutzt, und das ist ein anderer Satz.
-fn fehler_mit(code: StatusCode, typ: &str, msg: &str, param: Option<&str>, fehlercode: Option<&str>) -> Response {
+pub(crate) fn fehler_mit(code: StatusCode, typ: &str, msg: &str, param: Option<&str>, fehlercode: Option<&str>) -> Response {
     let mut antwort = (code, Json(serde_json::json!({
         "error": {
             "message": msg,
@@ -948,6 +953,70 @@ async fn weiterleiten(state: LocalApiState, pfad: &str, pflichtfeld: &str, heade
     antwort
 }
 
+/// Where a request for the model `gewuenscht` goes: the lane, the id that lane
+/// knows, and the lane's address right now.
+///
+/// Taken out of `weiterleiten_mit` (2026-11-22) because `/v1/responses`
+/// (local_api_responses.rs) needs exactly the same resolution, and a second
+/// copy would sooner or later have decided differently from the first: the
+/// same error codes, the same on-demand load of an LU Engine model (C57), the
+/// same address. An `Err` is the finished error response.
+pub(crate) struct UpstreamZiel {
+    pub(crate) lane: Lane,
+    pub(crate) upstream_id: String,
+    pub(crate) base: String,
+}
+
+pub(crate) async fn upstream_ziel(state: &LocalApiState, gewuenscht: &str, pfad: &str) -> Result<UpstreamZiel, Response> {
+    let mut gewuenscht = gewuenscht.to_string();
+    // Eine Engine-ID aus 3.0.8 (`lu/<voller Pfad>`) meint das Modell dieses Namens.
+    if let Some(neu) = alte_engine_id_lesen(&gewuenscht) {
+        gewuenscht = neu;
+    }
+    let k = katalog(state).await;
+    let ziel = match resolve_model(&gewuenscht, &k) {
+        Ok(m) => m,
+        Err(e) => {
+            let code = match e {
+                ResolveError::Ambiguous { .. } => StatusCode::BAD_REQUEST,
+                ResolveError::Unknown(_) | ResolveError::LaneLeer { .. } => StatusCode::NOT_FOUND,
+            };
+            return Err(fehler_mit(code, "invalid_request_error", &e.message(), Some("model"), Some(e.code())));
+        }
+    };
+
+    // C57: ein LU-Engine-Modell, das nicht geladen ist, wird jetzt geladen,
+    // wie Ollama es beim ersten Aufruf tut. Embeddings nicht: die laufen in
+    // der App ueber einen eigenen Engine-Prozess, nicht ueber den Chat.
+    let mut engine_port: Option<u16> = None;
+    if ziel.lane == Lane::Engine && pfad != "/embeddings" {
+        if let Some(host) = &state.engine {
+            let modelle = engine_modelle(host).await;
+            if let Some(m) = modelle.into_iter().find(|m| m.name == ziel.upstream_id) {
+                match bereitstellen(Arc::clone(host), &state.lade_schloss, &state.http, &m, WARTEN_AUF_FREI, WARTEN_AUF_BEREIT).await {
+                    Ok(p) => engine_port = Some(p),
+                    Err(e) => {
+                        let code = match e {
+                            super::local_api_engine::LadeFehler::Belegt { .. } => StatusCode::SERVICE_UNAVAILABLE,
+                            super::local_api_engine::LadeFehler::Start { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+                        };
+                        return Err(fehler_mit(code, "api_error", &e.message(), Some("model"), Some(e.code())));
+                    }
+                }
+            }
+        }
+    }
+
+    let base = match engine_port {
+        Some(p) => format!("http://127.0.0.1:{}/v1", p),
+        None => match upstreams_jetzt(state).await.into_iter().find(|u| u.lane() == Some(ziel.lane)) {
+            Some(u) => u.base.trim_end_matches('/').to_string(),
+            None => return Err(fehler(StatusCode::BAD_GATEWAY, "api_error", &format!("{} has no configured address.", ziel.lane.label()))),
+        },
+    };
+    Ok(UpstreamZiel { lane: ziel.lane, upstream_id: ziel.upstream_id, base })
+}
+
 async fn weiterleiten_mit(
     state: LocalApiState,
     pfad: &str,
@@ -981,21 +1050,10 @@ async fn weiterleiten_mit(
         );
     }
 
-    let mut gewuenscht = json.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
-    // Eine Engine-ID aus 3.0.8 (`lu/<voller Pfad>`) meint das Modell dieses Namens.
-    if let Some(neu) = alte_engine_id_lesen(&gewuenscht) {
-        gewuenscht = neu;
-    }
-    let k = katalog(&state).await;
-    let ziel = match resolve_model(&gewuenscht, &k) {
-        Ok(m) => m,
-        Err(e) => {
-            let code = match e {
-                ResolveError::Ambiguous { .. } => StatusCode::BAD_REQUEST,
-                ResolveError::Unknown(_) | ResolveError::LaneLeer { .. } => StatusCode::NOT_FOUND,
-            };
-            return fehler_mit(code, "invalid_request_error", &e.message(), Some("model"), Some(e.code()));
-        }
+    let gewuenscht = json.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
+    let ziel = match upstream_ziel(&state, &gewuenscht, pfad).await {
+        Ok(z) => z,
+        Err(antwort) => return antwort,
     };
 
     // Nach oben geht die ID, die die Lane kennt — nicht unsere qualifizierte.
@@ -1004,36 +1062,7 @@ async fn weiterleiten_mit(
     }
 
     let stream_gewuenscht = json.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
-
-    // C57: ein LU-Engine-Modell, das nicht geladen ist, wird jetzt geladen,
-    // wie Ollama es beim ersten Aufruf tut. Embeddings nicht: die laufen in
-    // der App ueber einen eigenen Engine-Prozess, nicht ueber den Chat.
-    let mut engine_port: Option<u16> = None;
-    if ziel.lane == Lane::Engine && pfad != "/embeddings" {
-        if let Some(host) = &state.engine {
-            let modelle = engine_modelle(host).await;
-            if let Some(m) = modelle.into_iter().find(|m| m.name == ziel.upstream_id) {
-                match bereitstellen(Arc::clone(host), &state.lade_schloss, &state.http, &m, WARTEN_AUF_FREI, WARTEN_AUF_BEREIT).await {
-                    Ok(p) => engine_port = Some(p),
-                    Err(e) => {
-                        let code = match e {
-                            super::local_api_engine::LadeFehler::Belegt { .. } => StatusCode::SERVICE_UNAVAILABLE,
-                            super::local_api_engine::LadeFehler::Start { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-                        };
-                        return fehler_mit(code, "api_error", &e.message(), Some("model"), Some(e.code()));
-                    }
-                }
-            }
-        }
-    }
-
-    let base = match engine_port {
-        Some(p) => format!("http://127.0.0.1:{}/v1", p),
-        None => match upstreams_jetzt(&state).await.into_iter().find(|u| u.lane() == Some(ziel.lane)) {
-            Some(u) => u.base.trim_end_matches('/').to_string(),
-            None => return fehler(StatusCode::BAD_GATEWAY, "api_error", &format!("{} has no configured address.", ziel.lane.label())),
-        },
-    };
+    let base = ziel.base.clone();
 
     let ziel_url = format!("{}{}", base, pfad);
     let mut req = state.http.post(&ziel_url);
@@ -1163,7 +1192,7 @@ async fn weiterleiten_mit(
 /// Bericht B5 (2026-10-28): ohne eigene Behandlung beantwortet axum einen zu
 /// grossen Koerper selbst, mit einer nackten Text-413, an `fehler()` vorbei,
 /// und ein OpenAI-SDK meldet dann nur einen Parse-Fehler.
-type Koerper = Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>;
+pub(crate) type Koerper = Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>;
 
 /// Wie gross ein Anfragekoerper sein darf: 32 MB.
 ///
@@ -1177,7 +1206,7 @@ pub const MAX_KOERPER_BYTES: usize = 32 * 1024 * 1024;
 
 /// Eine abgelehnte Anfrage in der Fehlerform dieses Servers. Gezaehlt wird
 /// sie nicht: sie hat kein Modell erreicht, wie vorher auch.
-fn koerper_abgelehnt(e: axum::extract::rejection::BytesRejection) -> Response {
+pub(crate) fn koerper_abgelehnt(e: axum::extract::rejection::BytesRejection) -> Response {
     if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
         return fehler_mit(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -1348,15 +1377,21 @@ fn lu_doku() -> serde_json::Value {
             { "method": "POST", "path": "/v1/chat/completions",  "note": "Requires `model` and `messages`. `stream: true` streams." },
             { "method": "POST", "path": "/v1/completions",       "note": "Requires `model` and `prompt`." },
             { "method": "POST", "path": "/v1/embeddings",        "note": "Requires `model` and `input`." },
+            { "method": "POST", "path": "/v1/responses",         "note": "OpenAI Responses API. Requires `model` and `input`. `stream: true` streams Responses events as SSE. `previous_response_id` continues an earlier response of this server." },
+            { "method": "GET",  "path": "/v1/responses",         "note": "WebSocket upgrade of the Responses API. Send {\"type\":\"response.create\", ...} text frames, one turn at a time; the events come back as text frames. Same key as every other route." },
             { "method": "GET",  "path": "/lu/v1/health",         "note": "Per-lane state: address, reachable, model count." },
             { "method": "GET",  "path": "/lu/v1/tools",          "note": "Catalogue of LU agent tools. Not callable over HTTP yet." },
             { "method": "GET",  "path": "/lu/v1/docs",           "note": "This page." },
         ],
         "loading": "The LU Engine holds one model at a time. A chat or completion for an LU Engine model that is not loaded loads it first, so that first answer takes as long as the load (like Ollama). A swap waits until the engine has finished the answer it is writing. GET /lu/v1/health names the loaded model.",
         "passthrough": "Everything other than `model` goes to the backend untouched — temperature, tools, response_format, and whatever else that backend supports. What a lane cannot do, this API cannot add.",
+        "responses": {
+            "translation": "/v1/responses is answered through the lane's /v1/chat/completions: `instructions` and system or developer messages become one system message, function_call and function_call_output items become tool calls and tool messages, `max_output_tokens` becomes `max_tokens`, `reasoning.effort` becomes `reasoning_effort`, `text.format` becomes `response_format`. Built-in tools (web search, file search, computer use) do not exist here and are left out.",
+            "previous_response_id": "Works for responses of this server while it runs: the last 256 are kept in memory, never on disk, and are gone when the API stops. `store: false` keeps nothing, so such a response cannot be continued.",
+        },
         "errors": {
             "shape": "OpenAI's: { error: { message, type, param, code } }",
-            "codes": ["invalid_api_key", "invalid_body", "missing_required_parameter", "model_not_found", "model_ambiguous", "lane_unavailable", "model_load_failed", "engine_busy"],
+            "codes": ["invalid_api_key", "invalid_body", "missing_required_parameter", "model_not_found", "model_ambiguous", "lane_unavailable", "model_load_failed", "engine_busy", "previous_response_not_found", "invalid_frame", "invalid_value", "upgrade_required", "upstream_error"],
             "lane_unavailable": "The name asked for a real lane that currently holds no models — that backend is most likely not running.",
         },
         "cors": "Off until you list an origin under Settings → Local API. No wildcard: name the origin you want to let read your local model traffic.",
@@ -1464,6 +1499,14 @@ pub fn build_local_api_router(state: LocalApiState) -> Router {
         .route("/v1/chat/completions", post(handle_chat))
         .route("/v1/completions", post(handle_completions))
         .route("/v1/embeddings", post(handle_embeddings))
+        // The OpenAI Responses API: POST answers as JSON or SSE, GET is the
+        // WebSocket upgrade. Both sit behind the same auth layer as every
+        // other route (the upgrade is an ordinary GET until auth let it
+        // through). See local_api_responses.rs.
+        .route(
+            "/v1/responses",
+            post(super::local_api_responses::handle_responses_post).get(super::local_api_responses::handle_responses_ws),
+        )
         .route("/lu/v1/health", get(handle_health))
         .route("/lu/v1/tools", get(handle_tools))
         .route("/lu/v1/docs", get(handle_docs))
@@ -1471,7 +1514,7 @@ pub fn build_local_api_router(state: LocalApiState) -> Router {
             fehler(
                 StatusCode::NOT_FOUND,
                 "invalid_request_error",
-                &format!("No route {} {}. This server speaks /v1/models, /v1/chat/completions, /v1/completions, /v1/embeddings, /lu/v1/health, /lu/v1/tools and /lu/v1/docs — the last one describes all of them.", method, uri.path()),
+                &format!("No route {} {}. This server speaks /v1/models, /v1/chat/completions, /v1/completions, /v1/embeddings, /v1/responses, /lu/v1/health, /lu/v1/tools and /lu/v1/docs — the last one describes all of them.", method, uri.path()),
             )
         })
         .layer(axum::extract::DefaultBodyLimit::max(MAX_KOERPER_BYTES))
@@ -1558,6 +1601,7 @@ pub async fn start_local_api(
             .map_err(|e| e.to_string())?,
         nutzung: Arc::new(Nutzung::neu()),
         live, engine, lade_schloss: Default::default(),
+        response_store: Default::default(),
     };
     let nutzung = Arc::clone(&api_state.nutzung);
 
@@ -1795,7 +1839,7 @@ mod local_api_echt {
             upstreams: default_upstreams(),
             cors_origins: cors,
         };
-        let state = LocalApiState { cfg: Arc::new(RwLock::new(cfg)), http, nutzung: Arc::new(Nutzung::neu()), live: None, engine: None, lade_schloss: Default::default() };
+        let state = LocalApiState { cfg: Arc::new(RwLock::new(cfg)), http, nutzung: Arc::new(Nutzung::neu()), live: None, engine: None, lade_schloss: Default::default(), response_store: Default::default() };
         let l = tokio::net::TcpListener::bind(bind_addr(false, 0)).await.ok()?;
         let addr = l.local_addr().ok()?;
         let router = build_local_api_router(state);
@@ -1980,6 +2024,7 @@ mod local_api_echt {
                 .connect_timeout(std::time::Duration::from_secs(5)).build().unwrap(),
             nutzung: Arc::new(Nutzung::neu()),
             live: None, engine: None, lade_schloss: Default::default(),
+            response_store: Default::default(),
         };
         let l = tokio::net::TcpListener::bind(bind_addr(false, port)).await
             .unwrap_or_else(|e| panic!("Port {} nicht frei: {}", port, e));
@@ -2292,6 +2337,7 @@ mod tests {
             http: reqwest::Client::new(),
             nutzung: Arc::clone(&nutzung),
             live: None, engine: None, lade_schloss: Default::default(),
+            response_store: Default::default(),
         };
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let api = l.local_addr().unwrap();
@@ -2345,6 +2391,7 @@ mod tests {
             http: reqwest::Client::new(),
             nutzung: Arc::new(Nutzung::neu()),
             live, engine: None, lade_schloss: Default::default(),
+            response_store: Default::default(),
         };
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let a = l.local_addr().unwrap();
@@ -2821,6 +2868,7 @@ mod tests {
             "/v1/chat/completions",
             "/v1/completions",
             "/v1/embeddings",
+            "/v1/responses",
             "/lu/v1/health",
             "/lu/v1/tools",
             "/lu/v1/docs",
@@ -2829,7 +2877,7 @@ mod tests {
         }
         // Alle Fehlercodes, die der Code wirklich sendet, stehen drin.
         let codes = d["errors"]["codes"].to_string();
-        for c in ["invalid_api_key", "missing_required_parameter", "model_not_found", "model_ambiguous", "lane_unavailable"] {
+        for c in ["invalid_api_key", "missing_required_parameter", "model_not_found", "model_ambiguous", "lane_unavailable", "previous_response_not_found"] {
             assert!(codes.contains(c), "{} fehlt in der Doku", c);
         }
         // Und jede Lane nennt sich so, wie das Praefix wirklich heisst.
@@ -2917,6 +2965,7 @@ mod c57_engine_lane {
             live: None,
             engine,
             lade_schloss: Default::default(),
+            response_store: Default::default(),
         };
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let a = l.local_addr().unwrap();

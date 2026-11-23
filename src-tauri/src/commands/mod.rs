@@ -56,6 +56,8 @@ pub mod self_migrate;
 pub mod self_migrate_cmd;
 pub mod local_api;
 pub mod local_api_engine;
+// POST/GET /v1/responses of the local API server, see local_api_responses.rs.
+pub mod local_api_responses;
 pub mod logging;
 pub mod media_cmds;
 // Create, 3D: open a model in Blender or have Blender make a .blend or FBX.
@@ -88,6 +90,8 @@ pub mod neuron;
 pub mod oauth;
 pub mod process;
 pub mod proxy;
+// The native Responses API transport (HTTP SSE + WebSocket), see responses.rs.
+pub mod responses;
 pub mod workflow_fetch;
 pub mod lan_address;
 pub mod remote;

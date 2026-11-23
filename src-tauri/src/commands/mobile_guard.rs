@@ -302,6 +302,12 @@ pub const ALLOWED: &[&str] = &[
     "register_openai_host",
     "pull_model_stream",
     "cancel_model_pull",
+    // The Responses API transport talks to the providers the phone already
+    // reaches through the proxy, under the same allow-list (https/wss only
+    // past the home network). It starts nothing on the device.
+    "responses_stream",
+    "responses_cancel",
+    "responses_close_session",
 ];
 
 #[cfg_attr(not(mobile), allow(dead_code))]

@@ -86,6 +86,20 @@ function vaultDelete(id: ProviderId): Promise<void> {
  * key, the address must be http or https, and the fields that belong to the
  * shared slot alone (`managed`, `displaced`) never survive.
  */
+/**
+ * The wire an OpenAI-compatible endpoint speaks (`apiProtocol`) and how a
+ * Responses API turn is carried (`responsesTransport`). Only the known values
+ * leave storage; anything else reads as absent, which is Chat Completions.
+ */
+function protocolFields(raw: Partial<ProviderConfig>): Pick<ProviderConfig, 'apiProtocol' | 'responsesTransport'> {
+  const out: Pick<ProviderConfig, 'apiProtocol' | 'responsesTransport'> = {}
+  if (raw.apiProtocol === 'chat_completions' || raw.apiProtocol === 'responses') out.apiProtocol = raw.apiProtocol
+  if (raw.responsesTransport === 'auto' || raw.responsesTransport === 'websocket' || raw.responsesTransport === 'sse') {
+    out.responsesTransport = raw.responsesTransport
+  }
+  return out
+}
+
 function sanitizeCompatSlot(id: CompatProviderId, raw: unknown): ProviderConfig | null {
   if (!raw || typeof raw !== 'object') return null
   const r = raw as Partial<ProviderConfig>
@@ -98,6 +112,7 @@ function sanitizeCompatSlot(id: CompatProviderId, raw: unknown): ProviderConfig 
     baseUrl,
     apiKey: typeof r.apiKey === 'string' ? r.apiKey : '',
     isLocal: r.isLocal === true,
+    ...protocolFields(r),
   }
 }
 // Providers whose OS-vault WRITE failed this session. partialize keeps their
@@ -278,6 +293,7 @@ export function sanitizeOpenAIEntries(raw: unknown): ProviderConfig[] {
       baseUrl: typeof r.baseUrl === 'string' ? r.baseUrl : '',
       apiKey: typeof r.apiKey === 'string' ? r.apiKey : '',
       isLocal: r.isLocal === true,
+      ...protocolFields(r),
       ...(r.disabledByUser === true ? { disabledByUser: true } : {}),
     })
   }
@@ -337,7 +353,7 @@ interface ProviderState {
 
   /** Adds an entry and returns its id. Enabled right away. */
   addOpenAIEntry: (input: { name: string; baseUrl: string; isLocal: boolean }) => string
-  updateOpenAIEntry: (entryId: string, updates: Partial<Pick<ProviderConfig, 'name' | 'baseUrl' | 'isLocal' | 'enabled' | 'disabledByUser'>>) => void
+  updateOpenAIEntry: (entryId: string, updates: Partial<Pick<ProviderConfig, 'name' | 'baseUrl' | 'isLocal' | 'enabled' | 'disabledByUser' | 'apiProtocol' | 'responsesTransport'>>) => void
   setOpenAIEntryApiKey: (entryId: string, key: string) => void
   getOpenAIEntryApiKey: (entryId: string) => string
   removeOpenAIEntry: (entryId: string) => void
@@ -496,7 +512,7 @@ export const useProviderStore = create<ProviderState>()(
           // the map key. An address change goes through addCompatProvider,
           // which also drops the key typed for the old host.
           const { enabled, name, disabledByUser } = updates
-          const patch: Partial<ProviderConfig> = {}
+          const patch: Partial<ProviderConfig> = { ...protocolFields(updates) }
           if (enabled !== undefined) patch.enabled = enabled && !!before.baseUrl
           if (typeof name === 'string' && name.trim()) patch.name = name.trim().slice(0, 80)
           if (disabledByUser !== undefined) patch.disabledByUser = disabledByUser

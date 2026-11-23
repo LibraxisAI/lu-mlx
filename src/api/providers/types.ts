@@ -24,6 +24,21 @@ export { isCompatProviderId, compatProviderId, speaksOpenAIProtocol } from './co
 export type FixedProviderId = 'ollama' | 'openai' | 'anthropic' | 'lu-cloud'
 export type ProviderId = FixedProviderId | CompatProviderId
 
+/**
+ * Which OpenAI wire protocol an OpenAI-compatible provider speaks (2026-11-22).
+ * 'chat_completions' is `/v1/chat/completions`, what every slot spoke before
+ * and what an absent field still means. 'responses' is the Responses API,
+ * `/v1/responses` (api/providers/responses-client.ts).
+ */
+export type ApiProtocol = 'chat_completions' | 'responses'
+
+/**
+ * How the Responses API is reached (only read when `apiProtocol` is
+ * 'responses'). 'auto' tries the persistent WebSocket and falls back to HTTP
+ * SSE when the server does not offer one; 'websocket' and 'sse' pin one.
+ */
+export type ResponsesTransport = 'auto' | 'websocket' | 'sse'
+
 export interface ProviderConfig {
   id: ProviderId
   name: string          // Display name: "Ollama", "OpenRouter", "Groq", "Anthropic"
@@ -31,6 +46,12 @@ export interface ProviderConfig {
   baseUrl: string       // e.g. "http://localhost:11434", "https://openrouter.ai/api/v1"
   apiKey: string        // Encrypted in store. Empty string for local providers.
   isLocal: boolean      // true for Ollama, LM Studio, vLLM, no API key needed
+  // 2026-11-22: the wire protocol of an OpenAI-compatible slot or entry, see
+  // ApiProtocol. Undefined = 'chat_completions', the request every existing
+  // configuration keeps sending.
+  apiProtocol?: ApiProtocol
+  // Only with apiProtocol 'responses'. Undefined = 'auto'.
+  responsesTransport?: ResponsesTransport
   // CA (13.11.2026): send an assistant step's own reasoning back as
   // `reasoning_content` (lib/agent-core/reasoning-replay.ts). Set by LU Cloud,
   // whose reasoners need it between tool calls. Undefined = not sent.

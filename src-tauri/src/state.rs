@@ -343,6 +343,15 @@ pub struct AppState {
     /// (`save_cloud_file_dialog`), fired by `cancel_cloud_file`. Its own
     /// instance for the same reason as the two above.
     pub cloud_file_tokens: crate::cancel_registry::CancelRegistry,
+    /// One token per running `responses_stream` (the native Responses API
+    /// transport), fired by `responses_cancel`. Its own instance for the same
+    /// reason as the registries above: a stream id of one command can never
+    /// cancel a request of another.
+    pub responses_tokens: crate::cancel_registry::CancelRegistry,
+    /// The cached Responses API WebSockets, one per endpoint, key and chat
+    /// session, with the `previous_response_id` chain that lives on each, and
+    /// the endpoints known to refuse the upgrade (commands/responses.rs).
+    pub responses_sessions: Arc<crate::commands::responses::ResponsesSessionRegistry>,
     pub install_status: Arc<Mutex<InstallState>>,
     /// Cancel flag for the ComfyUI installer (Bug #1 v2.4.3).
     /// `install_comfyui` polls this between steps; setting it from
@@ -521,6 +530,8 @@ impl AppState {
             stream_tokens: crate::cancel_registry::CancelRegistry::new(),
             call_tokens: crate::cancel_registry::CancelRegistry::new(),
             cloud_file_tokens: crate::cancel_registry::CancelRegistry::new(),
+            responses_tokens: crate::cancel_registry::CancelRegistry::new(),
+            responses_sessions: Arc::new(crate::commands::responses::ResponsesSessionRegistry::new()),
             install_status: Arc::new(Mutex::new(InstallState::default())),
             comfyui_install_cancel: Arc::new(AtomicBool::new(false)),
             ollama_install: Arc::new(Mutex::new(InstallState::default())),

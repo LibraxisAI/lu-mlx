@@ -25,7 +25,8 @@ import { backendCall } from '../../api/backend'
 import { diagnoseBuiltinEngine, readBuiltinSlotStatus } from '../../api/builtin-ensure'
 import { useBuiltinEngineStatus } from '../../hooks/useBuiltinEngineStatus'
 import { reachVerdict, liveSlotStatus, type SlotStatus } from '../../lib/builtin-slot-status'
-import type { ProviderId, ProviderConfig } from '../../api/providers/types'
+import type { ApiProtocol, ProviderId, ProviderConfig, ResponsesTransport } from '../../api/providers/types'
+import { isCompatProviderId } from '../../api/providers/compat-id'
 import { disabledSlotNote } from '../../lib/disabled-slot-note'
 import { HINWEIS_TEXT, HINWEIS_ZEILE, PUNKT_FARBE } from '../../lib/hinweis'
 import { parkApiKeyForBackend, restoreParkedApiKeyForBackend } from '../../lib/parked-key'
@@ -767,6 +768,17 @@ export function ProviderSettings() {
                   <ExtraModelIdsField baseUrl={config.baseUrl} />
                 )}
 
+                {/* Which wire this OpenAI-compatible endpoint speaks. */}
+                {(id === 'openai' || isCompatProviderId(id)) && view.endpointEditable && (
+                  <ApiProtocolFields
+                    fieldId={`provider-${id}`}
+                    protocol={config.apiProtocol}
+                    transport={config.responsesTransport}
+                    labelClass="text-[0.6rem]"
+                    onChange={(updates) => setProviderConfig(id, updates)}
+                  />
+                )}
+
                 {/* Test + Disable + (g) Start Server when LM-Studio is offline */}
                 <div className="flex items-center gap-2 flex-wrap">
                   <button
@@ -1233,6 +1245,62 @@ function ExtraModelIdsField({ baseUrl, fieldId = 'extra-model-ids' }: { baseUrl:
 /** For the test of GitHub #112, which renders the field on its own. */
 export const ExtraModelIdsFieldForTest = ExtraModelIdsField
 
+const PROTOCOL_SELECT =
+  'w-full px-1.5 py-0.5 rounded bg-transparent border border-white/8 text-[0.65rem] text-gray-300 focus:outline-none focus:border-white/20 [&>option]:bg-gray-900'
+
+function asTransport(value: string): ResponsesTransport {
+  return value === 'websocket' || value === 'sse' ? value : 'auto'
+}
+
+/**
+ * The wire an OpenAI-compatible endpoint speaks. Chat Completions is what
+ * every such server has and stays the default; the Responses API is OpenAI's
+ * newer endpoint, carried over a WebSocket where the server offers one and
+ * over SSE where it does not (Auto tries in that order).
+ */
+function ApiProtocolFields({ fieldId, protocol, transport, labelClass, onChange }: {
+  fieldId: string
+  protocol: ApiProtocol | undefined
+  transport: ResponsesTransport | undefined
+  labelClass: 'text-[0.6rem]' | 't-micro'
+  onChange: (updates: Pick<ProviderConfig, 'apiProtocol' | 'responsesTransport'>) => void
+}) {
+  const current: ApiProtocol = protocol === 'responses' ? 'responses' : 'chat_completions'
+  return (
+    <div className="space-y-1.5">
+      <div>
+        <label className={`${labelClass} text-gray-500 mb-0.5 block`} htmlFor={`${fieldId}-api-protocol`}>API Protocol</label>
+        <select
+          id={`${fieldId}-api-protocol`}
+          data-testid="api-protocol"
+          value={current}
+          onChange={(e) => onChange({ apiProtocol: e.target.value === 'responses' ? 'responses' : 'chat_completions' })}
+          className={PROTOCOL_SELECT}
+        >
+          <option value="chat_completions">Chat Completions (/v1/chat/completions)</option>
+          <option value="responses">Responses API (/v1/responses)</option>
+        </select>
+      </div>
+      {current === 'responses' && (
+        <div>
+          <label className={`${labelClass} text-gray-500 mb-0.5 block`} htmlFor={`${fieldId}-responses-transport`}>Responses Transport</label>
+          <select
+            id={`${fieldId}-responses-transport`}
+            data-testid="responses-transport"
+            value={transport ?? 'auto'}
+            onChange={(e) => onChange({ responsesTransport: asTransport(e.target.value) })}
+            className={PROTOCOL_SELECT}
+          >
+            <option value="auto">Auto (WebSocket → SSE)</option>
+            <option value="websocket">WebSocket (wss://)</option>
+            <option value="sse">SSE (HTTP)</option>
+          </select>
+        </div>
+      )}
+    </div>
+  )
+}
+
 /** The expanded-row key of an additional OpenAI-compatible entry. */
 function entryRowKey(entryId: string): string {
   return `entry:${entryId}`
@@ -1419,6 +1487,13 @@ function OpenAIEntryRow({ entry, expanded, onToggleExpanded }: {
             </div>
           </div>
           <ExtraModelIdsField baseUrl={entry.baseUrl} fieldId={`extra-model-ids-${entryId}`} />
+          <ApiProtocolFields
+            fieldId={`entry-${entryId}`}
+            protocol={entry.apiProtocol}
+            transport={entry.responsesTransport}
+            labelClass="t-micro"
+            onChange={(updates) => updateOpenAIEntry(entryId, updates)}
+          />
           <div className="flex items-center gap-2 flex-wrap">
             <button
               onClick={() => { void test() }}

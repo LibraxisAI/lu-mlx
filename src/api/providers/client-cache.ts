@@ -27,10 +27,12 @@ const clientCache: Map<string, ProviderClient> = new Map()
  * Create a unique cache key for a provider config.
  * Invalidates when URL or API key changes. The entry id (GitHub #173) is part
  * of it: two entries on the same address are two clients, each naming its own
- * entry on the rows it lists.
+ * entry on the rows it lists. The API protocol and the Responses transport
+ * are part of it too: switching either has to take effect on the next send,
+ * not on the next restart.
  */
 function cacheKey(config: ProviderConfig): string {
-  return `${config.id}:${config.entryId ?? ''}:${config.baseUrl}:${config.apiKey?.slice(0, 8) || ''}`
+  return `${config.id}:${config.entryId ?? ''}:${config.baseUrl}:${config.apiKey?.slice(0, 8) || ''}:${config.apiProtocol ?? ''}:${config.responsesTransport ?? ''}`
 }
 
 /**

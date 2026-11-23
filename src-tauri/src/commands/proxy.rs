@@ -811,7 +811,7 @@ fn is_registerable_public_host(host: &str) -> bool {
 /// registered while a redirect chain is already in flight must not be able to
 /// widen that chain retroactively.
 #[derive(Clone, Default)]
-struct ProxyAllowList {
+pub(crate) struct ProxyAllowList {
     ollama: String,
     comfy: String,
     openai: std::collections::HashSet<String>,
@@ -821,7 +821,7 @@ struct ProxyAllowList {
 }
 
 impl ProxyAllowList {
-    fn snapshot(state: &crate::state::AppState) -> Self {
+    pub(crate) fn snapshot(state: &crate::state::AppState) -> Self {
         Self {
             // Configured Ollama host (Issue #31: users with OLLAMA_HOST=192.168.x.x).
             ollama: state
@@ -907,6 +907,49 @@ impl ProxyAllowList {
             host
         ))
     }
+
+    /// `check` for the Responses API transport (commands/responses.rs), which
+    /// reaches the same backends over `ws://`/`wss://` as well as http(s).
+    ///
+    /// A WebSocket URL is held to exactly the rules of its HTTP twin: `ws`
+    /// maps to `http`, `wss` to `https`, and the mapped URL goes through
+    /// `check` unchanged. So the metadata block, the localhost rule, the
+    /// registered-host set and the phone's "https only past the home network"
+    /// rule all apply to the socket too, and there is no second allow-list
+    /// that could drift from the first. A phone that may only reach a host
+    /// over https may likewise only reach it over wss, because `ws` becomes
+    /// `http` before the check.
+    ///
+    /// The "proxy_localhost: " prefix of `check`'s refusal is dropped: this
+    /// text can end up in a chat bubble, and a Rust command name has no
+    /// business there (kein-rust-name-im-chatfenster).
+    pub(crate) fn check_responses_url(&self, raw: &str) -> Result<(), String> {
+        let parsed = url::Url::parse(raw).map_err(|e| format!("Invalid URL: {}", e))?;
+        let text = parsed.as_str();
+        let mapped = match parsed.scheme() {
+            "http" | "https" => text.to_string(),
+            "ws" => format!("http{}", &text["ws".len()..]),
+            "wss" => format!("https{}", &text["wss".len()..]),
+            other => return Err(format!("Blocked scheme: {}", other)),
+        };
+        self.check(&mapped).map_err(|e| {
+            e.strip_prefix("proxy_localhost: ")
+                .map(str::to_string)
+                .unwrap_or(e)
+        })
+    }
+
+    /// A list with fixed contents for the unit tests of other modules
+    /// (commands/responses.rs), which cannot build an `AppState`.
+    #[cfg(test)]
+    pub(crate) fn for_tests(phone: bool, openai_hosts: &[&str]) -> Self {
+        Self {
+            ollama: String::new(),
+            comfy: String::new(),
+            openai: openai_hosts.iter().map(|h| h.to_lowercase()).collect(),
+            phone,
+        }
+    }
 }
 
 /// The client every proxy command uses.
@@ -923,7 +966,7 @@ impl ProxyAllowList {
 /// `resp.text()` sees it. On localhost it changes nothing; for a ComfyUI on
 /// another machine started with `--enable-compress-response-body` it is what
 /// lets the 2.8 MB /object_info arrive inside its timeout at all.
-fn proxy_client(timeout: Duration, allow: ProxyAllowList) -> Result<reqwest::Client, String> {
+pub(crate) fn proxy_client(timeout: Duration, allow: ProxyAllowList) -> Result<reqwest::Client, String> {
     const MAX_HOPS: usize = 3;
     reqwest::Client::builder()
         .user_agent(crate::app_identity::outgoing_agent!("2.0"))
@@ -986,7 +1029,7 @@ pub fn register_openai_host(
 /// sent as `Authorization` for the engine (an empty key from the provider
 /// slot, at most) is replaced, not added to. Every other request keeps the
 /// caller's headers as they were.
-fn with_engine_key(
+pub(crate) fn with_engine_key(
     url: &str,
     headers: Option<std::collections::HashMap<String, String>>,
     engine_ports: &[u16],
@@ -1113,7 +1156,15 @@ fn is_builtin_generation_url(url: &str, engine_port: u16) -> bool {
         return false;
     }
     let path = parsed.path().trim_end_matches('/');
-    path.ends_with("/chat/completions") || path.ends_with("/completions") || path.ends_with("/infill")
+    // `/responses` (2026-11-22): the native Responses API transport
+    // (commands/responses.rs) generates on the same engine and names its model
+    // in the same `model` field, so the same claim is checked there. Without
+    // it, switching a provider to "Responses API" would have been the way
+    // past this guard.
+    path.ends_with("/chat/completions")
+        || path.ends_with("/completions")
+        || path.ends_with("/infill")
+        || path.ends_with("/responses")
 }
 
 /// The `model` field of a request body, when there is one worth checking.
@@ -1163,7 +1214,7 @@ pub(crate) fn builtin_model_conflict(
 /// The guard as the proxy commands call it: reads the running engine out of
 /// the app state and applies `builtin_model_conflict`. No engine running means
 /// no claim to check.
-fn guard_builtin_model(
+pub(crate) fn guard_builtin_model(
     url: &str,
     body: Option<&str>,
     state: &tauri::State<'_, crate::state::AppState>,
@@ -1607,11 +1658,11 @@ pub async fn proxy_localhost_stream_chunked(
 
 /// "Off" for the first chunk wait: thirty days, far past any prompt and still
 /// a value tokio can add to an Instant without overflowing.
-const FIRST_CHUNK_OFF: Duration = Duration::from_secs(30 * 24 * 3600);
+pub(crate) const FIRST_CHUNK_OFF: Duration = Duration::from_secs(30 * 24 * 3600);
 
 /// The first chunk window for one stream (issue 177): the renderer's setting
 /// in ms, 0 for Off, or the built in default when it sent none.
-fn first_chunk_window(setting_ms: Option<u64>, default: Duration) -> Duration {
+pub(crate) fn first_chunk_window(setting_ms: Option<u64>, default: Duration) -> Duration {
     match setting_ms {
         None => default,
         Some(0) => FIRST_CHUNK_OFF,
@@ -1624,7 +1675,7 @@ fn first_chunk_window(setting_ms: Option<u64>, default: Duration) -> Duration {
 /// undercut: the request would die of the total limit while the setting still
 /// promised to wait. An hour of answer on top of the first chunk window, and
 /// never less than the old two hours.
-fn whole_request_limit(first_chunk: Duration) -> Duration {
+pub(crate) fn whole_request_limit(first_chunk: Duration) -> Duration {
     Duration::from_secs(7200).max(first_chunk.saturating_add(Duration::from_secs(3600)))
 }
 

@@ -1343,6 +1343,11 @@ pub fn run() {
             commands::proxy::register_openai_host,
             commands::proxy::pull_model_stream,
             commands::proxy::cancel_model_pull,
+            // Native OpenAI Responses API (/v1/responses): HTTP SSE and the
+            // persistent WebSocket, behind the same allow-list as the proxy.
+            commands::responses::responses_stream,
+            commands::responses::responses_cancel,
+            commands::responses::responses_close_session,
             // The Cloud switch counts its presses anonymously (funnel.rs)
             commands::funnel::funnel_ping,
             // B7 (the web app Phase 4 inspiration) — one-shot diagnostic probe

@@ -20,13 +20,13 @@ import { ProviderError, type ChatBilling, type CreditRates } from './types'
 import { LoopStop, RepetitionStop } from '../../lib/repetition-stop'
 import { singleModelSlot } from '../../lib/capabilities'
 import { parseSSEStream } from '../sse'
-import { idleAbortGuard, isStreamIdleTimeout } from '../stream-idle'
+import { idleAbortGuard, isStreamIdleTimeout, STREAM_FIRST_CHUNK_TIMEOUT_MS, STREAM_IDLE_TIMEOUT_MS } from '../stream-idle'
 import { sendWithTransientRetry } from './retry'
 import { repairJson } from '../../lib/tool-call-repair'
 import { signalCreditsExhausted } from '../../lib/credits-exhausted'
 import { parseRetryAfter } from '../../lib/http-status'
 import { requestLimitMessage } from '../../lib/request-limit'
-import { localFetch, localFetchStream, isPrivateOrLanHost, isDirectFetchAllowed, hostnameOf, ensureProxyAllowsHost, backendCall } from '../backend'
+import { localFetch, localFetchStream, isPrivateOrLanHost, isDirectFetchAllowed, hostnameOf, ensureProxyAllowsHost, backendCall, isTauri } from '../backend'
 import { chatBackendsBack } from '../../lib/chat-backends-gate'
 import { openAiSamplerFields } from './sampler-fields'
 import { openAiCustomFields } from '../../lib/custom-params'
@@ -61,6 +61,8 @@ import { endpointKey, withExtraModels } from '../../lib/extra-model-ids'
 import { log } from '../../lib/logger'
 import { estimateTokens } from '../../lib/token-estimate'
 import { MOBILE_TEXT, platformText } from '../../lib/platform-text'
+import { buildResponsesRequest } from './responses-wire'
+import { collectResponsesChunks, streamResponsesTurn, type ResponsesErrorContext, type ResponsesTurnParams } from './responses-client'
 
 // Transport routing lives in the `useLocalProxy` getter (below) plus the shared
 // host helpers in backend.ts. A direct webview fetch only works for hosts the
@@ -1141,6 +1143,12 @@ export class OpenAIProvider implements ProviderClient {
     options?: ChatOptions,
   ): AsyncGenerator<ChatStreamChunk> {
     messages = await resolveMessageAttachments(messages)
+    // The Responses API (`/v1/responses`) is a different wire, not a variant
+    // of this body; see responsesChunks below.
+    if (this.config.apiProtocol === 'responses') {
+      yield* this.responsesChunks(model, messages, options?.tools, options, true)
+      return
+    }
     const body: OpenAIChatRequest = {
       model,
       // Bug B3: one system message, first. The built-in engine and LM Studio
@@ -1395,6 +1403,174 @@ export class OpenAIProvider implements ProviderClient {
     yield doneChunk('disconnect')
   }
 
+  // ── Responses API (/v1/responses) ────────────────────────────
+
+  /**
+   * One session per model on this endpoint. On the desktop the Rust side
+   * keeps one WebSocket per session and chains each turn onto the last with
+   * `previous_response_id` when the new input only extends the old one; a
+   * conversation that does not extend it (another chat, an edited message)
+   * simply sends its whole input, so sharing the session between chats costs
+   * the cache hit, never correctness.
+   */
+  private readonly responsesSessions = new Map<string, string>()
+
+  private responsesSession(model: string): string {
+    let id = this.responsesSessions.get(model)
+    if (!id) {
+      const c: { randomUUID?: () => string } | undefined = globalThis.crypto
+      const rnd = c?.randomUUID?.() ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
+      id = `${this.config.id}:${model}:${rnd}`
+      this.responsesSessions.set(model, id)
+    }
+    return id
+  }
+
+  private responsesContext(toolsSent: boolean): ResponsesErrorContext {
+    return {
+      providerName: this.config.name,
+      baseUrl: this.baseUrl,
+      managed: this.config.managed === true,
+      lan: this.isLanBackend,
+      // On the desktop every Responses turn runs in Rust, whatever the host.
+      viaProxy: isTauri() || this.useLocalProxy,
+      luCloud: this.config.id === 'lu-cloud',
+      toolsSent,
+    }
+  }
+
+  /**
+   * The request for one Responses turn, built from the same knobs as a Chat
+   * Completions body: the template contract, the token budget, top_p held
+   * back above temperature 1, the thinking knob (as `reasoning.effort`).
+   * Samplers beyond temperature and top_p (top_k, min_p, …) go only to a
+   * server on this machine or the LAN: api.openai.com answers 400 to an
+   * unknown field on this endpoint.
+   */
+  private async responsesTurn(
+    model: string,
+    messages: ChatMessage[],
+    tools: ToolDefinition[] | undefined,
+    options: ChatOptions | undefined,
+    streaming: boolean,
+  ): Promise<ResponsesTurnParams> {
+    const toolList = tools?.length ? tools : undefined
+    const contract = this.templateContract(messages, !!toolList, model)
+    // applyMaxTokens measures the payload of a Chat Completions body, so it
+    // gets one with the same messages and tools, and its answer is reused.
+    const probe: OpenAIChatRequest = { model, messages: contract.map(m => this.toOpenAIMessage(m)), stream: true }
+    if (toolList) probe.tools = toolList
+    await this.applyMaxTokens(model, probe, options)
+
+    let topP = options?.topP
+    const heldTopP = topPForTemperature(options?.temperature, topP)
+    if (heldTopP !== undefined) topP = heldTopP
+    const extra: Record<string, unknown> = {}
+    if (this.isLanBackend && options) {
+      if (options.topK !== undefined) extra.top_k = options.topK
+      Object.assign(extra, openAiSamplerFields(this.samplerTarget, options))
+      if (this.config.id !== 'lu-cloud') Object.assign(extra, openAiCustomFields(options.customParams))
+    }
+    const body = buildResponsesRequest({
+      model,
+      messages: contract,
+      tools: toolList,
+      stream: true,
+      temperature: options?.temperature,
+      topP,
+      maxOutputTokens: probe.max_tokens,
+      reasoningEffort: this.thinkingEffort(model, options?.thinking, options),
+      // Read by chatWithTools only, as on the Chat Completions path.
+      jsonSchema: !streaming && this.config.id !== 'lu-cloud' ? options?.jsonSchema : undefined,
+      // Nothing is kept on the server: the chat history lives in LU, and a
+      // WebSocket chain works on the connection's own cache.
+      store: false,
+      extra,
+    })
+
+    // Same self-heal as chatStream before the first byte leaves.
+    if (this.isLanBackend) await chatBackendsBack()
+    if (this.config.managed === true) await ensureBuiltinEngineAlive(model)
+    await ensureProxyAllowsHost(this.baseUrl)
+
+    return {
+      baseUrl: this.baseUrl,
+      body,
+      // Rust drops what a WebSocket handshake must not carry (Content-Type,
+      // hop-by-hop headers) and adds the engine key for the app's own engine.
+      headers: this.headers,
+      transport: this.config.responsesTransport ?? 'auto',
+      sessionId: this.responsesSession(model),
+      signal: options?.signal,
+      idleMs: STREAM_IDLE_TIMEOUT_MS,
+      // Issue 177: a local backend follows Chat Reply Timeout (0 = Off).
+      firstChunkMs: this.isLanBackend ? chatFirstReplyMs(useSettingsStore.getState().settings) : STREAM_FIRST_CHUNK_TIMEOUT_MS,
+      fetcher: this.useLocalProxy ? localFetchStream : fetch,
+      context: this.responsesContext(!!toolList),
+    }
+  }
+
+  /**
+   * One Responses turn as chat chunks. Two things on top of the client:
+   *
+   * - A 400 about `reasoning` before anything was shown is sent once more
+   *   without it. A model without a reasoning mode refuses the field on this
+   *   endpoint, where Chat Completions ignores `reasoning_effort`.
+   * - On the app's own engine the repetition and loop stops of chatStream
+   *   (`watch`), which end the turn and cancel it upstream.
+   */
+  private async *responsesChunks(
+    model: string,
+    messages: ChatMessage[],
+    tools: ToolDefinition[] | undefined,
+    options: ChatOptions | undefined,
+    watch: boolean,
+  ): AsyncGenerator<ChatStreamChunk> {
+    const turn = await this.responsesTurn(model, messages, tools, options, watch)
+    const guard = idleAbortGuard(options?.signal)
+    const managed = watch && this.config.managed === true
+    const repetitionStop = managed ? new RepetitionStop() : undefined
+    const reasoningRepetitionStop = managed ? new RepetitionStop() : undefined
+    const watchLoops = managed && singleModelSlot()
+    const loopStop = watchLoops ? new LoopStop() : undefined
+    const reasoningLoopStop = watchLoops ? new LoopStop() : undefined
+    let body = turn.body
+    let shown = false
+    try {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          for await (const chunk of streamResponsesTurn({ ...turn, body, signal: guard.signal })) {
+            if (!chunk.done) {
+              const reasoning = chunk.thinking ?? ''
+              if (repetitionStop?.push(chunk.content) || reasoningRepetitionStop?.push(reasoning)) {
+                guard.abort()
+                throw new Error(platformText('repeatedQuestionMarks'))
+              }
+              if (loopStop?.push(chunk.content) || reasoningLoopStop?.push(reasoning)) {
+                guard.abort()
+                throw new Error(MOBILE_TEXT.repeatedOutput)
+              }
+            }
+            shown = true
+            yield chunk
+          }
+          return
+        } catch (err) {
+          const refusedReasoning = err instanceof ProviderError && err.status === 400 && /reasoning|effort/i.test(err.message)
+          if (attempt === 0 && !shown && body.reasoning && refusedReasoning) {
+            log.warn('[responses] endpoint refused the reasoning field, sending without it', { provider: this.config.id, model })
+            body = { ...body }
+            delete body.reasoning
+            continue
+          }
+          throw err
+        }
+      }
+    } finally {
+      guard.release()
+    }
+  }
+
   async chatWithTools(
     model: string,
     messages: ChatMessage[],
@@ -1402,6 +1578,18 @@ export class OpenAIProvider implements ProviderClient {
     options?: ChatOptions,
   ): Promise<{ content: string; toolCalls: ToolCall[]; promptEvalCount?: number; evalCount?: number; cachedPromptCount?: number; thinking?: string; billing?: ChatBilling }> {
     messages = await resolveMessageAttachments(messages)
+    if (this.config.apiProtocol === 'responses') {
+      const r = await collectResponsesChunks(this.responsesChunks(model, messages, tools, options, false))
+      return {
+        content: r.content,
+        toolCalls: r.toolCalls,
+        promptEvalCount: r.promptEvalCount,
+        evalCount: r.evalCount,
+        cachedPromptCount: r.cachedPromptCount,
+        thinking: r.thinking,
+        billing: r.billing,
+      }
+    }
     const body: OpenAIChatRequest = {
       model,
       // Bug B3: same invariant as chatStream, see providers/normalize-system.ts.

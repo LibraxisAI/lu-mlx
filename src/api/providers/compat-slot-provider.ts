@@ -33,6 +33,10 @@ export class CompatSlotProvider implements ProviderClient {
       baseUrl: config.baseUrl,
       apiKey: config.apiKey,
       isLocal: config.isLocal,
+      // The wire this slot speaks (Chat Completions or the Responses API)
+      // and, for the latter, how it is carried.
+      apiProtocol: config.apiProtocol,
+      responsesTransport: config.responsesTransport,
     })
   }
 
