@@ -183,7 +183,9 @@ pub enum ResponsesStreamEvent {
         transport: String,
     },
     /// `x-lu-chat-billing` of LU Cloud: "flash" or "credits".
-    Billing { mode: String },
+    Billing {
+        mode: String,
+    },
     Error {
         status: Option<u16>,
         code: Option<String>,
@@ -282,7 +284,9 @@ pub(crate) struct TurnFailure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TurnEnd {
     /// `commit` is the response id a WebSocket chain may continue from.
-    Completed { commit: Option<String> },
+    Completed {
+        commit: Option<String>,
+    },
     Cancelled,
     /// The renderer's channel is gone (window closed, reader dropped).
     SinkGone,
@@ -324,8 +328,7 @@ pub(crate) struct ResponsesEndpoints {
 /// base URL of the provider settings (`https://api.openai.com/v1`) and a
 /// pasted full endpoint both work. A query (Azure's `api-version`) stays.
 pub(crate) fn responses_endpoints(raw: &str) -> Result<ResponsesEndpoints, String> {
-    let mut url =
-        url::Url::parse(raw.trim()).map_err(|e| format!("Invalid Responses URL: {e}"))?;
+    let mut url = url::Url::parse(raw.trim()).map_err(|e| format!("Invalid Responses URL: {e}"))?;
     let (http_scheme, ws_scheme) = match url.scheme() {
         "http" | "ws" => ("http", "ws"),
         "https" | "wss" => ("https", "wss"),
@@ -397,7 +400,7 @@ pub(crate) fn outgoing_headers(
     if let Some(token) = super::engine_token::token_for_url(http_url) {
         out.push((super::engine_token::HEADER.to_string(), token.to_string()));
     }
-    out.sort_by(|a, b| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase()));
+    out.sort_by_key(|a| a.0.to_ascii_lowercase());
     out
 }
 
@@ -627,9 +630,7 @@ fn str_of<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 fn opt_string(v: &Value, key: &str) -> Option<String> {
-    str_of(v, key)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+    str_of(v, key).filter(|s| !s.is_empty()).map(str::to_string)
 }
 
 fn code_of(e: &Value) -> Option<String> {
@@ -711,7 +712,11 @@ impl ResponsesEventAccumulator {
 
     /// One parsed frame. `sse_event` is the SSE `event:` name, used when the
     /// JSON carries no `type`.
-    pub(crate) fn process(&mut self, sse_event: Option<&str>, frame: &Value) -> Vec<ResponsesStreamEvent> {
+    pub(crate) fn process(
+        &mut self,
+        sse_event: Option<&str>,
+        frame: &Value,
+    ) -> Vec<ResponsesStreamEvent> {
         let mut out = Vec::new();
         if self.terminal.is_some() {
             return out;
@@ -747,7 +752,11 @@ impl ResponsesEventAccumulator {
             "response.output_item.added" => {
                 if let Some(item) = frame.get("item") {
                     if str_of(item, "type") == Some("function_call") {
-                        let i = self.call_for(opt_string(item, "id"), output_index, opt_string(item, "call_id"));
+                        let i = self.call_for(
+                            opt_string(item, "id"),
+                            output_index,
+                            opt_string(item, "call_id"),
+                        );
                         self.update_call(i, item);
                         self.start_call(i, &mut out);
                     }
@@ -764,19 +773,26 @@ impl ResponsesEventAccumulator {
                 self.emit_text(item_id, delta, &mut out);
             }
             "response.output_text.done" | "response.refusal.done" => {
-                let text = str_of(frame, "text").or(str_of(frame, "refusal")).unwrap_or("");
+                let text = str_of(frame, "text")
+                    .or(str_of(frame, "refusal"))
+                    .unwrap_or("");
                 self.emit_text_tail(item_id, text, &mut out);
             }
             "response.content_part.done" => {
                 if let Some(part) = frame.get("part") {
-                    let text = str_of(part, "text").or(str_of(part, "refusal")).unwrap_or("");
+                    let text = str_of(part, "text")
+                        .or(str_of(part, "refusal"))
+                        .unwrap_or("");
                     self.emit_text_tail(item_id, text, &mut out);
                 }
             }
             "response.reasoning_summary_part.added" => {
                 // A second summary part: keep the parts apart in the thinking
                 // panel instead of gluing two paragraphs into one.
-                let index = frame.get("summary_index").and_then(Value::as_u64).unwrap_or(0);
+                let index = frame
+                    .get("summary_index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
                 if index > 0 && self.reasoning_seen.contains(&key_of(item_id.as_deref())) {
                     out.push(ResponsesStreamEvent::ReasoningDelta {
                         delta: "\n\n".to_string(),
@@ -785,7 +801,9 @@ impl ResponsesEventAccumulator {
                     });
                 }
             }
-            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" | "response.reasoning.delta" => {
+            "response.reasoning_summary_text.delta"
+            | "response.reasoning_text.delta"
+            | "response.reasoning.delta" => {
                 let delta = str_of(frame, "delta").unwrap_or("");
                 let summary = ty.contains("summary");
                 self.emit_reasoning(item_id, delta, summary, &mut out);
@@ -854,7 +872,11 @@ impl ResponsesEventAccumulator {
             return false;
         }
         self.flush_calls(out);
-        let finish_reason = if self.calls.is_empty() { "stop" } else { "tool_calls" };
+        let finish_reason = if self.calls.is_empty() {
+            "stop"
+        } else {
+            "tool_calls"
+        };
         out.push(ResponsesStreamEvent::Completed {
             response_id: self.response_id.clone(),
             model: self.model.clone(),
@@ -878,7 +900,12 @@ impl ResponsesEventAccumulator {
         }
     }
 
-    fn emit_text(&mut self, item_id: Option<String>, delta: &str, out: &mut Vec<ResponsesStreamEvent>) {
+    fn emit_text(
+        &mut self,
+        item_id: Option<String>,
+        delta: &str,
+        out: &mut Vec<ResponsesStreamEvent>,
+    ) {
         if delta.is_empty() {
             return;
         }
@@ -895,7 +922,12 @@ impl ResponsesEventAccumulator {
     /// A `.done`-type text: only when that item got no deltas. Deltas without
     /// an item id count for every item and the other way round, so a server
     /// that names its items only sometimes does not get its text twice.
-    fn emit_text_tail(&mut self, item_id: Option<String>, text: &str, out: &mut Vec<ResponsesStreamEvent>) {
+    fn emit_text_tail(
+        &mut self,
+        item_id: Option<String>,
+        text: &str,
+        out: &mut Vec<ResponsesStreamEvent>,
+    ) {
         let key = key_of(item_id.as_deref());
         if self.text_seen.contains(&key)
             || self.text_seen.contains("")
@@ -912,7 +944,13 @@ impl ResponsesEventAccumulator {
             || (key.is_empty() && !self.reasoning_seen.is_empty())
     }
 
-    fn emit_reasoning(&mut self, item_id: Option<String>, delta: &str, summary: bool, out: &mut Vec<ResponsesStreamEvent>) {
+    fn emit_reasoning(
+        &mut self,
+        item_id: Option<String>,
+        delta: &str,
+        summary: bool,
+        out: &mut Vec<ResponsesStreamEvent>,
+    ) {
         if delta.is_empty() {
             return;
         }
@@ -928,14 +966,27 @@ impl ResponsesEventAccumulator {
         });
     }
 
-    fn find_call(&self, item_id: Option<&str>, output_index: Option<u64>, call_id: Option<&str>) -> Option<usize> {
+    fn find_call(
+        &self,
+        item_id: Option<&str>,
+        output_index: Option<u64>,
+        call_id: Option<&str>,
+    ) -> Option<usize> {
         if let Some(id) = item_id {
-            if let Some(i) = self.calls.iter().position(|c| c.item_id.as_deref() == Some(id)) {
+            if let Some(i) = self
+                .calls
+                .iter()
+                .position(|c| c.item_id.as_deref() == Some(id))
+            {
                 return Some(i);
             }
         }
         if let Some(cid) = call_id {
-            if let Some(i) = self.calls.iter().position(|c| c.call_id.as_deref() == Some(cid)) {
+            if let Some(i) = self
+                .calls
+                .iter()
+                .position(|c| c.call_id.as_deref() == Some(cid))
+            {
                 return Some(i);
             }
         }
@@ -950,7 +1001,12 @@ impl ResponsesEventAccumulator {
         None
     }
 
-    fn call_for(&mut self, item_id: Option<String>, output_index: Option<u64>, call_id: Option<String>) -> usize {
+    fn call_for(
+        &mut self,
+        item_id: Option<String>,
+        output_index: Option<u64>,
+        call_id: Option<String>,
+    ) -> usize {
         if let Some(i) = self.find_call(item_id.as_deref(), output_index, call_id.as_deref()) {
             let c = &mut self.calls[i];
             if c.item_id.is_none() {
@@ -984,7 +1040,9 @@ impl ResponsesEventAccumulator {
         if let Some(args) = str_of(item, "arguments") {
             // The full arguments of a finished item are authoritative; on an
             // added item they only count when no delta arrived yet.
-            if !args.is_empty() && (c.args.is_empty() || str_of(item, "status") == Some("completed")) {
+            if !args.is_empty()
+                && (c.args.is_empty() || str_of(item, "status") == Some("completed"))
+            {
                 c.args = args.to_string();
             }
         }
@@ -1048,10 +1106,19 @@ impl ResponsesEventAccumulator {
         }
     }
 
-    fn item_done(&mut self, item: &Value, output_index: Option<u64>, out: &mut Vec<ResponsesStreamEvent>) {
+    fn item_done(
+        &mut self,
+        item: &Value,
+        output_index: Option<u64>,
+        out: &mut Vec<ResponsesStreamEvent>,
+    ) {
         match str_of(item, "type") {
             Some("function_call") => {
-                let i = self.call_for(opt_string(item, "id"), output_index, opt_string(item, "call_id"));
+                let i = self.call_for(
+                    opt_string(item, "id"),
+                    output_index,
+                    opt_string(item, "call_id"),
+                );
                 if !self.calls[i].done {
                     let c = &mut self.calls[i];
                     if let Some(call_id) = opt_string(item, "call_id") {
@@ -1172,12 +1239,17 @@ impl ResponsesEventAccumulator {
         }
         self.flush_calls(out);
         let usage = resp.get("usage");
-        let input_tokens = usage.and_then(|u| u.get("input_tokens").or(u.get("prompt_tokens"))).and_then(Value::as_u64);
+        let input_tokens = usage
+            .and_then(|u| u.get("input_tokens").or(u.get("prompt_tokens")))
+            .and_then(Value::as_u64);
         let output_tokens = usage
             .and_then(|u| u.get("output_tokens").or(u.get("completion_tokens")))
             .and_then(Value::as_u64);
         let cached_tokens = usage
-            .and_then(|u| u.get("input_tokens_details").or(u.get("prompt_tokens_details")))
+            .and_then(|u| {
+                u.get("input_tokens_details")
+                    .or(u.get("prompt_tokens_details"))
+            })
             .and_then(|d| d.get("cached_tokens"))
             .and_then(Value::as_u64);
         let reason = resp
@@ -1217,19 +1289,28 @@ impl ResponsesEventAccumulator {
 // ---------------------------------------------------------------------------
 
 fn retry_after_from_headers(get: impl Fn(&str) -> Option<String>) -> Option<u64> {
-    let parse = |v: String| v.trim().parse::<f64>().ok().filter(|n| n.is_finite() && *n >= 0.0);
+    let parse = |v: String| {
+        v.trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|n| n.is_finite() && *n >= 0.0)
+    };
     if let Some(ms) = get("retry-after-ms").and_then(parse) {
         return Some(ms.ceil() as u64);
     }
-    get("retry-after").and_then(parse).map(|s| (s * 1000.0).ceil() as u64)
+    get("retry-after")
+        .and_then(parse)
+        .map(|s| (s * 1000.0).ceil() as u64)
 }
 
 /// "Please try again in 1.5s" / "in 20ms", as OpenAI words its rate limits.
 fn retry_after_from_message(message: &str) -> Option<u64> {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
-        regex::Regex::new(r"(?i)try again in\s+(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|secs?|seconds?)\b")
-            .expect("static retry pattern")
+        regex::Regex::new(
+            r"(?i)try again in\s+(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|secs?|seconds?)\b",
+        )
+        .expect("static retry pattern")
     });
     let caps = re.captures(message)?;
     let n: f64 = caps.get(1)?.as_str().parse().ok()?;
@@ -1242,7 +1323,11 @@ fn retry_after_from_message(message: &str) -> Option<u64> {
 }
 
 /// A non-2xx HTTP answer (or a refused WebSocket upgrade) as a failure.
-pub(crate) fn failure_from_http(status: u16, retry_after_ms: Option<u64>, body: &str) -> ResponsesFailure {
+pub(crate) fn failure_from_http(
+    status: u16,
+    retry_after_ms: Option<u64>,
+    body: &str,
+) -> ResponsesFailure {
     let parsed: Option<Value> = serde_json::from_str(body).ok();
     let err = parsed
         .as_ref()
@@ -1279,7 +1364,10 @@ pub(crate) fn failure_from_http(status: u16, retry_after_ms: Option<u64>, body: 
 /// `{"type":"error","status":429,"error":{…},"headers":{…}}`, the error
 /// frame of the Responses WebSocket (and of some SSE servers).
 fn failure_from_error_frame(frame: &Value) -> ResponsesFailure {
-    let err = frame.get("error").filter(|e| e.is_object()).unwrap_or(frame);
+    let err = frame
+        .get("error")
+        .filter(|e| e.is_object())
+        .unwrap_or(frame);
     let status = frame
         .get("status")
         .or(frame.get("status_code"))
@@ -1293,13 +1381,11 @@ fn failure_from_error_frame(frame: &Value) -> ResponsesFailure {
     let code = code_of(err);
     let headers = frame.get("headers");
     let from_headers = retry_after_from_headers(|name| {
-        headers
-            .and_then(|h| h.get(name))
-            .and_then(|v| match v {
-                Value::String(s) => Some(s.clone()),
-                Value::Number(n) => Some(n.to_string()),
-                _ => None,
-            })
+        headers.and_then(|h| h.get(name)).and_then(|v| match v {
+            Value::String(s) => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        })
     });
     let retryable = status.is_some_and(|s| matches!(s, 408 | 409 | 429) || s >= 500)
         || matches!(
@@ -1326,7 +1412,11 @@ fn failure_from_error_frame(frame: &Value) -> ResponsesFailure {
 fn transport_failure(http_url: &str, detail: &str) -> ResponsesFailure {
     ResponsesFailure::new(
         "transport",
-        format!("error sending request for url ({}): {}", redact_url(http_url), detail),
+        format!(
+            "error sending request for url ({}): {}",
+            redact_url(http_url),
+            detail
+        ),
         true,
     )
 }
@@ -1339,7 +1429,11 @@ fn reqwest_failure(http_url: &str, e: &reqwest::Error, visible: bool) -> Respons
     if visible {
         return ResponsesFailure::new(
             "stream_broken",
-            format!("the connection to {} broke off during the answer: {}", redact_url(http_url), text),
+            format!(
+                "the connection to {} broke off during the answer: {}",
+                redact_url(http_url),
+                text
+            ),
             false,
         );
     }
@@ -1391,7 +1485,9 @@ fn watchdog_failure(spec: &TurnSpec, meaningful: bool) -> ResponsesFailure {
 fn is_chain_rejection(f: &ResponsesFailure) -> bool {
     f.code.as_deref() == Some("previous_response_not_found")
         || f.message.contains("previous_response")
-        || f.server_raw.as_deref().is_some_and(|raw| raw.contains("previous_response_id"))
+        || f.server_raw
+            .as_deref()
+            .is_some_and(|raw| raw.contains("previous_response_id"))
 }
 
 fn classify_ws_failure(f: &ResponsesFailure, chained: bool, visible: bool) -> FailKind {
@@ -1400,7 +1496,10 @@ fn classify_ws_failure(f: &ResponsesFailure, chained: bool, visible: bool) -> Fa
     }
     if f.code.as_deref() == Some("websocket_connection_limit_reached")
         || f.status.is_some_and(|s| s >= 500)
-        || matches!(f.code.as_deref(), Some("server_error") | Some("server_overloaded"))
+        || matches!(
+            f.code.as_deref(),
+            Some("server_error") | Some("server_overloaded")
+        )
     {
         return FailKind::Retryable;
     }
@@ -1505,7 +1604,10 @@ pub(crate) async fn sse_turn(
             _ = token.cancelled() => return Ok(TurnEnd::Cancelled),
             r = tokio::time::timeout(WS_CONNECT_LIMIT, resp.text()) => r.ok().and_then(Result::ok).unwrap_or_default(),
         };
-        return Err(fail(failure_from_http(status.as_u16(), retry, &text), false));
+        return Err(fail(
+            failure_from_http(status.as_u16(), retry, &text),
+            false,
+        ));
     }
 
     if let Some(mode) = resp
@@ -1578,7 +1680,12 @@ pub(crate) async fn sse_turn(
         };
         let (frames, eof) = match item {
             None => (decoder.finish(), true),
-            Some(Err(e)) => return Err(fail(reqwest_failure(&spec.http_url, &e, acc.visible), acc.visible)),
+            Some(Err(e)) => {
+                return Err(fail(
+                    reqwest_failure(&spec.http_url, &e, acc.visible),
+                    acc.visible,
+                ))
+            }
             Some(Ok(bytes)) => (decoder.push(&bytes), false),
         };
         for frame in frames {
@@ -1622,7 +1729,10 @@ pub(crate) async fn sse_turn(
                     false,
                 )
             } else {
-                transport_failure(&spec.http_url, "the server closed the stream before it sent a response")
+                transport_failure(
+                    &spec.http_url,
+                    "the server closed the stream before it sent a response",
+                )
             };
             return Err(fail(failure, acc.visible));
         }
@@ -1636,7 +1746,8 @@ pub(crate) async fn sse_turn(
 // WebSocket turn, chaining, session cache
 // ---------------------------------------------------------------------------
 
-type WsConn = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type WsConn =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// The committed base of the next chained turn.
 #[derive(Debug, Clone)]
@@ -1702,7 +1813,9 @@ fn content_text(content: Option<&Value>) -> String {
 
 fn echo_kind(item: &Value) -> Option<Echo> {
     match str_of(item, "type") {
-        Some("function_call") => Some(Echo::Call(str_of(item, "call_id").unwrap_or("").to_string())),
+        Some("function_call") => Some(Echo::Call(
+            str_of(item, "call_id").unwrap_or("").to_string(),
+        )),
         Some("reasoning") => Some(Echo::Reasoning),
         Some("message") | None if str_of(item, "role") == Some("assistant") => {
             Some(Echo::Text(content_text(item.get("content"))))
@@ -1719,7 +1832,11 @@ fn echo_kind(item: &Value) -> Option<Echo> {
 /// its tool call ids, reasoning items skipped) as the client's echo; and at
 /// least one item after that. Anything else sends the full input, which
 /// costs tokens but can never continue the wrong conversation.
-pub(crate) fn chain_delta(last: &LastResponse, fingerprint: &Value, full_input: &[Value]) -> Option<Vec<Value>> {
+pub(crate) fn chain_delta(
+    last: &LastResponse,
+    fingerprint: &Value,
+    full_input: &[Value],
+) -> Option<Vec<Value>> {
     if &last.fingerprint != fingerprint || full_input.len() <= last.full_input.len() {
         return None;
     }
@@ -1758,7 +1875,11 @@ struct Staged {
 /// `instructions` stay in a chained frame: the server does not carry them
 /// over from the previous response, and a frame without them would answer
 /// without the system prompt.
-fn build_ws_envelope(body: &Map<String, Value>, last: Option<&LastResponse>, allow_chain: bool) -> (Value, Option<Staged>, bool) {
+fn build_ws_envelope(
+    body: &Map<String, Value>,
+    last: Option<&LastResponse>,
+    allow_chain: bool,
+) -> (Value, Option<Staged>, bool) {
     let mut params = body.clone();
     params.remove("stream");
     let input = params.remove("input").unwrap_or(Value::Array(Vec::new()));
@@ -1809,19 +1930,26 @@ fn socket_still_open(conn: &mut WsConn) -> bool {
     }
 }
 
-fn build_ws_request(spec: &TurnSpec) -> Result<tungstenite::handshake::client::Request, ResponsesFailure> {
-    let mut request = spec
-        .ws_url
-        .as_str()
-        .into_client_request()
-        .map_err(|e| ResponsesFailure::new("refused", format!("Invalid Responses WebSocket URL: {e}"), false))?;
+fn build_ws_request(
+    spec: &TurnSpec,
+) -> Result<tungstenite::handshake::client::Request, ResponsesFailure> {
+    let mut request = spec.ws_url.as_str().into_client_request().map_err(|e| {
+        ResponsesFailure::new(
+            "refused",
+            format!("Invalid Responses WebSocket URL: {e}"),
+            false,
+        )
+    })?;
     let headers = request.headers_mut();
     for (k, v) in &spec.headers {
         let lower = k.to_ascii_lowercase();
         if lower == "content-type" || lower == "accept" {
             continue;
         }
-        if let (Ok(name), Ok(value)) = (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v)) {
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(k.as_bytes()),
+            HeaderValue::from_str(v),
+        ) {
             headers.insert(name, value);
         }
     }
@@ -1859,7 +1987,11 @@ fn classify_connect_error(spec: &TurnSpec, e: tungstenite::Error) -> TurnFailure
             } else {
                 FailKind::Final
             };
-            TurnFailure { failure, visible: false, kind }
+            TurnFailure {
+                failure,
+                visible: false,
+                kind,
+            }
         }
         // The server answered, but not with an upgrade (200 with a page,
         // missing accept key, …): it does not speak the WebSocket.
@@ -1876,7 +2008,11 @@ fn classify_connect_error(spec: &TurnSpec, e: tungstenite::Error) -> TurnFailure
             kind: FailKind::Unsupported,
         },
         tungstenite::Error::Url(u) => TurnFailure {
-            failure: ResponsesFailure::new("refused", format!("Invalid Responses WebSocket URL: {u}"), false),
+            failure: ResponsesFailure::new(
+                "refused",
+                format!("Invalid Responses WebSocket URL: {u}"),
+                false,
+            ),
             visible: false,
             kind: FailKind::Final,
         },
@@ -1888,7 +2024,10 @@ fn classify_connect_error(spec: &TurnSpec, e: tungstenite::Error) -> TurnFailure
     }
 }
 
-async fn ws_connect(spec: &TurnSpec, token: &CancellationToken) -> Result<Option<WsConn>, TurnFailure> {
+async fn ws_connect(
+    spec: &TurnSpec,
+    token: &CancellationToken,
+) -> Result<Option<WsConn>, TurnFailure> {
     let request = build_ws_request(spec).map_err(|failure| TurnFailure {
         failure,
         visible: false,
@@ -1904,7 +2043,10 @@ async fn ws_connect(spec: &TurnSpec, token: &CancellationToken) -> Result<Option
         Err(_) => Err(TurnFailure {
             failure: transport_failure(
                 &spec.http_url,
-                &format!("the WebSocket handshake did not finish within {} s", limit.as_secs()),
+                &format!(
+                    "the WebSocket handshake did not finish within {} s",
+                    limit.as_secs()
+                ),
             ),
             visible: false,
             kind: FailKind::Retryable,
@@ -1942,8 +2084,11 @@ async fn ws_turn(
             }
         }
     };
-    let (envelope, staged, chained) =
-        build_ws_envelope(&spec.body, slot.last.as_ref(), allow_chain && !slot.chain_refused);
+    let (envelope, staged, chained) = build_ws_envelope(
+        &spec.body,
+        slot.last.as_ref(),
+        allow_chain && !slot.chain_refused,
+    );
     let mut staged = staged;
     // Consumed: only this turn's clean completion commits again.
     slot.last = None;
@@ -1964,7 +2109,11 @@ async fn ws_turn(
         }
         Err(_) => {
             return Err(TurnFailure {
-                failure: ws_failure(spec, "the WebSocket did not take the request in time", false),
+                failure: ws_failure(
+                    spec,
+                    "the WebSocket did not take the request in time",
+                    false,
+                ),
                 visible: false,
                 kind: FailKind::Retryable,
             })
@@ -1978,7 +2127,11 @@ async fn ws_turn(
     let broken = |acc: &ResponsesEventAccumulator, detail: &str| TurnFailure {
         failure: ws_failure(spec, detail, acc.visible),
         visible: acc.visible,
-        kind: if acc.visible { FailKind::Final } else { FailKind::Retryable },
+        kind: if acc.visible {
+            FailKind::Final
+        } else {
+            FailKind::Retryable
+        },
     };
     loop {
         let msg = tokio::select! {
@@ -2009,7 +2162,10 @@ async fn ws_turn(
                     .filter(|r| !r.is_empty())
                     .map(|r| format!(" ({r})"))
                     .unwrap_or_default();
-                return Err(broken(&acc, &format!("the server closed the WebSocket{reason}")));
+                return Err(broken(
+                    &acc,
+                    &format!("the server closed the WebSocket{reason}"),
+                ));
             }
             Some(Ok(Message::Text(text))) => {
                 let value: Value = match serde_json::from_str(text.as_str()) {
@@ -2094,7 +2250,9 @@ impl ResponsesSessionRegistry {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, RegistryInner> {
-        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn slot(&self, key: SessionKey) -> Arc<tokio::sync::Mutex<WsSlot>> {
@@ -2117,7 +2275,13 @@ impl ResponsesSessionRegistry {
             }
         }
         let slot = Arc::new(tokio::sync::Mutex::new(WsSlot::default()));
-        inner.slots.insert(key, SlotEntry { slot: slot.clone(), used: tick });
+        inner.slots.insert(
+            key,
+            SlotEntry {
+                slot: slot.clone(),
+                used: tick,
+            },
+        );
         slot
     }
 
@@ -2190,7 +2354,7 @@ async fn run_ws(
     let mut guard = shared.and_then(|slot| slot.try_lock_owned().ok());
     let mut ephemeral = WsSlot::default();
     let slot: &mut WsSlot = match guard.as_mut() {
-        Some(g) => &mut **g,
+        Some(g) => g,
         None => &mut ephemeral,
     };
     let mut allow_chain = true;
@@ -2278,14 +2442,19 @@ fn prepare(
     }
     let body = match serde_json::from_str::<Value>(&req.body_json) {
         Ok(Value::Object(map)) => map,
-        _ => return Err(refused("The Responses request body is not a JSON object.".to_string())),
+        _ => {
+            return Err(refused(
+                "The Responses request body is not a JSON object.".to_string(),
+            ))
+        }
     };
     // A generation request may not name a model the engine is not holding.
     super::proxy::guard_builtin_model(&ends.http, Some(&req.body_json), state).map_err(refused)?;
     let ports = super::engine_key::engine_ports(state);
     let headers = outgoing_headers(&ends.http, req.headers.clone(), &ports);
     let fingerprint = auth_fingerprint(&headers);
-    let first_window = super::proxy::first_chunk_window(req.first_chunk_timeout_ms, DEFAULT_FIRST_CHUNK);
+    let first_window =
+        super::proxy::first_chunk_window(req.first_chunk_timeout_ms, DEFAULT_FIRST_CHUNK);
     let idle = idle_window(req.idle_timeout_ms);
     let client = super::proxy::proxy_client(super::proxy::whole_request_limit(first_window), allow)
         .map_err(|e| ResponsesFailure::new("transport", e, true))?;
@@ -2405,7 +2574,8 @@ mod tests {
     }
 
     fn body(input: Value) -> Map<String, Value> {
-        match json!({"model": "gpt-test", "instructions": "Be brief.", "input": input, "store": false}) {
+        match json!({"model": "gpt-test", "instructions": "Be brief.", "input": input, "store": false})
+        {
             Value::Object(m) => m,
             _ => unreachable!(),
         }
@@ -2417,7 +2587,10 @@ mod tests {
             ws_url: ws_url.to_string(),
             endpoint_key: redact_url(ws_url),
             body: body(input),
-            headers: vec![("Authorization".to_string(), "Bearer sk-test-0123456789abcdef".to_string())],
+            headers: vec![(
+                "Authorization".to_string(),
+                "Bearer sk-test-0123456789abcdef".to_string(),
+            )],
             auth_fingerprint: "fp".to_string(),
             session_id: Some("chat-1".to_string()),
             first_window: Duration::from_secs(5),
@@ -2434,7 +2607,11 @@ mod tests {
     }
 
     fn sse_crlf(ev: &Value) -> String {
-        format!("event: {}\r\ndata: {}\r\n\r\n", ev["type"].as_str().unwrap(), ev)
+        format!(
+            "event: {}\r\ndata: {}\r\n\r\n",
+            ev["type"].as_str().unwrap(),
+            ev
+        )
     }
 
     fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -2478,7 +2655,10 @@ mod tests {
 
     /// A one-shot HTTP server that answers with an SSE body, cut into small
     /// pieces so chunk boundaries fall inside characters and `\r\n` pairs.
-    async fn sse_server(payload: Vec<u8>, piece: usize) -> (String, tokio::task::JoinHandle<String>) {
+    async fn sse_server(
+        payload: Vec<u8>,
+        piece: usize,
+    ) -> (String, tokio::task::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
@@ -2547,8 +2727,12 @@ mod tests {
         let e = responses_endpoints("http://127.0.0.1:8129/v1/").unwrap();
         assert_eq!(e.http, "http://127.0.0.1:8129/v1/responses");
         assert_eq!(e.ws, "ws://127.0.0.1:8129/v1/responses");
-        let e = responses_endpoints("wss://example.test/openai/v1/responses?api-version=1").unwrap();
-        assert_eq!(e.http, "https://example.test/openai/v1/responses?api-version=1");
+        let e =
+            responses_endpoints("wss://example.test/openai/v1/responses?api-version=1").unwrap();
+        assert_eq!(
+            e.http,
+            "https://example.test/openai/v1/responses?api-version=1"
+        );
         assert_eq!(e.ws, "wss://example.test/openai/v1/responses?api-version=1");
         assert!(responses_endpoints("ftp://example.test/v1").is_err());
     }
@@ -2556,10 +2740,18 @@ mod tests {
     #[test]
     fn the_websocket_url_is_held_to_the_rules_of_its_http_twin() {
         let desk = ProxyAllowList::for_tests(false, &["api.openai.com"]);
-        assert!(desk.check_responses_url("wss://api.openai.com/v1/responses").is_ok());
-        assert!(desk.check_responses_url("ws://127.0.0.1:8129/v1/responses").is_ok());
-        assert!(desk.check_responses_url("ws://169.254.169.254/latest/meta-data").is_err());
-        assert!(desk.check_responses_url("wss://[::ffff:169.254.169.254]/x").is_err());
+        assert!(desk
+            .check_responses_url("wss://api.openai.com/v1/responses")
+            .is_ok());
+        assert!(desk
+            .check_responses_url("ws://127.0.0.1:8129/v1/responses")
+            .is_ok());
+        assert!(desk
+            .check_responses_url("ws://169.254.169.254/latest/meta-data")
+            .is_err());
+        assert!(desk
+            .check_responses_url("wss://[::ffff:169.254.169.254]/x")
+            .is_err());
         assert!(desk.check_responses_url("ws://[fd00:ec2::254]/x").is_err());
         assert!(desk.check_responses_url("ftp://api.openai.com/v1").is_err());
         let refused = desk
@@ -2568,9 +2760,15 @@ mod tests {
         assert!(!refused.contains("proxy_localhost"), "{refused}");
 
         let phone = ProxyAllowList::for_tests(true, &["api.openai.com"]);
-        assert!(phone.check_responses_url("ws://api.openai.com/v1/responses").is_err());
-        assert!(phone.check_responses_url("http://api.openai.com/v1/responses").is_err());
-        assert!(phone.check_responses_url("wss://api.openai.com/v1/responses").is_ok());
+        assert!(phone
+            .check_responses_url("ws://api.openai.com/v1/responses")
+            .is_err());
+        assert!(phone
+            .check_responses_url("http://api.openai.com/v1/responses")
+            .is_err());
+        assert!(phone
+            .check_responses_url("wss://api.openai.com/v1/responses")
+            .is_ok());
     }
 
     #[test]
@@ -2585,9 +2783,16 @@ mod tests {
         assert!(!clean.contains("lu_0123456789abcdefABCD"), "{clean}");
         assert!(clean.contains("x=1"), "{clean}");
         assert!(clean.contains("[REDACTED]"));
-        let ev = ResponsesFailure::new("auth", "Incorrect API key provided: sk-live-0123456789abcdef", false).into_event();
+        let ev = ResponsesFailure::new(
+            "auth",
+            "Incorrect API key provided: sk-live-0123456789abcdef",
+            false,
+        )
+        .into_event();
         match ev {
-            ResponsesStreamEvent::Error { message, .. } => assert!(!message.contains("sk-live-0123456789abcdef")),
+            ResponsesStreamEvent::Error { message, .. } => {
+                assert!(!message.contains("sk-live-0123456789abcdef"))
+            }
             other => panic!("{other:?}"),
         }
     }
@@ -2612,7 +2817,10 @@ mod tests {
     #[test]
     fn text_sent_only_in_done_events_is_emitted_once() {
         let mut acc = ResponsesEventAccumulator::new("sse");
-        let mut events = acc.process(None, &json!({"type":"response.output_text.done","item_id":"msg_1","text":"Hello"}));
+        let mut events = acc.process(
+            None,
+            &json!({"type":"response.output_text.done","item_id":"msg_1","text":"Hello"}),
+        );
         events.extend(acc.process(None, &json!({"type":"response.output_item.done","item":{"type":"message","id":"msg_1","content":[{"type":"output_text","text":"Hello"}]}})));
         events.extend(acc.process(None, &json!({"type":"response.completed","response":{"id":"r1","status":"completed","output":[{"type":"message","id":"msg_1","content":[{"type":"output_text","text":"Hello"}]}]}})));
         let texts: Vec<&ResponsesStreamEvent> = events
@@ -2620,7 +2828,9 @@ mod tests {
             .filter(|e| matches!(e, ResponsesStreamEvent::TextDelta { .. }))
             .collect();
         assert_eq!(texts.len(), 1);
-        assert!(matches!(acc.terminal, Some(Terminal::Completed { commit: Some(ref id) }) if id == "r1"));
+        assert!(
+            matches!(acc.terminal, Some(Terminal::Completed { commit: Some(ref id) }) if id == "r1")
+        );
     }
 
     #[test]
@@ -2638,7 +2848,10 @@ mod tests {
                 "usage": {"input_tokens": 5, "output_tokens": 2}
             }),
         );
-        assert!(events.contains(&ResponsesStreamEvent::TextDelta { delta: "Hi".into(), item_id: Some("m1".into()) }));
+        assert!(events.contains(&ResponsesStreamEvent::TextDelta {
+            delta: "Hi".into(),
+            item_id: Some("m1".into())
+        }));
         assert!(events.contains(&ResponsesStreamEvent::FunctionCallDone {
             item_id: Some("fc1".into()),
             call_id: "c1".into(),
@@ -2646,14 +2859,22 @@ mod tests {
             arguments: "{\"a\":1}".into()
         }));
         match events.last() {
-            Some(ResponsesStreamEvent::Completed { status, finish_reason, input_tokens, .. }) => {
+            Some(ResponsesStreamEvent::Completed {
+                status,
+                finish_reason,
+                input_tokens,
+                ..
+            }) => {
                 assert_eq!(status, "incomplete");
                 assert_eq!(finish_reason.as_deref(), Some("length"));
                 assert_eq!(*input_tokens, Some(5));
             }
             other => panic!("{other:?}"),
         }
-        assert!(matches!(acc.terminal, Some(Terminal::Completed { commit: None })));
+        assert!(matches!(
+            acc.terminal,
+            Some(Terminal::Completed { commit: None })
+        ));
     }
 
     #[test]
@@ -2685,15 +2906,35 @@ mod tests {
             Some(vec![user("more")])
         );
         // The client edited the model's answer: no chain.
-        assert_eq!(chain_delta(&last, &fp, &[user("hi"), assistant("Hello!!"), user("more")]), None);
+        assert_eq!(
+            chain_delta(
+                &last,
+                &fp,
+                &[user("hi"), assistant("Hello!!"), user("more")]
+            ),
+            None
+        );
         // An earlier message changed: no chain.
-        assert_eq!(chain_delta(&last, &fp, &[user("hey"), assistant("Hello"), user("more")]), None);
+        assert_eq!(
+            chain_delta(&last, &fp, &[user("hey"), assistant("Hello"), user("more")]),
+            None
+        );
         // Other instructions: no chain.
         let mut other = body(json!([]));
         other.insert("instructions".into(), json!("Be verbose."));
-        assert_eq!(chain_delta(&last, &chain_fingerprint(&other), &[user("hi"), assistant("Hello"), user("more")]), None);
+        assert_eq!(
+            chain_delta(
+                &last,
+                &chain_fingerprint(&other),
+                &[user("hi"), assistant("Hello"), user("more")]
+            ),
+            None
+        );
         // Nothing new after the echo: no chain.
-        assert_eq!(chain_delta(&last, &fp, &[user("hi"), assistant("Hello")]), None);
+        assert_eq!(
+            chain_delta(&last, &fp, &[user("hi"), assistant("Hello")]),
+            None
+        );
     }
 
     #[test]
@@ -2738,26 +2979,78 @@ mod tests {
         let (events, sink) = collector();
         let client = reqwest::Client::new();
         let token = CancellationToken::new();
-        let s = spec(&url, "ws://127.0.0.1:1/v1/responses", json!([user("weather?")]));
+        let s = spec(
+            &url,
+            "ws://127.0.0.1:1/v1/responses",
+            json!([user("weather?")]),
+        );
         let end = sse_turn(&client, &s, &token, &sink).await.unwrap();
-        assert_eq!(end, TurnEnd::Completed { commit: Some("resp_1".into()) });
+        assert_eq!(
+            end,
+            TurnEnd::Completed {
+                commit: Some("resp_1".into())
+            }
+        );
         let request = server.await.unwrap();
         assert!(request.contains("\"stream\":true"), "{request}");
-        assert!(request.to_ascii_lowercase().contains("authorization: bearer sk-test-0123456789abcdef"));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer sk-test-0123456789abcdef"));
         let got = events.lock().unwrap().clone();
         let want = vec![
-            ResponsesStreamEvent::Created { response_id: Some("resp_1".into()), model: Some("gpt-test".into()), transport: "sse".into() },
-            ResponsesStreamEvent::ReasoningDelta { delta: "Thinking".into(), item_id: Some("rs_1".into()), summary: true },
-            ResponsesStreamEvent::ReasoningItemDone { item_id: "rs_1".into(), encrypted_content: Some("enc".into()), summary: vec!["Thinking".into()] },
-            ResponsesStreamEvent::TextDelta { delta: "Zażółć ".into(), item_id: Some("msg_1".into()) },
-            ResponsesStreamEvent::TextDelta { delta: "gęślą".into(), item_id: Some("msg_1".into()) },
-            ResponsesStreamEvent::FunctionCallStarted { item_id: Some("fc_1".into()), call_id: "call_1".into(), name: "get_weather".into() },
-            ResponsesStreamEvent::FunctionCallArgsDelta { item_id: Some("fc_1".into()), call_id: Some("call_1".into()), delta: "{\"city\":".into() },
-            ResponsesStreamEvent::FunctionCallArgsDelta { item_id: Some("fc_1".into()), call_id: Some("call_1".into()), delta: "\"Kielce\"}".into() },
-            ResponsesStreamEvent::FunctionCallDone { item_id: Some("fc_1".into()), call_id: "call_1".into(), name: "get_weather".into(), arguments: "{\"city\":\"Kielce\"}".into() },
+            ResponsesStreamEvent::Created {
+                response_id: Some("resp_1".into()),
+                model: Some("gpt-test".into()),
+                transport: "sse".into(),
+            },
+            ResponsesStreamEvent::ReasoningDelta {
+                delta: "Thinking".into(),
+                item_id: Some("rs_1".into()),
+                summary: true,
+            },
+            ResponsesStreamEvent::ReasoningItemDone {
+                item_id: "rs_1".into(),
+                encrypted_content: Some("enc".into()),
+                summary: vec!["Thinking".into()],
+            },
+            ResponsesStreamEvent::TextDelta {
+                delta: "Zażółć ".into(),
+                item_id: Some("msg_1".into()),
+            },
+            ResponsesStreamEvent::TextDelta {
+                delta: "gęślą".into(),
+                item_id: Some("msg_1".into()),
+            },
+            ResponsesStreamEvent::FunctionCallStarted {
+                item_id: Some("fc_1".into()),
+                call_id: "call_1".into(),
+                name: "get_weather".into(),
+            },
+            ResponsesStreamEvent::FunctionCallArgsDelta {
+                item_id: Some("fc_1".into()),
+                call_id: Some("call_1".into()),
+                delta: "{\"city\":".into(),
+            },
+            ResponsesStreamEvent::FunctionCallArgsDelta {
+                item_id: Some("fc_1".into()),
+                call_id: Some("call_1".into()),
+                delta: "\"Kielce\"}".into(),
+            },
+            ResponsesStreamEvent::FunctionCallDone {
+                item_id: Some("fc_1".into()),
+                call_id: "call_1".into(),
+                name: "get_weather".into(),
+                arguments: "{\"city\":\"Kielce\"}".into(),
+            },
             ResponsesStreamEvent::Completed {
-                response_id: Some("resp_1".into()), model: Some("gpt-test".into()), status: "completed".into(),
-                finish_reason: Some("tool_calls".into()), input_tokens: Some(12), output_tokens: Some(7), cached_tokens: Some(8), transport: "sse".into(),
+                response_id: Some("resp_1".into()),
+                model: Some("gpt-test".into()),
+                status: "completed".into(),
+                finish_reason: Some("tool_calls".into()),
+                input_tokens: Some(12),
+                output_tokens: Some(7),
+                cached_tokens: Some(8),
+                transport: "sse".into(),
             },
         ];
         assert_eq!(got, want);
@@ -2780,10 +3073,16 @@ mod tests {
         assert!(token.is_cancelled());
         let (events, sink) = collector();
         let sessions = ResponsesSessionRegistry::new();
-        let s = spec(&format!("http://{addr}/v1/responses"), &format!("ws://{addr}/v1/responses"), json!([user("hi")]));
+        let s = spec(
+            &format!("http://{addr}/v1/responses"),
+            &format!("ws://{addr}/v1/responses"),
+            json!([user("hi")]),
+        );
         let client = reqwest::Client::new();
         for transport in [Transport::Sse, Transport::WebSocket, Transport::Auto] {
-            let end = run_turn(&client, &sessions, &s, transport, &token, &sink).await.unwrap();
+            let end = run_turn(&client, &sessions, &s, transport, &token, &sink)
+                .await
+                .unwrap();
             assert_eq!(end, TurnEnd::Cancelled);
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -2798,13 +3097,19 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
             let _ = read_http_request(&mut sock).await;
-            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n").await.unwrap();
-            let delta = json!({"type":"response.output_text.delta","item_id":"m","delta":"partial"});
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
+                .await
+                .unwrap();
+            let delta =
+                json!({"type":"response.output_text.delta","item_id":"m","delta":"partial"});
             sock.write_all(sse_crlf(&delta).as_bytes()).await.unwrap();
             sock.flush().await.unwrap();
             // Hold the stream open; the client hanging up ends this read.
             let mut buf = [0u8; 64];
-            tokio::time::timeout(Duration::from_secs(5), sock.read(&mut buf)).await.ok().and_then(Result::ok)
+            tokio::time::timeout(Duration::from_secs(5), sock.read(&mut buf))
+                .await
+                .ok()
+                .and_then(Result::ok)
         });
         let token = CancellationToken::new();
         let cancel = token.clone();
@@ -2814,12 +3119,17 @@ mod tests {
             }
             true
         };
-        let s = spec(&format!("http://{addr}/v1/responses"), "ws://127.0.0.1:1/v1/responses", json!([user("hi")]));
+        let s = spec(
+            &format!("http://{addr}/v1/responses"),
+            "ws://127.0.0.1:1/v1/responses",
+            json!([user("hi")]),
+        );
         let client = reqwest::Client::new();
-        let end = tokio::time::timeout(Duration::from_secs(5), sse_turn(&client, &s, &token, &sink))
-            .await
-            .expect("cancel must end the turn")
-            .unwrap();
+        let end =
+            tokio::time::timeout(Duration::from_secs(5), sse_turn(&client, &s, &token, &sink))
+                .await
+                .expect("cancel must end the turn")
+                .unwrap();
         assert_eq!(end, TurnEnd::Cancelled);
         // The server saw the connection close (read returned 0), not the
         // five second timeout.
@@ -2857,17 +3167,28 @@ mod tests {
                 let script = script.clone();
                 let turn = turn.clone();
                 tokio::spawn(async move {
-                    let header_log = log.clone();
-                    let callback = move |req: &Request, resp: Response| -> Result<Response, ErrorResponse> {
-                        let headers = req
-                            .headers()
-                            .iter()
-                            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
-                            .collect();
-                        header_log.lock().unwrap().headers.push(headers);
-                        Ok(resp)
-                    };
-                    let Ok(mut ws) = tokio_tungstenite::accept_hdr_async(sock, callback).await else {
+                    struct CaptureHeaders(Arc<Mutex<WsLog>>);
+                    impl tokio_tungstenite::tungstenite::handshake::server::Callback for CaptureHeaders {
+                        fn on_request(
+                            self,
+                            req: &Request,
+                            resp: Response,
+                        ) -> Result<Response, ErrorResponse> {
+                            let headers = req
+                                .headers()
+                                .iter()
+                                .map(|(k, v)| {
+                                    (k.as_str().to_string(), v.to_str().unwrap_or("").to_string())
+                                })
+                                .collect();
+                            self.0.lock().unwrap().headers.push(headers);
+                            Ok(resp)
+                        }
+                    }
+                    let Ok(mut ws) =
+                        tokio_tungstenite::accept_hdr_async(sock, CaptureHeaders(log.clone()))
+                            .await
+                    else {
                         return;
                     };
                     while let Some(Ok(msg)) = ws.next().await {
@@ -2892,7 +3213,12 @@ mod tests {
                                 Act::PingAwaitPong => {
                                     ws.send(Message::Ping(b"hb".to_vec().into())).await.unwrap();
                                     loop {
-                                        match tokio::time::timeout(Duration::from_secs(5), ws.next()).await {
+                                        match tokio::time::timeout(
+                                            Duration::from_secs(5),
+                                            ws.next(),
+                                        )
+                                        .await
+                                        {
                                             Ok(Some(Ok(Message::Pong(_)))) => {
                                                 log.lock().unwrap().pongs += 1;
                                                 break;
@@ -2914,9 +3240,15 @@ mod tests {
 
     fn completed(id: &str, text: &str) -> Vec<Act> {
         vec![
-            Act::Send(json!({"type":"response.created","response":{"id":id,"model":"gpt-test","status":"in_progress"}})),
-            Act::Send(json!({"type":"response.output_text.delta","item_id":format!("msg_{id}"),"output_index":0,"delta":text})),
-            Act::Send(json!({"type":"response.completed","response":{"id":id,"model":"gpt-test","status":"completed","usage":{"input_tokens":3,"output_tokens":1}}})),
+            Act::Send(
+                json!({"type":"response.created","response":{"id":id,"model":"gpt-test","status":"in_progress"}}),
+            ),
+            Act::Send(
+                json!({"type":"response.output_text.delta","item_id":format!("msg_{id}"),"output_index":0,"delta":text}),
+            ),
+            Act::Send(
+                json!({"type":"response.completed","response":{"id":id,"model":"gpt-test","status":"completed","usage":{"input_tokens":3,"output_tokens":1}}}),
+            ),
         ]
     }
 
@@ -2930,8 +3262,12 @@ mod tests {
             }
             1 => completed("resp_2", "Again"),
             2 => vec![
-                Act::Send(json!({"type":"response.created","response":{"id":"resp_3","status":"in_progress"}})),
-                Act::Send(json!({"type":"response.failed","response":{"id":"resp_3","status":"failed","error":{"code":"invalid_prompt","message":"nope"}}})),
+                Act::Send(
+                    json!({"type":"response.created","response":{"id":"resp_3","status":"in_progress"}}),
+                ),
+                Act::Send(
+                    json!({"type":"response.failed","response":{"id":"resp_3","status":"failed","error":{"code":"invalid_prompt","message":"nope"}}}),
+                ),
             ],
             _ => completed("resp_4", "Ok"),
         });
@@ -2942,12 +3278,32 @@ mod tests {
         let (events, sink) = collector();
 
         let a = spec(&http_url, &ws_url, json!([user("hi")]));
-        assert_eq!(run_ws(&registry, &a, &token, &sink).await.unwrap(), TurnEnd::Completed { commit: Some("resp_1".into()) });
+        assert_eq!(
+            run_ws(&registry, &a, &token, &sink).await.unwrap(),
+            TurnEnd::Completed {
+                commit: Some("resp_1".into())
+            }
+        );
 
-        let b = spec(&http_url, &ws_url, json!([user("hi"), assistant("Hello"), user("more")]));
-        assert_eq!(run_ws(&registry, &b, &token, &sink).await.unwrap(), TurnEnd::Completed { commit: Some("resp_2".into()) });
+        let b = spec(
+            &http_url,
+            &ws_url,
+            json!([user("hi"), assistant("Hello"), user("more")]),
+        );
+        assert_eq!(
+            run_ws(&registry, &b, &token, &sink).await.unwrap(),
+            TurnEnd::Completed {
+                commit: Some("resp_2".into())
+            }
+        );
 
-        let c_input = json!([user("hi"), assistant("Hello"), user("more"), assistant("Again"), user("third")]);
+        let c_input = json!([
+            user("hi"),
+            assistant("Hello"),
+            user("more"),
+            assistant("Again"),
+            user("third")
+        ]);
         let c = spec(&http_url, &ws_url, c_input.clone());
         let failed = run_ws(&registry, &c, &token, &sink).await.unwrap_err();
         assert_eq!(failed.kind, FailKind::Final);
@@ -2956,7 +3312,12 @@ mod tests {
         let mut d_items = c_input.as_array().unwrap().clone();
         d_items.push(user("again"));
         let d = spec(&http_url, &ws_url, Value::Array(d_items.clone()));
-        assert_eq!(run_ws(&registry, &d, &token, &sink).await.unwrap(), TurnEnd::Completed { commit: Some("resp_4".into()) });
+        assert_eq!(
+            run_ws(&registry, &d, &token, &sink).await.unwrap(),
+            TurnEnd::Completed {
+                commit: Some("resp_4".into())
+            }
+        );
 
         let log = log.lock().unwrap();
         assert_eq!(log.frames.len(), 4);
@@ -2976,9 +3337,17 @@ mod tests {
         // Turns 1-3 shared one socket; the failure dropped it.
         assert_eq!(log.headers.len(), 2);
         let first = &log.headers[0];
-        let header = |name: &str| first.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone());
+        let header = |name: &str| {
+            first
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.clone())
+        };
         assert_eq!(header("openai-beta").as_deref(), Some(OPENAI_BETA_WS));
-        assert_eq!(header("authorization").as_deref(), Some("Bearer sk-test-0123456789abcdef"));
+        assert_eq!(
+            header("authorization").as_deref(),
+            Some("Bearer sk-test-0123456789abcdef")
+        );
         assert!(log.pongs >= 1, "the client must answer the server's ping");
         drop(log);
         let texts: Vec<String> = events
@@ -3006,7 +3375,9 @@ mod tests {
         let registry = ResponsesSessionRegistry::new();
         let (_events, sink) = collector();
         let s = spec(&http_url, &ws_url, json!([user("hi")]));
-        let f = run_ws(&registry, &s, &CancellationToken::new(), &sink).await.unwrap_err();
+        let f = run_ws(&registry, &s, &CancellationToken::new(), &sink)
+            .await
+            .unwrap_err();
         assert_eq!(f.failure.status, Some(429));
         assert_eq!(f.failure.code.as_deref(), Some("rate_limit_exceeded"));
         assert_eq!(f.failure.retry_after_ms, Some(2000));
@@ -3052,27 +3423,40 @@ mod tests {
     #[tokio::test]
     async fn auto_falls_back_to_sse_when_the_upgrade_is_refused_and_remembers_it() {
         let (host, upgrades, posts) = upgrade_refusing_server().await;
-        let s = spec(&format!("http://{host}/v1/responses"), &format!("ws://{host}/v1/responses"), json!([user("hi")]));
+        let s = spec(
+            &format!("http://{host}/v1/responses"),
+            &format!("ws://{host}/v1/responses"),
+            json!([user("hi")]),
+        );
         let registry = ResponsesSessionRegistry::new();
         let client = reqwest::Client::new();
         let (events, sink) = collector();
         let token = CancellationToken::new();
-        let end = run_turn(&client, &registry, &s, Transport::Auto, &token, &sink).await.unwrap();
+        let end = run_turn(&client, &registry, &s, Transport::Auto, &token, &sink)
+            .await
+            .unwrap();
         assert!(matches!(end, TurnEnd::Completed { .. }));
         assert!(registry.ws_unsupported(&s.endpoint_key));
-        assert!(events.lock().unwrap().contains(&ResponsesStreamEvent::Created {
-            response_id: Some("resp_s".into()),
-            model: Some("m".into()),
-            transport: "sse".into()
-        }));
+        assert!(events
+            .lock()
+            .unwrap()
+            .contains(&ResponsesStreamEvent::Created {
+                response_id: Some("resp_s".into()),
+                model: Some("m".into()),
+                transport: "sse".into()
+            }));
         assert_eq!(upgrades.load(Ordering::SeqCst), 1);
         assert_eq!(posts.load(Ordering::SeqCst), 1);
         // The second turn goes straight to SSE.
-        run_turn(&client, &registry, &s, Transport::Auto, &token, &sink).await.unwrap();
+        run_turn(&client, &registry, &s, Transport::Auto, &token, &sink)
+            .await
+            .unwrap();
         assert_eq!(upgrades.load(Ordering::SeqCst), 1);
         assert_eq!(posts.load(Ordering::SeqCst), 2);
         // Forced WebSocket surfaces the refusal instead of falling back.
-        let f = run_turn(&client, &registry, &s, Transport::WebSocket, &token, &sink).await.unwrap_err();
+        let f = run_turn(&client, &registry, &s, Transport::WebSocket, &token, &sink)
+            .await
+            .unwrap_err();
         assert_eq!(f.kind, FailKind::Unsupported);
         assert_eq!(f.failure.status, Some(426));
     }
@@ -3081,8 +3465,12 @@ mod tests {
     async fn no_fallback_once_visible_output_was_sent() {
         let script: Script = Arc::new(|_, _| {
             vec![
-                Act::Send(json!({"type":"response.created","response":{"id":"resp_x","status":"in_progress"}})),
-                Act::Send(json!({"type":"response.output_text.delta","item_id":"m","delta":"partial"})),
+                Act::Send(
+                    json!({"type":"response.created","response":{"id":"resp_x","status":"in_progress"}}),
+                ),
+                Act::Send(
+                    json!({"type":"response.output_text.delta","item_id":"m","delta":"partial"}),
+                ),
                 Act::Drop,
             ]
         });
@@ -3097,17 +3485,32 @@ mod tests {
                 counter.fetch_add(1, Ordering::SeqCst);
             }
         });
-        let s = spec(&format!("http://{sse_addr}/v1/responses"), &ws_url, json!([user("hi")]));
+        let s = spec(
+            &format!("http://{sse_addr}/v1/responses"),
+            &ws_url,
+            json!([user("hi")]),
+        );
         let registry = ResponsesSessionRegistry::new();
         let client = reqwest::Client::new();
         let (events, sink) = collector();
-        let f = run_turn(&client, &registry, &s, Transport::Auto, &CancellationToken::new(), &sink)
-            .await
-            .unwrap_err();
+        let f = run_turn(
+            &client,
+            &registry,
+            &s,
+            Transport::Auto,
+            &CancellationToken::new(),
+            &sink,
+        )
+        .await
+        .unwrap_err();
         assert!(f.visible);
         assert_eq!(f.failure.code.as_deref(), Some("stream_broken"));
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(hits.load(Ordering::SeqCst), 0, "no SSE request after visible output");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "no SSE request after visible output"
+        );
         let texts = events
             .lock()
             .unwrap()
@@ -3120,7 +3523,10 @@ mod tests {
     #[test]
     fn transport_and_idle_settings_parse_like_the_proxy() {
         assert_eq!(Transport::parse(None).unwrap(), Transport::Auto);
-        assert_eq!(Transport::parse(Some("WebSocket")).unwrap(), Transport::WebSocket);
+        assert_eq!(
+            Transport::parse(Some("WebSocket")).unwrap(),
+            Transport::WebSocket
+        );
         assert_eq!(Transport::parse(Some("sse")).unwrap(), Transport::Sse);
         assert!(Transport::parse(Some("carrier-pigeon")).is_err());
         assert_eq!(idle_window(None), DEFAULT_IDLE);
@@ -3139,6 +3545,9 @@ mod tests {
         .unwrap();
         assert_eq!(v["kind"], "function_call_args_delta");
         assert_eq!(v["item_id"], "fc");
-        assert_eq!(serde_json::to_value(ResponsesStreamEvent::Eof {}).unwrap(), json!({"kind": "eof"}));
+        assert_eq!(
+            serde_json::to_value(ResponsesStreamEvent::Eof {}).unwrap(),
+            json!({"kind": "eof"})
+        );
     }
 }

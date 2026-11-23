@@ -35,8 +35,8 @@ use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
 
 use super::local_api::{
-    engine_schluessel, fehler, fehler_mit, forward_headers, header_map_to_btree, jetzt_ms, koerper_abgelehnt,
-    qualified_id, upstream_ziel, Koerper, Lane, Laufend, LocalApiState,
+    engine_schluessel, fehler, fehler_mit, forward_headers, header_map_to_btree, jetzt_ms,
+    koerper_abgelehnt, qualified_id, upstream_ziel, Koerper, Lane, Laufend, LocalApiState,
 };
 use super::responses::SseLineDecoder;
 
@@ -120,10 +120,13 @@ fn inhalt_fuer_chat(content: &Value, role: &str) -> Result<Value, String> {
             for p in parts {
                 match str_of(p, "type").unwrap_or("") {
                     "input_text" | "output_text" | "text" | "summary_text" => {
-                        chat_parts.push(json!({"type": "text", "text": str_of(p, "text").unwrap_or("")}));
+                        chat_parts
+                            .push(json!({"type": "text", "text": str_of(p, "text").unwrap_or("")}));
                     }
                     "refusal" => {
-                        chat_parts.push(json!({"type": "text", "text": str_of(p, "refusal").unwrap_or("")}));
+                        chat_parts.push(
+                            json!({"type": "text", "text": str_of(p, "refusal").unwrap_or("")}),
+                        );
                     }
                     "input_image" | "image_url" => {
                         let url = match p.get("image_url") {
@@ -186,7 +189,11 @@ pub(crate) fn eingabe_fuer_chat(input: &Value) -> Result<Vec<Value>, String> {
                 Some("developer") | Some("system") => "system",
                 Some("assistant") => "assistant",
                 Some("user") | None => "user",
-                Some(other) => return Err(format!("Unknown role '{other}'. Use user, assistant, system or developer.")),
+                Some(other) => {
+                    return Err(format!(
+                        "Unknown role '{other}'. Use user, assistant, system or developer."
+                    ))
+                }
             };
             let content = inhalt_fuer_chat(item.get("content").unwrap_or(&Value::Null), role)?;
             let mut m = json!({"role": role, "content": content});
@@ -198,7 +205,9 @@ pub(crate) fn eingabe_fuer_chat(input: &Value) -> Result<Vec<Value>, String> {
         }
         match ty {
             Some("function_call") => {
-                let call_id = str_of(item, "call_id").or(str_of(item, "id")).unwrap_or("call_0");
+                let call_id = str_of(item, "call_id")
+                    .or(str_of(item, "id"))
+                    .unwrap_or("call_0");
                 let name = str_of(item, "name").unwrap_or("");
                 let args = match item.get("arguments") {
                     Some(Value::String(s)) => s.clone(),
@@ -338,7 +347,10 @@ fn format_fuer_chat(text: &Value) -> Option<Value> {
     match str_of(f, "type")? {
         "json_schema" => {
             let mut js = Map::new();
-            js.insert("name".to_string(), json!(str_of(f, "name").unwrap_or("response")));
+            js.insert(
+                "name".to_string(),
+                json!(str_of(f, "name").unwrap_or("response")),
+            );
             for k in ["schema", "strict", "description"] {
                 if let Some(v) = f.get(k).filter(|v| !v.is_null()) {
                     js.insert(k.to_string(), v.clone());
@@ -385,7 +397,11 @@ const ECHO: [&str; 12] = [
 ];
 
 /// The lane's request body (without `stream`, which the caller sets).
-pub(crate) fn chat_koerper(body: &Map<String, Value>, nachrichten: Vec<Value>, upstream_id: &str) -> Map<String, Value> {
+pub(crate) fn chat_koerper(
+    body: &Map<String, Value>,
+    nachrichten: Vec<Value>,
+    upstream_id: &str,
+) -> Map<String, Value> {
     let mut chat = Map::new();
     chat.insert("model".to_string(), json!(upstream_id));
     chat.insert("messages".to_string(), Value::Array(nachrichten));
@@ -397,7 +413,11 @@ pub(crate) fn chat_koerper(body: &Map<String, Value>, nachrichten: Vec<Value>, u
     if let Some(n) = body.get("max_output_tokens").filter(|v| v.is_u64()) {
         chat.insert("max_tokens".to_string(), n.clone());
     }
-    if let Some(effort) = body.get("reasoning").and_then(|r| r.get("effort")).filter(|v| v.is_string()) {
+    if let Some(effort) = body
+        .get("reasoning")
+        .and_then(|r| r.get("effort"))
+        .filter(|v| v.is_string())
+    {
         chat.insert("reasoning_effort".to_string(), effort.clone());
     }
     if let Some(tools) = body.get("tools").and_then(tools_fuer_chat) {
@@ -541,7 +561,11 @@ impl ResponsesStreamTranslator {
             self.close_calls(out);
             let (id, index) = (neue_id("rs"), self.next_index);
             self.next_index += 1;
-            self.reasoning = Some(OffenesItem { id: id.clone(), index, text: String::new() });
+            self.reasoning = Some(OffenesItem {
+                id: id.clone(),
+                index,
+                text: String::new(),
+            });
             let added = self.ev(
                 "response.output_item.added",
                 json!({"output_index": index, "item": {"id": id, "type": "reasoning", "summary": []}}),
@@ -569,7 +593,9 @@ impl ResponsesStreamTranslator {
     }
 
     fn close_reasoning(&mut self, out: &mut Vec<Value>) {
-        let Some(r) = self.reasoning.take() else { return };
+        let Some(r) = self.reasoning.take() else {
+            return;
+        };
         let done = self.ev(
             "response.reasoning_summary_text.done",
             json!({"item_id": r.id, "output_index": r.index, "summary_index": 0, "text": r.text}),
@@ -581,7 +607,10 @@ impl ResponsesStreamTranslator {
         );
         out.push(part);
         let item = json!({"id": r.id, "type": "reasoning", "summary": [{"type": "summary_text", "text": r.text}]});
-        let ev = self.ev("response.output_item.done", json!({"output_index": r.index, "item": item}));
+        let ev = self.ev(
+            "response.output_item.done",
+            json!({"output_index": r.index, "item": item}),
+        );
         out.push(ev);
         self.output.push((r.index, item));
     }
@@ -592,7 +621,11 @@ impl ResponsesStreamTranslator {
             self.close_calls(out);
             let (id, index) = (neue_id("msg"), self.next_index);
             self.next_index += 1;
-            self.message = Some(OffenesItem { id: id.clone(), index, text: String::new() });
+            self.message = Some(OffenesItem {
+                id: id.clone(),
+                index,
+                text: String::new(),
+            });
             let added = self.ev(
                 "response.output_item.added",
                 json!({"output_index": index, "item": {"id": id, "type": "message", "status": "in_progress", "role": "assistant", "content": []}}),
@@ -635,7 +668,10 @@ impl ResponsesStreamTranslator {
             "id": m.id, "type": "message", "status": "completed", "role": "assistant",
             "content": [{"type": "output_text", "text": m.text, "annotations": []}]
         });
-        let ev = self.ev("response.output_item.done", json!({"output_index": m.index, "item": item}));
+        let ev = self.ev(
+            "response.output_item.done",
+            json!({"output_index": m.index, "item": item}),
+        );
         out.push(ev);
         self.output.push((m.index, item));
     }
@@ -649,7 +685,11 @@ impl ResponsesStreamTranslator {
             Some(v) if !v.is_null() => v.to_string(),
             _ => String::new(),
         };
-        let i = match self.calls.iter().position(|c| c.chat_index == chat_index && c.open) {
+        let i = match self
+            .calls
+            .iter()
+            .position(|c| c.chat_index == chat_index && c.open)
+        {
             Some(i) => i,
             None => {
                 self.close_reasoning(out);
@@ -709,7 +749,10 @@ impl ResponsesStreamTranslator {
                 "id": c.id, "type": "function_call", "status": "completed",
                 "call_id": c.call_id, "name": c.name, "arguments": c.args
             });
-            let ev = self.ev("response.output_item.done", json!({"output_index": c.index, "item": item}));
+            let ev = self.ev(
+                "response.output_item.done",
+                json!({"output_index": c.index, "item": item}),
+            );
             out.push(ev);
             self.output.push((c.index, item));
         }
@@ -732,7 +775,11 @@ impl ResponsesStreamTranslator {
                 self.cached = Some(c);
             }
         }
-        let Some(choice) = v.get("choices").and_then(Value::as_array).and_then(|a| a.first()) else {
+        let Some(choice) = v
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|a| a.first())
+        else {
             return out;
         };
         if let Some(delta) = choice.get("delta").or(choice.get("message")) {
@@ -783,7 +830,11 @@ impl ResponsesStreamTranslator {
             r["incomplete_details"] = json!({"reason": reason});
         }
         self.final_response = Some(r.clone());
-        let ty = if status == "completed" { "response.completed" } else { "response.incomplete" };
+        let ty = if status == "completed" {
+            "response.completed"
+        } else {
+            "response.incomplete"
+        };
         let ev = self.ev(ty, json!({"response": r}));
         out.push(ev);
         out
@@ -852,16 +903,19 @@ pub(crate) enum Abgelehnt {
         code: &'static str,
     },
     /// An error response that is already built (`upstream_ziel`).
-    Antwort(Response),
+    Antwort(Box<Response>),
 }
 
 impl Abgelehnt {
     fn into_response(self) -> Response {
         match self {
-            Abgelehnt::Fehler { status, message, param, code } => {
-                fehler_mit(status, "invalid_request_error", &message, param, Some(code))
-            }
-            Abgelehnt::Antwort(r) => r,
+            Abgelehnt::Fehler {
+                status,
+                message,
+                param,
+                code,
+            } => fehler_mit(status, "invalid_request_error", &message, param, Some(code)),
+            Abgelehnt::Antwort(r) => *r,
         }
     }
 
@@ -869,7 +923,9 @@ impl Abgelehnt {
     async fn into_frame(self) -> Value {
         let resp = self.into_response();
         let status = resp.status().as_u16();
-        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap_or_default();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap_or_default();
         let error = serde_json::from_slice::<Value>(&bytes)
             .ok()
             .and_then(|v| v.get("error").cloned())
@@ -900,7 +956,10 @@ pub(crate) struct Vorbereitet {
 
 /// Validation, `previous_response_id`, translation and the lane, before a
 /// single byte goes upstream. Every refusal here has its HTTP status.
-pub(crate) async fn vorbereiten(state: &LocalApiState, body: &Map<String, Value>) -> Result<Vorbereitet, Abgelehnt> {
+pub(crate) async fn vorbereiten(
+    state: &LocalApiState,
+    body: &Map<String, Value>,
+) -> Result<Vorbereitet, Abgelehnt> {
     let missing = |param: &'static str| Abgelehnt::Fehler {
         status: StatusCode::BAD_REQUEST,
         message: format!("Missing required parameter: '{param}'."),
@@ -914,7 +973,9 @@ pub(crate) async fn vorbereiten(state: &LocalApiState, body: &Map<String, Value>
     let input = match body.get("input") {
         Some(Value::String(s)) if !s.is_empty() => body["input"].clone(),
         Some(Value::Array(a)) if !a.is_empty() => body["input"].clone(),
-        Some(Value::String(_)) | Some(Value::Array(_)) | Some(Value::Null) | None => return Err(missing("input")),
+        Some(Value::String(_)) | Some(Value::Array(_)) | Some(Value::Null) | None => {
+            return Err(missing("input"))
+        }
         Some(_) => {
             return Err(Abgelehnt::Fehler {
                 status: StatusCode::BAD_REQUEST,
@@ -955,13 +1016,19 @@ pub(crate) async fn vorbereiten(state: &LocalApiState, body: &Map<String, Value>
         code: "invalid_value",
     })?;
     conversation.extend(neu);
-    let ziel = upstream_ziel(state, &modell, "/chat/completions").await.map_err(Abgelehnt::Antwort)?;
+    let ziel = upstream_ziel(state, &modell, "/chat/completions")
+        .await
+        .map_err(Abgelehnt::Antwort)?;
     let instructions = body
         .get("instructions")
         .and_then(Value::as_str)
         .filter(|s| !s.trim().is_empty())
         .map(str::to_string);
-    let chat = chat_koerper(body, chat_nachrichten(instructions.as_deref(), &conversation), &ziel.upstream_id);
+    let chat = chat_koerper(
+        body,
+        chat_nachrichten(instructions.as_deref(), &conversation),
+        &ziel.upstream_id,
+    );
     let store = body.get("store").and_then(Value::as_bool).unwrap_or(true);
     let mut echo = Map::new();
     for k in ECHO {
@@ -993,13 +1060,23 @@ fn upstream_kopf(headers: &HeaderMap) -> BTreeMap<String, String> {
             !k.starts_with("sec-websocket-")
                 && !matches!(
                     k.as_str(),
-                    "upgrade" | "accept" | "accept-encoding" | "content-type" | "origin" | "openai-beta"
+                    "upgrade"
+                        | "accept"
+                        | "accept-encoding"
+                        | "content-type"
+                        | "origin"
+                        | "openai-beta"
                 )
         })
         .collect()
 }
 
-fn upstream_anfrage(state: &LocalApiState, v: &Vorbereitet, kopf: &BTreeMap<String, String>, stream: bool) -> reqwest::RequestBuilder {
+fn upstream_anfrage(
+    state: &LocalApiState,
+    v: &Vorbereitet,
+    kopf: &BTreeMap<String, String>,
+    stream: bool,
+) -> reqwest::RequestBuilder {
     let mut body = v.chat.clone();
     body.insert("stream".to_string(), json!(stream));
     if stream {
@@ -1007,7 +1084,9 @@ fn upstream_anfrage(state: &LocalApiState, v: &Vorbereitet, kopf: &BTreeMap<Stri
     }
     let mut req = state.http.post(&v.ziel_url);
     for (k, val) in kopf {
-        if let (Ok(name), Ok(value)) = (HeaderName::try_from(k.as_str()), HeaderValue::from_str(val)) {
+        if let (Ok(name), Ok(value)) =
+            (HeaderName::try_from(k.as_str()), HeaderValue::from_str(val))
+        {
             req = req.header(name, value);
         }
     }
@@ -1057,7 +1136,13 @@ async fn speichern(state: &LocalApiState, v: &Vorbereitet, tr: &ResponsesStreamT
 /// The streaming turn: events into `tx` until the lane is done, the lane
 /// fails, or the receiver is gone (then the lane request is dropped, which
 /// stops the generation).
-async fn strom_zug(state: LocalApiState, v: Vorbereitet, kopf: BTreeMap<String, String>, tx: mpsc::Sender<Value>, waechter: Laufend) {
+async fn strom_zug(
+    state: LocalApiState,
+    v: Vorbereitet,
+    kopf: BTreeMap<String, String>,
+    tx: mpsc::Sender<Value>,
+    waechter: Laufend,
+) {
     let _waechter = waechter;
     let mut tr = ResponsesStreamTranslator::new(&v.id, &v.qualifiziert, v.echo.clone());
     for ev in tr.start() {
@@ -1077,7 +1162,10 @@ async fn strom_zug(state: LocalApiState, v: Vorbereitet, kopf: BTreeMap<String, 
     let antwort = match antwort {
         Ok(r) => r,
         Err(e) => {
-            let events = fail(&mut tr, format!("{label} did not answer: {}", crate::os_error::english(&e)));
+            let events = fail(
+                &mut tr,
+                format!("{label} did not answer: {}", crate::os_error::english(&e)),
+            );
             for ev in events {
                 let _ = tx.send(ev).await;
             }
@@ -1104,7 +1192,13 @@ async fn strom_zug(state: LocalApiState, v: Vorbereitet, kopf: BTreeMap<String, 
         let (frames, ende) = match item {
             None => (decoder.finish(), true),
             Some(Err(e)) => {
-                let events = fail(&mut tr, format!("{label} broke off mid-answer: {}", crate::os_error::english(&e)));
+                let events = fail(
+                    &mut tr,
+                    format!(
+                        "{label} broke off mid-answer: {}",
+                        crate::os_error::english(&e)
+                    ),
+                );
                 for ev in events {
                     let _ = tx.send(ev).await;
                 }
@@ -1146,7 +1240,10 @@ async fn strom_zug(state: LocalApiState, v: Vorbereitet, kopf: BTreeMap<String, 
             if tr.has_finish_reason() {
                 break;
             }
-            let events = fail(&mut tr, format!("{label} closed the stream before the answer was finished."));
+            let events = fail(
+                &mut tr,
+                format!("{label} closed the stream before the answer was finished."),
+            );
             for ev in events {
                 let _ = tx.send(ev).await;
             }
@@ -1166,7 +1263,12 @@ async fn strom_zug(state: LocalApiState, v: Vorbereitet, kopf: BTreeMap<String, 
 }
 
 /// `stream: false`: the lane's whole answer through the same translator.
-async fn json_zug(state: LocalApiState, v: Vorbereitet, kopf: BTreeMap<String, String>, waechter: Laufend) -> Response {
+async fn json_zug(
+    state: LocalApiState,
+    v: Vorbereitet,
+    kopf: BTreeMap<String, String>,
+    waechter: Laufend,
+) -> Response {
     let label = v.lane.label();
     let antwort = match upstream_anfrage(&state, &v, &kopf, false).send().await {
         Ok(r) => r,
@@ -1187,7 +1289,10 @@ async fn json_zug(state: LocalApiState, v: Vorbereitet, kopf: BTreeMap<String, S
             return fehler(
                 StatusCode::BAD_GATEWAY,
                 "api_error",
-                &format!("{label} broke off mid-answer: {}", crate::os_error::english(&e)),
+                &format!(
+                    "{label} broke off mid-answer: {}",
+                    crate::os_error::english(&e)
+                ),
             );
         }
     };
@@ -1195,7 +1300,13 @@ async fn json_zug(state: LocalApiState, v: Vorbereitet, kopf: BTreeMap<String, S
         state.nutzung.fehler();
         let text = String::from_utf8_lossy(&bytes);
         let code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-        return fehler_mit(code, "api_error", &upstream_fehlertext(status.as_u16(), &text), None, Some("upstream_error"));
+        return fehler_mit(
+            code,
+            "api_error",
+            &upstream_fehlertext(status.as_u16(), &text),
+            None,
+            Some("upstream_error"),
+        );
     }
     let chat: Value = match serde_json::from_slice(&bytes) {
         Ok(v) => v,
@@ -1219,7 +1330,11 @@ async fn json_zug(state: LocalApiState, v: Vorbereitet, kopf: BTreeMap<String, S
     drop(waechter);
     match tr.final_response() {
         Some(r) => Json(r.clone()).into_response(),
-        None => fehler(StatusCode::INTERNAL_SERVER_ERROR, "api_error", "Could not build the response."),
+        None => fehler(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "api_error",
+            "Could not build the response.",
+        ),
     }
 }
 
@@ -1233,7 +1348,11 @@ fn sse_bytes(ev: &Value) -> axum::body::Bytes {
 // ---------------------------------------------------------------------------
 
 /// `POST /v1/responses`.
-pub async fn handle_responses_post(AxumState(state): AxumState<LocalApiState>, headers: HeaderMap, body: Koerper) -> Response {
+pub async fn handle_responses_post(
+    AxumState(state): AxumState<LocalApiState>,
+    headers: HeaderMap,
+    body: Koerper,
+) -> Response {
     let bytes = match body {
         Ok(b) => b,
         Err(e) => return koerper_abgelehnt(e),
@@ -1251,9 +1370,19 @@ pub async fn handle_responses_post(AxumState(state): AxumState<LocalApiState>, h
         }
     };
     let Some(body) = json.as_object() else {
-        return fehler_mit(StatusCode::BAD_REQUEST, "invalid_request_error", "Body must be a JSON object.", None, Some("invalid_body"));
+        return fehler_mit(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "Body must be a JSON object.",
+            None,
+            Some("invalid_body"),
+        );
     };
-    let modell = body.get("model").and_then(Value::as_str).unwrap_or("").to_string();
+    let modell = body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let waechter = state.nutzung.beginn(&modell);
     let v = match vorbereiten(&state, body).await {
         Ok(v) => v,
@@ -1271,14 +1400,22 @@ pub async fn handle_responses_post(AxumState(state): AxumState<LocalApiState>, h
     // The client hanging up drops this stream and `rx` with it; `tx.closed()`
     // then ends the turn and drops the lane request.
     let strom = futures_util::stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|ev| (Ok::<_, std::io::Error>(sse_bytes(&ev)), rx))
+        rx.recv()
+            .await
+            .map(|ev| (Ok::<_, std::io::Error>(sse_bytes(&ev)), rx))
     });
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/event-stream")
         .header(header::CACHE_CONTROL, "no-cache")
         .body(Body::from_stream(strom))
-        .unwrap_or_else(|_| fehler(StatusCode::INTERNAL_SERVER_ERROR, "api_error", "Could not build the response."))
+        .unwrap_or_else(|_| {
+            fehler(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "api_error",
+                "Could not build the response.",
+            )
+        })
 }
 
 /// `GET /v1/responses`: the WebSocket of the Responses API.
@@ -1310,7 +1447,11 @@ pub(crate) fn frame_lesen(text: &str) -> Result<Map<String, Value>, Value> {
     let v: Value = serde_json::from_str(text)
         .map_err(|e| fehler_frame(400, "invalid_frame", &format!("The frame is not JSON: {e}")))?;
     let Value::Object(mut frame) = v else {
-        return Err(fehler_frame(400, "invalid_frame", "A frame must be a JSON object."));
+        return Err(fehler_frame(
+            400,
+            "invalid_frame",
+            "A frame must be a JSON object.",
+        ));
     };
     match frame.remove("type").as_ref().and_then(Value::as_str) {
         Some("response.create") => {}
@@ -1318,7 +1459,9 @@ pub(crate) fn frame_lesen(text: &str) -> Result<Map<String, Value>, Value> {
             return Err(fehler_frame(
                 400,
                 "invalid_frame",
-                &format!("Unknown frame type '{other}'. Send {{\"type\":\"response.create\", ...}}."),
+                &format!(
+                    "Unknown frame type '{other}'. Send {{\"type\":\"response.create\", ...}}."
+                ),
             ))
         }
         None => {
@@ -1339,8 +1482,17 @@ pub(crate) fn frame_lesen(text: &str) -> Result<Map<String, Value>, Value> {
     Ok(frame)
 }
 
-async fn ws_zug(state: LocalApiState, body: Map<String, Value>, kopf: BTreeMap<String, String>, tx: mpsc::Sender<Value>) {
-    let modell = body.get("model").and_then(Value::as_str).unwrap_or("").to_string();
+async fn ws_zug(
+    state: LocalApiState,
+    body: Map<String, Value>,
+    kopf: BTreeMap<String, String>,
+    tx: mpsc::Sender<Value>,
+) {
+    let modell = body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let waechter = state.nutzung.beginn(&modell);
     match vorbereiten(&state, &body).await {
         Ok(v) => strom_zug(state, v, kopf, tx, waechter).await,
@@ -1359,7 +1511,11 @@ async fn ws_sitzung(state: LocalApiState, socket: WebSocket, kopf: BTreeMap<Stri
     let (tx, mut rx) = mpsc::channel::<Value>(EVENT_BUFFER);
     let schreiber = tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
-            if sink.send(WsMessage::Text(ev.to_string().into())).await.is_err() {
+            if sink
+                .send(WsMessage::Text(ev.to_string().into()))
+                .await
+                .is_err()
+            {
                 break;
             }
         }
@@ -1370,7 +1526,12 @@ async fn ws_sitzung(state: LocalApiState, socket: WebSocket, kopf: BTreeMap<Stri
     loop {
         if laufend.is_none() {
             if let Some(body) = warteschlange.pop_front() {
-                laufend = Some(tokio::spawn(ws_zug(state.clone(), body, kopf.clone(), tx.clone())));
+                laufend = Some(tokio::spawn(ws_zug(
+                    state.clone(),
+                    body,
+                    kopf.clone(),
+                    tx.clone(),
+                )));
             }
         }
         tokio::select! {
@@ -1476,7 +1637,10 @@ mod tests {
                 port: 0,
                 lan: false,
                 token: TOKEN.into(),
-                upstreams: vec![Upstream { lane_prefix: "ollama".into(), base: format!("http://{lane_addr}/v1") }],
+                upstreams: vec![Upstream {
+                    lane_prefix: "ollama".into(),
+                    base: format!("http://{lane_addr}/v1"),
+                }],
                 cors_origins: Vec::new(),
             })),
             http: reqwest::Client::new(),
@@ -1499,11 +1663,17 @@ mod tests {
         let mut decoder = SseLineDecoder::default();
         let mut frames = decoder.push(text.as_bytes());
         frames.extend(decoder.finish());
-        frames.into_iter().map(|f| serde_json::from_str(&f.data).unwrap()).collect()
+        frames
+            .into_iter()
+            .map(|f| serde_json::from_str(&f.data).unwrap())
+            .collect()
     }
 
     fn types(events: &[Value]) -> Vec<String> {
-        events.iter().map(|e| e["type"].as_str().unwrap().to_string()).collect()
+        events
+            .iter()
+            .map(|e| e["type"].as_str().unwrap().to_string())
+            .collect()
     }
 
     // -- translation, pure ----------------------------------------------------
@@ -1524,11 +1694,17 @@ mod tests {
         .unwrap();
         assert_eq!(msgs.len(), 4);
         assert_eq!(msgs[0], json!({"role": "system", "content": "Be brief."}));
-        assert_eq!(msgs[1]["content"][1]["image_url"]["url"], "data:image/png;base64,AAAA");
+        assert_eq!(
+            msgs[1]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,AAAA"
+        );
         assert_eq!(msgs[2]["content"], "A cat.");
         assert_eq!(msgs[2]["reasoning_content"], "Looking.");
         assert_eq!(msgs[2]["tool_calls"][0]["id"], "c1");
-        assert_eq!(msgs[3], json!({"role": "tool", "tool_call_id": "c1", "content": "ok"}));
+        assert_eq!(
+            msgs[3],
+            json!({"role": "tool", "tool_call_id": "c1", "content": "ok"})
+        );
         assert!(eingabe_fuer_chat(&json!([{"type": "web_search_call"}])).is_err());
     }
 
@@ -1539,7 +1715,10 @@ mod tests {
             json!({"role": "system", "content": "Speak Polish."}),
         ];
         let msgs = chat_nachrichten(Some("Be brief."), &conv);
-        assert_eq!(msgs[0], json!({"role": "system", "content": "Be brief.\n\nSpeak Polish."}));
+        assert_eq!(
+            msgs[0],
+            json!({"role": "system", "content": "Be brief.\n\nSpeak Polish."})
+        );
         assert_eq!(msgs.len(), 2);
         let body = match json!({
             "model": "qwen", "max_output_tokens": 50, "reasoning": {"effort": "low"}, "temperature": 0.2, "store": false,
@@ -1555,18 +1734,32 @@ mod tests {
         assert_eq!(chat["max_tokens"], 50);
         assert_eq!(chat["reasoning_effort"], "low");
         assert_eq!(chat["temperature"], 0.2);
-        assert_eq!(chat["tools"], json!([{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}]));
-        assert_eq!(chat["tool_choice"], json!({"type": "function", "function": {"name": "f"}}));
+        assert_eq!(
+            chat["tools"],
+            json!([{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}])
+        );
+        assert_eq!(
+            chat["tool_choice"],
+            json!({"type": "function", "function": {"name": "f"}})
+        );
         assert_eq!(chat["response_format"]["json_schema"]["name"], "answer");
-        assert!(chat.get("store").is_none() && chat.get("input").is_none() && chat.get("instructions").is_none());
+        assert!(
+            chat.get("store").is_none()
+                && chat.get("input").is_none()
+                && chat.get("instructions").is_none()
+        );
     }
 
     #[test]
     fn frames_top_level_and_nested_are_read_and_bad_ones_answered() {
-        let a = frame_lesen(r#"{"type":"response.create","model":"qwen","input":"hi","stream":true}"#).unwrap();
+        let a =
+            frame_lesen(r#"{"type":"response.create","model":"qwen","input":"hi","stream":true}"#)
+                .unwrap();
         assert_eq!(a["model"], "qwen");
         assert!(a.get("stream").is_none());
-        let b = frame_lesen(r#"{"type":"response.create","response":{"model":"qwen","input":"hi"}}"#).unwrap();
+        let b =
+            frame_lesen(r#"{"type":"response.create","response":{"model":"qwen","input":"hi"}}"#)
+                .unwrap();
         assert_eq!(b["input"], "hi");
         let e = frame_lesen("not json").unwrap_err();
         assert_eq!(e["type"], "error");
@@ -1579,7 +1772,12 @@ mod tests {
     fn the_store_is_bounded() {
         let mut store = ResponseStore::default();
         for i in 0..(STORE_CAP + 10) {
-            store.put(StoredResponse { id: format!("resp_{i}"), model: "m".into(), conversation: vec![], instructions: None });
+            store.put(StoredResponse {
+                id: format!("resp_{i}"),
+                model: "m".into(),
+                conversation: vec![],
+                instructions: None,
+            });
         }
         assert_eq!(store.len(), STORE_CAP);
         assert!(store.get("resp_0").is_none());
@@ -1612,7 +1810,13 @@ mod tests {
         assert_eq!(v["usage"]["input_tokens"], 11);
         assert_eq!(v["usage"]["output_tokens"], 4);
         assert_eq!(v["usage"]["total_tokens"], 15);
-        let call = v["output"].as_array().unwrap().iter().find(|i| i["type"] == "function_call").unwrap().clone();
+        let call = v["output"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["type"] == "function_call")
+            .unwrap()
+            .clone();
         assert_eq!(call["call_id"], "call_a");
         assert_eq!(call["name"], "get_weather");
         assert_eq!(call["arguments"], "{\"city\":\"Kielce\"}");
@@ -1622,10 +1826,18 @@ mod tests {
         assert_eq!(up["model"], "qwen");
         assert_eq!(up["stream"], false);
         assert_eq!(up["max_tokens"], 50);
-        assert_eq!(up["messages"][0], json!({"role": "system", "content": "Be brief."}));
+        assert_eq!(
+            up["messages"][0],
+            json!({"role": "system", "content": "Be brief."})
+        );
         assert_eq!(up["messages"][1], json!({"role": "user", "content": "hi"}));
         assert_eq!(up["tools"][0]["function"]["name"], "get_weather");
-        assert!(state.response_store.read().await.get(v["id"].as_str().unwrap()).is_some());
+        assert!(state
+            .response_store
+            .read()
+            .await
+            .get(v["id"].as_str().unwrap())
+            .is_some());
     }
 
     #[tokio::test]
@@ -1658,13 +1870,19 @@ mod tests {
             assert!(t.contains(&want.to_string()), "{want} missing in {t:?}");
         }
         assert_eq!(t.last().unwrap(), "response.completed");
-        let seqs: Vec<u64> = events.iter().map(|e| e["sequence_number"].as_u64().unwrap()).collect();
+        let seqs: Vec<u64> = events
+            .iter()
+            .map(|e| e["sequence_number"].as_u64().unwrap())
+            .collect();
         assert!(seqs.windows(2).all(|w| w[1] == w[0] + 1));
         let done = &events.last().unwrap()["response"];
         assert_eq!(done["output_text"], "Hello");
         assert_eq!(done["usage"]["input_tokens"], 11);
         let first_id = done["id"].as_str().unwrap().to_string();
-        assert_eq!(seen.lock().unwrap()[0]["stream_options"]["include_usage"], true);
+        assert_eq!(
+            seen.lock().unwrap()[0]["stream_options"]["include_usage"],
+            true
+        );
 
         // Turn two continues turn one: the lane gets the whole conversation.
         let r = c
@@ -1685,7 +1903,10 @@ mod tests {
         assert_eq!(msgs[1]["role"], "assistant");
         assert_eq!(msgs[1]["content"], "Hello");
         assert_eq!(msgs[1]["tool_calls"][0]["id"], "call_a");
-        assert_eq!(msgs[2], json!({"role": "tool", "tool_call_id": "call_a", "content": "sunny"}));
+        assert_eq!(
+            msgs[2],
+            json!({"role": "tool", "tool_call_id": "call_a", "content": "sunny"})
+        );
 
         // An unknown id.
         let r = c
@@ -1701,7 +1922,13 @@ mod tests {
         assert_eq!(v["error"]["param"], "previous_response_id");
 
         // No input.
-        let r = c.post(&url).bearer_auth(TOKEN).json(&json!({"model": "qwen"})).send().await.unwrap();
+        let r = c
+            .post(&url)
+            .bearer_auth(TOKEN)
+            .json(&json!({"model": "qwen"}))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(r.status(), 400);
         let v: Value = r.json().await.unwrap();
         assert_eq!(v["error"]["code"], "missing_required_parameter");
@@ -1730,7 +1957,9 @@ mod tests {
     // -- WebSocket ------------------------------------------------------------
 
     async fn read_until_terminal(
-        ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
     ) -> Vec<Value> {
         let mut out = Vec::new();
         loop {
@@ -1743,7 +1972,10 @@ mod tests {
                 let v: Value = serde_json::from_str(t.as_str()).unwrap();
                 let ty = v["type"].as_str().unwrap_or("").to_string();
                 out.push(v);
-                if matches!(ty.as_str(), "response.completed" | "response.incomplete" | "response.failed" | "error") {
+                if matches!(
+                    ty.as_str(),
+                    "response.completed" | "response.incomplete" | "response.failed" | "error"
+                ) {
                     return out;
                 }
             }
@@ -1776,30 +2008,45 @@ mod tests {
             .insert("authorization", format!("Bearer {TOKEN}").parse().unwrap());
         let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
 
-        ws.send(tungstenite::Message::text(r#"{"type":"response.create","model":"qwen","input":"weather?"}"#))
-            .await
-            .unwrap();
+        ws.send(tungstenite::Message::text(
+            r#"{"type":"response.create","model":"qwen","input":"weather?"}"#,
+        ))
+        .await
+        .unwrap();
         let events = read_until_terminal(&mut ws).await;
         let t = types(&events);
         assert_eq!(t[0], "response.created");
         assert!(t.contains(&"response.output_text.delta".to_string()));
         assert!(t.contains(&"response.function_call_arguments.delta".to_string()));
         assert_eq!(t.last().unwrap(), "response.completed");
-        let first_id = events.last().unwrap()["response"]["id"].as_str().unwrap().to_string();
+        let first_id = events.last().unwrap()["response"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         // A second turn on the same socket, nested form, continuing the first.
         let frame = json!({"type": "response.create", "response": {
             "model": "qwen", "previous_response_id": first_id,
             "input": [{"type": "function_call_output", "call_id": "call_a", "output": "sunny"}]
         }});
-        ws.send(tungstenite::Message::text(frame.to_string())).await.unwrap();
+        ws.send(tungstenite::Message::text(frame.to_string()))
+            .await
+            .unwrap();
         let events = read_until_terminal(&mut ws).await;
         assert_eq!(types(&events).last().unwrap(), "response.completed");
-        assert_eq!(seen.lock().unwrap()[1]["messages"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            seen.lock().unwrap()[1]["messages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
         assert_eq!(seen.lock().unwrap()[1]["stream"], true);
 
         // A bad frame gets an error frame, and the socket stays usable.
-        ws.send(tungstenite::Message::text("not json")).await.unwrap();
+        ws.send(tungstenite::Message::text("not json"))
+            .await
+            .unwrap();
         let events = read_until_terminal(&mut ws).await;
         let err = events.last().unwrap();
         assert_eq!(err["type"], "error");
@@ -1817,10 +2064,15 @@ mod tests {
         assert_eq!(err["status"], 404);
         assert_eq!(err["error"]["code"], "previous_response_not_found");
 
-        ws.send(tungstenite::Message::text(r#"{"type":"response.create","model":"qwen","input":"hi"}"#))
-            .await
-            .unwrap();
-        assert_eq!(types(&read_until_terminal(&mut ws).await).last().unwrap(), "response.completed");
+        ws.send(tungstenite::Message::text(
+            r#"{"type":"response.create","model":"qwen","input":"hi"}"#,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            types(&read_until_terminal(&mut ws).await).last().unwrap(),
+            "response.completed"
+        );
         let _ = ws.close(None).await;
     }
 }

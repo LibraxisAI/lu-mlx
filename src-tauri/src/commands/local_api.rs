@@ -967,7 +967,7 @@ pub(crate) struct UpstreamZiel {
     pub(crate) base: String,
 }
 
-pub(crate) async fn upstream_ziel(state: &LocalApiState, gewuenscht: &str, pfad: &str) -> Result<UpstreamZiel, Response> {
+pub(crate) async fn upstream_ziel(state: &LocalApiState, gewuenscht: &str, pfad: &str) -> Result<UpstreamZiel, Box<Response>> {
     let mut gewuenscht = gewuenscht.to_string();
     // Eine Engine-ID aus 3.0.8 (`lu/<voller Pfad>`) meint das Modell dieses Namens.
     if let Some(neu) = alte_engine_id_lesen(&gewuenscht) {
@@ -981,7 +981,7 @@ pub(crate) async fn upstream_ziel(state: &LocalApiState, gewuenscht: &str, pfad:
                 ResolveError::Ambiguous { .. } => StatusCode::BAD_REQUEST,
                 ResolveError::Unknown(_) | ResolveError::LaneLeer { .. } => StatusCode::NOT_FOUND,
             };
-            return Err(fehler_mit(code, "invalid_request_error", &e.message(), Some("model"), Some(e.code())));
+            return Err(Box::new(fehler_mit(code, "invalid_request_error", &e.message(), Some("model"), Some(e.code()))));
         }
     };
 
@@ -1000,7 +1000,7 @@ pub(crate) async fn upstream_ziel(state: &LocalApiState, gewuenscht: &str, pfad:
                             super::local_api_engine::LadeFehler::Belegt { .. } => StatusCode::SERVICE_UNAVAILABLE,
                             super::local_api_engine::LadeFehler::Start { .. } => StatusCode::INTERNAL_SERVER_ERROR,
                         };
-                        return Err(fehler_mit(code, "api_error", &e.message(), Some("model"), Some(e.code())));
+                        return Err(Box::new(fehler_mit(code, "api_error", &e.message(), Some("model"), Some(e.code()))));
                     }
                 }
             }
@@ -1011,7 +1011,7 @@ pub(crate) async fn upstream_ziel(state: &LocalApiState, gewuenscht: &str, pfad:
         Some(p) => format!("http://127.0.0.1:{}/v1", p),
         None => match upstreams_jetzt(state).await.into_iter().find(|u| u.lane() == Some(ziel.lane)) {
             Some(u) => u.base.trim_end_matches('/').to_string(),
-            None => return Err(fehler(StatusCode::BAD_GATEWAY, "api_error", &format!("{} has no configured address.", ziel.lane.label()))),
+            None => return Err(Box::new(fehler(StatusCode::BAD_GATEWAY, "api_error", &format!("{} has no configured address.", ziel.lane.label())))),
         },
     };
     Ok(UpstreamZiel { lane: ziel.lane, upstream_id: ziel.upstream_id, base })
@@ -1053,7 +1053,7 @@ async fn weiterleiten_mit(
     let gewuenscht = json.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
     let ziel = match upstream_ziel(&state, &gewuenscht, pfad).await {
         Ok(z) => z,
-        Err(antwort) => return antwort,
+        Err(antwort) => return *antwort,
     };
 
     // Nach oben geht die ID, die die Lane kennt — nicht unsere qualifizierte.

@@ -1143,6 +1143,13 @@ export class OpenAIProvider implements ProviderClient {
     options?: ChatOptions,
   ): AsyncGenerator<ChatStreamChunk> {
     messages = await resolveMessageAttachments(messages)
+    // Managed built-in engine: Create/Music renders stop the llama-server
+    // child to free VRAM ("reloads lazily on the next message"), this is that
+    // lazy reload. Restart-before-send instead of letting the fetch hit a dead
+    // 127.0.0.1:8127 and look like a crashed backend.
+    // A Create render may have moved this backend's model out (vram-handoff).
+    if (this.isLanBackend) await chatBackendsBack()
+    if (this.config.managed === true) await ensureBuiltinEngineAlive(model)
     // The Responses API (`/v1/responses`) is a different wire, not a variant
     // of this body; see responsesChunks below.
     if (this.config.apiProtocol === 'responses') {
@@ -1205,14 +1212,6 @@ export class OpenAIProvider implements ProviderClient {
     // params 400/422s and the retry below drops it. Real usage is what keeps
     // the TokenCounter honest, a char/4 estimate can't see the system prompt.
     body.stream_options = { include_usage: true }
-
-    // Managed built-in engine: Create/Music renders stop the llama-server
-    // child to free VRAM ("reloads lazily on the next message"), this is that
-    // lazy reload. Restart-before-send instead of letting the fetch hit a dead
-    // 127.0.0.1:8127 and look like a crashed backend.
-    // A Create render may have moved this backend's model out (vram-handoff).
-    if (this.isLanBackend) await chatBackendsBack()
-    if (this.config.managed === true) await ensureBuiltinEngineAlive(model)
 
     if (this.useLocalProxy) await ensureProxyAllowsHost(this.baseUrl)
     const fetcher = this.useLocalProxy ? localFetchStream : fetch
@@ -1488,9 +1487,6 @@ export class OpenAIProvider implements ProviderClient {
       extra,
     })
 
-    // Same self-heal as chatStream before the first byte leaves.
-    if (this.isLanBackend) await chatBackendsBack()
-    if (this.config.managed === true) await ensureBuiltinEngineAlive(model)
     await ensureProxyAllowsHost(this.baseUrl)
 
     return {
@@ -1578,6 +1574,11 @@ export class OpenAIProvider implements ProviderClient {
     options?: ChatOptions,
   ): Promise<{ content: string; toolCalls: ToolCall[]; promptEvalCount?: number; evalCount?: number; cachedPromptCount?: number; thinking?: string; billing?: ChatBilling }> {
     messages = await resolveMessageAttachments(messages)
+    // Same self-heal as chatStream: agent/tool turns after a Create render
+    // must revive the offloaded built-in engine before hitting its port.
+    // A Create render may have moved this backend's model out (vram-handoff).
+    if (this.isLanBackend) await chatBackendsBack()
+    if (this.config.managed === true) await ensureBuiltinEngineAlive(model)
     if (this.config.apiProtocol === 'responses') {
       const r = await collectResponsesChunks(this.responsesChunks(model, messages, tools, options, false))
       return {
@@ -1630,12 +1631,6 @@ export class OpenAIProvider implements ProviderClient {
     if (options?.jsonSchema && this.config.id !== 'lu-cloud') {
       body.response_format = { type: 'json_schema', json_schema: { name: 'answer', schema: options.jsonSchema } }
     }
-
-    // Same self-heal as chatStream: agent/tool turns after a Create render
-    // must revive the offloaded built-in engine before hitting its port.
-    // A Create render may have moved this backend's model out (vram-handoff).
-    if (this.isLanBackend) await chatBackendsBack()
-    if (this.config.managed === true) await ensureBuiltinEngineAlive(model)
 
     if (this.useLocalProxy) await ensureProxyAllowsHost(this.baseUrl)
     const fetcher = this.useLocalProxy ? localFetch : fetch
