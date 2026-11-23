@@ -26,6 +26,12 @@ import { loadedOnCpuLabel, loadedOnCpuTitle } from '../../lib/ollama-window-fit'
 import { ModelLoadError } from '../../lib/ollama-errors'
 import { displayModelName, isOpenAISlotModel } from '../../api/providers'
 import { splitForMiddleEllipsis, modelDisplayLabel } from '../../lib/model-label'
+import {
+  duplicateModelDisplayNames,
+  modelProtocolBadge,
+  resolveModelApiProtocol,
+  resolveModelProviderConfig,
+} from '../../lib/model-protocol-badge'
 import { formatContextWindow } from '../../lib/formatters'
 import { lmStudioLoadContext, savedLmStudioContext } from '../../lib/lmstudio-context-pick'
 import { activateBuiltinModel, isManagedBuiltinActive } from '../../api/engine'
@@ -1631,6 +1637,8 @@ export function ModelSelector({ openUpward = false, surface = 'chat', answeredBy
       ? (s.providers.openai.name ?? null)
       : null,
   )
+  const allProviders = useProviderStore((s) => s.providers)
+  const openaiEntries = useProviderStore((s) => s.openaiEntries)
   const foldedRows = useModelStore((s) => s.foldedRows)
   // Ein Wechsel laeuft, solange der Waehler einen fuehrt oder das Backend
   // eines meldet. Beides faerbt den Punkt und dreht den Ring, damit der Name
@@ -1670,6 +1678,19 @@ export function ModelSelector({ openUpward = false, surface = 'chat', answeredBy
     ? allTextModels.filter((m) => m.name === activeModel || canUseTools({ name: m.name, supportsTools: m.supportsTools }))
     : allTextModels
   const hiddenForCode = allTextModels.length - textModels.length
+  const duplicateDisplayNames = useMemo(() => duplicateModelDisplayNames(textModels), [textModels])
+  const activeProtocol = gezeigtesModell
+    ? resolveModelApiProtocol(gezeigtesModell, allProviders, openaiEntries)
+    : null
+  const activeProviderCfg = gezeigtesModell
+    ? resolveModelProviderConfig(gezeigtesModell, allProviders, openaiEntries)
+    : null
+  const gezeigtesDisplayLabel = gezeigtesObj
+    ? (('displayName' in gezeigtesObj && typeof gezeigtesObj.displayName === 'string' && gezeigtesObj.displayName) ||
+      displayModelName(gezeigtesObj.name))
+    : activeDisplayName
+  const activeHasDuplicate = duplicateDisplayNames.has(gezeigtesDisplayLabel)
+  const activeProtocolChip = modelProtocolBadge(activeProtocol, activeHasDuplicate)
   // A14: die Zeilen, deren Wahl das lokale Backend wechselt, stehen unter
   // ihrer eigenen Ueberschrift statt zwischen den Modellfamilien, denn ein
   // Klick darauf hat eine Folge und die Ueberschrift ist die billigste Stelle,
@@ -1761,7 +1782,12 @@ export function ModelSelector({ openUpward = false, surface = 'chat', answeredBy
         title={
           answeredBy
             ? `The answers in this chat were written by ${answeredBy}. The next answer runs on the model picked here.`
-            : activeModel ? `Model: ${activeDisplayName}, click to switch`
+            : activeModel
+              ? activeProtocol
+                ? `Model: ${activeDisplayName} (${activeProviderCfg?.name || 'OpenAI-compat'} · ${
+                    activeProtocol === 'responses' ? 'Responses API' : 'Chat Completions'
+                  }), click to switch`
+                : `Model: ${activeDisplayName}, click to switch`
               : sendNeedsModel ? 'Your message needs a chat model. Pick one here to send it.' : 'Select a chat model'
         }
         aria-label="Select chat model"
@@ -1785,6 +1811,19 @@ export function ModelSelector({ openUpward = false, surface = 'chat', answeredBy
         <span className="min-w-0 max-w-[140px] truncate leading-none">
           {activeDisplayName}
         </span>
+
+        {activeProtocolChip && (
+          <span
+            data-testid="active-model-protocol"
+            className={`shrink-0 text-[0.55rem] leading-none font-medium ${
+              activeProtocolChip.isResponses ? 'text-emerald-400/90' : 'text-gray-400'
+            }`}
+          >
+            {activeHasDuplicate && activeProviderCfg?.name
+              ? `${activeProviderCfg.name} · ${activeProtocolChip.short}`
+              : activeProtocolChip.short}
+          </span>
+        )}
 
         {/* Chevron / Spinner */}
         {wechselLaeuft ? (
@@ -2063,6 +2102,11 @@ export function ModelSelector({ openUpward = false, surface = 'chat', answeredBy
                     const { head: nameKopf, tail: nameEnde } = splitForMiddleEllipsis(modelDisplayName)
                     const modelProvider = ('provider' in model && model.provider) || 'ollama'
                     const providerBadge = getProviderBadge(model)
+                    const rowProtocol = resolveModelApiProtocol(model.name, allProviders, openaiEntries)
+                    const rowProtocolBadge = modelProtocolBadge(
+                      rowProtocol,
+                      duplicateDisplayNames.has(modelDisplayName),
+                    )
                     const isActive = model.name === activeModel
 
                     const isLmsRow = isLmStudioProvider(('providerName' in model && model.providerName) as string | undefined)
@@ -2152,6 +2196,17 @@ export function ModelSelector({ openUpward = false, surface = 'chat', answeredBy
                           {modelProvider !== 'ollama' && (
                             <span className={`text-[0.5rem] ${providerBadge.color}`}>
                               {providerBadge.label}
+                            </span>
+                          )}
+                          {rowProtocolBadge && (
+                            <span
+                              data-testid="model-protocol-badge"
+                              title={`Uses ${rowProtocolBadge.long}`}
+                              className={`text-[0.5rem] shrink-0 ${
+                                rowProtocolBadge.isResponses ? 'font-medium text-emerald-400/80' : 'text-gray-500'
+                              }`}
+                            >
+                              {rowProtocolBadge.short}
                             </span>
                           )}
                           {/* 2.5.8, tool-calling capability at a glance. Text

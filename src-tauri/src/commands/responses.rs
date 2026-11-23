@@ -23,7 +23,7 @@
 //!      HTTP and WebSocket endpoints.
 //!   2. `run_turn` picks the transport. `auto` tries the WebSocket first and
 //!      falls back to SSE on exactly two triggers: the server refused the
-//!      upgrade (400/404/405/426/501 or no upgrade at all), or the bounded
+//!      upgrade (400/403/404/405/426/501 or no upgrade at all), or the bounded
 //!      retries of a transport failure ran out. Never after anything visible
 //!      reached the user: a restart would show the start of the answer twice.
 //!   3. One `ResponsesEventAccumulator` turns every Responses event, from
@@ -88,7 +88,7 @@ const MAX_WS_UNSUPPORTED: usize = 256;
 
 /// Upgrade answers that mean "this server does not speak the Responses
 /// WebSocket" rather than "this request is wrong": fall back to SSE.
-const FALLBACK_STATUSES: [u16; 5] = [400, 404, 405, 426, 501];
+const FALLBACK_STATUSES: [u16; 6] = [400, 403, 404, 405, 426, 501];
 
 /// Most of a server's raw error body that travels to the renderer.
 const SERVER_RAW_MAX: usize = 4096;
@@ -3385,9 +3385,11 @@ mod tests {
         assert_eq!(f.kind, FailKind::Final);
     }
 
-    /// Raw server: a WebSocket upgrade gets 426, a POST gets a short SSE
-    /// answer. Counts both.
-    async fn upgrade_refusing_server() -> (String, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    /// Raw server: a WebSocket upgrade gets `status_line`, a POST gets a short
+    /// SSE answer. Counts both.
+    async fn ws_status_refusing_server(
+        status_line: &'static str,
+    ) -> (String, Arc<AtomicUsize>, Arc<AtomicUsize>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let upgrades = Arc::new(AtomicUsize::new(0));
@@ -3401,7 +3403,12 @@ mod tests {
                     if request.to_ascii_lowercase().contains("upgrade: websocket") {
                         u.fetch_add(1, Ordering::SeqCst);
                         let _ = sock
-                            .write_all(b"HTTP/1.1 426 Upgrade Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                            .write_all(
+                                format!(
+                                    "HTTP/1.1 {status_line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                                )
+                                .as_bytes(),
+                            )
                             .await;
                     } else {
                         p.fetch_add(1, Ordering::SeqCst);
@@ -3420,9 +3427,11 @@ mod tests {
         (format!("127.0.0.1:{}", addr.port()), upgrades, posts)
     }
 
-    #[tokio::test]
-    async fn auto_falls_back_to_sse_when_the_upgrade_is_refused_and_remembers_it() {
-        let (host, upgrades, posts) = upgrade_refusing_server().await;
+    async fn assert_ws_status_falls_back_to_sse(
+        status_line: &'static str,
+        expected_status: u16,
+    ) {
+        let (host, upgrades, posts) = ws_status_refusing_server(status_line).await;
         let s = spec(
             &format!("http://{host}/v1/responses"),
             &format!("ws://{host}/v1/responses"),
@@ -3458,7 +3467,17 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(f.kind, FailKind::Unsupported);
-        assert_eq!(f.failure.status, Some(426));
+        assert_eq!(f.failure.status, Some(expected_status));
+    }
+
+    #[tokio::test]
+    async fn auto_falls_back_to_sse_when_the_upgrade_is_refused_and_remembers_it() {
+        assert_ws_status_falls_back_to_sse("426 Upgrade Required", 426).await;
+    }
+
+    #[tokio::test]
+    async fn auto_falls_back_to_sse_when_ws_upgrade_returns_403() {
+        assert_ws_status_falls_back_to_sse("403 Forbidden", 403).await;
     }
 
     #[tokio::test]

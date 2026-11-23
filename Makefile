@@ -155,11 +155,13 @@ clean-deep: clean  ## Clean + nuke src-tauri/target (full rustc rebuild next tim
 
 .PHONY: test
 test:  ## Unit tests (vitest — CI gate)
-	npx vitest run
+	@[[ -x "$(REPO_ROOT)/node_modules/.bin/vitest" ]] || { printf "$(C_RED)[fail]$(C_RESET) node_modules missing — run npm ci first\n"; exit 1; }
+	npx --no-install vitest run
 
 .PHONY: typecheck
 typecheck:  ## TypeScript check (CI gate)
-	npx tsc --noEmit
+	@[[ -x "$(REPO_ROOT)/node_modules/.bin/tsc" ]] || { printf "$(C_RED)[fail]$(C_RESET) node_modules missing — run npm ci first\n"; exit 1; }
+	npx --no-install tsc --noEmit
 
 .PHONY: test-scripts
 test-scripts:  ## Shell-side unit tests (sidecar/identity/install/keychain + make help)
