@@ -23,12 +23,13 @@ const teasers = (backend: 'local' | 'cloud', mlxHost: boolean) =>
   visibleIntents(backend, mlxHost, true).filter((m) => isIntentLocked(m, backend, mlxHost)).map((m) => m.id)
 
 describe('intent cloud gating', () => {
-  it('eraser is hosted-only everywhere since 3.1.3', () => {
+  it('eraser is hosted-only on Windows/Linux since 3.1.3, and runs locally via LaMa on macOS', () => {
     expect(INTENT_MAP.eraser.cloudOnly).toBe(true)
     expect(INTENT_MAP.eraser.hasLocalLane).toBeUndefined()
+    expect(INTENT_MAP.eraser.localLaneMacOnly).toBe(true)
     expect(isIntentLocked(INTENT_MAP.eraser, 'local', false)).toBe(true)
     expect(isIntentAvailable('eraser', 'local', false)).toBe(false)
-    expect(isIntentAvailable('eraser', 'local', false, false, false, false, false, false, false, true)).toBe(false)
+    expect(isIntentAvailable('eraser', 'local', false, false, false, false, false, false, false, true)).toBe(true)
   })
 
   it('upscale keeps its hosted endpoint and runs locally too since 3.0.7', () => {
@@ -103,12 +104,13 @@ describe('intent cloud gating', () => {
 // stay locked teasers (or hidden when they have no hosted teaser sheet)
 // until ComfyUI answers on :8080.
 describe('intent gating on a local MLX Mac (no ComfyUI)', () => {
-  it('only image, video, the cutout, Character Studio and 3D stay real local tabs', () => {
-    // Remove Background runs on Vision in macOS (commands/mlx_cutout.rs).
+  it('image, video, the cutout, LaMa erase, Character Studio and 3D stay real local tabs', () => {
+    // Remove Background runs on Vision in macOS (commands/mlx_cutout.rs),
+    // and Erase Object runs locally via LaMa (commands/mlx_erase.rs).
     // Character Studio runs "Use character" through mflux with the LoRA from
     // the Mac's LoRA folder; its Train tab says where to train. 3D (3.1.0) is
     // TripoSR's own engine; without it the Stage offers the setup.
-    expect(unlocked('local', true)).toEqual(['image', 'removebg', 'video', 'character', '3d'])
+    expect(unlocked('local', true)).toEqual(['image', 'removebg', 'eraser', 'video', 'character', '3d'])
   })
 
   it('the hosted-only tools AND the 2.5.8 lanes become cloud teasers', () => {
@@ -132,8 +134,8 @@ describe('intent gating on a local MLX Mac (no ComfyUI)', () => {
     // negative) — which produced an unrelated fresh image instead of an edit.
     // Hiding is the only honest state left.
     const hidden = INTENTS.map((m) => m.id).filter((id) => !shown('local', true).includes(id))
-    // Erase is hidden on every local host (3.1.3): a mask in Edit does it.
-    expect(hidden).toEqual(['edit', 'eraser', 'animate'])
+    // Edit and Animate stay hidden on an MLX-only Mac; Erase runs via LaMa.
+    expect(hidden).toEqual(['edit', 'animate'])
   })
 
   it('mlxOnlyCreateHost is the Mac switch: Comfy connected means not MLX-only', () => {

@@ -25,13 +25,14 @@ describe('the Enhance tab on the Mac', () => {
     expect(isIntentLocked(INTENT_MAP.upscale, 'local', true, false, false, true)).toBe(false)
     expect(isIntentAvailable('upscale', 'local', true, false, false, true)).toBe(true)
     // With the teasers off it is still there: it is no teaser.
-    expect(ids(true, false)).toEqual(['image', 'removebg', 'upscale', 'video', 'character', '3d'])
+    expect(ids(true, false)).toEqual(['image', 'removebg', 'upscale', 'eraser', 'video', 'character', '3d'])
   })
 
-  it('opens no other tab: Edit, Erase and Animate keep their own rules', () => {
-    for (const id of ['edit', 'eraser', 'animate'] as const) {
+  it('opens no other tab: Edit and Animate keep their own rules while Erase runs locally on LaMa', () => {
+    for (const id of ['edit', 'animate'] as const) {
       expect(isIntentAvailable(id, 'local', true, false, false, true), id).toBe(false)
     }
+    expect(isIntentAvailable('eraser', 'local', true, false, false, true)).toBe(true)
   })
 
   it('changes nothing on a ComfyUI host or in the other mode', () => {

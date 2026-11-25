@@ -77,9 +77,9 @@ describe('the Animate tab on the Mac', () => {
     expect(ids(true)).not.toContain('edit')
     // With the cloud teasers off it is still there: it is no teaser. The
     // cutout is there on every Mac (Vision, commands/mlx_cutout.rs), and so
-    // is Character Studio. Extend Video runs on the same models as Animate
-    // since 14.10.2026 (M1), so it comes with it.
-    expect(visibleIntents('local', true, false, true).map((m) => m.id)).toEqual(['image', 'removebg', 'video', 'animate', 'character', 'extend', '3d'])
+    // Erase runs locally via LaMa (commands/mlx_erase.rs). Extend Video runs
+    // on the same models as Animate since 14.10.2026 (M1), so it comes with it.
+    expect(visibleIntents('local', true, false, true).map((m) => m.id)).toEqual(['image', 'removebg', 'eraser', 'video', 'animate', 'character', 'extend', '3d'])
   })
 
   it('changes nothing on a ComfyUI host, with or without the flag', () => {

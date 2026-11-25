@@ -32,14 +32,23 @@ beforeEach(() => {
   store().setIntent('image')
 })
 
-describe('no list of local mode holds Erase', () => {
+describe('Windows/Linux local mode hides Erase; macOS keeps local LaMa Erase', () => {
   const flags = [false, true]
-  it('on Windows and on a Mac, with Cloud features on and off, whatever is installed', () => {
-    for (const mac of flags) for (const features of flags) for (const installed of flags) {
-      const list = visibleIntents('local', mac, features, installed, installed, installed, installed, installed, installed)
+  it('on Windows and Linux (non-Mac), Erase is hidden in local mode regardless of settings', () => {
+    for (const features of flags) for (const installed of flags) {
+      const list = visibleIntents('local', false, features, installed, installed, installed, installed, installed, installed, false)
       expect(list.map((m) => m.id)).not.toContain('eraser')
       expect(pillEntries(list).map((p) => p.meta.short)).not.toContain('Erase')
-      expect(isIntentAvailable('eraser', 'local', mac, installed, installed, installed, installed, installed, installed)).toBe(false)
+      expect(isIntentAvailable('eraser', 'local', false, installed, installed, installed, installed, installed, installed, false)).toBe(false)
+    }
+  })
+
+  it('on macOS (both MLX-only and Comfy-connected), Erase stays available via LaMa', () => {
+    for (const features of flags) for (const mlxHost of flags) {
+      const list = visibleIntents('local', mlxHost, features, false, false, false, false, false, false, true)
+      expect(list.map((m) => m.id)).toContain('eraser')
+      expect(pillEntries(list).map((p) => p.meta.short)).toContain('Erase')
+      expect(isIntentAvailable('eraser', 'local', mlxHost, false, false, false, false, false, false, true)).toBe(true)
     }
   })
 
@@ -67,20 +76,19 @@ describe('a stored or sent Erase lands in Edit', () => {
     expect(store().mask).toEqual(MASK)
   })
 
-  it('on a Mac with a model that edits too', () => {
+  it('on a Mac setIntent keeps Erase and its mask, even without an edit diffusion model', () => {
     mlx.host = true
     models([TURBO, QWEN], QWEN.name)
     useCreateStore.setState({ source: PICTURE, mask: MASK })
     store().setIntent('eraser')
-    expect(store().intent()).toBe('edit')
+    expect(store().intent()).toBe('eraser')
+    expect(store().utilityOp).toBe('eraser')
     expect(store().mask).toEqual(MASK)
-  })
 
-  it('on a Mac without one it opens Image, the tab that is there', () => {
-    mlx.host = true
     models([TURBO], TURBO.name)
     store().setIntent('eraser')
-    expect(store().intent()).toBe('image')
+    expect(store().intent()).toBe('eraser')
+    expect(store().mask).toEqual(MASK)
   })
 
   it('the flip from Cloud keeps the source and the mask', () => {
@@ -93,35 +101,39 @@ describe('a stored or sent Erase lands in Edit', () => {
     expect(store().mask).toEqual(MASK)
   })
 
-  it('the flip on a Mac with a model that edits keeps them as well', () => {
+  it('the flip on a Mac keeps Erase, the source and the mask', () => {
     mlx.host = true
     models([TURBO, QWEN], TURBO.name)
     useCreateStore.setState({ backend: 'cloud' })
     store().setIntent('eraser')
     useCreateStore.setState({ source: PICTURE, mask: MASK })
     store().setBackend('local')
-    expect(store().intent()).toBe('edit')
-    expect(store().imageModel).toBe(QWEN.name)
+    expect(store().intent()).toBe('eraser')
+    expect(store().source).toEqual(PICTURE)
     expect(store().mask).toEqual(MASK)
   })
 
-  it('the flip on a Mac without one leaves no mask behind on Image', () => {
+  it('the flip on a Mac without an edit model still keeps Erase and its mask', () => {
     mlx.host = true
     models([TURBO], TURBO.name)
     useCreateStore.setState({ backend: 'cloud' })
     store().setIntent('eraser')
     useCreateStore.setState({ source: PICTURE, mask: MASK })
     store().setBackend('local')
-    expect(store().intent()).toBe('image')
-    expect(store().mask).toBeNull()
+    expect(store().intent()).toBe('eraser')
+    expect(store().mask).toEqual(MASK)
   })
 
-  it('a persisted blob with Erase opens on Edit', () => {
+  it('a persisted blob with Erase opens on Edit on non-Mac and keeps Erase on Mac', () => {
     const merge = useCreateStore.persist.getOptions().merge!
     const merged = merge({ utilityOp: 'eraser', mode: 'video', imageSubMode: 'text2img' }, store()) as CreateState
     expect(merged.utilityOp).toBeNull()
     expect(merged.mode).toBe('image')
     expect(merged.imageSubMode).toBe('img2img')
+
+    mlx.host = true
+    const macMerged = merge({ utilityOp: 'eraser' }, store()) as CreateState
+    expect(macMerged.utilityOp).toBe('eraser')
   })
 })
 

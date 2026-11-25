@@ -42,13 +42,13 @@ describe('der Mac strandet nicht auf einem Werkzeug, das er lokal nicht hat', ()
     useCreateStore.setState({ comfyRunning: false })
   })
 
-  it('drei Werkzeuge sind lokal auf dem Mac wirklich versteckt', () => {
+  it('zwei Werkzeuge sind lokal auf dem Mac wirklich versteckt', () => {
     // Ohne diesen Fall koennte der Rest gruen sein, weil gar nichts versteckt
     // ist. Genau das waere die stille Fassung des Fehlers. Remove Background
-    // is no longer one of them: the Mac cuts out through Vision.
+    // (Vision) und Erase (LaMa) laufen lokal auf dem Mac.
     const alle = new Set(visibleIntents('cloud', true, true).map((m) => m.id))
     const fehlend = [...alle].filter((id) => !sichtbar().has(id))
-    expect(fehlend.sort()).toEqual(['animate', 'edit', 'eraser'])
+    expect(fehlend.sort()).toEqual(['animate', 'edit'])
   })
 
   it('keins davon ueberlebt den Wechsel auf lokal', () => {
