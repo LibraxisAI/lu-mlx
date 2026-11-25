@@ -8,7 +8,9 @@ import { INTENTS } from '../../components/create/experimental/intents'
 // live on the cloud. Until then the tab names none (stageHowtoTopic below
 // finds no topic, and its Stage shows no how-to line), instead of a link to
 // a film that is not there.
-const NO_FILM_YET = new Set(['swap_character'])
+// Scene to Video (3.1.3) likewise: the web's film (/howto/scene) shows the
+// web tab; the desktop film is recorded once the tab ships.
+const NO_FILM_YET = new Set(['swap_character', 'scene'])
 const FILMED = INTENTS.filter((i) => !NO_FILM_YET.has(i.id))
 
 describe('how it works', () => {
@@ -105,5 +107,15 @@ describe('how it works', () => {
     expect(steps.map((s) => s.text).join(' ')).toMatch(/LU Engine/)
     const settings = readFileSync(resolve(__dirname, '../../components/settings/SettingsPage.tsx'), 'utf8')
     expect(settings).toContain('<HowtoRow topic="gguf-file" />')
+  })
+})
+
+// 3.1.2: the agent and sandbox films were re-recorded for the question in the
+// chat. They get new file names, so 3.1.0 and 3.1.1, whose lines carry the old
+// timings, keep playing the old agent.mp4 and sandbox.mp4 from the server.
+describe('re-recorded films get a file name of their own', () => {
+  it('agent and sandbox load the 3.1.2 films, not the old ones', () => {
+    expect(howtoVideoUrl(HOWTO.agent.films[0])).toBe('https://lu-labs.ai/howto/agent-312.mp4')
+    expect(howtoVideoUrl(HOWTO.sandbox.films[0])).toBe('https://lu-labs.ai/howto/sandbox-312.mp4')
   })
 })

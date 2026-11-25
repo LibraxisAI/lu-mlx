@@ -1,12 +1,13 @@
 import {
   Image as ImageIcon, Wand2, Scissors, Video, Film, Maximize2, Eraser,
-  UserRound, Mic, Music, FastForward, PersonStanding, Box, Replace,
+  UserRound, Mic, Music, FastForward, PersonStanding, Box, Replace, Clapperboard,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import type { CreateBackend, CreateIntent, ThreeDWay } from '../../../stores/createStore'
+import type { CreateBackend, CreateCapability, CreateIntent, ThreeDWay } from '../../../stores/createStore'
 import { THREE_D_TEXT } from '../../../lib/three/three-d-text'
 import { MUSIC_PLACEHOLDER } from '../../../lib/render/music-ui'
 import { isHubIntent } from '../../../lib/create/character-hub'
+import { SCENE_NAME } from '../../../lib/render/scene'
 
 export interface IntentMeta {
   id: CreateIntent
@@ -22,7 +23,7 @@ export interface IntentMeta {
   allowsMask: boolean
   isVideo: boolean
   /** Capability id (node probe) this intent depends on, if any. */
-  capability?: 'rmbg' | 'inpaint-nodes' | 'dwpose'
+  capability?: CreateCapability
   /** Categories with a hosted endpoint (cloud clip/teaser exists). */
   cloudOnly?: true
   /** 2.5.8: cloudOnly categories that ALSO run on the local ComfyUI backend
@@ -37,6 +38,8 @@ export interface IntentMeta {
   localLaneMacOnly?: true
   /** Local model files this intent needs (gates the Download & install card). */
   requiresModels?: 'image' | 'video' | 'audio' | 'lipsync' | 'motion' | 'upscale'
+  /** New in this release: the bar marks the pill. */
+  isNew?: true
   examples: string[]
 }
 
@@ -96,7 +99,7 @@ export const INTENTS: IntentMeta[] = [
     id: 'eraser', label: 'Erase Object', short: 'Erase', icon: Eraser,
     placeholder: '',
     needsSource: true, needsPrompt: false, allowsMask: true, isVideo: false,
-    cloudOnly: true, hasLocalLane: true, localLaneMacOnly: true, requiresModels: 'image',
+    cloudOnly: true,
     examples: [],
   },
   {
@@ -117,6 +120,21 @@ export const INTENTS: IntentMeta[] = [
     needsSource: true, needsPrompt: true, allowsMask: false, isVideo: true,
     requiresModels: 'video',
     examples: ['slow zoom in, subtle parallax', 'hair and clothes moving in the wind'],
+  },
+  {
+    // Scene to Video (3.1.3, the web's tab of 16.11.2026): a grey blockout
+    // video from Blender or any 3D tool becomes a finished clip. Camera and
+    // timing come from the video, the look from the prompt. Its inputs are
+    // its own (SceneStage, SceneControls). Local on Windows and Linux: Wan
+    // 2.1 VACE over a depth video of the scene (lib/render/scene.ts), from
+    // the VACE file Motion Control installs; a Mac has no such lane and shows
+    // the locked cloud pill.
+    id: 'scene', label: SCENE_NAME, short: 'Scene', icon: Clapperboard,
+    placeholder: 'Describe the new look…',
+    needsSource: false, needsPrompt: true, allowsMask: false, isVideo: true,
+    capability: 'depth',
+    cloudOnly: true, hasLocalLane: true, requiresModels: 'motion', isNew: true,
+    examples: [],
   },
 
   // ── 2.5.8 specialized categories (2026-07-17). All have hosted
@@ -188,14 +206,15 @@ export const INTENTS: IntentMeta[] = [
   {
     // Swap Character (07.11.2026, port of the web's C52): a real video keeps
     // its motion, camera, sound and scene, and its people become the people
-    // of the customer's photos. Studio models only (lib/render/swap.ts), no
-    // local lane: in local mode it is a locked cloud pill like Erase. The
-    // pill says "Swap" (the web's desktop word), the full name stands in
-    // title and aria-label; the bar has no room for two more words.
+    // of the customer's photos. Cloud: Studio models (lib/render/swap.ts).
+    // The local lane (lib/create/swap-local.ts) stays off in 3.1.3: its real
+    // runs on Wan 2.2 Animate came back with black mask bands and wrong
+    // colours, so Swap is a cloud action on every computer for now.
     id: 'swap_character', label: 'Swap Character', short: 'Swap', icon: Replace,
     placeholder: '',
     needsSource: false, needsPrompt: false, allowsMask: false, isVideo: true,
-    cloudOnly: true,
+    capability: 'dwpose',
+    cloudOnly: true, requiresModels: 'motion',
     examples: [],
   },
   {
@@ -287,25 +306,27 @@ function runsOnMlx(id: CreateIntent, mlxAnimate: boolean, mlxEdit: boolean, mlxU
  * tested instead of buried in the IntentBar's JSX.
  *
  * Cloud shows everything. Local (ComfyUI, Windows/Linux, and a Mac with
- * ComfyUI connected where `mlxHost` is false) also shows everything — the
- * hosted-only tools render as locked cloud teasers rather than disappearing.
- * Local on an MLX Mac hides the intents that have neither a local MLX path
- * nor a hosted teaser sheet (edit while no installed model takes an image,
- * and animate while none starts from one): they need a ComfyUI node or a
- * model that is not there, so leaving them selectable is a dead affordance
- * that either errors on submit or, worse and the MLX case, silently drops the
- * source and returns an unrelated fresh image.
+ * ComfyUI connected where `mlxHost` is false) shows everything but Erase,
+ * which local mode does not have at all (3.1.3): an object goes through a
+ * mask in Edit. The other hosted-only tools render as locked cloud teasers
+ * rather than disappearing. Local on an MLX Mac hides the intents that have
+ * neither a local MLX path nor a hosted teaser sheet (edit while no installed
+ * model takes an image, and animate while none starts from one): they need a
+ * ComfyUI node or a model that is not there, so leaving them selectable is a
+ * dead affordance that either errors on submit or, worse and the MLX case,
+ * silently drops the source and returns an unrelated fresh image.
  *
  * `cloudFeatures` is the setting "Show Cloud features in Local mode". Off, the
  * local bar carries no cloud teaser at all: a tool that cannot run on this
  * machine is left out, the same way the Mac leaves out what MLX cannot do.
  * Until 3.0.5 the switch only took the LU Cloud rows out of the model
- * pickers, and Enhance and Erase kept their cloud tag and kept opening the
+ * pickers, and the hosted tools kept their cloud tag and kept opening the
  * Cloud sheet (the box, 04.10.2026).
  */
 export function visibleIntents(backend: CreateBackend, mlxHost: boolean, cloudFeatures: boolean, mlxAnimate = false, mlxEdit = false, mlxUpscale = false, mlxMusic = false, mlxMotion = false, mlxTalk = false, macHost = false): IntentMeta[] {
   if (backend === 'cloud') return INTENTS
-  const shown = mlxHost ? INTENTS.filter((m) => runsOnMlx(m.id, mlxAnimate, mlxEdit, mlxUpscale, mlxMusic, mlxMotion, mlxTalk) || m.cloudOnly === true) : INTENTS
+  const local = INTENTS.filter((m) => m.id !== 'eraser')
+  const shown = mlxHost ? local.filter((m) => runsOnMlx(m.id, mlxAnimate, mlxEdit, mlxUpscale, mlxMusic, mlxMotion, mlxTalk) || m.cloudOnly === true) : local
   return cloudFeatures ? shown : shown.filter((m) => !isIntentLocked(m, backend, mlxHost, mlxAnimate, mlxEdit, mlxUpscale, mlxMusic, mlxMotion, mlxTalk, macHost))
 }
 

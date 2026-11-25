@@ -22,6 +22,10 @@ pub mod download;
 // The same download commands on a phone, where the transfer belongs to the
 // operating system (plugins/lu-native).
 pub mod download_mobile;
+// The newest published version, for the update hint of the open Android package.
+#[cfg(any(mobile, test))]
+#[cfg_attr(not(mobile), allow(dead_code))]
+pub mod app_update;
 pub mod engine;
 pub mod engine_idle;
 pub mod engine_key;
@@ -50,6 +54,10 @@ pub mod health;
 // phone (lib.rs).
 #[cfg_attr(mobile, allow(unused_imports, unused_variables))]
 pub mod install;
+// Its two commands are desktop only; the installers that stay compiled on a
+// phone still reach its cancel flags.
+#[cfg_attr(mobile, allow(dead_code))]
+pub mod install_jobs;
 pub mod install_method;
 pub mod install_method_cmd;
 pub mod self_migrate;
@@ -137,6 +145,7 @@ pub mod web_body;
 pub mod web_reach;
 pub mod web_research;
 pub mod browser;
+pub mod spell;
 pub mod funnel;
 // Moves a ComfyUI render to the system trash. No ComfyUI and no trash on a
 // phone, and the `trash` crate does not compile there.

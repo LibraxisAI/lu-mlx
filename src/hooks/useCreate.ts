@@ -1,10 +1,13 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { blobFromUrl } from '../lib/render/data-url'
+import { SCENE_LOCAL_FPS, sceneLocalFrames, sceneLocalProblem, sceneLocalSize } from '../lib/render/scene'
+import { sceneFrameFor } from '../lib/create/scene-frame'
 import { THREE_D_TEXT } from '../lib/three/three-d-text'
 import { PC_3D_MODEL, threeDGalleryItem, threeDPicturePrompt, threeDProvenance } from '../lib/three/run-local-3d'
 import { coverCropBlob } from '../lib/cover-crop'
 import { videoRunGivenUp, videoRunProgress, videoRunStatus } from '../lib/mlx-video-progress'
 import { featherMaskBlob } from '../lib/mask-feather'
+import { isPromptlessRemoval, REMOVE_NEGATIVE_COMFY, REMOVE_PROMPT_COMFY, REMOVE_PROMPT_MAC } from '../lib/local-edit-mask'
 import { macHiresPass } from '../lib/mac-hires'
 import { v4 as uuid } from 'uuid'
 import {
@@ -19,6 +22,7 @@ import {
   getUpscaleModels,
   getCLIPModels,
   resolveLocalOpPick,
+  sceneLaneModels,
   uploadMediaFile,
   getSamplers,
   getSchedulers,
@@ -83,6 +87,7 @@ import { knownMacMemoryGb } from '../lib/mac-memory'
 import { MIN_TRAIN_IMAGES, maxTrainImages, tooFewTrainPhotosLine } from '../lib/train-image-cap'
 import { improveKindForIntent, IMPROVING_PROMPT, type ImproveOutcome } from '../lib/render/improve-prompt'
 import { elapsedLine } from '../lib/elapsed-line'
+import { CANCEL_ANSWER_LIMIT_MS, comfyBusyLabel, settleWithin } from '../lib/comfy-busy-line'
 import { cancelFreeAfterRender, freeAfterRenderMode, scheduleFreeAfterRender } from '../lib/free-after-render'
 import { improvePrompt } from '../lib/render/improve-prompt-run'
 import { currentChatModelList, currentHelperModel } from '../lib/cloud-helper-model'
@@ -137,7 +142,9 @@ import { fetchGalleryItemBlob } from '../components/create/experimental/galleryU
 import { LongRunStopped, longVideoRequest, runLongVideo, type ClipItem } from '../lib/long-video-run'
 import { settleSeams } from '../api/video-settle'
 import { ownWorkflowMisfitNote } from '../lib/own-workflow-fit'
-import { loadImageRef } from '../components/create/experimental/loadImage'
+import { ensureLocalFilename, loadImageRef } from '../components/create/experimental/loadImage'
+import { localClipFrames, swapLocalFrames, swapLocalModels, swapLocalProblem, swapLocalSize, SWAP_LOCAL_NO_MODEL } from '../lib/create/swap-local'
+import { mediaSeconds } from '../components/create/experimental/useStudioPrice'
 import { listMlxLoras } from '../api/mlx-loras'
 import {
   getVideoStatus, listVideoModels, generateVideo, getVideoProgress, cancelVideo,
@@ -686,7 +693,7 @@ export function useCreate() {
       const st = await getMacTrainStatus().catch(() => null)
       const missing = st && (st.memoryRefusal ?? macTrainMissing(st))
       if (missing) {
-        setError(st.memoryRefusal ?? `${missing} Install it in the Model Manager, then hit Create again.`)
+        setError(st.memoryRefusal ?? `${missing} Install it in the Model Manager, then start the training again.`)
         return
       }
     }
@@ -748,6 +755,7 @@ export function useCreate() {
       // step 27 while the chat model was brought back beside it).
       if (trainingCancelRequested.current) return
       setProgress(8, 'Starting the training run...')
+      useCreateStore.getState().setTrainNotice(null)
       await startCharacterTraining(setId, trigger, trigger, state.trainSteps, state.trainVramPreset, kind)
       let cancelRounds = 0
       for (;;) {
@@ -755,6 +763,12 @@ export function useCreate() {
         if (!useCreateStore.getState().isGenerating && !trainingCancelRequested.current) return
         const s = await characterTrainingStatus().catch(() => null)
         if (!s) continue
+        // A41 / GitHub #260: the run switched itself to Low VRAM. Say so for
+        // the whole run, and keep Low VRAM picked: it follows the card.
+        if (s.notice && s.notice !== useCreateStore.getState().trainNotice) {
+          useCreateStore.getState().setTrainNotice(s.notice)
+          useCreateStore.getState().setTrainVramPreset('low-vram')
+        }
         if (s.status === 'running') {
           if (trainingCancelRequested.current) {
             // Stop was pressed and the backend still reports a run: the
@@ -913,7 +927,21 @@ export function useCreate() {
     // name, so they map straight onto the existing i2iImage/i2vImage handles.
     const effInputImage = source?.filename ?? i2iImage
     const effI2vImage = source?.filename ?? i2vImage
-    const maskFilename = mask?.filename
+    // A mask painted in cloud mode has no ComfyUI file until the backfill in
+    // CreateContext is through. Without one the run would edit the whole
+    // picture, so it is staged here at the latest.
+    let stagedMask = mask?.filename
+    if (intent === 'edit' && mask && !stagedMask && !isMlxImageHost()) {
+      try {
+        const ref = await ensureLocalFilename(mask, 'mask.png')
+        state.setMask(ref)
+        stagedMask = ref.filename
+      } catch {
+        setError('The mask could not be sent to ComfyUI. Paint it again.')
+        return
+      }
+    }
+    const maskFilename = stagedMask
     const isRemoveBg = mode === 'image' && removebg
     // Enhance Image on local ComfyUI (3.0.7): core upscale nodes, its own
     // model from models/upscale_models, no prompt and no picker model. A Mac
@@ -928,14 +956,21 @@ export function useCreate() {
     // I2V flow below — its source IS the extracted last frame. character
     // trained already branched off above (Rust musubi trainer); its use
     // surface is a plain image generate with the LoRA active. ──
+    // Swap Character runs locally since 3.1.3 on Wan 2.2 Animate (replace):
+    // the motion list, narrowed to the Animate models (swapLocalModels).
+    // Scene to Video (3.1.3) is the fourth: Wan 2.1 VACE over a depth video
+    // of the scene (buildSceneWorkflow), on the VACE files of the Motion list.
     const localOp =
-      state.cloudOp === 'music' || state.cloudOp === 'lipsync' || state.cloudOp === 'motion'
+      state.cloudOp === 'music' || state.cloudOp === 'lipsync' || state.cloudOp === 'motion' || state.cloudOp === 'scene'
         ? state.cloudOp
+        : state.cloudOp === 'swap_character' ? 'swap' as const
         : null
     const localOpList =
       localOp === 'music' ? state.audioModelList
       : localOp === 'lipsync' ? state.lipsyncModelList
       : localOp === 'motion' ? state.motionModelList
+      : localOp === 'swap' ? swapLocalModels(state.motionModelList)
+      : localOp === 'scene' ? sceneLaneModels(state.motionModelList)
       : []
     const localOpModel = localOp ? resolveLocalOpPick(state.localOpModel, localOpList) : ''
 
@@ -987,6 +1022,10 @@ export function useCreate() {
     // the run uses `prompt`, the gallery keeps both. A rewrite that fails never
     // stops the run, it goes on with the user's own prompt.
     let prompt = scenePrompt
+    // Local Edit with a mask and no prompt removes what was painted
+    // (lib/local-edit-mask): the whole area is made new from the surroundings.
+    const removeRun = isPromptlessRemoval({ intent, backend: 'local', hasMask: !!mask, prompt: scenePrompt })
+    if (removeRun) prompt = isMlxImageHost() ? REMOVE_PROMPT_MAC : REMOVE_PROMPT_COMFY
     let improveFields: { promptOriginal?: string; rewrittenBy?: string; improveFailed?: true } = {}
     // The safety check covers the rewrite too: the user wrote an allowed
     // prompt, the model must not turn it into a refusal.
@@ -1203,12 +1242,17 @@ export function useCreate() {
       // the canvas apart from the budget, and the canvas below stays at the
       // full size of the source.
       const editSide = macEditSide(referenceSide(editBudget, editRefs.length))
-      // C75: a Qwen-Image 2.1 edit in the shape of the size fields. The
-      // picture (and its mask) is cut to that shape before it is staged
-      // (lib/cover-crop), so the engine's edit follows it.
+      // C75: a Qwen-Image 2.1 edit in the shape of the size fields. 3.1.3
+      // (Discord bug-reports, 19.11.2026): the picture goes in WHOLE and the
+      // engine is handed the canvas, as on Windows. Cut to the shape first,
+      // a full-length picture in a square lost its head and the red frame
+      // around it, and the model made up a new face. Only with a mask is the
+      // picture (and its mask) still cut to the shape (lib/cover-crop): the
+      // painted area has to sit where it sits in the result.
       const macShape = mlxEdit && !!source && listed?.type === 'qwenimage' && state.qwenEditShape === 'canvas'
+      const macShapeCrop = macShape && !!mask?.url
       const shapeOf = macShape ? { width, height } : source
-      const editSize = mlxEdit && source && editRefs.length > 1 ? macEditCanvas(editCanvas(editBudget, shapeOf!)) : null
+      const editSize = mlxEdit && source && (editRefs.length > 1 || macShape) ? macEditCanvas(editCanvas(editBudget, shapeOf!)) : null
       // "Transparent background": the same prompt wrapper the Windows graph
       // uses. The model writes the alpha channel and the engine keeps it.
       const transparent = wantsTransparent({
@@ -1248,16 +1292,22 @@ export function useCreate() {
         // disk here, the way a start image is before a local video.
         const editImages: string[] = []
         for (const [i, ref] of editRefs.entries()) {
-          editImages.push(i === 0 && macShape
+          editImages.push(i === 0 && macShapeCrop
             ? await stageStartImage(await coverCropBlob(await blobFromUrl(ref.url), width, height))
             : ref.filename || await stageStartImage(await blobFromUrl(ref.url)))
         }
         const editMask = mlxEdit && mask?.url
           ? await stageStartImage(await featherMaskBlob(
-            macShape ? await coverCropBlob(await blobFromUrl(mask.url), width, height) : await blobFromUrl(mask.url),
+            macShapeCrop ? await coverCropBlob(await blobFromUrl(mask.url), width, height) : await blobFromUrl(mask.url),
             growMaskBy,
           ))
           : undefined
+        // The second pass has no mask and would repaint the whole picture,
+        // so a masked edit runs without it, as ComfyUI's does.
+        if (editMask && hiresFixEnabled && (listed?.editImages ?? 0) > 0) {
+          const skipped = 'Native HiRes was skipped: it runs on edits of the whole picture.'
+          macSkippedNote = macSkippedNote ? `${macSkippedNote} ${skipped}` : skipped
+        }
         // "Improve my prompt" with the Qwen enhancer (GH #148): it rewrites
         // now, with the chat model out of memory, and its process has ended
         // before the image model loads. An edit shows it the same images, in
@@ -1288,7 +1338,7 @@ export function useCreate() {
             prompt: macRefs ? canonicalImageRefs(prompt, editImages.length, 'qwen21') : transparent ? transparentPrompt(prompt) : prompt,
             steps, seed: imageSeed, guidance: cfgScale,
             ...(mlxEdit
-              ? { images: editImages, resolution: editSide, ...(editSize ?? {}), mask: editMask, strength: state.editStrength }
+              ? { images: editImages, resolution: editSide, ...(editSize ?? {}), mask: editMask, strength: removeRun ? 1 : state.editStrength }
               : { width, height }),
             model: mlxModelIdFor(effImageModel),
             negativePrompt: (macRefs ? canonicalImageRefs(negativePrompt, editImages.length, 'qwen21') : negativePrompt) || undefined,
@@ -1304,7 +1354,7 @@ export function useCreate() {
           // as on Windows. After an edit the same: the edited picture is the
           // image of the second pass (Discord feature request 21.10.2026).
           let first = made
-          const pass = hiresFixEnabled && (listed?.editImages ?? 0) > 0
+          const pass = hiresFixEnabled && !editMask && (listed?.editImages ?? 0) > 0
             ? macHiresPass(made.width || width, made.height || height, { scale: hiresScale, steps: hiresSteps, denoise: hiresDenoise })
             : null
           if (pass) {
@@ -1746,7 +1796,17 @@ export function useCreate() {
     // Background removal is prompt-free and model-independent (RMBG node);
     // lipsync/motion drive off their media inputs (the builder supplies a
     // neutral scene prompt when the field is empty).
-    const promptOptional = isRemoveBg || isUpscale || intent === 'eraser' || localOp === 'lipsync' || localOp === 'motion'
+    const promptOptional = isRemoveBg || isUpscale || localOp === 'lipsync' || localOp === 'motion' || localOp === 'swap'
+    // Scene to Video: the same checks as the stage shows, before the prompt
+    // rule below, so a missing video is named first.
+    const sceneClip = localOp === 'scene' && state.scene.clip && state.scene.clip.videoUrl === state.videoInput?.url ? state.scene.clip : null
+    if (localOp === 'scene') {
+      const problem = sceneLocalProblem({ hasVideo: !!state.videoInput, seconds: sceneClip?.seconds, prompt })
+      if (problem) {
+        setError(problem)
+        return
+      }
+    }
     if (!promptOptional && !prompt.trim()) {
       setError(localOp === 'music' ? 'Describe the track first. Genre, mood, tempo…' : 'Please enter a prompt.')
       return
@@ -1791,6 +1851,10 @@ export function useCreate() {
         setError('No talking character model installed. Use Download & install above to get Wan 2.2 S2V.')
       } else if (localOp === 'motion') {
         setError('No motion model installed. Use Download & install above to get Wan Animate or VACE.')
+      } else if (localOp === 'swap') {
+        setError(SWAP_LOCAL_NO_MODEL)
+      } else if (localOp === 'scene') {
+        setError('Scene to Video runs on Wan 2.1 VACE. Use Download & install above to get it.')
       } else {
         setError(mode === 'image'
           ? 'No image model selected. Add checkpoints or FLUX models to ComfyUI.'
@@ -1806,6 +1870,14 @@ export function useCreate() {
       }
       if (!state.audioInput) {
         setError('Add a voice first. Upload or record the speech audio.')
+        return
+      }
+    }
+    if (localOp === 'swap') {
+      // The one people rule and the inputs, before anything uploads.
+      const problem = swapLocalProblem(state)
+      if (problem) {
+        setError(problem)
         return
       }
     }
@@ -1961,20 +2033,20 @@ export function useCreate() {
       })
       const transparentFields = () => (transparentRequested && builderUsed === 'dynamic' ? { transparent: true as const } : {})
       const baseParams = {
-        prompt, negativePrompt,
+        prompt, negativePrompt: removeRun && !negativePrompt.trim() ? REMOVE_NEGATIVE_COMFY : negativePrompt,
         ...(transparentRequested ? { transparent: true } : {}), model: activeModel, sampler, scheduler, steps, cfgScale, width, height, seed: runSeed, batchSize,
         ...(isRemoveBg && effInputImage ? { removebg: true, inputImage: effInputImage } : {}),
         // Discord 2026-09-25 (a user: "a house becomes a tennis court"): at
         // strength 1.00 the builder read denoise >= 1 as "no img2img" and
         // dropped the source without a word. Edit always keeps the source;
         // 0.95 is the most it repaints (the slider tops out there too).
-        ...(isI2I && !isRemoveBg && effInputImage ? { inputImage: effInputImage, denoise: Math.min(denoise, EDIT_MAX_DENOISE) } : {}),
+        ...(isI2I && !isRemoveBg && effInputImage ? { inputImage: effInputImage, denoise: removeRun ? 1 : Math.min(denoise, EDIT_MAX_DENOISE) } : {}),
         // B46: a Qwen edit reads its own Edit strength (1 = as before); the
         // builder ignores it on every other family.
         ...(isI2I && !isRemoveBg && effInputImage && state.editStrength < 1 ? { editStrength: state.editStrength } : {}),
         // C75: a Qwen-Image 2.1 edit in the shape of the size fields. Only
         // the edit graph of that model reads it (dynamic-workflow.ts).
-        ...(isI2I && !isRemoveBg && effInputImage && imageModelType === 'qwenimage' && state.qwenEditShape === 'canvas' ? { editShape: 'canvas' as const } : {}),
+        ...(isI2I && !isRemoveBg && effInputImage && (imageModelType === 'qwenimage' || imageModelType === 'minimaxh3image') && state.qwenEditShape === 'canvas' ? { editShape: 'canvas' as const } : {}),
         // GH #144: further references ride along; the builder keeps only as
         // many as the model's family takes (lib/edit-references).
         ...(isI2I && !isRemoveBg && effInputImage && references.some((r) => r.filename)
@@ -2047,8 +2119,51 @@ export function useCreate() {
           setProgress(3, 'Uploading the driving video...')
           drivingVideo = await uploadMediaFile(state.videoInput.blob, state.videoInput.name)
         }
+        let swapRef: string | undefined
+        let swapSize: { width: number; height: number } | null = null
+        if (localOp === 'swap' && state.videoInput) {
+          setProgress(3, 'Uploading your video...')
+          drivingVideo = await uploadMediaFile(state.videoInput.blob, state.videoInput.name)
+          const person = state.swapFigures[0]
+          if (person?.image) swapRef = (await ensureLocalFilename(person.image, person.character ?? 'character')).filename
+          // Portrait video, portrait run: the lane's size turned to the frame.
+          swapSize = swapLocalSize(width, height, state.swapFrame)
+        }
+        // Scene to Video: the scene video, and the own first frame where the
+        // customer set one. Size and length follow the clip (lib/render/scene).
+        let firstFrame: string | undefined
+        let sceneShape: { width: number; height: number; frames: number; fps: number } | null = null
+        if (localOp === 'scene' && state.videoInput) {
+          setProgress(3, 'Uploading the scene video...')
+          drivingVideo = await uploadMediaFile(state.videoInput.blob, state.videoInput.name)
+          const own = sceneFrameFor(state.scene, state.videoInput.url)
+          if (own) {
+            setProgress(4, 'Uploading your first frame...')
+            const frameBlob = await blobFromUrl(own.url).catch(() => {
+              throw new Error('Your first frame could not be read. Add it again as a picture.')
+            })
+            firstFrame = await uploadMediaFile(frameBlob, frameBlob.type === 'image/jpeg' ? 'scene-first-frame.jpg' : 'scene-first-frame.png')
+          }
+          sceneShape = { ...sceneLocalSize(sceneClip?.width, sceneClip?.height), frames: sceneLocalFrames(sceneClip?.seconds), fps: SCENE_LOCAL_FPS }
+          outputWidth = sceneShape.width
+          outputHeight = sceneShape.height
+        }
         setProgress(5, 'Building workflow...')
         const laneDefaults = COMFY_MODEL_DEFAULTS[imageModelType] ?? COMFY_MODEL_DEFAULTS.unknown
+        if (localOp === 'swap' && state.videoInput) {
+          laneFrames = swapLocalFrames(
+            await mediaSeconds(state.videoInput.url, 'video'),
+            mode === 'video' ? fps : laneDefaults.fps,
+          )
+        }
+        // A workflow of the user's own keeps the length the user set for it.
+        if (localOp === 'motion' && state.videoInput && !useWorkflowStore.getState().getWorkflowForModel(activeModel, imageModelType)) {
+          laneFrames = localClipFrames(
+            laneFrames || laneDefaults.frames,
+            await mediaSeconds(state.videoInput.url, 'video'),
+            mode === 'video' ? fps : laneDefaults.fps,
+          )
+        }
         // The lanes carry the same version gate as a picture (YuE2, S2V,
         // Animate): a too-old ComfyUI is offered the update, then the build
         // runs again. The box, 03.10.2026: Music failed with the update
@@ -2062,15 +2177,16 @@ export function useCreate() {
           // The shared width/height/frames sliders follow the picked model via
           // setLocalOpModel; fall back to the architecture defaults when a
           // stale persisted value would be off-grid for the lane.
-          width: width || laneDefaults.width,
-          height: height || laneDefaults.height,
-          frames: laneFrames || laneDefaults.frames,
-          fps: mode === 'video' ? fps : laneDefaults.fps,
+          width: swapSize?.width ?? sceneShape?.width ?? (width || laneDefaults.width),
+          height: swapSize?.height ?? sceneShape?.height ?? (height || laneDefaults.height),
+          frames: sceneShape?.frames ?? (laneFrames || laneDefaults.frames),
+          fps: sceneShape?.fps ?? (mode === 'video' ? fps : laneDefaults.fps),
           seconds: state.musicDuration,
           lyrics: state.musicLyrics,
           audioFile,
-          refImage: source?.filename || undefined,
+          refImage: localOp === 'swap' ? swapRef : source?.filename || undefined,
           drivingVideo,
+          firstFrame,
         }
         // A workflow of the user's own, picked for this model in Advanced
         // settings, runs instead of LU's Motion Control graph. Discord,
@@ -2098,7 +2214,10 @@ export function useCreate() {
       // Check for custom workflow assignment — but verify it's compatible with the model
       let customWf = localOp || isUpscale ? null : useWorkflowStore.getState().getWorkflowForModel(activeModel, imageModelType)
       if (customWf) {
+        // An own workflow has no slot for the painted mask (injectParameters),
+        // so a masked edit runs on LU's graph, which reads it or refuses.
         const misfit = ownWorkflowMisfitNote(customWf.name, apiNodes(customWf.workflow).map(([, n]) => n.class_type), imageModelType, listedModel?.source)
+          ?? (intent === 'edit' && maskFilename ? `"${customWf.name}" takes no mask, so this edit ran on LU's own workflow.` : null)
         if (misfit) {
           // C72: said on the progress line and kept under the result, not
           // only in the console.
@@ -2137,7 +2256,8 @@ export function useCreate() {
           if (dynErr instanceof Error && dynErr.name === 'WorkflowUnavailableError') {
             throw dynErr
           }
-          if (!legacyBuilderFits(imageModelType, mode === 'video')) throw dynErr
+          // The legacy graphs are text to image: a mask would be lost in them.
+          if (maskFilename || !legacyBuilderFits(imageModelType, mode === 'video')) throw dynErr
           // Fallback to legacy builders if dynamic fails
           console.warn('[useCreate] Dynamic builder failed, using legacy:', dynErr)
           builderUsed = 'legacy'
@@ -2243,7 +2363,9 @@ export function useCreate() {
       // source (lib/edit-hires), and a masked edit is refused with a line
       // (api/hires-fix).
       const hiresEdit = intent === 'edit' && isI2I && !isRemoveBg && !!effInputImage
-      if (hiresFixEnabled && (intent === 'image' || hiresEdit)) {
+      // MiniMax H3 Image takes no HiRes pass (its latent has a time axis);
+      // Create hides the switch for it, and a switch left on is not applied.
+      if (hiresFixEnabled && (intent === 'image' || hiresEdit) && imageModelType !== 'minimaxh3image') {
         setProgress(8, 'Adding native HiRes Fix...')
         const editBase = hiresEdit
           ? editHiresBase({ source, width, height, modelType: imageModelType, modelName: activeModel, editShape: state.qwenEditShape })
@@ -2383,8 +2505,12 @@ export function useCreate() {
           let phasePct = 10
           store.setProgressPhase('queued')
           const line = elapsedLine((text) => setProgress(phasePct, text), 'Queued...')
+          let phaseLabel = 'Queued...'
+          let silentSince: number | null = null
           const setPhase = (pct: number, label: string) => {
             phasePct = pct
+            phaseLabel = label
+            silentSince = null
             line.setLabel(label)
           }
 
@@ -2503,7 +2629,14 @@ export function useCreate() {
               const alive = await checkComfyConnection(COMFY_PROBE_LIMIT_MS)
               if (completionHandled) return
               if (!alive && Date.now() - asked < COMFY_PROBE_LIMIT_MS * 0.8) { cleanup(); reject(new Error('ComfyUI stopped responding during generation')); return }
-              if (!alive) line.setLabel('ComfyUI is busy and does not answer yet...')
+              if (!alive) {
+                silentSince ??= asked
+                line.setLabel(comfyBusyLabel(Date.now() - silentSince))
+              } else if (silentSince !== null) {
+                // It answers again: the busy line must not outlive the wait.
+                silentSince = null
+                line.setLabel(phaseLabel)
+              }
               // A prompt still in ComfyUI's queue is alive even when the socket
               // goes quiet (long model loads emit no events) — refresh the
               // watchdog once a minute from the queue itself.
@@ -2747,7 +2880,9 @@ export function useCreate() {
       const ownPromptId = useCreateStore.getState().currentPromptId
       const lateLook = (err as { lateLook?: string } | null)?.lateLook
       if (ownPromptId && !lateLook) {
-        try { await abandonPrompt(ownPromptId) } catch { /* best effort */ }
+        // Bounded like Cancel: a ComfyUI that does not answer must not hold
+        // the end of the run. The request itself goes on in the background.
+        await settleWithin(abandonPrompt(ownPromptId), CANCEL_ANSWER_LIMIT_MS)
       }
       // A stall verdict is LU giving up, not ComfyUI: what it still delivers
       // goes to the gallery, and the stall line goes away with it.
@@ -3067,7 +3202,8 @@ export function useCreate() {
     // interrupts when ours is the one running.
     const ownPromptId = useCreateStore.getState().currentPromptId
     if (ownPromptId) {
-      try { await abandonPrompt(ownPromptId) } catch { /* best effort */ }
+      // A ComfyUI too busy to answer must not hold the app in "generating".
+      await settleWithin(abandonPrompt(ownPromptId), CANCEL_ANSWER_LIMIT_MS)
     }
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
     useCreateStore.getState().setIsGenerating(false)

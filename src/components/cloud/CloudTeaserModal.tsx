@@ -22,6 +22,8 @@ import { openExternal, isMacOS } from '../../api/backend'
 import { checkoutStartUrl } from '../../lib/cloud-links'
 import { reportCloudGate } from '../../api/funnel'
 import { BuyChoice } from './BuyChoice'
+import { MONOGRAM, MONOGRAM_INVERT } from '../layout/brand'
+import { isHubIntent } from '../../lib/create/character-hub'
 import { getMaxVramGb, getSharedMemoryGb } from '../../lib/hardware'
 import { sharedMemoryWording } from '../../lib/shared-memory-wording'
 
@@ -34,10 +36,6 @@ const INTENT_COPY: Record<Extract<CloudTeaserTarget, { surface: 'intent' }>['int
   upscale: {
     title: 'Upscale',
     line: 'Blow any image up to crisp 2K, 4K or 8K. No VRAM needed.',
-  },
-  eraser: {
-    title: 'Erase Object',
-    line: 'Paint over anything and it’s gone. Clean fill, no trace.',
   },
   character: {
     title: 'Character Studio',
@@ -62,6 +60,11 @@ const INTENT_COPY: Record<Extract<CloudTeaserTarget, { surface: 'intent' }>['int
   swap_character: {
     title: 'Swap Character',
     line: 'Put a new person into a real video. Same moves, same scene, same sound.',
+  },
+  // 3.1.3: on a Mac the tab is a locked cloud pill (no ComfyUI, no VACE).
+  scene: {
+    title: 'Scene to Video',
+    line: 'Turn a grey 3D scene into a finished clip. Same camera, same timing, the look you describe.',
   },
 }
 
@@ -163,6 +166,8 @@ export function CloudTeaserModal() {
         : null
 
 
+  // The sheets of the Character area carry the LU mark alone (David, 21.11.2026).
+  const hubSheet = target?.surface === 'intent' && isHubIntent(target.intent)
   useDismissOnEscape(!!target && !!copy, close)
   return (
     <AnimatePresence>
@@ -187,7 +192,7 @@ export function CloudTeaserModal() {
           >
             {/* Demo stage */}
             <div className="relative h-[130px] bg-black/30 border-b border-white/[0.06] overflow-hidden">
-              <TeaserDemo target={target} />
+              {hubSheet ? <LogoStage /> : <TeaserDemo target={target} />}
               <button
                 onClick={close}
                 className="absolute top-2 right-2 p-1.5 rounded-md text-gray-500 hover:text-gray-200 hover:bg-white/10 transition-colors"
@@ -200,7 +205,7 @@ export function CloudTeaserModal() {
 
             <div className="p-4 space-y-3">
               <div className="flex items-center gap-2">
-                <Cloud size={14} className="text-violet-600 dark:text-violet-300" />
+                {!hubSheet && <Cloud size={14} className="text-violet-600 dark:text-violet-300" />}
                 <h3 className="text-[0.85rem] font-semibold text-white">{copy.title}</h3>
                 <span className="ml-auto text-[0.55rem] font-medium uppercase tracking-widest text-violet-300/80">
                   LU Cloud
@@ -221,6 +226,7 @@ export function CloudTeaserModal() {
                   Blatt bringt. */}
               <BuyChoice
                 tone="sheet"
+                plain={hubSheet}
                 onPick={(order) => {
                   close()
                   reportCloudGate(order === 'sub' ? 'cloud_teaser_sub' : 'cloud_teaser_pack')
@@ -234,7 +240,7 @@ export function CloudTeaserModal() {
                     onClick={() => { close(); setIntent(localLane) }}
                     className="flex-1 flex items-center justify-center gap-1.5 h-8 rounded-lg border border-white/15 text-gray-200 text-[0.7rem] font-semibold hover:bg-white/[0.06] transition-colors"
                   >
-                    <MonitorDown size={12} /> Try local
+                    {!hubSheet && <MonitorDown size={12} />} Try local
                   </button>
                 )}
                 <button
@@ -262,11 +268,25 @@ export function CloudTeaserModal() {
 // ── "Show me" demos — tiny looping motion sketches, one per tool. Pure
 // CSS/SVG so they ship inside the bundle (no media assets, theme-crisp). ──
 
+/** The LU mark, breathing slowly. */
+function LogoStage() {
+  return (
+    <div className="absolute inset-0 flex items-center justify-center" data-testid="cloud-teaser-logo">
+      <motion.img
+        src={MONOGRAM}
+        alt="LU"
+        className={`h-14 w-14 ${MONOGRAM_INVERT}`}
+        animate={{ opacity: [0.72, 1, 0.72], scale: [0.98, 1.02, 0.98] }}
+        transition={{ duration: 4, repeat: Infinity, ease: 'easeInOut' }}
+      />
+    </div>
+  )
+}
+
 function TeaserDemo({ target }: { target: CloudTeaserTarget }) {
   const kind = target.surface === 'intent' ? target.intent : target.kind === 'video' ? 'video-model' : 'image-model'
   switch (kind) {
     case 'upscale': return <UpscaleDemo />
-    case 'eraser': return <EraserDemo />
     case 'character': return <CharacterDemo />
     case 'lipsync': return <LipsyncDemo />
     case 'music': return <MusicDemo />
@@ -297,29 +317,6 @@ function UpscaleDemo() {
       >
         4K
       </motion.span>
-    </Stage>
-  )
-}
-
-function EraserDemo() {
-  return (
-    <Stage>
-      <div className="relative w-24 h-16 rounded-lg bg-gradient-to-br from-emerald-800/60 to-emerald-600/40">
-        {/* Der Gegenstand, den der Radierer wegnimmt. Er war gelb, ohne dass
-            hier irgendetwas zu warnen waere: reine Deko. Sky gehoert zur
-            Palette dieses Fensters (violet, sky, fuchsia, rose) und ist als
-            volle Flaeche noch an keinen anderen Demo-Gegenstand vergeben. */}
-        <motion.div
-          className="absolute left-3 bottom-3 w-6 h-8 rounded-sm bg-sky-300/90"
-          animate={{ opacity: [1, 1, 0, 0, 1] }}
-          transition={{ ...LOOP, duration: 3, times: [0, 0.35, 0.55, 0.85, 1] }}
-        />
-        <motion.div
-          className="absolute w-3.5 h-3.5 rounded-full border-2 border-white/80 bg-white/20"
-          animate={{ x: [8, 20, 8], y: [18, 30, 18], opacity: [0, 1, 0] }}
-          transition={{ ...LOOP, duration: 3 }}
-        />
-      </div>
     </Stage>
   )
 }

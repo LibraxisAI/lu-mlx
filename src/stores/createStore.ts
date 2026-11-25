@@ -24,6 +24,7 @@ import { downgradeMirror, sanitizeEntries } from '../lib/gallery-persist'
  * results, the in-flight flag). Everything else in the blob is a preference.
  */
 const RUNTIME_ONLY_KEYS: readonly string[] = [
+  'hubPhotoImage', 'hubNewDraft',
   'backend', 'source', 'mask', 'references', 'endImage', 'imageReferences', 'caps', 'isGenerating', 'comfyCorsBlocked',
   // A queue of source images from yesterday must never start a run today.
   'batchSources', 'batchRun', 'batchOriginal',
@@ -108,9 +109,23 @@ export interface SwapFigure {
   role: string
   /** Where the customer tapped this person in the first frame (0 to 1). */
   mark?: { x: number; y: number } | null
+  /** Not in the first frame: comes in later from this side (the one
+   *  people rule, lib/create/people-rule.ts). */
+  later?: 'left' | 'right' | null
   /** The character of the Character area this person becomes, by name, so
    *  the row says "→ Bean". Unset for a photo picked by hand. */
   character?: string | null
+}
+
+/** The page "New character" on its way to the training and back. */
+export interface HubNewDraft {
+  photos: File[]
+  name: string
+  /** The word on the training page, and a description per photo (by place). */
+  trigger: string
+  captions: string[]
+  /** Filled by the way back: the page takes all of it up again. */
+  back?: boolean
 }
 
 /** Swap Character in two steps (14.11.2026, as on the web): the first frame
@@ -121,6 +136,37 @@ export interface SwapFrame { url: string; width: number; height: number; videoUr
  *  inputs it came from (lib/render/swap.ts, swapFrameKey); once they no longer
  *  match, it has expired. */
 export interface SwapBuilt { jobId: string; url: string; key: string; confirmed: boolean }
+
+/** Scene to Video (3.1.3, port of the web's 16.11.2026): the first frame the
+ *  run starts from. A frame the editor designed on the cloud is an own result
+ *  (`jobId`); an own upload is a picture in the app. `videoUrl` is the scene
+ *  video it belongs to ('' before any clip: it goes with the first one). */
+export type SceneFrame =
+  | { kind: 'designed'; jobId: string; url: string; model: string; videoUrl: string }
+  | { kind: 'upload'; url: string; width: number; height: number; videoUrl: string }
+
+/** Scene to Video beside the scene video (videoInput). Runtime-only. */
+export interface SceneState {
+  /** The scene video as the app measured it. */
+  clip: { videoUrl: string; seconds: number; width: number; height: number } | null
+  /** The first frame of the scene video, drawn in the app. */
+  first: { videoUrl: string; url: string; width: number; height: number } | null
+  /** The customer's own first frame, uploaded or generated; the run starts
+   *  from it instead of the frame taken from the clip. */
+  frame: SceneFrame | null
+  /** The own first frame is being generated: Create waits for it. */
+  frameBusy: boolean
+  /** When the scene video on screen was added. A result made before it
+   *  belongs to an older scene and does not hide the new one. */
+  videoSetAt: number
+}
+
+/** The node sets a local tab needs on top of its model (Stage CapabilityCard).
+ *  'depth' (3.1.3): the depth extractor of comfyui_controlnet_aux, which
+ *  Scene to Video draws its depth video with. */
+export type CreateCapability = 'rmbg' | 'inpaint-nodes' | 'dwpose' | 'depth'
+
+export const EMPTY_SCENE: SceneState = { clip: null, first: null, frame: null, frameBusy: false, videoSetAt: 0 }
 
 const ONE_FIGURE: SwapFigure[] = [{ image: null, role: '' }]
 
@@ -134,12 +180,13 @@ const ONE_FIGURE: SwapFigure[] = [{ image: null, role: '' }]
 // the train lane is a real local tab now (it was cloud-first while 2.5.8
 // had no trainer runtime).
 // 3D joined in 3.1.0: TRELLIS.2 on the core nodes of the pinned ComfyUI.
-export const LOCAL_LANE_OPS: ReadonlySet<CloudOp> = new Set(['music', 'lipsync', 'extend', 'motion', 'character', '3d'])
+// Scene to Video joined in 3.1.3: Wan 2.1 VACE with a depth video of the scene.
+export const LOCAL_LANE_OPS: ReadonlySet<CloudOp> = new Set(['music', 'lipsync', 'extend', 'motion', 'character', '3d', 'scene'])
 
-/** Upscale (core ImageScale) and eraser (checkpoint inpaint + mask) when
- *  ComfyUI is connected. Kept off the CloudOp set so the specialized-lane
- *  picker is unchanged; IntentBar unlocks them via `hasLocalLane`. */
-export const LOCAL_UTILITY_OPS: ReadonlySet<UtilityOp> = new Set(['upscale', 'eraser'])
+/** The utility tools with a local ComfyUI lane (core upscale nodes, see
+ *  lib/local-upscale.ts). Kept off the CloudOp set so the specialized-lane
+ *  picker is unchanged; IntentBar unlocks upscale via `hasLocalLane`. */
+export const LOCAL_UTILITY_OPS: ReadonlySet<UtilityOp> = new Set(['upscale'])
 
 /** An audio/video file (or training image) staged in the composer before
  *  upload. `blob` carries the bytes for the cloud upload; `url` is a local
@@ -439,8 +486,9 @@ export interface CreateState {
   editStrength: number
   /** C75: the shape a local Qwen-Image 2.1 edit (ComfyUI) comes out in.
    *  'source', the default: the shape of the picture, at the pixel budget of
-   *  the size fields. 'canvas': the width and height set below; the picture
-   *  is scaled and cropped from its centre to that shape before the encode. */
+   *  the size fields. 'canvas': the width and height set below; the whole
+   *  picture is the reference (3.1.3; on the Mac a masked edit is still cut
+   *  to the shape, so the mask lines up). */
   qwenEditShape: QwenEditShape
   /** Native text-to-image latent upscale + refinement pass (local ComfyUI). */
   hiresFixEnabled: boolean
@@ -490,6 +538,10 @@ export interface CreateState {
   /** 3.0.8 D20: the local trainer's recipe, Normal or Low VRAM. Persisted:
    *  it follows the card, which does not change between sessions. */
   trainVramPreset: TrainVramPreset
+  /** A41 / GitHub #260: the sentence of a run that switched itself from
+   *  Normal to Low VRAM because the card is too small for Normal. Shown
+   *  under the trainer while it is set. Runtime only. */
+  trainNotice: string | null
   /** 3.0.9 P8: what the local trainer learns, a character or a style /
    *  concept / pose (lib/train-kind.ts). Persisted like the steps. */
   trainKind: TrainKind
@@ -523,11 +575,20 @@ export interface CreateState {
   /** Swap Character: the built and (after Continue) confirmed first frame.
    *  Runtime-only. */
   swapBuilt: SwapBuilt | null
+  /** Scene to Video: the measured clip, its first frame and the own first
+   *  frame. Runtime-only. */
+  scene: SceneState
   /** The Character area (3.1.0 part B): which of its three steps shows. Only
    *  read while the intent is one of HUB_INTENTS. Runtime-only. */
   hubStep: HubStep
   /** The character picked in step 1, null for "Just use a photo". Runtime-only. */
   hubCharacter: HubCharacter | null
+  /** Image with a photo character (3.1.3, as on the web): the run is an Edit
+   *  with its photos as references, and it stays in the Character area. */
+  hubPhotoImage: { key: string; name: string } | null
+  /** What the page "New character" held when it went on to the training, so
+   *  the way back finds it again. Runtime only. */
+  hubNewDraft: HubNewDraft | null
   /** The action last open in the area, so the pill goes back to it. */
   hubLastIntent: CreateIntent | null
   /** Swap and Motion on the cloud (14.11.2026): the sound of the result
@@ -662,7 +723,7 @@ export interface CreateState {
    *  stayed hidden until Create was opened again (box run d307-d). */
   loraListKey: string
   /** Runtime-only: which local custom-node capabilities are installed. */
-  caps: Record<'rmbg' | 'inpaint-nodes' | 'dwpose', boolean>
+  caps: Record<CreateCapability, boolean>
 
   isGenerating: boolean
   /** Runtime-only: the user-managed ComfyUI (0.19+) blocked the WebView's
@@ -794,6 +855,7 @@ export interface CreateState {
   setTrainSteps: (n: number) => void
   setTrainCaption: (name: string, text: string) => void
   setTrainVramPreset: (p: TrainVramPreset) => void
+  setTrainNotice: (text: string | null) => void
   setTrainKind: (k: TrainKind) => void
   setTrainStyleTrigger: (on: boolean) => void
   setSelectedCharacter: (c: CharacterRef | null) => void
@@ -805,7 +867,10 @@ export interface CreateState {
   setSwapConsent: (consent: boolean) => void
   setSwapFrame: (frame: SwapFrame | null) => void
   setSwapBuilt: (built: SwapBuilt | null) => void
+  setScene: (patch: Partial<SceneState>) => void
   setHubStep: (step: HubStep) => void
+  setHubPhotoImage: (v: { key: string; name: string } | null) => void
+  setHubNewDraft: (v: HubNewDraft | null) => void
   setHubCharacter: (c: HubCharacter | null) => void
   /** The pill "Character": back to the action that was open, else step 1. */
   openCharacterHub: () => void
@@ -845,7 +910,7 @@ export interface CreateState {
   setBackend: (backend: CreateBackend) => void
   setCloudImageModel: (id: string) => void
   setCloudVideoModel: (id: string) => void
-  setCaps: (caps: Record<'rmbg' | 'inpaint-nodes' | 'dwpose', boolean>) => void
+  setCaps: (caps: Record<CreateCapability, boolean>) => void
   resetParamsToModelDefaults: () => void
 
   setIsGenerating: (generating: boolean) => void
@@ -1307,6 +1372,7 @@ export const useCreateStore = create<CreateState>()(
       trainSteps: TRAIN_STEPS_DEFAULT,
       trainCaptions: {} as Record<string, string>,
       trainVramPreset: TRAIN_VRAM_PRESET_DEFAULT as TrainVramPreset,
+      trainNotice: null as string | null,
       trainKind: TRAIN_KIND_DEFAULT as TrainKind,
       trainStyleTrigger: true,
       selectedCharacter: null as CharacterRef | null,
@@ -1319,8 +1385,11 @@ export const useCreateStore = create<CreateState>()(
       swapConsent: false,
       swapFrame: null as SwapFrame | null,
       swapBuilt: null as SwapBuilt | null,
+      scene: EMPTY_SCENE,
       hubStep: 'who' as HubStep,
       hubCharacter: null as HubCharacter | null,
+      hubPhotoImage: null as { key: string; name: string } | null,
+      hubNewDraft: null as HubNewDraft | null,
       hubLastIntent: null as CreateIntent | null,
       sound: 'original' as 'original' | 'none' | 'lipsync',
       lipsyncModel: 'latentsync',
@@ -1368,7 +1437,7 @@ export const useCreateStore = create<CreateState>()(
       localOpModel: '',
       charactersVersion: 0,
       loraListKey: '',
-      caps: { rmbg: false, 'inpaint-nodes': false, dwpose: false } as Record<'rmbg' | 'inpaint-nodes' | 'dwpose', boolean>,
+      caps: { rmbg: false, 'inpaint-nodes': false, dwpose: false, depth: false } as Record<CreateCapability, boolean>,
 
       isGenerating: false,
       comfyCorsBlocked: false,
@@ -1485,8 +1554,16 @@ export const useCreateStore = create<CreateState>()(
       // Eine andere Unterkategorie faehrt ein anderes Modell und wirft damit die
       // Studio-Optionen weg (withOwnStudioOptions): ein Feld wie `resolution` hat
       // je Endpunkt eine andere Auswahl.
-      setIntent: (intent) => {
+      setIntent: (asked) => {
+        // Local mode has no Erase (3.1.3). A way in from anywhere lands in
+        // Edit, which keeps the source and the mask; on a Mac without a model
+        // that edits there is no Edit either, and it lands on Image.
+        const intent: CreateIntent = asked === 'eraser' && get().backend === 'local'
+          ? (isMlxImageHost() && !mlxTakesEditImage(get().imageModelList) ? 'image' : 'edit')
+          : asked
         const changed = get().intent() !== intent
+        // Any tab picked by name leaves Image with a photo character.
+        if (get().hubPhotoImage) set({ hubPhotoImage: null })
         set((s) => withOwnStudioOptions(s, withMacEditCanvas(s, ((): Partial<CreateState> => {
         const patch = ((): Partial<CreateState> => {
         // Clear intent-incompatible inputs: intents without a source drop both;
@@ -1538,10 +1615,29 @@ export const useCreateStore = create<CreateState>()(
             return { ...base, cloudOp: 'extend' as const, mode: 'video' as const, videoSubMode: 't2v' as const, ...dropAll,
               ...videoModelParams(s.videoModel, s.videoModelList, 'extend', s.videoSpeed) }
           }
-          case 'swap_character':
+          case 'swap_character': {
             // Its inputs are its own slots (video, figures); the Stage's
-            // source and mask are not read.
+            // source and mask are not read. Locally (3.1.3) it runs Wan 2.2
+            // Animate like Motion, with Motion's sampler defaults.
+            if (s.backend === 'local' && !isMlxImageHost()) {
+              const d = MODEL_TYPE_DEFAULTS.wananimate
+              return { ...base, cloudOp: 'swap_character' as const, mode: 'video' as const, videoSubMode: 'i2v' as const, mask: null,
+                steps: d.steps, cfgScale: d.cfgScale, sampler: d.sampler, scheduler: d.scheduler,
+                width: d.width, height: d.height, ...(d.frames ? { frames: d.frames } : {}), ...(d.fps ? { fps: d.fps } : {}) }
+            }
             return { ...base, cloudOp: 'swap_character' as const, mode: 'video' as const, videoSubMode: 'i2v' as const, mask: null }
+          }
+          case 'scene': {
+            // Scene to Video (3.1.3): the scene video and the own first frame
+            // are its own slots; the Stage's source, mask and references are
+            // not read. The local lane is Wan 2.1 VACE (buildSceneWorkflow),
+            // so its sampling starts from the VACE defaults; size and length
+            // follow the clip at the start.
+            const d = MODEL_TYPE_DEFAULTS.wanvace
+            return { ...base, cloudOp: 'scene' as const, mode: 'video' as const, videoSubMode: 'i2v' as const, mask: null, references: [],
+              steps: d.steps, cfgScale: d.cfgScale, sampler: d.sampler, scheduler: d.scheduler,
+              width: d.width, height: d.height, ...(d.frames ? { frames: d.frames } : {}), ...(d.fps ? { fps: d.fps } : {}) }
+          }
           case 'motion': {
             // Keeps the source slot (the character image the video drives).
             // On the Mac the lane runs an LTX-2.3 pack, and its catalogue
@@ -1702,6 +1798,7 @@ export const useCreateStore = create<CreateState>()(
         return { trainCaptions }
       }),
       setTrainVramPreset: (p) => set({ trainVramPreset: isTrainVramPreset(p) ? p : TRAIN_VRAM_PRESET_DEFAULT }),
+      setTrainNotice: (text) => set({ trainNotice: text && text.trim() ? text.trim() : null }),
       // The steps follow the mode: each has its own three presets, and a
       // number of the other mode would match none of the switch's options.
       setTrainKind: (k) => set((s) => {
@@ -1723,8 +1820,16 @@ export const useCreateStore = create<CreateState>()(
       setVideoInput: (videoInput) => {
         releaseReplacedMediaRef(get().videoInput, videoInput)
         const figures = get().swapFigures
+        const scene = get().scene
         set(videoInput?.url === get().videoInput?.url ? { videoInput } : {
           videoInput, swapSeconds: null, swapFrame: null, swapBuilt: null,
+          // Scene to Video: measurement and frames belonged to the old video.
+          // An own first frame picked before any clip (videoUrl '') goes with
+          // the first clip, as on the web (18.11.2026).
+          scene: {
+            ...scene, clip: null, first: null, videoSetAt: videoInput ? Date.now() : 0,
+            frame: videoInput && scene.frame?.kind === 'upload' && scene.frame.videoUrl === '' ? { ...scene.frame, videoUrl: videoInput.url } : null,
+          },
           swapFigures: figures.some((f) => f.mark) ? figures.map((f) => ({ ...f, mark: null })) : figures,
         })
       },
@@ -1734,7 +1839,10 @@ export const useCreateStore = create<CreateState>()(
       setSwapConsent: (swapConsent) => set({ swapConsent }),
       setSwapFrame: (swapFrame) => set({ swapFrame }),
       setSwapBuilt: (swapBuilt) => set({ swapBuilt }),
+      setScene: (patch) => set((s) => ({ scene: { ...s.scene, ...patch } })),
       setHubStep: (hubStep) => set({ hubStep }),
+      setHubPhotoImage: (hubPhotoImage) => set({ hubPhotoImage }),
+      setHubNewDraft: (hubNewDraft) => set({ hubNewDraft }),
       setHubCharacter: (hubCharacter) => set({ hubCharacter }),
       openCharacterHub: () => {
         const s = get()
@@ -1825,10 +1933,14 @@ export const useCreateStore = create<CreateState>()(
       setBatchRun: (batchRun) => set({ batchRun }),
       setBatchOriginal: (batchOriginal) => set({ batchOriginal }),
       setMask: (mask) => set({ mask }),
-      // Flipping to local clears the intents that have no local lane here so
-      // the surface never strands on a dead op the IntentBar no longer shows.
-      // Edit keeps its state since 2.5.7, removebg keeps its Vision/RMBG lane,
-      // and animate keeps its i2v state since 2026-07-17.
+      // Flipping to local closes the intents that have no local lane (upscale
+      // on a Mac without ComfyUI or upscaler) so the surface never strands on
+      // a dead op the IntentBar no longer shows. Erase becomes Edit with its
+      // source and mask, the way local mode removes an object (3.1.3). Edit
+      // keeps its state since 2.5.7 (checkpoint mask inpaint), removebg keeps
+      // its Vision/RMBG lane, and animate keeps its i2v state since 2026-07-17 —
+      // the local I2V lane is back (buildDynamicWorkflow wires the family's
+      // image-to-video node).
       setBackend: (backend) => {
         const keepsExtend = get().cloudOp === 'extend' && mlxTakesStartImage(get().videoModelList)
         const macRunsOp = (get().cloudOp === 'music' && mlxMakesMusic(get().audioModelList))
@@ -1844,12 +1956,15 @@ export const useCreateStore = create<CreateState>()(
           if (isMobile()) return { backend: 'cloud', ...cleared }
           if (backend !== 'local') return { backend, ...cleared }
           const patch: Partial<CreateState> = { backend, ...cleared }
+          // Enhance keeps its tab on Windows and Linux (local ComfyUI upscale,
+          // 3.0.7), and on a Mac with an upscaler or connected ComfyUI.
+          // Erase always closes into Edit, and Enhance closes on an MLX-only
+          // Mac without an upscaler.
           const mac = isMlxImageHost()
           const toolStays = mac
-            ? (s.utilityOp === 'upscale' && (s.mlxUpscale || s.comfyRunning))
-              || (s.utilityOp === 'eraser' && s.comfyRunning)
-            : s.utilityOp === 'upscale'
-          if (s.utilityOp && !toolStays) Object.assign(patch, { utilityOp: null, mask: null, error: null })
+            ? s.utilityOp === 'upscale' && (s.mlxUpscale || s.comfyRunning)
+            : !!s.utilityOp && LOCAL_UTILITY_OPS.has(s.utilityOp)
+          if (s.utilityOp && !toolStays) Object.assign(patch, { utilityOp: null, error: null, ...(s.utilityOp === 'eraser' ? {} : { mask: null }) })
           // music/lipsync/extend/motion (2.5.8) and character (2.6.0, local
           // musubi trainer) run locally, so a backend flip keeps them
           // selected; only the genuinely hosted-only ops drop.
@@ -1862,11 +1977,17 @@ export const useCreateStore = create<CreateState>()(
           const opBleibt = ('cloudOp' in patch ? patch.cloudOp : s.cloudOp)
             || ('utilityOp' in patch ? patch.utilityOp : s.utilityOp)
           if (mlxOnly && !opBleibt) {
+            // Remove Background stays: every Mac cuts out through Vision
+            // (commands/mlx_cutout.rs), with no model and no ComfyUI node.
+            // Edit bleibt, solange ein installiertes Bildmodell ein Bild
+            // nimmt (Qwen-Image 2.1 ueber die zweite Engine). Dieses Modell
+            // liest eine Maske, also bleibt sie dort stehen.
             if (s.imageSubMode === 'img2img' && !s.removebg) {
               if (!mlxTakesEditImage(s.imageModelList)) Object.assign(patch, { imageSubMode: 'text2img' })
               else Object.assign(patch, editLanePick(s))
             }
-            if (s.mask) Object.assign(patch, { mask: null })
+            const macEditKeepsMask = s.mode === 'image' && s.imageSubMode === 'img2img' && !s.removebg && mlxTakesEditImage(s.imageModelList)
+            if (s.mask && !macEditKeepsMask) Object.assign(patch, { mask: null })
             if (s.videoSubMode === 'i2v' && !mlxTakesStartImage(s.videoModelList)) Object.assign(patch, { videoSubMode: 't2v' })
           }
           // A tab this flip closes takes its number of images with it, like
@@ -2276,6 +2397,13 @@ export const useCreateStore = create<CreateState>()(
         if ('upscaleLongSide' in safe) safe.upscaleLongSide = normalizeUpscaleLongSide(safe.upscaleLongSide)
         if ('upscaleModelPick' in safe && typeof safe.upscaleModelPick !== 'string') safe.upscaleModelPick = null
         if (safe.mode === 'i2i') {
+          safe.mode = 'image'
+          safe.imageSubMode = 'img2img'
+        }
+        // 3.1.3: local mode has no Erase. An older or foreign blob that holds
+        // it opens on Edit. The cloud track (a phone) keeps its tab.
+        if (safe.utilityOp === 'eraser' && current.backend === 'local') {
+          safe.utilityOp = null
           safe.mode = 'image'
           safe.imageSubMode = 'img2img'
         }

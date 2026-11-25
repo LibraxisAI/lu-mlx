@@ -42,6 +42,9 @@ const CORE_NODES = new Set([
   'CheckpointLoaderSimple', 'UNETLoader', 'CLIPLoader', 'DualCLIPLoader', 'VAELoader',
   'ImageOnlyCheckpointLoader', 'CLIPVisionLoader', 'LoadImage', 'LoadImageMask', 'LoadAudio',
   'LoadVideo', 'AudioEncoderLoader',
+  // Swap on this computer (3.1.3): the mask from the pose skeleton, all core
+  // (nodes.py EmptyImage/ImageCompositeMasked, nodes_mask.py the rest).
+  'EmptyImage', 'ImageCompositeMasked', 'ImageToMask', 'MaskComposite', 'ThresholdMask', 'GrowMask',
   // conditioning
   // TextEncodeQwenImage21: core, registered by the QwenExtension in
   // comfy_extras/nodes_qwen.py (read in comfyanonymous/ComfyUI master on
@@ -93,6 +96,12 @@ const CORE_NODES = new Set([
   'KSamplerAdvanced',
   'KSampler', 'BasicGuider', 'BasicScheduler', 'KSamplerSelect', 'RandomNoise', 'SamplerCustomAdvanced',
   'MiniMaxH3ImageToVideo', 'MiniMaxH3ReferenceToVideo',
+  // MiniMax H3 Image (3.1.3): MiniMaxH3ImageConditioning in
+  // comfy_extras/nodes_minimax_h3.py from v0.45.0; GetImageSize
+  // (comfy_extras/nodes_images.py) and RepeatLatentBatch (nodes.py), both
+  // core. All three in the /object_info of ComfyUI v0.46.0 (a277b5bf2) on
+  // 19.11.2026, and the H3 Image graphs passed its /prompt validation.
+  'MiniMaxH3ImageConditioning', 'GetImageSize', 'RepeatLatentBatch',
   // Read in Comfy-Org/ComfyUI at tag v0.38.0 on 2026-10-02 (schema node_id of
   // each, the file in brackets, the first release that has it):
   //   LTX 2.5, all in comfy_extras/nodes_lt.py unless noted:
@@ -135,11 +144,22 @@ const CORE_NODES = new Set([
   // on the 2026-08-02 e2e box (full tile/overlap/temporal signature).
   'VAEDecode', 'VAEDecodeTiled', 'VAEDecodeAudio', 'VAEEncode', 'VAEEncodeForInpaint', 'ImageScale',
   'GetVideoComponents', 'CreateVideo',
+  // ComfyUI v0.42.4, comfy_extras/nodes_dataset.py (local Swap without VHS).
+  'VideoFrameSample',
+  // ComfyUI v0.42.4, comfy_extras/nodes_math.py.
+  'ComfyMathExpression',
   // Enhance Image (3.0.7), read in Comfy-Org/ComfyUI master on 2026-10-14:
   // UpscaleModelLoader (model_name) and ImageUpscaleWithModel (upscale_model,
   // image) [comfy_extras/nodes_upscale_model.py]; ImageScaleBy (image,
   // upscale_method, scale_by) [nodes.py].
   'UpscaleModelLoader', 'ImageUpscaleWithModel', 'ImageScaleBy',
+  // Scene to Video (3.1.3, buildSceneWorkflow): the own first frame in front
+  // of the depth video and its keep/paint mask. Long-standing core nodes:
+  // ImageBatch, EmptyImage [nodes.py], ImageFromBatch [nodes_images.py],
+  // ImageToMask [nodes_mask.py, channel red|green|blue|alpha], read in the
+  // ComfyUI v0.42.4 source on 19.11.2026 (ImageBatch is marked DEPRECATED
+  // there and still registered; it scales image2 to image1).
+  'ImageFromBatch', 'ImageBatch', 'EmptyImage', 'ImageToMask',
   // output
   'SaveImage', 'SaveAnimatedWEBP', 'SaveVideo', 'SaveAudioMP3',
 ])
@@ -163,11 +183,15 @@ const CUSTOM_PACK_NODES: Record<string, Set<string>> = {
     'ADE_LoadAnimateDiffModel', 'ADE_ApplyAnimateDiffModelSimple', 'ADE_UseEvolvedSampling',
   ]),
   // Kosinkadink/ComfyUI-VideoHelperSuite
-  'ComfyUI-VideoHelperSuite': new Set(['VHS_VideoCombine']),
+  // VHS_LoadVideo: Swap and Scene to Video read the clip at the run's rate with it.
+  'ComfyUI-VideoHelperSuite': new Set(['VHS_VideoCombine', 'VHS_LoadVideo']),
   // 1038lab/ComfyUI-RMBG
   'ComfyUI-RMBG': new Set(['RMBG']),
   // Fannovel16/comfyui_controlnet_aux
-  'comfyui_controlnet_aux': new Set(['DWPreprocessor']),
+  // DepthAnythingV2Preprocessor: Scene to Video's depth video
+  // (node_wrappers/depth_anything_v2.py NODE_CLASS_MAPPINGS, inputs image,
+  // ckpt_name incl. depth_anything_v2_vits.pth, resolution; read 19.11.2026).
+  'comfyui_controlnet_aux': new Set(['DWPreprocessor', 'DepthAnythingV2Preprocessor']),
   // city96/ComfyUI-GGUF
   'ComfyUI-GGUF': new Set(['UnetLoaderGGUF']),
 }

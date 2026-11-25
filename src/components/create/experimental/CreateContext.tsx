@@ -3,7 +3,7 @@ import { useCreate } from '../../../hooks/useCreate'
 import { useRereadOnReturn } from '../../../hooks/useRereadOnReturn'
 import { useCloudCreate, hasActiveCloudRun } from '../../../hooks/useCloudCreate'
 import { useCloudSession } from '../../../hooks/useCloudSession'
-import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
+import { useCreateStore, type CreateCapability, type GalleryItem } from '../../../stores/createStore'
 import { listedLoras, getVAEModels, checkComfyConnection, refreshComfyModels } from '../../../api/comfyui'
 import { getAllNodeInfo, clearNodeCache } from '../../../api/comfyui-nodes'
 import { installCustomNodes, nodePacksNotLoaded, assertBundleFits, checkBundlesOnDisk, startModelDownload, getDownloadProgress, modelsNotVisibleInComfy, judgeableFolders } from '../../../api/discover'
@@ -14,12 +14,22 @@ import { asComfyGpuMode, comfyCpuBannerText, type ComfyCpuBannerFacts } from '..
 import { installMlxStack } from '../../../api/mlx-install'
 import { listMlxLoras, MLX_LORAS_CHANGED, type MlxLoraAlpha, type MlxLoraKeys } from '../../../api/mlx-loras'
 import { useDownloadStore } from '../../../stores/downloadStore'
-import { downloadBundleFiles, waitOrAbort, waitForModelsVisible, InstallCancelled } from '../../../lib/bundle-install'
+import { downloadBundleFiles, waitOrAbort, waitForModelsVisible, nodesAfterPackInstall, InstallCancelled } from '../../../lib/bundle-install'
 import { ensureLocalFilename } from './loadImage'
 import { batchReady, requestBatchStop, runBatchEdit } from './batchRun'
 import { comfyStartupError, nodePackLoadError, COMFY_INSTALLED_BUT_DEAD } from './comfyError'
 import { restartComfyForNewNodes } from '../../../api/comfy-restart'
 import type { CloudQuota } from '../../../lib/render/cloud-jobs'
+
+/** What Create can do with the nodes this ComfyUI lists. */
+function capsFromNodes(names: Set<string>): Record<CreateCapability, boolean> {
+  return {
+    rmbg: names.has('RMBG'),
+    'inpaint-nodes': names.has('VAEEncodeForInpaint') || names.has('InpaintModelConditioning'),
+    dwpose: names.has('DWPreprocessor'),
+    depth: names.has('DepthAnythingV2Preprocessor'),
+  }
+}
 
 /** Hold until nothing is rendering, so a heal never lands on a live job.
  *  Bounded: a render that never reports finished must not park an install
@@ -81,6 +91,9 @@ interface CreateExpValue {
   connected: boolean | null
   modelsLoaded: boolean
   modelLoadError: string | null
+  /** ComfyUI answers and its node list is still on the way: a missing node
+   *  pack cannot be told from one not read yet. */
+  capsPending: boolean
   /** macOS: which local lanes still have no MLX model. `null` off-Mac and until
    *  the first probe answers, so the setup card never flashes during startup. */
   mlxMissing: { image: boolean; video: boolean } | null
@@ -99,7 +112,7 @@ interface CreateExpValue {
    *  and throws on failure. 'rmbg' = the RMBG cutout node; 'inpaint-nodes' =
    *  ComfyUI's core inpaint nodes (nothing to clone — present on any current
    *  install once ComfyUI is up). */
-  installCapability: (cap: 'rmbg' | 'inpaint-nodes' | 'dwpose', onProgress?: (msg: string) => void, signal?: AbortSignal) => Promise<void>
+  installCapability: (cap: CreateCapability, onProgress?: (msg: string) => void, signal?: AbortSignal) => Promise<void>
   /** One-click "everything you need" for a fresh PC: ensure ComfyUI runs
    *  (installing it first if needed), then download the default starter
    *  bundle for the intent kind (image → SDXL checkpoint, video → Wan 2.1,
@@ -131,6 +144,7 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
   const backend = useCreateStore((s) => s.backend)
   const setBackend = useCreateStore((s) => s.setBackend)
   const setCaps = useCreateStore((s) => s.setCaps)
+  const [capsAsked, setCapsAsked] = useState(false)
   const [loraList, setLoraList] = useState<string[]>([])
   const [loraKeys, setLoraKeys] = useState<Readonly<Record<string, MlxLoraKeys>>>({})
   const [loraAlpha, setLoraAlpha] = useState<Readonly<Record<string, MlxLoraAlpha>>>({})
@@ -189,7 +203,7 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (connected !== true) { setComfyCpu(null); return }
     let cancelled = false
-    backendCall<{ startedCpu?: boolean | null; mode?: string | null; hasAmd?: boolean | null; amdRocmServed?: boolean | null }>('get_comfy_gpu_status')
+    backendCall<{ startedCpu?: boolean | null; mode?: string | null; hasAmd?: boolean | null; amdRocmServed?: boolean | null; amdNoGpuBuild?: boolean | null }>('get_comfy_gpu_status')
       .then((s) => {
         if (cancelled) return
         setComfyCpu({
@@ -198,6 +212,7 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
           hasAmd: s?.hasAmd === true,
           isLinux: isLinux(),
           amdRocmServed: s?.amdRocmServed === true,
+          amdNoGpuBuild: s?.amdNoGpuBuild === true,
         })
       })
       .catch(() => { if (!cancelled) setComfyCpu(null) })
@@ -239,13 +254,9 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
     setVaeList(['auto', ...vaes])
     try {
       const nodes = await getAllNodeInfo(true)
-      const names = new Set(Object.keys(nodes))
-      setCaps({
-        rmbg: names.has('RMBG'),
-        'inpaint-nodes': names.has('VAEEncodeForInpaint') || names.has('InpaintModelConditioning'),
-        dwpose: names.has('DWPreprocessor'),
-      })
+      setCaps(capsFromNodes(new Set(Object.keys(nodes))))
     } catch { /* node probe is best-effort */ }
+    setCapsAsked(true)
   }, [connected, setCaps])
   // K3 proof-vorgabe Station 10 / GH #109, the completion case: a character
   // trained locally lands in models/loras the same way a manually dropped
@@ -401,19 +412,14 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
   // the node cache each round so we don't read the stale pre-install
   // catalogue) until the node shows up. The BiRefNet / RMBG-2.0 cutout model
   // is fetched by the node itself on the first run.
-  const installCapability = useCallback(async (cap: 'rmbg' | 'inpaint-nodes' | 'dwpose', onProgress?: (msg: string) => void, signal?: AbortSignal) => {
+  const installCapability = useCallback(async (cap: CreateCapability, onProgress?: (msg: string) => void, signal?: AbortSignal) => {
     await ensureComfyRunning(onProgress, signal)
-    const capsFrom = (names: Set<string>) => ({
-      rmbg: names.has('RMBG'),
-      'inpaint-nodes': names.has('VAEEncodeForInpaint') || names.has('InpaintModelConditioning'),
-      dwpose: names.has('DWPreprocessor'),
-    })
     if (cap === 'inpaint-nodes') {
       // Core ComfyUI nodes — nothing to clone. If they're still missing after
       // ComfyUI is up, the install is ancient; re-probe and say so honestly.
       const nodes = await getAllNodeInfo()
       const names = new Set(Object.keys(nodes))
-      setCaps(capsFrom(names))
+      setCaps(capsFromNodes(names))
       if (!names.has('VAEEncodeForInpaint') && !names.has('InpaintModelConditioning')) {
         throw new Error(
           'This ComfyUI is missing its core inpaint nodes (VAEEncodeForInpaint). Update ComfyUI to a current version.',
@@ -423,11 +429,15 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
     }
     // Clone-and-pip capabilities share one flow: install the pack, restart
     // ComfyUI, poll /object_info (cache-cleared) until the node registers.
-    const pack = cap === 'dwpose' ? 'controlnet-aux' : 'rmbg'
-    const nodeClass = cap === 'dwpose' ? 'DWPreprocessor' : 'RMBG'
+    // Pose (Motion Control) and depth (Scene to Video) come from the same
+    // pack, comfyui_controlnet_aux.
+    const pack = cap === 'dwpose' || cap === 'depth' ? 'controlnet-aux' : 'rmbg'
+    const nodeClass = cap === 'dwpose' ? 'DWPreprocessor' : cap === 'depth' ? 'DepthAnythingV2Preprocessor' : 'RMBG'
     onProgress?.(cap === 'dwpose'
       ? 'Downloading & installing the pose extractor (controlnet aux). This can take a minute…'
-      : 'Downloading & installing the background removal node. This can take a minute…')
+      : cap === 'depth'
+        ? 'Downloading & installing the depth extractor (controlnet aux). This can take a minute…'
+        : 'Downloading & installing the background removal node. This can take a minute…')
     await installCustomNodes([pack], { force: true })
     onProgress?.('Restarting ComfyUI to register the node…')
     await restartComfyForNewNodes()
@@ -439,7 +449,7 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
         const nodes = await getAllNodeInfo()
         const names = new Set(Object.keys(nodes))
         if (names.has(nodeClass)) {
-          setCaps(capsFrom(names))
+          setCaps(capsFromNodes(names))
           return
         }
       } catch { /* ComfyUI still restarting — keep polling */ }
@@ -494,6 +504,14 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
         if (await checkComfyConnection()) break
       }
       clearNodeCache()
+      // The card for a missing pack reads these. Without this it asked for the
+      // pack just installed, and its button pulled it and restarted ComfyUI again.
+      const names = await nodesAfterPackInstall({
+        read: async () => new Set(Object.keys(await getAllNodeInfo(true))),
+        expected: packs.flatMap((key) => CUSTOM_NODE_REGISTRY[key]?.requiredNodes ?? []),
+        signal,
+      })
+      if (names) setCaps(capsFromNodes(names))
     }
     // Put the transfer in the header Downloads tray BEFORE the first byte.
     // Until now this path talked to the Rust downloader directly and never
@@ -600,7 +618,7 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
         )
       }
     }
-  }, [ensureComfyRunning, fetchModels])
+  }, [ensureComfyRunning, fetchModels, setCaps])
 
   // Several source images (lib/batch-edit): Create runs the same single run
   // once per image, on the backend the batch started on.
@@ -620,7 +638,7 @@ export function CreateExpProvider({ children }: { children: ReactNode }) {
     enhanceVideo: cloud.enhanceVideo,
     makeVoice: cloud.makeVoice,
     samplerList, schedulerList, loraList, loraKeys, loraAlpha, vaeList, refreshModelLists,
-    connected, modelsLoaded, modelLoadError, mlxMissing, comfyOnCpu, comfyCpuBanner, installCapability, installModelBundle,
+    connected, modelsLoaded, modelLoadError, capsPending: connected === true && !capsAsked, mlxMissing, comfyOnCpu, comfyCpuBanner, installCapability, installModelBundle,
     cloudAvailable, quota, refreshQuota,
   }
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>

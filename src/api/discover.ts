@@ -2,6 +2,7 @@ import { backendCall, fetchExternal } from "./backend"
 import { folderIsAGuess } from '../lib/model-folder-guess'
 import { readComfyFolderLists, filterPartialFiles, refreshComfyModels } from "./comfyui"
 import { COMPONENT_REGISTRY, type ComponentSpec, type ComponentRequirements } from './component-registry'
+import { RETIRED_MODEL_LINE, isRetiredModelName } from '../lib/retired-models'
 import { clearNodeCache, getAllNodeInfo } from "./comfyui-nodes"
 import { restartComfyForNewNodes } from "./comfy-restart"
 import type { ProviderId } from "./providers/types"
@@ -19,6 +20,7 @@ import { customModelDirs } from './engine'
 import { extractGgufQuant, hfUrlToTreePath, parseHfUrl } from '../lib/hf-to-provider'
 import { IMAGE_PART } from './image-parts'
 import { kimiK3CatalogEntries } from './kimi-k3-catalog'
+import { INKLING_USAGE_POLICY, inklingCatalogEntries } from './inkling-catalog'
 import { imagePartFileName, isUpstreamImagePart, pickUpstreamImagePart } from '../lib/image-part'
 import { shardSetGap, type ShardGap } from '../lib/gguf-shards'
 import {
@@ -80,10 +82,14 @@ export function civitaiAuthToken(url: string): string | null {
 
 export { folderIsAGuess }
 
+/** MiniMax H3 and its derivatives are fetched on no path (lib/retired-models). */
+const isRetiredDownload = (url: string, filename: string) => isRetiredModelName(url) || isRetiredModelName(filename)
+
 export async function startModelDownload(
   url: string, subfolder: string, filename: string, expectedBytes?: number, sha256?: string,
   opts: { sniffFolder?: boolean } = {},
 ): Promise<{ status: string; id: string; error?: string }> {
+  if (isRetiredDownload(url, filename)) return { status: 'error', id: filename, error: RETIRED_MODEL_LINE }
   // D1: the page this file came from, for Details in Models.
   recordSourceFromDownload(filename, url)
   return backendCall("download_model", {
@@ -103,6 +109,7 @@ export async function startModelDownload(
  * huggingface.co or civitai.com, a .safetensors or .gguf file, a model folder.
  */
 export async function startChatLinkDownload(url: string, subfolder: string, filename: string): Promise<{ status: string; id: string; error?: string }> {
+  if (isRetiredDownload(url, filename)) return { status: 'error', id: filename, error: RETIRED_MODEL_LINE }
   recordSourceFromDownload(filename, url)
   return backendCall("download_model", {
     url,
@@ -242,6 +249,7 @@ export function isPermanentDownloadError(error?: string | null): boolean {
 }
 
 export async function resumeDownload(id: string, url: string, subfolder: string, expectedBytes?: number, sha256?: string, sniffFolder?: boolean): Promise<void> {
+  if (isRetiredDownload(url, id)) throw new Error(RETIRED_MODEL_LINE)
   await backendCall("resume_download", {
     id,
     url,
@@ -1051,6 +1059,7 @@ export { COMPONENT_REGISTRY }
 
 const HF = (repo: string, file: string) => `https://huggingface.co/${repo}/resolve/main/${file}`
 
+
 // The name an image part gets on disk is one rule for the whole app and lives
 // in lib/image-part.ts, next to the Rust side's `mmproj_sibling_path`. Kept
 // under this name here because the catalog and its tests speak of mmproj.
@@ -1346,6 +1355,12 @@ export function getMainstreamTextModels(): DiscoverModel[] {
     { name: 'Gemma 4 12B (Q8)', group: 'Gemma 4 12B', description: 'Google Gemma 4 12B · Q8_0, near-lossless full quality. Native tools + vision, 128K context, ~13 GB. lmstudio-community build (LM-Studio-curated) with a fixed tool-template, so tool calling works out of the box. Best on LM Studio (Ollama cannot load the gemma4 vision projector yet).', pulls: '100K+', tags: ['12B', 'Vision', 'Q8_0', '13 GB'], updated: 'Hot', agent: true, released: '2026-04', downloadUrl: HF('lmstudio-community/gemma-4-12b-it-GGUF', 'gemma-4-12B-it-Q8_0.gguf'), filename: 'gemma-4-12B-it-Q8_0.gguf', sizeGB: 13, ...IMAGE_PART['lmstudio-community/gemma-4-12b-it-GGUF/mmproj-gemma-4-12B-it-BF16.gguf'] },
     { name: 'Gemma 4 E4B', description: 'Gemma 4 E4B · lightweight 4.5B, great for small GPUs.', pulls: '100K+', tags: ['4.5B', 'Vision', 'Q4_K_M', '5 GB'], updated: 'Hot', released: '2026-04', downloadUrl: HF('unsloth/gemma-4-E4B-it-GGUF', 'gemma-4-E4B-it-Q4_K_M.gguf'), filename: 'gemma-4-E4B-it-Q4_K_M.gguf', sizeGB: 5, ...IMAGE_PART['unsloth/gemma-4-E4B-it-GGUF/mmproj-F16.gguf'] },
     { name: 'Gemma 4 E2B', description: 'Gemma 4 E2B · ultra-light 2.3B, runs on anything.', pulls: '100K+', tags: ['2.3B', 'Vision', 'Q4_K_M', '3 GB'], updated: 'New', released: '2026-04', downloadUrl: HF('unsloth/gemma-4-E2B-it-GGUF', 'gemma-4-E2B-it-Q4_K_M.gguf'), filename: 'gemma-4-E2B-it-Q4_K_M.gguf', sizeGB: 3, ...IMAGE_PART['unsloth/gemma-4-E2B-it-GGUF/mmproj-F16.gguf'] },
+    // ── Inkling 2 Mini (November 2026) ──
+    ...inklingCatalogEntries(),
+    // Ollama's only build: latest, 26b-a5b and 26b-a5b-nvfp4 are one manifest of
+    // 20.19 GB NVFP4 safetensors with `requires: 0.40.17` (registry, 21.11.2026).
+    // Safetensors run on Ollama's MLX runner, hence the MLX tag: Mac only.
+    { name: 'Inkling 2 Mini (Ollama)', description: 'Thinking Machines Inkling 2 Mini · vision + tools + thinking. Apple Silicon, needs Ollama 0.40.17 or newer.', pulls: '', tags: ['26B', 'Vision', 'Tools', 'MLX', 'NVFP4', '19 GB'], updated: 'New', agent: true, released: '2026-11', ollamaModel: 'inkling-2-mini', minOllama: '0.40.17', sizeGB: 18.8, usagePolicyUrl: INKLING_USAGE_POLICY, notFirstPick: true },
     // ── Qwen 3.8 (August 2026) ──
     // Qwen shipped no GGUF of its own, so the 27B rides on unsloth's dynamic
     // quants (the most-downloaded conversion by a wide margin). Every 27B entry
@@ -1768,6 +1783,8 @@ export async function searchHuggingFaceModels(query: string): Promise<DiscoverMo
   const models: DiscoverModel[] = []
   for (const repo of repos) {
     if (typeof repo?.id !== 'string') continue
+    // MiniMax H3 and its quants are not offered (lib/retired-models).
+    if (isRetiredModelName(repo.id)) continue
     const repoName = repo.id.split('/').pop() || ''
     const q4File = deriveQ4FilenameFromRepo(repoName)
     // D7: the repo name named no quant, so Q4_K_M is only a guess.
@@ -1796,6 +1813,8 @@ export async function searchHuggingFaceModels(query: string): Promise<DiscoverMo
       filename: q4File,
       url: `https://huggingface.co/${repo.id}`,
       ...(quantGuessed ? { quantGuessed: true } : {}),
+      // The maker's policy goes with the model, whoever converted it.
+      ...(/inkling[-_ ]?2/i.test(repo.id) ? { usagePolicyUrl: INKLING_USAGE_POLICY } : {}),
     })
   }
   return models
@@ -2249,6 +2268,7 @@ function titleArg(filename: string): { title?: string } {
 
 /** Download a GGUF model to a specific directory (for non-Ollama providers) */
 export async function startModelDownloadToPath(url: string, destDir: string, filename: string, expectedBytes?: number, sha256?: string): Promise<{ status: string; id: string; error?: string }> {
+  if (isRetiredDownload(url, filename)) return { status: 'error', id: filename, error: RETIRED_MODEL_LINE }
   // The CivitAI key goes along for a CivitAI address and no other (a LoRA
   // from the CivitAI search into the Mac's LoRA folder). Every other caller
   // sends what it sent before.
@@ -2773,7 +2793,8 @@ export async function searchCivitaiModels(
       ? items.filter((item) => asRecordArray(prop(asRecordArray(prop(item, 'modelVersions'))[0], 'files')).some(isSafetensors))
       : items
 
-    return wanted.map((item) => {
+    // MiniMax H3 and its derivatives are not offered (lib/retired-models).
+    return wanted.filter((item) => !isRetiredModelName(asString(prop(item, 'name')))).map((item) => {
       const version = asRecordArray(prop(item, 'modelVersions'))[0]
       const files = asRecordArray(prop(version, 'files'))
       const file = only?.safetensorsOnly ? files.find(isSafetensors) : files[0]

@@ -6,8 +6,9 @@
 //   no character   the three steps and "Create a character" (HubEmpty)
 //   new            the page that makes one from photos or a LoRA file
 //                  (HubNewCharacter)
-//   the stage      the characters as tabs, the picked one as a head line,
-//                  under it the inputs of the action and its photos
+//   the stage      the characters as tabs, what the picked one can do
+//                  behind the three dots at its tab, under the row the
+//                  inputs of the action and its photos
 //   training       a page of its own, the panel as it was
 //
 // What the action is stands in the row over the window (HubActionRow), and
@@ -20,15 +21,15 @@ import { ChevronLeft, Film, X } from 'lucide-react'
 import { useCreateStore } from '../../../../stores/createStore'
 import { actionOfIntent, type HubCharacter } from '../../../../lib/create/character-hub'
 import { useCreateExp } from '../CreateContext'
-import { Stage } from '../Stage'
+import { Stage, useStageSetupCard } from '../Stage'
 import { SpecialControls } from '../SpecialIntentControls'
 import { ModelChip } from '../ModelChip'
 import { HubCharactersContext } from './HubParts'
 import { HubEmpty } from './HubEmpty'
 import { HubNewCharacter } from './HubNewCharacter'
-import { HubCard, HubPhotos, HubTabs } from './HubStage'
+import { HubPhotos, HubTabs } from './HubStage'
 import { SwapOneClick, useSwapOneClickShown } from './SwapOneClick'
-import { openHubAction, openStageAction, useCharacterPhotos, useHubCharacters } from './hubCharacters'
+import { imageFromPhotos, openStageAction, useCharacterPhotos, useHubCharacters } from './hubCharacters'
 import { useHubRun, type HubStageSlot } from './hubRun'
 
 /** How long the first page waits for the list before it shows itself. */
@@ -59,7 +60,10 @@ export function CharacterHub({ stage, onOpenGallery }: Props) {
   const current = (picked && list.find((c) => c.key === picked.key)) || picked
   const training = step === 'panel' && intent === 'character' && characterTab === 'train'
   const onStage = (step === 'what' || step === 'panel') && !training
-  const action = onStage ? actionOfIntent(intent) : null
+  const photoImage = useCreateStore((s) => s.hubPhotoImage)
+  const action = onStage ? (photoImage ? 'image' as const : actionOfIntent(intent)) : null
+  // A one-time download of this action: its card stands alone (David, 21.11.).
+  const setupCard = useStageSetupCard(stage.comfyStarting) && action !== 'image'
   const { photos, loading: photosLoading } = useCharacterPhotos(onStage ? current : null)
 
   // The stage: a training set left open is not an action of it.
@@ -96,7 +100,7 @@ export function CharacterHub({ stage, onOpenGallery }: Props) {
 
   // Image opened from outside the stage (a training that just finished, a
   // Reuse from the gallery) runs on a character nobody picked here: that
-  // character takes the stage, so the head says who the picture will show.
+  // character takes the stage, so its tab says who the picture will show.
   const running = useCreateStore((s) => s.selectedCharacter)
   const runningOnStage = action === 'image' && !picked && running ? list.find((c) => c.ref?.id === running.id) : undefined
   useEffect(() => {
@@ -113,12 +117,37 @@ export function CharacterHub({ stage, onOpenGallery }: Props) {
     return () => clearTimeout(t)
   }, [step, loading])
 
+  // Image with a photo character is an Edit with its photos (imageFromPhotos):
+  // it starts as soon as such a character is on the stage on Image.
+  const isGenerating = useCreateStore((s) => s.isGenerating)
+  const photoIdle = onStage && action === 'image' && !isGenerating && !!current && !current.ref
+    && (current.photos?.length ?? 0) > 0 && photoImage?.key !== current.key ? current : null
+  useEffect(() => {
+    if (photoIdle) void imageFromPhotos(photoIdle).then((err) => { if (err) setError(err) })
+  }, [photoIdle?.key]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Back from the training: to the page with the photos and the name, when
+  // that is where it came from. Nothing is lost, what changed here comes along.
+  const backFromTraining = () => {
+    const st = useCreateStore.getState()
+    const draft = st.hubNewDraft
+    if (!draft || st.isGenerating) { toStage(picked ? 'what' : 'who'); return }
+    const photos = st.trainImages.map((i) => (i.blob instanceof File ? i.blob : new File([i.blob], i.name, { type: i.blob.type || 'image/jpeg' })))
+    const captions = st.trainImages.map((i) => st.trainCaptions[i.name] ?? '')
+    st.setHubNewDraft({ ...draft, photos, captions, trigger: st.triggerWord, back: true })
+    st.clearTrainImages()
+    st.setCharacterTab('use')
+    setHubStep('new')
+  }
+  const fromNew = useCreateStore((s) => !!s.hubNewDraft)
+  const cloudTraining = useCreateStore((s) => s.backend === 'cloud')
+
   const pick = (c: HubCharacter | null) => {
     setHubCharacter(c)
     void openStageAction(action ?? 'image', c, true).then((err) => { if (err) setError(err) })
   }
 
-  useStageSlot({ step, training, action, current, oneClick })
+  useStageSlot({ step, training, action, current, oneClick, setupCard })
   // Image: the notes of the run stand once the character is in it.
   const inRun = !!current?.ref && running?.id === current.ref.id
   const fromPhotos = !!current && !current.ref && (current.photos?.length ?? 0) > 0
@@ -135,18 +164,21 @@ export function CharacterHub({ stage, onOpenGallery }: Props) {
   } else if (training) {
     body = (
       <div className="hub-page" data-hub-training>
-        <div className="hub-line flex h-[35px] shrink-0 items-center gap-2 border-b hub-fs-13">
-          <button type="button" onClick={() => toStage(picked ? 'what' : 'who')} className="hub-muted flex items-center gap-1" data-hub-back>
-            <ChevronLeft size={13} />Characters
+        <div className="hub-line flex h-[35px] shrink-0 items-center justify-center gap-2 border-b hub-fs-13">
+          <button type="button" onClick={backFromTraining} className="hub-muted flex items-center gap-1" data-hub-back>
+            <ChevronLeft size={13} />{fromNew ? 'Photos and name' : 'Characters'}
           </button>
           <span className="hub-dim" aria-hidden>/</span>
           <span className="hub-text font-medium">Train a model</span>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin pb-4">
-          <div className="pt-3 empty:hidden"><Stage hub {...stage} /></div>
-          <HubPanel />
-          {/* What the training runs on, said on its page. */}
-          <div className="flex justify-center pt-2.5 empty:hidden" data-hub-train-model><ModelChip /></div>
+        <div className="hub-train-scroll">
+          <div className="hub-center">
+            {/* What is next and its button first, the photos under it. */}
+            <HubPanel />
+            <div className="empty:hidden"><Stage hub {...stage} /></div>
+            {/* On the cloud the trainer is a choice; locally it is a note under More options. */}
+            {cloudTraining && <div className="flex justify-center pt-1 empty:hidden" data-hub-train-model><ModelChip /></div>}
+          </div>
         </div>
       </div>
     )
@@ -161,28 +193,27 @@ export function CharacterHub({ stage, onOpenGallery }: Props) {
           list={list}
           loading={loading}
           current={current?.key ?? null}
+          character={current}
           photoOnly={!current}
           onPick={pick}
           onPhotoOnly={() => pick(null)}
           onNew={() => setHubStep('new')}
         />
-        {/* One scroll for the head and what stands under it, so a low
-            window never squeezes the head. What is shorter than the room
+        {/* One scroll for what stands under the row. What is shorter than the room
             (a character without photos) stands in its middle, between the
             row of the characters and the row over the prompt window; what
             fills it starts at the top. */}
         <div className="hub-scroll scrollbar-thin">
         <div className="hub-center">
-        <HubCard c={current} photo={photos[0] ?? null} />
         <StageClip />
         {oneClick ? (
           <SwapOneClick onChangeCharacter={() => toStage('what')} />
         ) : (
           <div className="hub-body pb-4">
             <div className="pt-3 empty:hidden"><Stage hub {...stage} /></div>
-            {(action !== 'image' || inRun || !current) && <HubPanel />}
+            {!setupCard && (action !== 'image' || inRun || !current) && <HubPanel />}
             {action === 'image' && fromPhotos && (
-              <p className="hub-dim pt-3 text-center hub-fs-125" data-hub-from-photos>Pictures of {current.name} are made in Edit, from its photos.</p>
+              <p className="hub-dim pt-3 text-center hub-fs-125" data-hub-from-photos>New pictures use the photos of {current.name} as reference.</p>
             )}
             {action === 'image' && <div className="pt-4"><HubPhotos c={current} photos={photos} loading={photosLoading} /></div>}
           </div>
@@ -206,8 +237,8 @@ export function CharacterHub({ stage, onOpenGallery }: Props) {
 /** What the stage says about the prompt window (hub/hubRun.ts): the line in
  *  its field, and the button in the states the tab's own run does not cover.
  *  The one click swap writes its own slot. */
-function useStageSlot({ step, training, action, current, oneClick }: {
-  step: string; training: boolean; action: ReturnType<typeof actionOfIntent>; current: HubCharacter | null; oneClick: boolean
+function useStageSlot({ step, training, action, current, oneClick, setupCard }: {
+  step: string; training: boolean; action: ReturnType<typeof actionOfIntent>; current: HubCharacter | null; oneClick: boolean; setupCard: boolean
 }) {
   const { generate } = useCreateExp()
   const setStage = useHubRun((s) => s.setStage)
@@ -228,19 +259,14 @@ function useStageSlot({ step, training, action, current, oneClick }: {
     const wait = (hint: string): HubStageSlot => ({ placeholder: 'Describe a new picture of your character', run: { label: 'Create', ready: false, hint, run: () => {} } })
     if (step === 'new') return wait('Save the character first.')
     if (step === 'who') return wait('Create a character first.')
+    // The card of a one-time download says it all: no second line over the window.
+    if (setupCard) return { run: { label: 'Create', ready: false, run: () => {} } }
     if (action !== 'image') return null
     if (!key) return wait('Pick a character for Image. A photo is enough for Swap and Motion.')
     const placeholder = `Describe a new picture of ${name}`
     if (photoCharacter) {
-      // No LoRA to run: the picture is made in Edit, from the photos.
-      return {
-        placeholder,
-        run: {
-          label: 'Continue in Edit',
-          ready: true,
-          run: () => { void openHubAction('image', onStage.current) },
-        },
-      }
+      // No LoRA to run: the window runs an Edit with the photos, right here.
+      return { placeholder }
     }
     if (ref && selected !== ref) {
       // The character is on the stage and not yet in the run: Create puts
@@ -260,7 +286,7 @@ function useStageSlot({ step, training, action, current, oneClick }: {
       }
     }
     return { placeholder }
-  }, [training, oneClick, step, action, key, name, ref, photoCharacter, selected, prompt, setError])
+  }, [training, oneClick, step, action, key, name, ref, photoCharacter, selected, prompt, setError, setupCard])
   useEffect(() => { setStage(slot) }, [slot, setStage])
   useEffect(() => () => setStage(null), [setStage])
 }

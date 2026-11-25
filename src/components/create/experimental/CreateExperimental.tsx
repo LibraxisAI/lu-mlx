@@ -100,7 +100,8 @@ function CreateExperimentalInner() {
   const threeDWay = useCreateStore((s) => s.threeDWay)
   // The Character area (3.1.0 part B) takes the place of the stage and the
   // prompt window for its four intents; gallery and presets stay beside it.
-  const hubOpen = isHubIntent(intent)
+  const hubPhotoImage = useCreateStore((s) => !!s.hubPhotoImage)
+  const hubOpen = isHubIntent(intent) || (intent === 'edit' && hubPhotoImage)
   // The Character tab stands on the middle axis of the prompt window: the
   // room the rails take at the right is kept free at the left as well
   // (index.css, .lu-hub-row reads --hub-rails).
@@ -206,10 +207,12 @@ function CreateExperimentalInner() {
     return () => setRenderSurfaceOpen(false)
   }, [])
   const [idleNotice, setIdleNotice] = useState('')
+  // Until the first look came back, nobody knows whether ComfyUI is starting.
+  const [comfyLooked, setComfyLooked] = useState(false)
   const idleTimerRef = useRef<(() => void) | null>(null)
   useEffect(() => {
     let cancelled = false
-    const clear = () => { if (!cancelled) setIdleNotice('') }
+    const clear = () => { if (!cancelled) { setIdleNotice(''); setComfyLooked(true) } }
     void (async () => {
       const { isMacOS } = await import('../../../api/backend')
       if (cancelled) return
@@ -217,7 +220,7 @@ function CreateExperimentalInner() {
       const { backendCall } = await import('../../../api/backend')
       const look = async () => {
         const st = await backendCall<ComfyGuardStatus>('comfyui_status').catch(() => null)
-        if (!cancelled) setIdleNotice(comfyIdleNotice(st))
+        if (!cancelled) { setIdleNotice(comfyIdleNotice(st)); setComfyLooked(true) }
       }
       await look()
       const timer = setInterval(() => { void look() }, IDLE_WATCH_INTERVAL_MS)
@@ -283,8 +286,11 @@ function CreateExperimentalInner() {
   const videoForLane = intentNeedsComfyGraph(intent)
     ? videoModelList.filter((m) => !isMlxImageModel(m.name))
     : videoModelList
-  const comfyStarting = idleNotice === IDLE_STARTING
-  const setupCardOwnsStage = stageShowsSetupCard({
+  const comfyStarting = comfyLooked ? idleNotice === IDLE_STARTING : null
+  // ComfyUI down, and nobody has looked yet whether it is on its way up: the
+  // bar holds back as well, the stage is waiting for the same answer.
+  const comfyUnread = connected === false && comfyStarting === null
+  const setupCardOwnsStage = comfyUnread || stageShowsSetupCard({
     backend,
     requiresModels: INTENT_MAP[intent].requiresModels,
     mlxMissing,
@@ -292,6 +298,7 @@ function CreateExperimentalInner() {
     comfyStarting,
     modelsLoaded,
     comfyRunning,
+    mlxHost: isMlxImageHost(),
     laneModelCount: laneModelCount(intent, INTENT_MAP[intent].requiresModels, {
       image: imageForLane, video: videoForLane, audio: audioModelList,
       lipsync: lipsyncModelList, motion: motionModelList, upscale: upscaleModelList,

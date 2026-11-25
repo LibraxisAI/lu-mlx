@@ -1,9 +1,12 @@
 [package]
 name = "locally-uncensored"
-version = "3.1.2"
+version = "3.1.3"
 description = "Private, local AI chat & image/video generation"
 authors = ["purpledoubled"]
 edition = "2021"
+# sysinfo 0.39.6 needs rustc 1.95; an older compiler stops with a clear
+# message instead of a dependency error deep in the build (CONTRIBUTING.md).
+rust-version = "1.95"
 license = "AGPL-3.0-only"
 # Never published to crates.io. Also what lets cargo deny accept the path
 # dependency on plugins/lu-native (allow-wildcard-paths, deny.toml).
@@ -29,6 +32,12 @@ insecure-test-keychain = []
 # phone with all rights. NEVER in a default or a shipped build:
 #   tauri build --debug --features e2e-remote
 e2e-remote = []
+# Test-only (TEST-LOGIN, 3.1.3, src/test_login.rs): a test build started with
+# --test-login-stdin signs in to LU Cloud with a one-time token read from
+# standard input, for the accounts named in LU_TEST_LOGIN_ALLOW at build time
+# only. NEVER in a default or a shipped build; scripts/check-no-test-login.sh
+# fails a release that carries it.
+test-login = []
 # The in-process engine (commands/engine_inproc.rs) is always part of the
 # Android and iOS builds: a phone cannot start the llama-server sidecar the
 # desktop uses. This feature builds the SAME file into a macOS build as well,
@@ -76,14 +85,14 @@ tokio = { version = "1", features = ["full"] }
 # reqwest is declared per target further down, because the TLS stack differs:
 # the desktop keeps the system one (reqwest's defaults, unchanged), the phones
 # use rustls.
-zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2"] }
 dirs = "6"
 # Python interpreter discovery for the in-process MLX media engine
 # (os_paths::find_python, mlx.rs::locate_python_311).
 which = "6"
 regex = "1"
 glob = "0.3"
-sysinfo = "0.33"
+sysinfo = "0.39.6"
 walkdir = "2"
 hostname = "0.4"
 whoami = "1"
@@ -273,14 +282,14 @@ encoding_rs = { version = "0.8", optional = true }
 # Which app a window belongs to, for computer use. Both are already in
 # Cargo.lock through tauri and xcap (MIT). libc, which computer use also names
 # on macOS, is declared once for every unix below, with its exact pin.
-objc2-app-kit = { version = "0.3", default-features = false, features = ["NSRunningApplication", "libc", "NSImage", "NSImageRep", "NSBitmapImageRep"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSRunningApplication", "libc", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSSpellChecker", "NSScreen"] }
 # The LU browser (commands/browser.rs, P-L 3.1.0): read a page in our own
 # JavaScript world and take its picture. Both crates are in Cargo.lock already
 # through wry, same versions; named here only for the WKWebView calls Tauri
 # 2.10 does not expose (it has no eval with an answer).
 objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-app-kit", "WKWebView", "WKContentWorld", "WKFrameInfo", "WKSnapshotConfiguration"] }
 block2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["NSString", "NSURL", "NSArray", "NSData", "NSDictionary", "NSError", "NSIndexSet"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSString", "NSURL", "NSArray", "NSData", "NSDictionary", "NSError", "NSIndexSet", "NSRange", "NSEnumerator"] }
 
 # Remove Background on a Mac (commands/mlx_cutout): the subject mask comes
 # from the Vision framework of macOS 14, so the cutout needs no model and no
@@ -299,20 +308,23 @@ objc2-image-io = { version = "0.3", default-features = false, features = ["std",
 # declared for every unix so the desktop test run executes the same function.
 # The crate is in every build already (tokio, sysinfo and others pull it in).
 #
-# The exact version is the point. sysinfo 0.33.1 stops compiling for iOS with
-# libc 0.2.190 (`unresolved import libc::mach_task_self`), and the lock file
-# is shared by every target, so this pin is what keeps a `cargo update` from
-# pulling the newer libc in. Raise it together with sysinfo, never alone.
+# The exact version is the point. sysinfo 0.33.1 stopped compiling for iOS
+# with libc 0.2.190 (`unresolved import libc::mach_task_self`), and the lock
+# file is shared by every target, so this pin is what keeps a `cargo update`
+# from pulling a libc in that nobody checked for the phones. 3.1.3 raised it
+# to 0.2.186 (zip 9.0.5 needs that) together with sysinfo 0.39.6, checked
+# with `cargo check` for aarch64-apple-ios and aarch64-linux-android. Raise
+# it together with sysinfo, never alone.
 # Guard: src/lib/__tests__/mobile-bau-fallen.test.ts
 [target.'cfg(unix)'.dependencies]
-libc = "=0.2.183"
+libc = "=0.2.186"
 
 [target.'cfg(windows)'.dependencies]
 # The LU browser (commands/browser.rs, P-L 3.1.0): ExecuteScript with its
 # answer and CapturePreview of WebView2. Both in Cargo.lock already through
 # wry, same versions.
 webview2-com = "0.38"
-windows = { version = "0.61", features = ["Win32_System_Com", "Win32_UI_Shell"] }
+windows = { version = "0.61", features = ["Win32_System_Com", "Win32_UI_Shell", "Win32_Globalization"] }
 windows-sys = { version = "0.59", features = ["Win32_System_JobObjects", "Win32_System_Threading", "Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm"] }
 # The accessibility tree for computer use (Apache-2.0). "input" is the one
 # feature its core module does not compile without.

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { motion, AnimatePresence, useIsPresent } from 'framer-motion'
-import { UploadCloud, ImagePlus, Scissors, Wand2, Sparkles, X, Loader2, Download, AlertTriangle, Image as ImageIcon, Film, Maximize2, Play } from 'lucide-react'
-import { useCreateStore, type GalleryItem } from '../../../stores/createStore'
+import { UploadCloud, ImagePlus, Scissors, Wand2, Sparkles, X, Loader2, Download, AlertTriangle, Image as ImageIcon, Film, Maximize2, Play, Clapperboard } from 'lucide-react'
+import { useCreateStore, type CreateCapability, type GalleryItem } from '../../../stores/createStore'
 import { useModelStore } from '../../../stores/modelStore'
 import { createRunModel } from '../../../lib/render/create-studio'
 import { musicText } from '../../../lib/render/music-ui'
@@ -10,9 +10,14 @@ import { INTENT_MAP, intentNeedsComfyGraph, intentNeedsSource } from './intents'
 import { ThreeDSetupCard, ThreeDVideoHint, useThreeDLocal } from './ThreeDStage'
 import { THREE_D_TEXT } from '../../../lib/three/three-d-text'
 import { SwapStage } from './SwapStage'
+import { SceneStage } from './SceneStage'
 import { editNeedsMask, defaultCloudModel, modelForOp } from '../../../stores/cloudCatalogStore'
-import { stageShowsSetupCard, laneModelCount } from './stageGate'
+import { stageSetupAnswer, laneModelCount } from './stageGate'
+import { capabilityAnswer, laneFace, settleFace, stageAnswers, threeDFace, STAGE_WAIT_MAX_MS, type LaneFace } from '../../../lib/create/stage-answers'
 import { needsMaskFor } from './maskGate'
+import { useLocalEditMask } from './useLocalEditMask'
+import { maskReadyLine } from '../../../lib/local-edit-mask'
+import { useSettingsStore } from '../../../stores/settingsStore'
 import { GeneratingView, ResultView } from './OutputView'
 import { EmptyState } from '../ui/EmptyState'
 import { MONOGRAM, MONOGRAM_INVERT } from '../../layout/brand'
@@ -46,6 +51,7 @@ import { useReferenceSlots } from './referenceSlots'
 import { SavedCharacterChips } from './SavedCharacters'
 import { loadPhotosAsReferences, sendPhotosToStudio } from './characterPhotos'
 import { MIN_TRAIN_IMAGES, maxTrainImages } from '../../../lib/train-image-cap'
+import { TrainMore } from './hub/TrainParts'
 import { TRAIN_CAPTION_HELP, TRAIN_CAPTION_MAX, TRAIN_CAPTION_PLACEHOLDER } from '../../../lib/train-captions'
 import { STYLE_CAPTION_HELP, STYLE_CAPTION_PLACEHOLDER, STYLE_DROP_HINT, STYLE_DROP_TITLE } from '../../../lib/train-kind'
 import { describeAvailability, describeTrainPhoto, type DescribeAvailability } from '../../../lib/render/describe-train-photos'
@@ -78,7 +84,7 @@ interface Props {
   /** Pick frames of a finished video and save them as a character. */
   onSaveCharacter?: (item: GalleryItem) => void
   /** ComfyUI is coming up: no setup card in that window (./stageGate). */
-  comfyStarting?: boolean
+  comfyStarting?: boolean | null
 }
 
 export function Stage({ hub = false, displayed, onOpenMaskEditor, onEditResult, onAnimateResult, onFullscreen, onShowPrompt, onSaveCharacter, comfyStarting }: Props) {
@@ -104,6 +110,7 @@ export function Stage({ hub = false, displayed, onOpenMaskEditor, onEditResult, 
   const isGenerating = useCreateStore((s) => s.isGenerating || s.batchRun !== null)
   const source = useCreateStore((s) => s.source)
   const sourceSetAt = useCreateStore((s) => s.sourceSetAt)
+  const sceneVideoSetAt = useCreateStore((s) => s.scene.videoSetAt)
   const setPrompt = useCreateStore((s) => s.setPrompt)
   const caps = useCreateStore((s) => s.caps)
   const backend = useCreateStore((s) => s.backend)
@@ -115,7 +122,7 @@ export function Stage({ hub = false, displayed, onOpenMaskEditor, onEditResult, 
   const lipsyncModelList = useCreateStore((s) => s.lipsyncModelList)
   const motionModelList = useCreateStore((s) => s.motionModelList)
   const upscaleModelList = useCreateStore((s) => s.upscaleModelList)
-  const { connected, modelsLoaded, mlxMissing } = useCreateExp()
+  const { connected, modelsLoaded, modelLoadError, capsPending, mlxMissing } = useCreateExp()
   const comfyRunning = useCreateStore((s) => s.comfyRunning)
   const imageForLane = intentNeedsComfyGraph(intent) && intent !== 'edit'
     ? imageModelList.filter((m) => !isMlxImageModel(m.name))
@@ -144,8 +151,10 @@ export function Stage({ hub = false, displayed, onOpenMaskEditor, onEditResult, 
   // Die Regel selbst steht in ./stageGate, weil die Kopfzeile in
   // CreateExperimental dieselbe Antwort braucht: sie haelt ihren roten Balken
   // zurueck, solange diese Karte die Lage schon erklaert.
-  const modelsMissing = stageShowsSetupCard({
+  const modelsAnswer = stageSetupAnswer({
     backend,
+    mlxHost: isMlxImageHost(),
+    modelsFailed: !!modelLoadError?.startsWith('Failed to load models'),
     requiresModels: meta.requiresModels,
     mlxMissing,
     connected,
@@ -157,6 +166,25 @@ export function Stage({ hub = false, displayed, onOpenMaskEditor, onEditResult, 
       lipsync: lipsyncModelList, motion: motionModelList, upscale: upscaleModelList,
     }),
   })
+  // An answer that is still out is neither "ready" nor "missing": the stage
+  // keeps the last face it knows for this tab, or waits (lib/create/stage-answers).
+  const liveFace = laneFace(modelsAnswer, capabilityAnswer({
+    needed: !!meta.capability && backend !== 'cloud' && !isMlxImageHost(),
+    present: capReady,
+    connected,
+    comfyStarting,
+    capsPending,
+  }))
+  const faceKey = `lane:${backend}|${intent}`
+  useEffect(() => {
+    if (liveFace !== 'wait') stageAnswers.set(faceKey, liveFace)
+  }, [faceKey, liveFace])
+  const face = settleFace(liveFace, stageAnswers.get<LaneFace>(faceKey))
+  const modelsMissing = face === 'models'
+  const threeDState = intent === '3d' && backend === 'local'
+    ? threeDFace({ ready: threeDSetup.ready, mac: isMlxImageHost(), connected, comfyStarting })
+    : 'work'
+  const waitedTooLong = useWaitedTooLong(face === 'wait' || threeDState === 'wait')
 
   // A result counts for the current source only if it was generated after the
   // source was loaded — otherwise an older gallery item would hijack the stage.
@@ -169,6 +197,7 @@ export function Stage({ hub = false, displayed, onOpenMaskEditor, onEditResult, 
   const imageRefSide = intent === 'image' && (imageRefSlots > 0 || imageRefCount > 0)
 
   const characterTab = useCreateStore((s) => s.characterTab)
+  const hubPhotoImage = useCreateStore((s) => !!s.hubPhotoImage)
   const characterTrain = intent === 'character' && characterTab === 'train'
   // The example chips of Music are style descriptions. Where the prompt of a
   // cloud model is the lyrics, a chip would be sung word for word, so that
@@ -189,6 +218,15 @@ export function Stage({ hub = false, displayed, onOpenMaskEditor, onEditResult, 
     () => (meta.requiresModels ? getInstallRun(meta.requiresModels).running : false),
   )
 
+  // Only a card that can change its mind has to ask the disk first.
+  const starterOnDisk = useStarterOnDisk(
+    meta.requiresModels,
+    intent,
+    face === 'models' && !isMlxImageHost() && connected !== true && !installRun,
+  )
+  const waiting = !waitedTooLong && !displayed && !installRun
+    && (face === 'wait' || threeDState === 'wait' || (face === 'models' && starterOnDisk === null))
+
   let body: React.ReactNode
   // The empty stage carries the how-to line under its examples. A stage that
   // waits for a file or shows the source has no such place, so the line stands
@@ -202,19 +240,25 @@ export function Stage({ hub = false, displayed, onOpenMaskEditor, onEditResult, 
   const howtoTopic = stageHowtoTopic(intent, backend, isMlxImageHost())
   if (isGenerating) {
     body = <GeneratingView />
+  } else if (waiting) {
+    // In the Character area an empty stage takes no room at all.
+    body = hub ? null : <StageWaiting />
   } else if (intent === '3d' && threeDSetup.needsSetup && !(displayed?.type === '3d' && !(needsSource && source && !freshResult))) {
     // A model already made (in the cloud, or before) is shown; the setup
     // takes the Stage when there is nothing to show.
     body = <ThreeDSetupCard setup={threeDSetup} />
   } else if (modelsMissing || installRun) {
-    body = <ModelInstallCard kind={meta.requiresModels!} />
-  } else if (meta.capability && !capReady) {
-    body = <CapabilityCard cap={meta.capability} />
+    body = <ModelInstallCard kind={meta.requiresModels!} startOnly={starterOnDisk === true} />
+  } else if (face === 'capability' || (waitedTooLong && meta.capability && !capReady)) {
+    body = <CapabilityCard cap={meta.capability!} />
   } else if (characterTrain) {
     // Character-Studio training board: the image SET lives here (4-30 photos);
     // trigger word + train button sit in the composer below.
-    body = <TrainSetBoard />
+    body = <TrainSetBoard compact={hub} />
     howtoAtFoot = true
+  } else if (hub && hubPhotoImage && !(displayed && freshResult)) {
+    // Image with a photo character: its photos stand on the stage (CharacterHub).
+    body = null
   } else if (needsSource && !source) {
     body = intent === '3d' && threeDWay === 'video' ? <ThreeDVideoHint /> : <InputSlot />
     howtoAtFoot = true
@@ -222,6 +266,10 @@ export function Stage({ hub = false, displayed, onOpenMaskEditor, onEditResult, 
     body = <SourcePreview onOpenMaskEditor={onOpenMaskEditor} />
     howtoAtFoot = true
     howtoOnlyWide = true
+  } else if (intent === 'scene' && !(displayed && displayed.intent === 'scene' && displayed.createdAt >= sceneVideoSetAt)) {
+    // Scene to Video: the scene and its first frame until a clip of this
+    // scene is there (SceneStage).
+    body = <SceneStage />
   } else if (intent === 'swap_character' && !(displayed && displayed.intent === 'swap_character')) {
     // Swap Character: original + new people -> result, until a swap is there.
     // In the Character area the panel shows the video and its people.
@@ -289,7 +337,7 @@ export function Stage({ hub = false, displayed, onOpenMaskEditor, onEditResult, 
       <div
         ref={stageRef}
         data-testid="create-stage"
-        className={cn('relative flex w-full flex-col overflow-hidden', characterTrain ? 'min-h-[min(52vh,26rem)]' : 'h-[min(52vh,26rem)]')}
+        className={cn('relative flex w-full flex-col overflow-hidden', characterTrain ? '' : 'h-[min(52vh,26rem)]')}
       >
         <AnimatePresence mode="wait">
           <StageLayer key={intent + (isGenerating ? ':gen' : '')}>{body}</StageLayer>
@@ -347,6 +395,29 @@ export function StageLayer({ children, footRoom = false }: { children: ReactNode
       {children}
     </motion.div>
   )
+}
+
+/** The stage while the answer about this tab is out. Nothing to read and
+ *  nothing to click, and fast answers never show even the small spinner. */
+function StageWaiting() {
+  return (
+    <div data-testid="stage-pending" role="status" aria-label="Checking this tab" className="flex-1 flex items-center justify-center">
+      <motion.span initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.5, duration: 0.3 }}>
+        <Loader2 size={16} className="animate-spin text-gray-400 dark:text-gray-600" />
+      </motion.span>
+    </div>
+  )
+}
+
+/** True once the stage has waited longer than any real answer takes. */
+function useWaitedTooLong(waiting: boolean): boolean {
+  const [over, setOver] = useState(false)
+  useEffect(() => {
+    if (!waiting) return
+    const timer = setTimeout(() => setOver(true), STAGE_WAIT_MAX_MS)
+    return () => { clearTimeout(timer); setOver(false) }
+  }, [waiting])
+  return waiting && over
 }
 
 function teachTitle(intent: string): string {
@@ -545,6 +616,7 @@ function useMaskTint(mask: { url: string; width: number; height: number } | null
 
 // ── Source loaded, awaiting generation ──
 function SourcePreview({ onOpenMaskEditor }: { onOpenMaskEditor: () => void }) {
+  const cloudFeatures = useSettingsStore((s) => s.settings.cloudTeasersEnabled)
   const source = useCreateStore((s) => s.source)
   const mask = useCreateStore((s) => s.mask)
   const setSource = useCreateStore((s) => s.setSource)
@@ -563,6 +635,7 @@ function SourcePreview({ onOpenMaskEditor }: { onOpenMaskEditor: () => void }) {
   const batchCount = useCreateStore((s) => s.batchSources.length)
   const batchOffered = useBatchOffered()
   const maskTint = useMaskTint(mask && !noMask ? mask : null)
+  const localMask = useLocalEditMask()
   // The same run over several images: no mask (it belongs to one image), and
   // the list below replaces "Change image".
   const batchOn = batchOffered && batchCount > 1
@@ -638,13 +711,13 @@ function SourcePreview({ onOpenMaskEditor }: { onOpenMaskEditor: () => void }) {
             : noMask ? 'Write the edit prompt below, then Create. This model needs no mask.'
             // A cloud model that edits through a mask does not start without
             // one (maskGate.ts), so the line about an empty mask is local only.
-            : needsMaskFor(intent, backend, false) ? 'Paint the area to change, write your prompt below, then Create.'
+            : localMask.block ?? (localMask.masked ? maskReadyLine(cloudFeatures) : null) ?? (needsMaskFor(intent, backend, false) ? 'Paint the area to change, write your prompt below, then Create.'
             // The Mac's Edit does not restyle at a denoise as the Windows
             // graph does: without a mask the prompt edits the whole image.
             : meta.id === 'edit' && backend === 'local' && isMlxImageHost()
               ? 'Paint an area to change just that, or leave the mask empty to edit the whole image. Write your prompt below, then Create.'
             : meta.allowsMask ? 'Leave the mask empty to restyle the whole image, or paint an area to change just that. Write your prompt below, then Create.'
-            : 'Describe the motion below, then Create.'}
+            : 'Describe the motion below, then Create.')}
         </p>
       </>
   )
@@ -797,6 +870,13 @@ const CAP_COPY = {
     title: 'Motion control needs the pose extractor',
     description: 'DWPose reads the skeleton out of your driving video so the character can copy it. This installs the controlnet aux node pack; the pose models download automatically on your first run.',
   },
+  depth: {
+    icon: Clapperboard,
+    title: 'Scene to Video needs the depth extractor',
+    // Depth Anything V2 Small: Apache-2.0, about 100 MB, fetched by the pack
+    // itself on the first run (buildSceneWorkflow names the file).
+    description: 'Depth Anything reads the depth of your scene so the camera and every shape stay where they are. This installs the controlnet aux node pack; the depth model (about 100 MB) downloads automatically on your first run.',
+  },
 } as const
 
 /** While an install runs, the card must not keep saying "needs a one-time
@@ -835,7 +915,7 @@ function GalleryPickThumb({ item }: { item: GalleryItem }) {
   return <img src={src} alt="" className="w-full h-full object-cover" onError={onError} onLoad={onLoad} />
 }
 
-function CapabilityCard({ cap }: { cap: 'rmbg' | 'inpaint-nodes' | 'dwpose' }) {
+function CapabilityCard({ cap }: { cap: CreateCapability }) {
   const { installCapability } = useCreateExp()
   // The run lives outside the card, like a bundle install: a failure must
   // still be readable after a trip to another mode (the box, 03.10.2026: the
@@ -910,22 +990,39 @@ const ALREADY_ON_DISK_COPY = {
   description: 'ComfyUI is not running, so nothing can render yet. Start ComfyUI and LU picks up the files you have, nothing on disk is downloaded again.',
 }
 
-function useStarterOnDisk(kind: StarterKind, intent: string, ask: boolean): boolean {
-  // The answer belongs to the lane it was asked for: a switch of lane or a
-  // ComfyUI that came up drops it without a reset in the effect.
-  const key = ask ? `${kind}|${intent}` : null
-  const [onDiskFor, setOnDiskFor] = useState<string | null>(null)
+/** Whether the lane's bundle is complete on disk. null while that is not
+ *  known, so the card never says "download" first and "already here" after. */
+function useStarterOnDisk(kind: StarterKind | undefined, intent: string, ask: boolean): boolean | null {
+  const key = ask && kind ? `disk:${kind}|${intent}` : null
+  const bundle = key && kind ? starterBundleFor(kind, intent) : null
+  const [live, setLive] = useState<{ key: string; onDisk: boolean } | null>(null)
   useEffect(() => {
-    if (!key) return
-    const bundle = starterBundleFor(kind, intent)
-    if (!bundle) return
+    if (!key || !bundle) return
     let stale = false
-    checkBundlesOnDisk([bundle])
-      .then((r) => { if (!stale) setOnDiskFor(r.installed[bundle.name] === true ? key : null) })
-      .catch(() => { /* the card keeps offering the download */ })
-    return () => { stale = true }
-  }, [key, kind, intent])
-  return key !== null && onDiskFor === key
+    const read = () => {
+      const ticket = stageAnswers.ticket()
+      checkBundlesOnDisk([bundle])
+        .then((r) => {
+          // A reply overtaken by a model change is not the state after it.
+          if (stale || ticket !== stageAnswers.ticket()) return
+          const onDisk = r.installed[bundle.name] === true
+          stageAnswers.answer(key, onDisk, ticket)
+          setLive({ key, onDisk })
+        })
+        // Not remembered: the card offers the download, as it always could.
+        .catch(() => { if (!stale && ticket === stageAnswers.ticket()) setLive({ key, onDisk: false }) })
+    }
+    read()
+    window.addEventListener('comfyui-model-downloaded', read)
+    return () => {
+      stale = true
+      window.removeEventListener('comfyui-model-downloaded', read)
+    }
+    // The bundle follows from the key.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key])
+  if (!key || !bundle) return false
+  return live?.key === key ? live.onDisk : stageAnswers.get<boolean>(key) ?? null
 }
 
 /** The plan of the Mac's video setup, for the card. Null until it is read,
@@ -993,8 +1090,26 @@ function videoBundleLine(intent: string): string {
   return ` The lane needs ${intent === 'animate' || intent === 'extend' ? 'an image-to-video' : 'a text-to-video'} model, so this installs ${name} (~${b.totalSizeGB} GB, ${b.vramRequired} VRAM).`
 }
 
-function ModelInstallCard({ kind }: { kind: 'image' | 'video' | 'audio' | 'lipsync' | 'motion' | 'upscale' }) {
-  const { installModelBundle, connected } = useCreateExp()
+const SCENE_BUNDLE_COPY = {
+  icon: Clapperboard,
+  title: 'Local Scene to Video needs a one-time download',
+  description: 'This sets up Wan 2.1 VACE plus its support files (~10.5 GB, runs from 8 GB VRAM). It follows the depth of your scene and paints the look you describe over it.',
+} as const
+
+/** Swap on this computer installs the Wan 2.2 Animate bundle (starterBundleFor),
+ *  so the card names that bundle, read from it, not the VACE one of Motion. */
+function swapBundleCopy() {
+  const b = starterBundleFor('motion', 'swap_character')
+  const what = b ? `${b.name.replace(/\s*\([^)]*\)\s*$/, '')} plus its support files (~${b.totalSizeGB} GB, ${b.vramRequired} VRAM)` : 'Wan 2.2 Animate plus its support files'
+  return {
+    icon: Film,
+    title: 'Local Swap needs a one-time download',
+    description: `This sets up ${what}. It puts one character into your video and keeps the original sound.`,
+  }
+}
+
+function ModelInstallCard({ kind, startOnly }: { kind: 'image' | 'video' | 'audio' | 'lipsync' | 'motion' | 'upscale'; startOnly: boolean }) {
+  const { installModelBundle } = useCreateExp()
   const intent = useCreateStore((s) => s.intent())
   // The run outlives this card on purpose. Stage swaps the card away as soon as
   // a render starts or the lane list refills, and a 12 GB install must not lose
@@ -1004,7 +1119,12 @@ function ModelInstallCard({ kind }: { kind: 'image' | 'video' | 'audio' | 'lipsy
   const mac = isMlxImageHost()
   // The MLX lanes a Mac sets up itself; connected ComfyUI handles any other lane.
   const macKind = mac && (kind === 'image' || kind === 'video' || kind === 'motion') ? kind : null
-  const copy = macKind ? MAC_BUNDLE_COPY[macKind] : BUNDLE_COPY[kind]
+  // Scene to Video installs the same VACE bundle as Motion Control, and says
+  // what it is for there.
+  const copy = macKind ? MAC_BUNDLE_COPY[macKind]
+    : intent === 'scene' && kind === 'motion' ? SCENE_BUNDLE_COPY
+      : intent === 'swap_character' && kind === 'motion' ? swapBundleCopy()
+        : BUNDLE_COPY[kind]
   // The Mac lane runs its own MLX stack and has no ComfyUI bundle to name.
   const cardGb = useGraphicsCardGb()
   // The Mac's video starter is chosen per Mac, so its card is written from
@@ -1018,7 +1138,6 @@ function ModelInstallCard({ kind }: { kind: 'image' | 'video' | 'audio' | 'lipsy
   // A Mac no video starter runs on: the card says so and offers no download.
   // A run that is already on its way, or left an error, keeps its body.
   const nothingToInstall = macKind === 'video' && !macVideo.canInstall && !installing && !err
-  const startOnly = useStarterOnDisk(kind, intent, !macKind && connected === false && !installing)
 
   const run = () => startInstallRun(kind, (onStatus, signal) =>
     installModelBundle(kind, onStatus, signal).catch((e: unknown) => {
@@ -1050,7 +1169,40 @@ function ModelInstallCard({ kind }: { kind: 'image' | 'video' | 'audio' | 'lipsy
 // ── Character-Studio training board (2.5.8): the 4-30 photo set. Trigger word
 // and the Create (train) button live in the composer; this is the visual home
 // of the image set with add/remove + drag&drop. ──
-export function TrainSetBoard() {
+/** Does the Stage show a setup card for this tab (a one-time download, a node
+ *  pack)? The Character area then shows that card alone. The same rule as the
+ *  Stage's own branches below. */
+export function useStageSetupCard(comfyStarting?: boolean | null): boolean {
+  const intent = useCreateStore((s) => s.intent())
+  const meta = INTENT_MAP[intent]
+  const backend = useCreateStore((s) => s.backend)
+  const caps = useCreateStore((s) => s.caps)
+  const image = useCreateStore((s) => s.imageModelList)
+  const video = useCreateStore((s) => s.videoModelList)
+  const audio = useCreateStore((s) => s.audioModelList)
+  const lipsync = useCreateStore((s) => s.lipsyncModelList)
+  const motion = useCreateStore((s) => s.motionModelList)
+  const upscale = useCreateStore((s) => s.upscaleModelList)
+  const { connected, modelsLoaded, modelLoadError, capsPending, mlxMissing } = useCreateExp()
+  const installRun = useSyncExternalStore(subscribeInstallRuns, () => (meta.requiresModels ? getInstallRun(meta.requiresModels).running : false))
+  const capReady = !meta.capability || backend === 'cloud' || !!caps[meta.capability] || isMlxImageHost()
+  const live = laneFace(stageSetupAnswer({
+    backend,
+    mlxHost: isMlxImageHost(),
+    modelsFailed: !!modelLoadError?.startsWith('Failed to load models'),
+    requiresModels: meta.requiresModels,
+    mlxMissing, connected, comfyStarting, modelsLoaded,
+    laneModelCount: laneModelCount(intent, meta.requiresModels, { image, video, audio, lipsync, motion, upscale }),
+  }), capabilityAnswer({
+    needed: !!meta.capability && backend !== 'cloud' && !isMlxImageHost(),
+    present: capReady, connected, comfyStarting, capsPending,
+  }))
+  // The face the Stage settled on for this tab (it writes it, this only reads).
+  const face = settleFace(live, stageAnswers.get<LaneFace>(`lane:${backend}|${intent}`))
+  return installRun || face === 'models' || face === 'capability'
+}
+
+export function TrainSetBoard({ compact = false }: { compact?: boolean } = {}) {
   const trainImages = useCreateStore((s) => s.trainImages)
   const addTrainImages = useCreateStore((s) => s.addTrainImages)
   const removeTrainImage = useCreateStore((s) => s.removeTrainImage)
@@ -1111,6 +1263,82 @@ export function TrainSetBoard() {
       .filter((f) => f.type.startsWith('image/'))
       .map(mediaRefFrom)
     if (imgs.length > 0) addTrainImages(imgs)
+  }
+
+  // The training page of the Character area (3.1.3): the photos as one small
+  // strip with its add tile. The descriptions are optional and fold away.
+  if (compact) {
+    return (
+      <div
+        className="flex w-full flex-col items-center gap-2.5 pb-2"
+        data-hub-train-photos={trainImages.length}
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={(e) => { e.preventDefault(); addFiles(e.dataTransfer.files) }}
+      >
+        <input ref={inputRef} type="file" accept="image/*" multiple className="hidden" aria-label="Add training photos"
+          onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = '' }} />
+        {trainImages.length === 0 && (
+          <button onClick={() => inputRef.current?.click()} className="hub-drop hub-text hub-fs-14 flex min-h-16 w-full max-w-[460px] flex-col items-center justify-center gap-0.5 px-4 py-3">
+            <span className="font-medium">Drop {MIN_TRAIN_IMAGES} to {maxTrainImages(backend)} {style ? STYLE_DROP_TITLE : 'photos of your character here'}</span>
+            <span className="hub-dim hub-fs-125">{style ? STYLE_DROP_HINT : 'One person or character, varied angles and lighting works best'}</span>
+          </button>
+        )}
+        {trainImages.length === 0 && (
+          <SavedCharacterChips
+            label="or start from a saved character"
+            title={(c) => `Add the ${c.photos.length} photos of ${c.name}`}
+            onPick={(c) => sendPhotosToStudio(c.name, c.photos)}
+          />
+        )}
+        {trainImages.length > 0 && <div className="hub-train-photos">
+          {trainImages.map((img) => (
+            <div key={img.name} className="hub-train-photo group">
+              <img src={img.url} alt="" />
+              <button
+                onClick={() => removeTrainImage(img.name)}
+                className="lu-on-dark absolute right-0.5 top-0.5 grid h-4 w-4 place-items-center rounded-full bg-black/60 text-white opacity-0 transition-opacity focus:opacity-100 group-hover:opacity-100"
+                title="Remove"
+                aria-label={`Remove ${img.name}`}
+              >
+                <X size={10} />
+              </button>
+            </div>
+          ))}
+          <button onClick={() => inputRef.current?.click()} className="hub-train-add" title="Add photos" aria-label="Add photos"><ImagePlus size={16} /></button>
+        </div>}
+        {captions && trainImages.length > 0 && (
+          <TrainMore label="Describe the photos (optional)">
+            <p className="hub-dim hub-fs-125 max-w-[460px] text-center" data-testid="train-caption-help">{captionHelp}</p>
+            {describing ? (
+              <button type="button" onClick={() => describeAbort.current?.abort()} className="hub-muted hub-fs-125 inline-flex items-center gap-1 underline underline-offset-2">
+                <Loader2 size={11} className="animate-spin" />Describing {describing.done} of {describing.total}, stop
+              </button>
+            ) : (
+              <button type="button" onClick={describeAll} disabled={!describe?.available || isGenerating} title={describe?.hint ?? 'Checking your chat model...'} className="hub-muted hub-fs-125 underline underline-offset-2 disabled:opacity-50 disabled:no-underline">
+                Describe photos
+              </button>
+            )}
+            <div className="grid w-full grid-cols-2 gap-x-3 gap-y-1.5">
+              {trainImages.map((img) => (
+                <div key={img.name} className="flex items-center gap-2">
+                  <img src={img.url} alt="" className="h-7 w-7 shrink-0 rounded object-cover" />
+                  <input
+                    value={trainCaptions[img.name] ?? ''}
+                    onChange={(e) => setTrainCaption(img.name, e.target.value)}
+                    maxLength={TRAIN_CAPTION_MAX}
+                    disabled={isGenerating}
+                    placeholder={captionPlaceholder}
+                    title={trainCaptions[img.name] || captionPlaceholder}
+                    aria-label={style ? `What is in ${img.name}` : `What changes in ${img.name}`}
+                    className="hub-line hub-text hub-fs-125 min-w-0 flex-1 border-b bg-transparent py-1 outline-none disabled:opacity-60"
+                  />
+                </div>
+              ))}
+            </div>
+          </TrainMore>
+        )}
+      </div>
+    )
   }
 
   return (

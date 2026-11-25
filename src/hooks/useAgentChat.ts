@@ -1,10 +1,12 @@
 import { stripSourcesMarker } from '../lib/web-evidence'
 import { billingOf, creditRatesOf } from '../lib/agent-core/credit-rates'
+import { cloudAgentStopOf, LOOP_HALT_CLOUD_AGENT_STOP } from '../lib/agent-core/cloud-agent-stop'
 import { isServerLoopCut, LOOP_HALT_COST, LOOP_HALT_GUARD, LOOP_HALT_SERVER_LOOP, SERVER_LOOP_MESSAGE, SERVER_LOOP_RETRIES } from '../lib/agent-core/server-loop-cut'
 import { canonicalArgs, repeatLabel, skippedRepeatsNote } from '../lib/agent-core/repeat-note'
 import { replayableReasoning } from '../lib/agent-core/reasoning-replay'
 import { useRef, useState, useCallback, useEffect } from 'react'
 import { frameFlush } from '../lib/frame-flush'
+import { beginReplyWrite } from '../stores/replyWriteStore'
 import { useRunActivityStore, toolProgressActivity, waitBeforeRetry, readingActivity, endFirstWait, hiddenThoughtArrived, waitForChatCard } from '../stores/runActivityStore'
 import { watchChatFirstWait } from '../lib/first-wait-vram'
 import { markCannotThink } from '../lib/model-compatibility'
@@ -72,7 +74,8 @@ import {
 import { detachToolCall, runMessageStarted, runMessageEnded } from '../stores/backgroundJobStore'
 import { summarizeTurn } from '../lib/turn-summary'
 import { buildVisionFeedback, dropOlderScreenFrames } from '../api/vision-feedback'
-import { COMPUTER_USE_TOOL_NAME, onlyTheTaskForTheScreen, withComputerUsePrompt } from '../lib/computer/prompt'
+import { COMPUTER_TASK_TOOL_NAME, COMPUTER_USE_TOOL_NAME, onlyTheTaskForTheScreen, withComputerUsePrompt } from '../lib/computer/prompt'
+import { browserStepsAside, isLuBrowserTool, withScreenTools } from '../lib/computer/screen-or-browser'
 import { memoryPairForRun } from '../lib/computer/memory-policy'
 import { getModelMaxTokens, estimateTokens } from '../lib/context-compaction'
 import { buildRequestMessages, trimWorkingHistory } from '../lib/context-decay'
@@ -170,7 +173,8 @@ import { planResumeAnchor } from '../lib/plan-resume'
 import { reasoningOnlyRound, REASONING_CONTINUE_BUDGET, REASONING_CONTINUE_STEER } from '../lib/reasoning-round'
 import { findUnbackedLinks, steerReplyIsNoAnswer, unbackedLinksSteer } from '../lib/unbacked-links'
 import { useTodoStore } from '../stores/todoStore'
-import { platformPromptLine, hostClockLine } from '../lib/host-platform'
+import { platformPromptLine } from '../lib/host-platform'
+import { agentClockLine } from '../lib/clock-share'
 import { buildTurnContext, withTurnContext } from '../lib/turn-context'
 import { explainSendRefusal } from '../lib/template-refusal'
 import { emptyAnswerExplanation } from '../lib/answer-notes'
@@ -196,7 +200,7 @@ import { takeRunNotices } from '../lib/run-notices'
 import { MEMORY_SKILL_PROMPT_LINE, renderSkillsSection, withSkillTools } from '../lib/skill-tools'
 import { useSkillStore } from '../stores/skillStore'
 import { TOOL_SEARCH, TOOL_SEARCH_DEF, briefFor, clearUnlockedTools, runToolSearch, withToolSearch } from '../lib/tool-search'
-import { withChatPersona, samplingPresetFor, speakerCustomParams, speakerPersonaFor } from '../lib/chat-persona'
+import { withChatPersona, samplingPresetFor, speakerCustomParams, speakerPersonaFor, extractionPersonaOf } from '../lib/chat-persona'
 import { injectPersonaNote, noteTokens, personaNoteOf } from '../lib/persona-note'
 
 // ── Hook ──────────────────────────────────────────────────────
@@ -920,6 +924,8 @@ export function useAgentChat() {
     // without a word or parked in a steer queue no run would ever read, and
     // Stop showed in every chat. The Code tab has had this net for a while.
     let laneOutcome: Awaited<ReturnType<typeof runInLane>> | undefined
+    // Edit stays shut until nothing can write this answer (stores/replyWriteStore.ts).
+    let endReplyWrite = () => {}
     try {
     laneOutcome = await runInLane(
       { conversationId: convId, lane, abort: () => abort.abort() },
@@ -936,6 +942,7 @@ export function useAgentChat() {
     } catch { /* run with whatever the engine has */ }
 
     const memoryScope = store.conversations.find(c => c.id === convId)?.memoryScope
+    const memoryChatOff = store.conversations.find(c => c.id === convId)?.memoryOff === true
 
     // Publish a HUMAN-READABLE slug ("create-an-index-7f2c3d") so
     // built-in tools land in `~/agent-workspace/<slug>/`. Previously
@@ -1085,6 +1092,7 @@ export function useAgentChat() {
       agentBlocks: [],
     }
     useChatStore.getState().addMessage(convId, assistantMessage)
+    endReplyWrite = beginReplyWrite(assistantMessage.id)
     // The request's sum over every model call of this run, the line under
     // the answer (lib/request-usage). `usage` keeps only the last call.
     const requestUsage = requestUsageTracker(convId, assistantMessage.id)
@@ -1187,7 +1195,7 @@ export function useAgentChat() {
       // small-model tool-calling (LongFuncEval, arXiv 2505.10570).
       const memTier = settings.smallModelMode ? Math.min(memContextTokens, 4096) : memContextTokens
       // Embedding-first retrieval; falls back to keyword scoring offline.
-      const selectedMemory = await useMemoryStore.getState().getMemoryContextAsync(userContent, memTier, { scope: memoryScope })
+      const selectedMemory = await useMemoryStore.getState().getMemoryContextAsync(userContent, memTier, { scope: memoryScope, conversationId: convId, chatOff: memoryChatOff })
       // Behind the newest message, not in the system prompt: the pick
       // changes with every message (lib/turn-context.ts, A7).
       memoryContext = selectedMemory.text
@@ -1208,6 +1216,14 @@ export function useAgentChat() {
     // every look in the history of the chat and went in circles (box,
     // 09.10.2026). A cloud model keeps both.
     const screenByTaskOnly = onlyTheTaskForTheScreen(providerId, (name) => !!toolRegistry.getToolByName(name), activeModel)
+    // Computer Control on: "use my browser" means the user's screen, not a
+    // window of LU's own (lib/computer/screen-or-browser.ts).
+    const screenToolHere = [COMPUTER_TASK_TOOL_NAME, COMPUTER_USE_TOOL_NAME].some((name) => {
+      const tool = toolRegistry.getToolByName(name)
+      return !!tool && permissions[tool.category] !== 'blocked' && (!curated || curated.includes(name))
+        && !(opts?.readOnly && !allowedInReadOnlyTurn(name))
+    })
+    const browserAside = browserStepsAside(userContent, screenToolHere)
     // Cloud mode makes pictures and clips through Create, never through this
     // computer's pipeline: plain chat already strips the local pair (useChat),
     // Agent mode offered it next to create_order, and a small model then
@@ -1216,6 +1232,7 @@ export function useAgentChat() {
     // The settings pair rides only on a turn about settings (A11).
     const toolMatchesCurated = (name: string) =>
       (!curated || curated.includes(name)) && !(opts?.readOnly && !allowedInReadOnlyTurn(name)) && !(screenByTaskOnly && name === COMPUTER_USE_TOOL_NAME)
+      && !(browserAside && isLuBrowserTool(name))
       && !(localMediaOff && isMediaTool(name))
       && (isWatcherToolName(name) ? opts?.watcherTools === true : (opts?.settingsTools === true || !isSelfControlToolName(name)))
     // Cloud mode AND Create in chat released for the account. Without the
@@ -1226,7 +1243,8 @@ export function useAgentChat() {
     // day"; they are put back, whatever it chose.
     // The settings pair likewise: the router has no say once the message is
     // about settings.
-    const withCreateTools = <T extends { name: string }>(chosen: T[], all: T[]): T[] => {
+    const withCreateTools = <T extends { name: string; category?: string }>(routed: T[], all: T[]): T[] => {
+      const chosen = withScreenTools(routed, all.filter((t) => toolMatchesCurated(t.name)), permissions)
       const extra = (n: string) => (opts?.createTools && isCreateToolName(n))
         || (isWatcherToolName(n) ? opts?.watcherTools : opts?.settingsTools && isSelfControlToolName(n))
       return opts?.createTools || opts?.settingsTools || opts?.watcherTools
@@ -1426,7 +1444,7 @@ export function useAgentChat() {
     // the note behind the question was measured on the desktop only. Inside a
     // run the system prompt does not change, so the steps still reuse the cache.
     const phoneSystemNote = isMobile()
-    const contextNote = buildTurnContext({ memory: memoryContext, rag: ragSuffix, clock: hostClockLine() })
+    const contextNote = buildTurnContext({ memory: memoryContext, rag: ragSuffix, clock: agentClockLine() })
     if (phoneSystemNote && contextNote) agentSystemPrompt += `\n\n${contextNote}`
     const turnContext = phoneSystemNote ? '' : contextNote
 
@@ -1733,6 +1751,10 @@ export function useAgentChat() {
       rates: creditRatesOf(activeModel),
       runCreditLimit: useSettingsStore.getState().settings.agentRunCreditLimit,
       hourCreditLimit: useSettingsStore.getState().settings.agentHourCreditLimit,
+      // 3.1.2 (A38, GitHub #256): the token limit per run from Settings, 0 = none;
+      // the halt names credits only where LU Cloud bills them.
+      runHaltTokens: useSettingsStore.getState().settings.agentRunHaltTokens,
+      luCloud: providerId === 'lu-cloud',
     })
     // Steps LU Cloud cut for repeating (lib/agent-core/server-loop-cut.ts).
     let serverLoopCuts = 0
@@ -3751,6 +3773,18 @@ export function useAgentChat() {
               emptyAnswerExplanation({ finishReason: MODEL_SWITCH_FINISH, captured: false, keepThinking: false }),
             )
           }
+        } else if (cloudAgentStopOf(err)) {
+          // LU Cloud ended the run itself (409, lib/agent-core/cloud-agent-stop.ts):
+          // a quiet stop under what was written, not "Agent error: ...", and
+          // nothing is sent again. The loop ends too, its next pass would stop
+          // the same way.
+          const stop = cloudAgentStopOf(err)!
+          loopHalt = LOOP_HALT_CLOUD_AGENT_STOP
+          useChatStore.getState().updateMessageFinishReason(convId!, assistantMessage.id, stop)
+          useChatStore.getState().updateMessageContent(
+            convId!, assistantMessage.id,
+            runState.content.trim() ? runState.content : emptyAnswerExplanation({ finishReason: stop, captured: false, keepThinking: false }),
+          )
         } else if (isServerLoopCut(err)) {
           // LU Cloud cut a step twice for repeating (lib/agent-core/server-loop-cut.ts).
           loopHalt = LOOP_HALT_SERVER_LOOP
@@ -4019,7 +4053,9 @@ export function useAgentChat() {
           toolNames: runState.blocks.flatMap((b) => (b.toolCalls ?? (b.toolCall ? [b.toolCall] : [])).map((call) => call.toolName)),
           sourceKind: 'chat',
         })
-        void extractMemoriesFromPair(pair.user, pair.assistant, convId, { scope: memoryScope, sourceKind: pair.sourceKind }).catch(() => {})
+        const { personas, activePersonaId } = useSettingsStore.getState()
+        const persona = extractionPersonaOf(useChatStore.getState().conversations.find((c) => c.id === convId), personas, activePersonaId, useSettingsStore.getState().settings.personasEnabled !== false)
+        void extractMemoriesFromPair(pair.user, pair.assistant, convId, { scope: memoryScope, sourceKind: pair.sourceKind, persona }).catch(() => {})
       }
 
       // ── /loop driver ───────────────────────────────────────────────────
@@ -4122,6 +4158,7 @@ export function useAgentChat() {
         CHAT_NOTICE_MS,
       )
     } finally {
+    endReplyWrite()
     // Whatever way the body ended, a claim still held by THIS run is a leak:
     // the loop's own finally deletes it on every path it reaches. Identity
     // checked, so a newer run on the same conversation is never touched.

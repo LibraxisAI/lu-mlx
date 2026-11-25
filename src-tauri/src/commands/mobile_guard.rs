@@ -74,6 +74,7 @@ pub const BLOCKED: &[&str] = &[
     "set_engine_idle_unload",
     "engine_key_for",
     "set_remote_page_title",
+    "set_remote_share_clock",
     "remote_pairing_qr",
     "remote_pairing_window",
     "remote_paired_devices",
@@ -143,6 +144,9 @@ pub const BLOCKED: &[&str] = &[
 /// "decided" from "forgotten", nothing reads this at run time.
 #[cfg(test)]
 pub const ALLOWED: &[&str] = &[
+    // A33: the spelling check of the right-click menu. On a phone it answers
+    // "not misspelled" (spell.rs), the phone has its own keyboard checker.
+    "spell_suggestions",
     "oauth_start",
     "oauth_wait",
     // Status and settings of desktop programs: they answer "not there" or
@@ -273,6 +277,7 @@ pub const ALLOWED: &[&str] = &[
     // plain one only in the Wi-Fi (and the bare status over the tunnel).
     "remote_client_request",
     "remote_client_cancel",
+    "app_latest_release",
     // The sealed channel: same address gate, the device key stays in Rust,
     // the six digit code only in the Wi-Fi (remote_sealed.rs).
     "remote_sealed_pair",
@@ -378,6 +383,14 @@ mod tests {
                 continue;
             }
             if line.starts_with("#[cfg(desktop)]") {
+                desktop_only = true;
+                continue;
+            }
+            // TEST-LOGIN (3.1.3): a test build only, never a shipped phone
+            // build. Its name must not stand in the BLOCKED list either:
+            // the list is text in every phone library, and
+            // scripts/check-no-test-login.sh fails a package that names it.
+            if line.starts_with("#[cfg(feature = \"test-login\")]") {
                 desktop_only = true;
                 continue;
             }

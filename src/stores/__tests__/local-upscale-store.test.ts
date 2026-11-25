@@ -57,8 +57,8 @@ describe('the backend flip', () => {
     expect(isIntentLocked(INTENT_MAP.upscale, 'local', true)).toBe(true)
   })
 
-  it('the rule is one set, and it names upscale and eraser', () => {
-    expect([...LOCAL_UTILITY_OPS]).toEqual(['upscale', 'eraser'])
+  it('the rule is one set, and it names upscale only', () => {
+    expect([...LOCAL_UTILITY_OPS]).toEqual(['upscale'])
   })
 })
 

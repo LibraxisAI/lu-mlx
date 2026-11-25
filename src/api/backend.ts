@@ -604,6 +604,8 @@ export async function backendCall<T = unknown>(
     set_comfyui_path: { path: "/local-api/set-comfyui-path", method: "POST" },
     install_comfyui: { path: "/local-api/install-comfyui", method: "POST" },
     install_comfyui_status: { path: "/local-api/install-comfyui" },
+    install_git: { path: "/local-api/install-git", method: "POST" },
+    install_git_status: { path: "/local-api/install-git-status" },
     install_ollama: { path: "/local-api/install-ollama", method: "POST" },
     install_ollama_status: { path: "/local-api/install-ollama-status" },
     set_comfyui_port: { path: "/local-api/set-comfyui-port", method: "POST" },
@@ -685,6 +687,8 @@ export async function backendCall<T = unknown>(
     // (commands/video_settle.rs); the dev server answers 501.
     video_color_settle: { path: "/local-api/video-color-settle", method: "POST" },
     read_media_file: { path: "/local-api/read-media-file", method: "POST" },
+    // A33: answered "not misspelled" by the dev server (system-routes.ts).
+    spell_suggestions: { path: "/local-api/spell-suggestions", method: "POST" },
     // The music engine of the Mac (commands/music.rs), desktop only like the
     // MLX commands above: the dev server answers 501 (mlx-media-stubs.ts).
     mlx_music_status: { path: "/local-api/mlx-music-status" },
@@ -859,6 +863,7 @@ export async function backendCall<T = unknown>(
     remote_connected_devices: { path: "/local-api/remote-connected-devices" },
     set_remote_permissions: { path: "/local-api/set-remote-permissions", method: "POST" },
     set_remote_page_title: { path: "/local-api/set-remote-page-title", method: "POST" },
+    set_remote_share_clock: { path: "/local-api/set-remote-share-clock", method: "POST" },
     start_tunnel: { path: "/local-api/start-tunnel", method: "POST" },
     stop_tunnel: { path: "/local-api/stop-tunnel", method: "POST" },
     tunnel_status: { path: "/local-api/tunnel-status" },

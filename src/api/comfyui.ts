@@ -1,4 +1,5 @@
 import { comfyuiUrl, localFetch, fetchLocalhostBytes, isTauri, backendCall, isMacOS } from "./backend"
+import { misplacedModelMessage, missedModelsOf } from '../lib/misplaced-model'
 import { log } from "../lib/logger"
 import { LU_CLIENT_PREFIX } from "./comfyui-ws"
 import { nodeComboOptions } from "./comfyui-enum"
@@ -17,10 +18,11 @@ import { isRecord, asString, asRecordArray } from '../types/json-guards'
 // getKnownFileSizes() herein, „to break the cycle at runtime". Die
 // Bundle-Daten gehören weder hierher noch nach discover.ts — sie liegen
 // jetzt in model-bundles.ts, das beide Seiten statisch lesen.
-import { getImageBundles, getVideoBundles } from './model-bundles'
+import { getImageBundles, getVideoBundles, getRetiredBundles } from './model-bundles'
 import { isQwenEnhancerFile } from '../lib/render/qwen-enhancer'
 import { pickQwenEncoder, qwenEncoderFile, type QwenEncoderChoice } from '../lib/render/qwen-text-encoder'
 import { COMPONENT_REGISTRY, type ComponentSpec } from './component-registry'
+import { RETIRED_MODEL_LINE, isRetiredModelName } from '../lib/retired-models'
 
 // ─── Control-plane fetch timeouts ───
 //
@@ -627,6 +629,14 @@ export function ref2vRefusal(name: string | null | undefined): string | null {
   }
 }
 
+/** Scene to Video's local models (3.1.3): the full Wan 2.1 VACE files of the
+ *  Motion Control list. Wan 2.2 Animate follows a pose skeleton and has no
+ *  input for the depth of a scene, and a VACE add-on module or a Wan 2.2 VACE
+ *  Fun file needs a graph LU does not build (ref2vRefusal). */
+export function sceneLaneModels(motion: readonly ClassifiedModel[]): ClassifiedModel[] {
+  return motion.filter((m) => m.type === 'wanvace' && ref2vRefusal(m.name) === null)
+}
+
 /** Can Animate run this model with the picture as a reference? */
 export function isRunnableRef2V(name: string | null | undefined): boolean {
   return ref2vFamily(name) !== null && ref2vRefusal(name) === null
@@ -1200,7 +1210,7 @@ let _knownFileSizes: Map<string, { subfolder: string; expectedBytes: number }> |
 async function getKnownFileSizes(): Promise<Map<string, { subfolder: string; expectedBytes: number }>> {
   if (_knownFileSizes) return _knownFileSizes
   _knownFileSizes = new Map()
-  for (const bundle of [...getImageBundles(), ...getVideoBundles()]) {
+  for (const bundle of [...getImageBundles(), ...getVideoBundles(), ...getRetiredBundles()]) {
     for (const f of bundle.files) {
       if (f.filename && f.sizeGB && f.subfolder) {
         _knownFileSizes.set(f.filename, {
@@ -1945,7 +1955,14 @@ function isMinimaxEncoder(name: string): boolean {
 
 /** An empty ComfyUI list still names the file this family needs, so Create
  *  can offer it as a download instead of "a VAE for your model type". */
+function retiredFileMissing(what: string, file: string): Error {
+  return new Error(`MiniMax H3 needs its ${what} "${file}", and it is not in ComfyUI. ${RETIRED_MODEL_LINE}`)
+}
+
 function nothingInstalled(kind: 'VAE' | 'text encoder', specs: (ComponentSpec | undefined)[]): Error {
+  // MiniMax H3 is no longer offered: the file is named, no source is.
+  const retired = specs.find((x) => isRetiredModelName(x?.downloadFilename))
+  if (retired) return retiredFileMissing(`${kind}`, retired.downloadFilename)
   const files = specs.filter((x): x is ComponentSpec => !!x).map((x) => `"${x.downloadFilename}"`)
   if (files.length === 0) return new Error(`No ${kind} models found. Download a ${kind} for your model type from the Model Manager.`)
   return new Error(`No ${kind} models found. Download ${files.join(' and ')} from the Model Manager.`)
@@ -2054,13 +2071,20 @@ export async function findMatchingVAE(modelType: ModelType): Promise<string> {
     if (match) return match
     throw new Error(`No LTX 2.5 video VAE found. Download "ltx-2.5-video-vae-bf16.safetensors" from the Model Manager.`)
   }
+  if (modelType === 'minimaxh3image') {
+    // MiniMax H3 Image has an autoencoder of its own; the H3 video VAE has a
+    // different latent and is never taken for it.
+    const match = vaes.find(v => isMinimaxH3ImageName(v) && lower(v).includes('vae'))
+    if (match) return match
+    throw retiredFileMissing('image VAE', 'minimax_h3_image_vae_fp16.safetensors')
+  }
   if (modelType === 'minimaxh3') {
     // The VIDEO autoencoder; the audio one is a second file of its own
     // (findMiniMaxAudioVAE), and the two are not interchangeable.
     const match = vaes.find(v => lower(v).includes('minimax_h3_video_vae'))
       || vaes.find(v => lower(v).includes('minimax') && lower(v).includes('video'))
     if (match) return match
-    throw new Error(`No MiniMax H3 video VAE found. Download "minimax_h3_video_vae_int8_convrot.safetensors" from the Model Manager.`)
+    throw retiredFileMissing('video VAE', 'minimax_h3_video_vae_int8_convrot.safetensors')
   }
   if (modelType === 'mochi') {
     const match = vaes.find(v => lower(v).includes('mochi'))
@@ -2156,7 +2180,7 @@ export async function findMiniMaxAudioVAE(): Promise<string> {
   const match = vaes.find(v => v.toLowerCase().includes('minimax_h3_audio_vae'))
     || vaes.find(v => v.toLowerCase().includes('minimax') && v.toLowerCase().includes('audio'))
   if (match) return match
-  throw new Error(`No MiniMax H3 audio VAE found. Download "minimax_h3_audio_vae_fp32.safetensors" from the Model Manager.`)
+  throw retiredFileMissing('audio VAE', 'minimax_h3_audio_vae_fp32.safetensors')
 }
 
 /**
@@ -2282,13 +2306,17 @@ export async function findMatchingCLIP(modelType: ModelType, activeModelName?: s
     if (match) return match
     throw new Error(`No LTX 2.5 text encoder found. Download "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors" from the Model Manager.`)
   }
-  if (modelType === 'minimaxh3') {
+  if (modelType === 'minimaxh3' || modelType === 'minimaxh3image') {
     // Qwen3-VL 32B, tuned for H3 and shipped only under H3's own names. The
-    // nvfp4 tier is the one the official templates load (15.7 GB).
-    const match = clips.find(c => isMinimaxEncoder(c) && lower(c).includes('nvfp4'))
-      || clips.find(c => isMinimaxEncoder(c))
+    // nvfp4 tier is the one the official templates load (15.7 GB). H3 Image
+    // reads the same file. Its prompt enhancer (qwen3.8_27b_minimax_h3_image_pe)
+    // carries "minimax" in its name too, but is a text writer, not this encoder.
+    const h3Encoder = (c: string) => isMinimaxEncoder(c) && !/(^|[^a-z])pe([^a-z]|$)/.test(lower(c))
+    const match = clips.find(c => h3Encoder(c) && lower(c).includes('nvfp4'))
+      || clips.find(c => h3Encoder(c) && lower(c).includes('qwen3vl'))
+      || clips.find(c => h3Encoder(c))
     if (match) return match
-    throw new Error(`No MiniMax H3 text encoder found. Download "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors" from the Model Manager.`)
+    throw retiredFileMissing('text encoder', 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors')
   }
   if (modelType === 'mochi') {
     const match = clips.find(c => lower(c).includes('t5') && !lower(c).includes('umt5') && !lower(c).includes('oldt5'))
@@ -2398,12 +2426,16 @@ export async function submitWorkflow(
   if (!res.ok) {
     const rawText = await res.text().catch(() => '')
     let errMsg = `HTTP ${res.status}`
+    let parsed: unknown = null
     try {
-      errMsg = describeComfyRejection(JSON.parse(rawText)) ?? errMsg
+      parsed = JSON.parse(rawText)
+      errMsg = describeComfyRejection(parsed) ?? errMsg
     } catch {
       if (rawText) errMsg = rawText.slice(0, 500)
     }
     log.error('comfyui.workflow_rejected', { errMsg, workflow: JSON.stringify(placed).slice(0, 2000) })
+    const misplaced = await misplacedModelNote(parsed)
+    if (misplaced) throw new Error(misplaced)
     throw new Error(`ComfyUI rejected workflow: ${errMsg}`)
   }
   const data: unknown = await res.json()
@@ -2419,10 +2451,33 @@ export async function submitWorkflow(
     if (promptId) await abandonPrompt(promptId)
     const errMsg = describeComfyRejection(data) ?? 'some output nodes failed validation'
     log.error('comfyui.workflow_rejected', { errMsg, partial: true, workflow: JSON.stringify(placed).slice(0, 2000) })
+    const misplaced = await misplacedModelNote(data)
+    if (misplaced) throw new Error(misplaced)
     throw new Error(`ComfyUI rejected workflow: ${errMsg}`)
   }
   if (!promptId) throw new Error('ComfyUI accepted the workflow but returned no prompt_id.')
   return promptId
+}
+
+/** GitHub #234: a main model in the other main-model folder, named with
+ *  where it belongs (lib/misplaced-model.ts). Null for every other rejection,
+ *  and when the folder lists cannot be read. */
+async function misplacedModelNote(rejection: unknown): Promise<string | null> {
+  const missed = missedModelsOf(rejection)
+  if (missed.length === 0) return null
+  try {
+    const [checkpoints, diffusionModels] = await Promise.all([getCheckpoints(), getDiffusionModels()])
+    for (const m of missed) {
+      const note = misplacedModelMessage(m, { checkpoints, diffusionModels })
+      if (note) {
+        log.warn('comfyui.model_in_wrong_folder', { file: m.file, loader: m.loader, belongsIn: m.folder })
+        return note
+      }
+    }
+  } catch (err) {
+    log.warn('comfyui.misplaced_check_failed', { err })
+  }
+  return null
 }
 
 /**

@@ -2372,6 +2372,61 @@ mod openai_bridge_live_tests {
             println!("LIVE chat(stream ndjson) ok: 2 lines, first content = {:?}", l0["message"]["content"]);
         });
     }
+
+    /// Inkling 2 Mini from a phone: what the phone sends, through the real
+    /// translation, against a llama-server that has the model loaded.
+    ///   LU_OPENAI_LIVE_BASE=http://127.0.0.1:18153/v1 cargo test inkling_through_remote -- --ignored
+    #[test]
+    #[ignore]
+    fn inkling_through_remote_lists_thinks_calls_tools_and_sees() {
+        const RED_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKklEQVR42mN4ICBAU8QwasGoBaMWjFowasGoBaMWjFowasGoBaMWDBULALgcAD3G45K4AAAAAElFTkSuQmCC";
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let base = std::env::var("LU_OPENAI_LIVE_BASE").expect("LU_OPENAI_LIVE_BASE");
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(300))
+                .build()
+                .unwrap();
+            let raw: serde_json::Value =
+                client.get(format!("{base}/models")).send().await.unwrap().json().await.unwrap();
+            let tags = openai_models_to_ollama_tags(&raw);
+            let name = tags["models"][0]["name"].as_str().unwrap().to_string();
+            assert!(name.to_lowercase().contains("inkling"), "loaded model: {name}");
+
+            let ask = |body: serde_json::Value| {
+                let client = client.clone();
+                let url = format!("{base}/chat/completions");
+                let wire = ollama_chat_req_to_openai(&body, is_lan_base(&base));
+                async move {
+                    let resp: serde_json::Value =
+                        client.post(url).json(&wire).send().await.unwrap().json().await.unwrap();
+                    openai_resp_to_ollama_message(&resp)
+                }
+            };
+            let opts = serde_json::json!({"num_predict": 800, "temperature": 0, "seed": 7});
+
+            let on = ask(serde_json::json!({"model": name, "stream": false, "think": true, "options": opts,
+                "messages": [{"role": "user", "content": "What is 17 + 26?"}]})).await;
+            assert!(on["message"]["content"].as_str().unwrap_or("").contains("43"), "{on}");
+            assert!(!on["message"]["thinking"].as_str().unwrap_or("").is_empty(), "{on}");
+
+            let off = ask(serde_json::json!({"model": name, "stream": false, "think": false, "options": opts,
+                "messages": [{"role": "user", "content": "What is 17 + 26?"}]})).await;
+            let text = off["message"]["content"].as_str().unwrap_or("");
+            assert!(text.contains("43") && !text.contains("<|"), "{off}");
+
+            let tool = ask(serde_json::json!({"model": name, "stream": false, "think": true, "options": opts,
+                "tools": [{"type": "function", "function": {"name": "get_weather",
+                    "description": "Get the current weather for a city",
+                    "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}],
+                "messages": [{"role": "user", "content": "What is the weather in Paris? Use the tool."}]})).await;
+            assert_eq!(tool["message"]["tool_calls"][0]["function"]["name"], "get_weather", "{tool}");
+
+            let image = ask(serde_json::json!({"model": name, "stream": false, "think": true, "options": opts,
+                "messages": [{"role": "user", "content": "What colour fills this image? One word.", "images": [RED_PNG]}]})).await;
+            assert!(image["message"]["content"].as_str().unwrap_or("").to_lowercase().contains("red"), "{image}");
+        });
+    }
 }
 
 // ─── WebSocket proxy (ComfyUI progress) ───
@@ -2822,7 +2877,21 @@ fn config_payload(model: String, system_prompt: String) -> serde_json::Value {
         // is built in the page on every turn instead of being frozen into the
         // one config fetch a session makes.
         "platformLine": host_platform_prompt_line(),
+        // 3.1.2 (A39, GitHub #257): whether the page and the phone app may put
+        // that clock in at all. Settings → Agent on the desktop decides.
+        "shareClock": SHARE_CLOCK.load(std::sync::atomic::Ordering::Relaxed),
     })
+}
+
+/// 3.1.2 (A39, GitHub #257): "Share date and time with the model" from the
+/// desktop's settings. Like the page title, the frontend hands it over at boot
+/// and on every change (lib/clock-share-remote.ts); on until it says otherwise.
+static SHARE_CLOCK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+#[tauri::command]
+pub fn set_remote_share_clock(share: bool) -> Result<(), String> {
+    SHARE_CLOCK.store(share, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
 }
 
 async fn handle_config(AxumState(state): AxumState<RemoteState>) -> Json<serde_json::Value> {
@@ -7170,6 +7239,20 @@ mod mobile_environment_tests {
         // The clock is deliberately NOT in here: it is fetched once per
         // session and would be stale within the minute.
         assert!(body.get("clockLine").is_none(), "the clock must not be frozen into config");
+    }
+
+    #[test]
+    fn the_config_says_whether_the_clock_may_be_shared() {
+        // 3.1.2 (A39): on by default, off once the desktop switched it off.
+        // One test for both states, so a parallel test never sees it flipped.
+        assert_eq!(super::config_payload(String::new(), String::new())["shareClock"], true);
+        super::set_remote_share_clock(false).unwrap();
+        let off = super::config_payload(String::new(), String::new());
+        super::set_remote_share_clock(true).unwrap();
+        assert_eq!(off["shareClock"], false);
+        let html = page();
+        assert!(html.contains("hostShareClock = cfg.shareClock !== false;"), "the page must read the switch");
+        assert!(html.contains("if(hostShareClock) parts.push(hostClockLine());"), "the page must honour the switch");
     }
 
     #[test]

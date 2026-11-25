@@ -1,7 +1,9 @@
 import type { CreateBackend, CreateIntent } from '../../../stores/createStore'
-import { runnableVideoLaneModels } from '../../../api/comfyui'
+import { swapLocalModels } from '../../../lib/create/swap-local'
+import { runnableVideoLaneModels, sceneLaneModels } from '../../../api/comfyui'
 import { imageLaneModels } from '../../../lib/image-engines'
 import type { IntentMeta } from './intents'
+import type { StageAnswer } from '../../../lib/create/stage-answers'
 
 /**
  * Wann die Buehne statt eines Motivs die Einrichtungskarte zeigt.
@@ -53,12 +55,16 @@ export interface StageGateInput {
    *  sagte die Sonde `false`, und die Buehne bot einen 6,5-GB-Download an,
    *  waehrend oben "ComfyUI is starting up." stand und die Modelle laengst da
    *  waren. Ein Klick haette Juggernaut ein zweites Mal geladen. */
-  comfyStarting?: boolean
+  comfyStarting?: boolean | null
   modelsLoaded: boolean
   /** Wie viele Modelle diese Spur tatsaechlich anbieten kann. */
   laneModelCount: number
   /** ComfyUI answered — a Mac with a connected instance is a Comfy host too. */
   comfyRunning?: boolean
+  /** This host answers from MLX: `mlxMissing === null` means "not read yet". */
+  mlxHost?: boolean
+  /** The model list failed for good: no answer is coming, so nothing waits. */
+  modelsFailed?: boolean
 }
 
 /**
@@ -73,6 +79,17 @@ export interface StageGateInput {
  * Karte bei jedem Start kurz auf.
  */
 export function stageShowsSetupCard(i: StageGateInput): boolean {
+  return stageSetupAnswer(i) === 'setup'
+}
+
+/**
+ * The same rule with its third answer: `unknown` while the probe that decides
+ * it is still out. The stage then shows no card and no work surface it might
+ * have to take back (lib/create/stage-answers).
+ */
+export function stageSetupAnswer(i: StageGateInput): StageAnswer {
+  if (i.backend !== 'local' || !i.requiresModels) return 'ready'
+  if (i.mlxHost && i.mlxMissing === null && !i.comfyRunning) return 'unknown'
   const mlxOnly = !!i.mlxMissing && !i.comfyRunning
   // Die Videospur zaehlt auch auf dem Mac ueber die Spur und nicht ueber die
   // rohe Liste: ein Mac, dessen einziges Videomodell ein Startbild braucht
@@ -86,14 +103,16 @@ export function stageShowsSetupCard(i: StageGateInput): boolean {
         // and its list stays empty until the LoRA is installed.
         : i.requiresModels === 'motion' ? i.modelsLoaded && i.laneModelCount === 0
           : false)
-  if (macMissing) return true
-  const comfyHost = i.mlxMissing === null || !!i.comfyRunning
-  return (
-    comfyHost && i.backend === 'local' && !!i.requiresModels && (
-      (i.connected === false && !i.comfyStarting) ||
-      (i.connected === true && i.modelsLoaded && i.laneModelCount === 0)
-    )
-  )
+  if (macMissing) return 'setup'
+  if (mlxOnly) {
+    // A Mac with neither image nor video never sets modelsLoaded.
+    const listed = i.modelsLoaded || (i.mlxMissing!.image && i.mlxMissing!.video)
+    return !listed && (i.requiresModels === 'video' || i.requiresModels === 'motion') ? 'unknown' : 'ready'
+  }
+  if (i.connected === null) return 'unknown'
+  if (i.connected === false) return i.comfyStarting === null || i.comfyStarting === true ? 'unknown' : 'setup'
+  if (!i.modelsLoaded) return i.modelsFailed ? 'ready' : 'unknown'
+  return i.laneModelCount === 0 ? 'setup' : 'ready'
 }
 
 /**
@@ -128,5 +147,11 @@ export function laneModelCount(
   // Dasselbe fuer Edit auf dem Mac: dort zaehlen nur die Modelle, die ein Bild
   // nehmen. Eine ComfyUI-Liste bleibt, wie sie ist.
   if (requiresModels === 'image') return imageLaneModels(lists.image as never, intent).length
+  // Swap runs on the Animate models of the motion list only (VACE cannot keep
+  // the scene around a person), so a box with VACE alone gets the download.
+  if (intent === 'swap_character') return swapLocalModels(lists.motion as never).length
+  // Scene to Video counts only the VACE files of the Motion list: with only
+  // Wan Animate there, the Stage offers the VACE download.
+  if (intent === 'scene') return sceneLaneModels((lists.motion ?? []) as never).length
   return (lists[requiresModels] ?? []).length
 }

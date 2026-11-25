@@ -41,6 +41,8 @@ mod media_store;
 #[cfg(test)]
 mod mobile_page;
 mod onboarding_window;
+#[cfg(desktop)]
+mod window_place;
 mod os_error;
 mod os_paths;
 mod phone_log;
@@ -57,6 +59,9 @@ mod remote_seal;
 mod shown_path;
 #[cfg(feature = "e2e-remote")]
 mod e2e_remote;
+// TEST-LOGIN: test builds only, see test_login.rs.
+#[cfg(feature = "test-login")]
+mod test_login;
 mod runtime_root;
 mod storage_move;
 mod system_tray;
@@ -612,6 +617,10 @@ pub fn run() {
     // PYTHONPATH into its own mount, and every python3 we start inherits them
     // and dies on "No module named 'encodings'".
     python::sanitize_appimage_python_env();
+    // 3.1.3: the Git that "Install Git" put into the data folder (Windows),
+    // first on PATH before anything clones. A no-op everywhere else.
+    #[cfg(desktop)]
+    commands::install::put_own_git_on_path();
 
     // Bound to a named local, not `let _ = ...`: `_log_guard` lives until the
     // end of `run`, i.e. as long as the app runs, while `_` would drop the
@@ -761,6 +770,10 @@ pub fn run() {
             #[cfg(desktop)]
             commands::install::cancel_comfyui_install,
             #[cfg(desktop)]
+            commands::install_jobs::install_jobs,
+            #[cfg(desktop)]
+            commands::install_jobs::cancel_install_job,
+            #[cfg(desktop)]
             commands::install::install_ollama,
             #[cfg(desktop)]
             commands::install::install_ollama_status,
@@ -809,11 +822,17 @@ pub fn run() {
             commands::install::install_tts_status,
             #[cfg(desktop)]
             commands::install::check_git_installed,
+            #[cfg(desktop)]
+            commands::install::install_git,
+            #[cfg(desktop)]
+            commands::install::install_git_status,
             // Local character trainer (musubi-tuner)
             #[cfg(desktop)]
             commands::trainer::install_character_trainer,
             #[cfg(desktop)]
             commands::trainer::character_trainer_status,
+            #[cfg(desktop)]
+            commands::trainer::trainer_setup_plan,
             #[cfg(desktop)]
             commands::trainer::stage_training_image,
             #[cfg(desktop)]
@@ -1273,6 +1292,8 @@ pub fn run() {
             commands::search::web_search,
             commands::search::web_fetch,
             commands::search::web_research,
+            // A33: the spelling suggestions of LU's own right-click menu.
+            commands::spell::spell_suggestions,
             commands::browser::browser_open,
             commands::browser::browser_snapshot,
             commands::browser::browser_scroll,
@@ -1300,6 +1321,7 @@ pub fn run() {
             commands::remote::disconnect_remote_device,
             commands::remote::set_remote_permissions,
             commands::remote::set_remote_page_title,
+            commands::remote::set_remote_share_clock,
             commands::remote::start_tunnel,
             commands::remote::stop_tunnel,
             commands::remote::tunnel_status,
@@ -1326,6 +1348,9 @@ pub fn run() {
             commands::remote_chats::remote_chats_reply,
             #[cfg(feature = "e2e-remote")]
             e2e_remote::remote_e2e_mode,
+            // TEST-LOGIN: test builds only (test_login.rs).
+            #[cfg(feature = "test-login")]
+            test_login::test_login_take,
             commands::remote_create::remote_create_cancel,
             commands::remote_create::remote_create_snapshot,
             // Proxy
@@ -1386,6 +1411,9 @@ pub fn run() {
             commands::mobile_native::remote_client_request,
             #[cfg(mobile)]
             commands::mobile_native::remote_client_cancel,
+            // The update hint of the open Android package (commands/app_update.rs).
+            #[cfg(mobile)]
+            commands::app_update::app_latest_release,
             // The sealed channel to a desktop (REMOTE-PROTOKOLL v2), the only
             // way to a desktop over the internet (commands/remote_sealed.rs).
             #[cfg(mobile)]
@@ -1416,6 +1444,9 @@ pub fn run() {
             commands::saved_characters_backup::saved_characters_backup_read_photo,
         ])
         .setup(|app| {
+            // TEST-LOGIN: test builds only (test_login.rs).
+            #[cfg(feature = "test-login")]
+            test_login::read_token_if_asked();
             // A phone has no HOME the `dirs` crate could answer from. The
             // one folder the system gives the app is known from here on,
             // and every path helper in os_paths reads it.
@@ -1609,7 +1640,13 @@ pub fn run() {
                 let w = window.clone();
                 let hide_gen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
                 window.on_window_event(move |event| {
+                    // 3.1.3: where the user puts the window is where it opens
+                    // next time (`window_place`).
+                    if matches!(event, tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)) {
+                        window_place::remember(&w);
+                    }
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        window_place::flush();
                         api.prevent_close();
                         // No tray (GH #204): a hidden window could never come
                         // back, so the close button is the Quit item.
@@ -1725,6 +1762,8 @@ pub fn run() {
             // server, the trainer and the MLX sidecar all running. Proved
             // live on 2026-07-28: app gone, the MLX Python still resident.
             if let tauri::RunEvent::Exit = event {
+                #[cfg(desktop)]
+                window_place::flush();
                 if let Some(state) = app.try_state::<AppState>() {
                     state.shutdown_subprocesses();
                 }

@@ -1,3 +1,5 @@
+import { WorkspaceAskCard } from './WorkspaceAskCard'
+import type { Resend } from '../../lib/agent-workspace-ask'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { PlanBar, PlanHistoryRow, usePlanHistory } from './PlanBar'
 import type { CSSProperties } from 'react'
@@ -18,6 +20,7 @@ import { useAgentModeStore } from '../../stores/agentModeStore'
 import { latestRefusalId, refusalNoticeApplies } from '../../lib/refusal-detect'
 import { GreetingSwitcher } from './GreetingSwitcher'
 import { forkMarks } from '../../lib/chat-forks'
+import { useChatNoticeStore, CHAT_NOTICE_MS } from '../../stores/chatNoticeStore'
 import { hasLaterRounds, isSpeakerTurn, laterAnswersInRound } from '../../lib/group-rounds'
 import { historyTrimNote } from '../../lib/history-trim-note'
 import { displayModelName } from '../../api/providers'
@@ -84,9 +87,11 @@ interface Props {
   onReject?: () => void
   /** Sends a message in this chat: the pinned plan's "Continue". */
   onContinuePlan?: (text: string) => void
+  /** Sends the message that waited for the workspace question (WorkspaceAskCard). */
+  onResendParked?: Resend
 }
 
-export function MessageList({ isGenerating, isThisChatGenerating, isLoadingModel, onRegenerate, onRegenerateSpeaker, onEdit, pendingApprovalId, onApprove, onReject, onContinuePlan }: Props) {
+export function MessageList({ isGenerating, isThisChatGenerating, isLoadingModel, onRegenerate, onRegenerateSpeaker, onEdit, pendingApprovalId, onApprove, onReject, onContinuePlan, onResendParked }: Props) {
   const showTyping = isThisChatGenerating ?? isGenerating
   // The question of the first use of computer control is open in this conversation.
   const chatAsked = useComputerStore((s) => !!s.chatAsk && !s.chatAsk.voice && (s.chatAsk.conversationId === null || s.chatAsk.conversationId === useChatStore.getState().activeConversationId))
@@ -199,7 +204,13 @@ export function MessageList({ isGenerating, isThisChatGenerating, isLoadingModel
 
   const handleBranch = useCallback((messageId: string) => {
     const c = bind.current.conversation
-    if (c) useChatStore.getState().duplicateConversation(c.id, { endAt: messageId })
+    if (!c) return
+    // 3.1.3 (David on purple): from the last answer the new chat looks exactly
+    // like the old one, so without a word the click seemed to do nothing.
+    const id = useChatStore.getState().duplicateConversation(c.id, { endAt: messageId })
+    const title = useChatStore.getState().conversations.find((x) => x.id === id)?.title
+    if (id) useChatNoticeStore.getState().show('chat-branched', `New chat opened: ${title}. The original stays as it was.`, 'ruhig', CHAT_NOTICE_MS)
+    else useChatNoticeStore.getState().show('chat-branched', 'This message could not be branched.', 'fehler', CHAT_NOTICE_MS)
   }, [])
 
   // Which message carries the switch of which kept version. Recomputed only
@@ -340,7 +351,9 @@ export function MessageList({ isGenerating, isThisChatGenerating, isLoadingModel
                 // Switching while a turn streams would move the bubble the
                 // stream writes into out of the thread.
                 onSwitchFork={isGenerating || readOnly ? undefined : handleSwitchFork}
-                onBranch={readOnly ? undefined : handleBranch}
+                // Not while this chat writes: the copy would hold half an answer
+                // and none of the run's tool steps, which are saved at its end.
+                onBranch={readOnly || isThisChatGenerating ? undefined : handleBranch}
                 readOnly={readOnly}
                 declined={message.id === declinedId}
                 speakerName={speakerNameOf(message, speakers, authors)}
@@ -373,6 +386,12 @@ export function MessageList({ isGenerating, isThisChatGenerating, isLoadingModel
             loadingModel={isLoadingModel}
             message={lastMessage}
           />
+        )}
+        {/* 3.1.2: the first agent message waits here for "Sandbox or Folder". */}
+        {!readOnly && onResendParked && (
+          <div className="pl-12 pr-3 pt-1">
+            <WorkspaceAskCard conversationId={conversation.id} resend={onResendParked} />
+          </div>
         )}
         {/* The run's plan, pinned under the newest message (PlanBar.tsx). */}
         {!readOnly && <PlanBar conversationId={conversation.id} onContinue={onContinuePlan} />}

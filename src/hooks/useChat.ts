@@ -1,6 +1,8 @@
 import { useState, useCallback, useEffect } from "react"
+import { noteSentSystemPrompt } from '../stores/contextBreakdownStore'
 import { create } from "zustand"
 import { frameFlush } from '../lib/frame-flush'
+import { beginReplyWrite } from '../stores/replyWriteStore'
 import { sendWindowFor } from '../lib/send-window'
 import { markCannotThink } from '../lib/model-compatibility'
 import { v4 as uuid } from "uuid"
@@ -21,6 +23,7 @@ import { NO_EMBED_MODEL_MOBILE_MESSAGE, isSingleSlotConflict } from "../lib/mode
 import { singleModelSlot } from "../lib/capabilities"
 import { continuesInPlace, markContinuation, wireForContinue, withLead } from "../lib/continue-answer"
 import { isMobile } from "../lib/device-kind"
+import { hasOpenAsk, parkForWorkspaceAsk, workspaceAskNeeded } from "../lib/agent-workspace-ask"
 import { withoutUnansweredTurns } from "../lib/unanswered-turns"
 import { fitChatForPhone, meterOfFit, phoneFitApplies } from "../lib/phone-context-fit"
 import { usePhoneMeterStore } from "../stores/phoneMeterStore"
@@ -84,7 +87,7 @@ import { shouldDowngradeThinking, engineDeniedThinking } from './codex/thinking-
 import { ProviderError } from '../api/providers/types'
 import { useBackgroundAgentWake } from './useBackgroundAgentWake'
 import { buildChatSystemPrompt } from '../lib/system-prompt'
-import { withChatPersona, speakerSamplingOptions, plainChatSpeaker, speakerPersonaFor } from '../lib/chat-persona'
+import { withChatPersona, speakerSamplingOptions, plainChatSpeaker, speakerPersonaFor, extractionPersonaOf } from '../lib/chat-persona'
 import { personaNoteOf } from '../lib/persona-note'
 import { toolRegistry } from '../api/mcp'
 import { syncCreateTools } from '../api/mcp/create-tools'
@@ -154,6 +157,17 @@ export function wantsWatcherTools(content: string, history: readonly Message[], 
  *  group is talk between models; every knob it skips belongs to the
  *  single-model paths and their tests. */
 async function runGroupTurn(convId: string, model: string, allModels: string[], abort: AbortController) {
+  // Held to the very end of the turn, so Edit stays shut until nothing can
+  // write into this bubble any more (stores/replyWriteStore.ts).
+  let endWrite = () => {}
+  try {
+    await writeGroupTurn(convId, model, allModels, abort, (id) => { endWrite = beginReplyWrite(id) })
+  } finally {
+    endWrite()
+  }
+}
+
+async function writeGroupTurn(convId: string, model: string, allModels: string[], abort: AbortController, replyStarted: (id: string) => void) {
   const { settings } = useSettingsStore.getState()
   const conv = useChatStore.getState().conversations.find((c) => c.id === convId)
   if (!conv) return
@@ -176,6 +190,7 @@ async function runGroupTurn(convId: string, model: string, allModels: string[], 
     timestamp: Date.now(),
   }
   useChatStore.getState().addMessage(convId, assistantMessage)
+  replyStarted(assistantMessage.id)
 
   // Der Grundtext gilt unabhaengig vom Personenschalter: der Schalter
   // entscheidet ueber die PERSON, nicht darueber, ob ueberhaupt ein Systemtext
@@ -335,6 +350,8 @@ async function runGroupTurn(convId: string, model: string, allModels: string[], 
     // larger than its context, because its own count ran ahead of the
     // estimate. Cut once under what it named and send again; the refusal
     // comes before any token, so nothing shows twice.
+    // W48: the member's own system prompt, for the context list.
+    noteSentSystemPrompt(conv.id, messages)
     async function* streamWithOverflowRetry() {
       try {
         yield* provider.chatStream(modelId, messages, streamOpts)
@@ -1063,6 +1080,19 @@ export function useChat() {
         store.addMessage(convId, { id: uuid(), role: 'assistant', content: res.message, timestamp: Date.now() })
         return
       }
+      // 3.1.2: no pop-up on switching Agent on any more. The first message of
+      // a chat without a workspace waits here, in the thread, under a card
+      // that asks "Sandbox or Folder" (lib/agent-workspace-ask.ts). After the
+      // choice the same message is sent again and lands right back here.
+      {
+        const convId = store.activeConversationId
+        // A message sent while the card is still open joins the parked one.
+        const reason = hasOpenAsk(convId) ? '' : await workspaceAskNeeded(convId)
+        if (reason !== null) {
+          parkForWorkspaceAsk(convId, content, reason ?? '', images, files, media)
+          return
+        }
+      }
       if (slash) {
         // /loop seeds the driver so pass 2 onward fires by itself, exactly as
         // it does in Code. Nobody should have to re-type a loop.
@@ -1236,8 +1266,10 @@ export function useChat() {
     // right after this comment, and the `cancelled-while-queued` follow-up
     // at the end all check `activeChatRuns.get(convId) === myRunToken`
     // first); it only fires on a path the body never reaches.
+    let endReplyWrite = () => {}
     try {
     const memoryScope = store.conversations.find(c => c.id === convId)?.memoryScope
+    const memoryChatOff = store.conversations.find(c => c.id === convId)?.memoryOff === true
     // GH #171: an attached text goes out whole when it fits the model's
     // context, and as far as it fits otherwise, with a line saying so.
     const sendFiles = await fitFilesForSend({
@@ -1282,6 +1314,7 @@ export function useChat() {
       timestamp: Date.now(),
     }
     useChatStore.getState().addMessage(convId, assistantMessage)
+    endReplyWrite = beginReplyWrite(assistantMessage.id)
 
     const conv = useChatStore.getState().conversations.find((c) => c.id === convId)
     if (!conv) {
@@ -1412,7 +1445,7 @@ export function useChat() {
       // and prime the model to attempt tools it doesn't have here (live find
       // 2026-06-11: gemma4 answered web-search questions with a silent empty
       // bubble because it spent the whole turn "deciding to call web_search").
-      const selectedMemory = await useMemoryStore.getState().getMemoryContextAsync(content, contextTokens, { excludeToolResults: true, scope: memoryScope })
+      const selectedMemory = await useMemoryStore.getState().getMemoryContextAsync(content, contextTokens, { excludeToolResults: true, scope: memoryScope, conversationId: convId, chatOff: memoryChatOff })
       // Behind the newest message, not in the system prompt: the pick
       // changes with every message (lib/turn-context.ts, A7).
       memoryContext = selectedMemory.text
@@ -1806,6 +1839,9 @@ export function useChat() {
       // payload the server just refused. The 400 fires on request
       // validation, before any token streams, so a retry never duplicates
       // visible output. The conversation itself is never touched.
+      // W48 (GitHub #257): the system prompt this request carries, for the
+      // context list.
+      noteSentSystemPrompt(convId, messages)
       async function* createStreamWithFallback() {
         // One card and a render from the chat holds it (3.0.8, A2): wait
         // visibly here instead of inside the provider without a word.
@@ -2272,7 +2308,9 @@ export function useChat() {
       // Auto-extract memories (fire-and-forget)
       const memSettings = useMemoryStore.getState().settings
       if (memSettings.autoExtractEnabled && memSettings.autoExtractInAllModes && run.content.trim() && run.convId) {
-        extractAndSave(content, run.content, run.convId, { scope: memoryScope }).catch(() => {})
+        const { personas, activePersonaId } = useSettingsStore.getState()
+        const persona = extractionPersonaOf(useChatStore.getState().conversations.find((c) => c.id === run.convId), personas, activePersonaId, useSettingsStore.getState().settings.personasEnabled !== false)
+        extractAndSave(content, run.content, run.convId, { scope: memoryScope, persona }).catch(() => {})
       }
     }
     })
@@ -2296,6 +2334,7 @@ export function useChat() {
         setIsGenerating(activeChatRuns.size > 0)
       }
       clearSendPending(convId, myRunToken)
+      endReplyWrite()
     }
     // Alle drei Referenzen sind konstant: `extractAndSave` kommt aus dem
     // Modul-Singleton MEMORY_API, `runGroupRound` ist ein useCallback mit

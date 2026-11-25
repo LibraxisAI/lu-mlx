@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 #[cfg(target_os = "windows")]
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -82,6 +82,11 @@ pub(super) fn download_file_blocking(
             .map_err(|e| format!("Read error: {}", os_error::english(&e)))?;
         if n == 0 {
             break;
+        }
+        if install_state.lock().map(|s| s.status == "cancelling").unwrap_or(false) {
+            drop(file);
+            let _ = fs::remove_file(dest);
+            return Err("cancelled".to_string());
         }
         std::io::Write::write_all(&mut file, &buf[..n])
             .map_err(|e| format!("Write: {}", os_error::english(&e)))?;
@@ -218,7 +223,7 @@ fn authenticode_verdict(path: &Path) -> SignatureVerdict {
     // -LiteralPath so a path with brackets is not read as a wildcard; single
     // quotes doubled so a quote in the path cannot end the string early.
     let escaped = path.to_string_lossy().replace('\'', "''");
-    let mut cmd = Command::new("powershell");
+    let mut cmd = crate::process_util::hidden_command("powershell");
     cmd.args([
         "-NoProfile",
         "-NonInteractive",

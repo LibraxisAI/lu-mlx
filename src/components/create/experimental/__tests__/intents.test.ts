@@ -23,17 +23,12 @@ const teasers = (backend: 'local' | 'cloud', mlxHost: boolean) =>
   visibleIntents(backend, mlxHost, true).filter((m) => isIntentLocked(m, backend, mlxHost)).map((m) => m.id)
 
 describe('intent cloud gating', () => {
-  it('eraser has a local ComfyUI lane in the Mac fork only', () => {
+  it('eraser is hosted-only everywhere since 3.1.3', () => {
     expect(INTENT_MAP.eraser.cloudOnly).toBe(true)
-    expect(INTENT_MAP.eraser.hasLocalLane).toBe(true)
-    expect(INTENT_MAP.eraser.localLaneMacOnly).toBe(true)
-    // Windows/Linux: still the LU Cloud teaser (the local version is a
-    // plain checkpoint inpaint, weaker than the hosted tool).
+    expect(INTENT_MAP.eraser.hasLocalLane).toBeUndefined()
     expect(isIntentLocked(INTENT_MAP.eraser, 'local', false)).toBe(true)
     expect(isIntentAvailable('eraser', 'local', false)).toBe(false)
-    // Mac with its own ComfyUI connected (not MLX-only): a real local tab.
-    expect(isIntentLocked(INTENT_MAP.eraser, 'local', false, false, false, false, false, false, false, true)).toBe(false)
-    expect(isIntentAvailable('eraser', 'local', false, false, false, false, false, false, false, true)).toBe(true)
+    expect(isIntentAvailable('eraser', 'local', false, false, false, false, false, false, false, true)).toBe(false)
   })
 
   it('upscale keeps its hosted endpoint and runs locally too since 3.0.7', () => {
@@ -61,14 +56,12 @@ describe('intent cloud gating', () => {
     expect(fromMeta).toEqual([...LOCAL_LANE_OPS, ...LOCAL_UTILITY_OPS].sort())
   })
 
-  it('the local IntentBar filter keeps the classic tabs, Enhance, lanes and 3D selectable (and eraser on Mac+ComfyUI)', () => {
-    const everywhere = INTENTS.filter((m) => !m.cloudOnly || (m.hasLocalLane && !m.localLaneMacOnly)).map((m) => m.id)
-    expect(everywhere).toEqual(['image', 'edit', 'removebg', 'upscale', 'video', 'animate', 'character', 'lipsync', 'music', 'extend', 'motion', '3d'])
-    // Windows/Linux ComfyUI host
-    expect(unlocked('local', false)).toEqual(everywhere)
-    // Mac with ComfyUI connected also runs eraser locally
-    const macComfy = INTENTS.filter((m) => !isIntentLocked(m, 'local', false, false, false, false, false, false, false, true)).map((m) => m.id)
-    expect(macComfy).toEqual(['image', 'edit', 'removebg', 'upscale', 'eraser', 'video', 'animate', 'character', 'lipsync', 'music', 'extend', 'motion', '3d'])
+  it('the local IntentBar filter keeps the 5 classic tabs, Enhance, Scene, the 5 lanes and 3D selectable (Swap is a cloud action in 3.1.3)', () => {
+    const selectable = INTENTS.filter((m) => !m.cloudOnly || m.hasLocalLane).map((m) => m.id)
+    // Scene to Video (3.1.3) runs Wan 2.1 VACE in ComfyUI, after Animate as on the web.
+    expect(selectable).toEqual(['image', 'edit', 'removebg', 'upscale', 'video', 'animate', 'scene', 'character', 'lipsync', 'music', 'extend', 'motion', '3d'])
+    // …and that IS what the pure filter reports for a ComfyUI local host.
+    expect(unlocked('local', false)).toEqual(selectable)
   })
 
   it('local edit gates on the inpaint capability + image models', () => {
@@ -94,6 +87,10 @@ describe('intent cloud gating', () => {
     // Motion gates on the VACE/Animate model list AND the DWPose pack.
     expect(INTENT_MAP.motion.requiresModels).toBe('motion')
     expect(INTENT_MAP.motion.capability).toBe('dwpose')
+    // Scene to Video gates on the VACE files of the same list and on the
+    // depth extractor of the same pack (laneModelCount counts VACE only).
+    expect(INTENT_MAP.scene.requiresModels).toBe('motion')
+    expect(INTENT_MAP.scene.capability).toBe('depth')
     // Character has no requiresModels gate: LocalTrainControls runs its own
     // three gates (trainer env, Z-Image bases, staged photos) instead.
     expect(INTENT_MAP.character.requiresModels).toBeUndefined()
@@ -119,7 +116,8 @@ describe('intent gating on a local MLX Mac (no ComfyUI)', () => {
     // uses — visible, honest, and it opens the teaser sheet on tap.
     // Swap Character (07.11.2026) is hosted-only like Erase, so it is a teaser
     // here too.
-    expect(teasers('local', true)).toEqual(['upscale', 'eraser', 'lipsync', 'music', 'extend', 'motion', 'swap_character'])
+    // Scene to Video (3.1.3) too: its local lane is a ComfyUI graph.
+    expect(teasers('local', true)).toEqual(['upscale', 'scene', 'lipsync', 'music', 'extend', 'motion', 'swap_character'])
   })
 
   it('every Mac teaser has a cloud endpoint to teased about', () => {
@@ -134,7 +132,8 @@ describe('intent gating on a local MLX Mac (no ComfyUI)', () => {
     // negative) — which produced an unrelated fresh image instead of an edit.
     // Hiding is the only honest state left.
     const hidden = INTENTS.map((m) => m.id).filter((id) => !shown('local', true).includes(id))
-    expect(hidden).toEqual(['edit', 'animate'])
+    // Erase is hidden on every local host (3.1.3): a mask in Edit does it.
+    expect(hidden).toEqual(['edit', 'eraser', 'animate'])
   })
 
   it('mlxOnlyCreateHost is the Mac switch: Comfy connected means not MLX-only', () => {
@@ -147,10 +146,10 @@ describe('intent gating on a local MLX Mac (no ComfyUI)', () => {
     expect(intentNeedsComfyGraph('character')).toBe(false)
   })
 
-  it('nothing is hidden on cloud or on a ComfyUI local host', () => {
+  it('nothing is hidden on cloud, and only Erase on a ComfyUI local host', () => {
     expect(shown('cloud', true)).toEqual(INTENTS.map((m) => m.id))
     expect(shown('cloud', false)).toEqual(INTENTS.map((m) => m.id))
-    expect(shown('local', false)).toEqual(INTENTS.map((m) => m.id))
+    expect(shown('local', false)).toEqual(INTENTS.map((m) => m.id).filter((id) => id !== 'eraser'))
   })
 
   it('cloud unlocks every intent regardless of host', () => {

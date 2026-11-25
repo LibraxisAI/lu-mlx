@@ -50,6 +50,8 @@ function App() {
       // The phone's tab name (GitHub #19) sits in Rust the same way
       // (lib/remote-page-title.ts).
       void import('./lib/remote-page-title').then(({ startRemotePageTitleSync }) => startRemotePageTitleSync())
+      // And whether the phone may share the date and time (A39, lib/clock-share-remote.ts).
+      void import('./lib/clock-share-remote').then(({ startRemoteShareClockSync }) => startRemoteShareClockSync())
 
       // The Local API comes up with LU when the user switched that on, so a
       // server that starts LU with its session keeps the API after a reboot.
@@ -66,6 +68,12 @@ function App() {
       // Device tests only: a build with the Cargo feature `e2e-remote` and
       // its environment says so; every other build answers no.
       void import('./lib/remote-e2e').then(({ startRemoteForDeviceTests }) => startRemoteForDeviceTests()).catch(() => {})
+      // TEST-LOGIN: test builds only. Vite replaces the constant, so in every
+      // other bundle this branch and lib/test-login are gone
+      // (scripts/check-no-test-login.sh).
+      if (import.meta.env.VITE_LU_TEST_LOGIN === '1') {
+        void import('./lib/test-login').then(({ runTestLogin }) => runTestLogin()).catch(() => {})
+      }
     }
 
     // Probe local Whisper (STT) once at boot and push the result into the voice

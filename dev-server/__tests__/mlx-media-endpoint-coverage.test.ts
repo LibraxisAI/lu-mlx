@@ -145,6 +145,11 @@ describe('endpointMap covers every backendCall/invokeMedia site the frontend can
     // shell_execute_cancel below, same reasoning, same Tauri-only shape
     // (Rust kills the process tree by callId, no HTTP route makes sense).
     'execute_code_cancel',
+    // test_login_take (TEST-LOGIN, 3.1.3): only a Tauri test build with the
+    // Cargo feature test-login has it, and the page calls it only when
+    // VITE_LU_TEST_LOGIN=1. A dev-server route would be a way in without the
+    // feature, so there is none on purpose.
+    'test_login_take',
     // Image part of a cancelled model download (October 2026): removes the
     // finished part next to a GGUF in the built-in engine's models folder.
     // Same Tauri-only shape as clear_download_entry and delete_bundled_model
@@ -189,6 +194,10 @@ describe('endpointMap covers every backendCall/invokeMedia site the frontend can
     'saved_characters_backup_missing', 'saved_characters_backup_put',
     'saved_characters_backup_read_index', 'saved_characters_backup_read_photo',
     'saved_characters_backup_write_index',
+    // The update hint of the open Android package (mobile/lib/app-update.ts).
+    // Registered on a phone only, and asked only when the build is the open
+    // preset on Android. A browser has no installed version to compare.
+    'app_latest_release',
     // Ends a running `lmstudio_load_model` (api/lmstudio.ts). The load itself
     // has no dev route (it is in the list below), so there is nothing a dev
     // route for its cancel could end.
@@ -230,6 +239,14 @@ describe('endpointMap covers every backendCall/invokeMedia site the frontend can
     // (api/mcp/builtin-tools.ts); the LU browser is registered only behind
     // isTauri() (lib/browser-tools.ts, browserExistsHere).
     'web_research', 'browser_control', 'browser_screenshot',
+    // The installs in the Downloads tray (3.1.3, stores/installJobsStore.ts):
+    // polled only behind isTauri(), and a row to stop only comes from that
+    // poll. The browser build installs nothing.
+    'cancel_install_job', 'install_jobs',
+    // What the trainer setup would load (TrainerDownloadLine). The same
+    // install has no dev route either (install_character_trainer below), and
+    // without an answer the line stays away.
+    'trainer_setup_plan',
     // Restore chats from backup (3.0.10): reads store_backup*.json, only behind isTauri().
     'chat_backup_conversations',
     'exit_app', 'file_read', 'find_orphan_downloads', 'fix_comfyui_cors', 'funnel_ping',

@@ -65,7 +65,7 @@ export { promptFilenamePrefix, videoDecodeNode } from './comfyui-graph'
 import { promptFilenamePrefix, videoDecodeNode, addVideoSave } from './comfyui-graph'
 import { extraReferenceSlots, isQwenImageEditModel, referenceSide } from '../lib/edit-references'
 import { canonicalImageRefs } from '../lib/image-ref-names'
-import { KREA2_STYLE_LORA, LOCAL_END_FRAME_MODELS, createReferenceSupport, localAnimateReferenceSlots, localEndFrame, CREATE_REFERENCE_MODELS } from '../lib/frame-refs'
+import { KREA2_STYLE_LORA, krea2ShiftCanvas, LOCAL_END_FRAME_MODELS, createReferenceSupport, localAnimateReferenceSlots, localEndFrame, CREATE_REFERENCE_MODELS } from '../lib/frame-refs'
 import { nativeUpscaleScale, upscaleTarget, type UpscaleFactor } from '../lib/local-upscale'
 import { TRELLIS2_FILES } from './model-bundles'
 import { WAN_FAST, findWanSpeedLora, isFastSampling, isWanSpeedLoraName, wanSamplingFor, wanSpeedKind, wanSpeedLoraNames } from '../lib/wan-speed'
@@ -98,6 +98,7 @@ export type WorkflowStrategy =
   | 'svd'             // SVD: ImageOnlyCheckpointLoader + SVD_img2vid_Conditioning
   | 'framepack'       // FramePack: Kijai wrapper + image input
   | 'minimaxh3'       // MiniMax H3: UNET + CLIPLoader(minimax) + video VAE + audio VAE, picture and sound in one pass
+  | 'minimaxh3image'  // MiniMax H3 Image: UNET + CLIPLoader(minimax) + its VAE + MiniMaxH3ImageConditioning
   // cogvideo / pyramidflow / allegro are gone on purpose (2026-07-24). Their
   // builders emitted node names no wrapper registers, so those model types now
   // resolve to 'unavailable' with an honest reason instead of a ComfyUI 400.
@@ -126,11 +127,9 @@ interface StrategyResult {
  *  one click update on (needsComfyUpdate). */
 export const LTX25_NEEDS_UPDATE = 'LTX 2.5 needs ComfyUI 0.32.0 or newer. Update ComfyUI in Settings.'
 
-/** C78: what Create says for MiniMax H3 Image, a still model on the H3
- *  layout that LU has no graph of its own for. */
-export const MINIMAX_H3_IMAGE_NO_BUILDER =
-  'LU has no built-in workflow for MiniMax H3 Image. Save the ComfyUI template "MiniMax-H3-Image: Text to Image", '
-  + 'import it under Workflows and assign it to this model. Create then runs it with your prompt, size and LoRAs.'
+/** MiniMax H3 Image's node (MiniMaxH3ImageConditioning) came with ComfyUI
+ *  0.45.0 (PR #17655, 10.11.2026). */
+export const MINIMAX_H3_IMAGE_NEEDS_UPDATE = 'MiniMax H3 Image needs ComfyUI 0.45.0 or newer. Update ComfyUI in Settings.'
 /** GH #192: what Create says for MOSS Image until LU has a graph of its own. */
 export const MOSS_IMAGE_NO_BUILDER =
   'LU has no built in workflow for MOSS Image. Import a ComfyUI workflow that runs MOSS Image under Workflows and assign it to this model. '
@@ -146,12 +145,6 @@ export function determineStrategy(
   nodes: CategorizedNodes,
   models: AvailableModels,
 ): StrategyResult {
-  // C78: MiniMax H3 Image has no graph of LU's own. Its workflow is the
-  // official template; imported under Workflows and assigned to the model,
-  // Create runs it with the prompt, size and LoRAs (workflows.ts).
-  if (modelType === 'minimaxh3image') {
-    return { strategy: 'unavailable', reason: MINIMAX_H3_IMAGE_NO_BUILDER }
-  }
   if (modelType === 'mossimage') {
     return { strategy: 'unavailable', reason: MOSS_IMAGE_NO_BUILDER }
   }
@@ -161,6 +154,20 @@ export function determineStrategy(
   const hasCLIPLoader = nodes.loaders.includes('CLIPLoader')
   const hasVAELoader = nodes.loaders.includes('VAELoader')
   const hasAnimateDiff = nodes.motion.includes('ADE_LoadAnimateDiffModel')
+
+  // MiniMax H3 Image (3.1.3): LU's own graph after the official templates
+  // image_minimax_h3_image_t2i and _edit. Up to 3.1.2 it asked for the
+  // template to be imported, and the imported template ignored the batch, the
+  // size and the reference image (Discord 17./18.11.2026).
+  if (modelType === 'minimaxh3image') {
+    if (!(hasUNET && hasCLIPLoader && hasVAELoader)) {
+      return { strategy: 'unavailable', reason: 'MiniMax H3 Image requires UNETLoader + CLIPLoader + VAELoader nodes' }
+    }
+    if (!nodes.latentInit.includes('MiniMaxH3ImageConditioning')) {
+      return { strategy: 'unavailable', reason: MINIMAX_H3_IMAGE_NEEDS_UPDATE }
+    }
+    return { strategy: 'minimaxh3image', reason: 'MiniMax H3 Image → UNETLoader + CLIPLoader(minimax) + MiniMaxH3ImageConditioning' }
+  }
 
   // ERNIE-Image → UNET + CLIPLoader(flux2) + VAE + Flux2LatentImage + ConditioningZeroOut
   if (modelType === 'ernie_image') {
@@ -523,6 +530,49 @@ export function normalizeLoraStrengths(
   return Array(count).fill(fallback)
 }
 
+/** The file a LoRA name points at, for telling two names of one file apart:
+ *  the base name without folder, in lower case. */
+export function loraFileKey(name: string): string {
+  return (name.split(/[\\/]/).pop() ?? name).trim().toLowerCase()
+}
+
+/**
+ * A45 (Discord 15.11.2026): one LoRA file goes into one model chain once.
+ * A file the graph loads on its own (`reserved`, such as the Krea 2 style
+ * reference LoRA of a reference run) leaves the stack, and its strength from
+ * the stack is handed back in `reservedStrength`: twice in the chain it
+ * counted double, and the picture came out as noise.
+ * A file that is in the stack twice (picked twice, or two spellings of one
+ * name) becomes one entry at the sum of its strengths. A LoRA adds its
+ * strength times its weights to the model, so that is what the two nodes did
+ * before, in one node.
+ */
+export function dedupeLoraStack(
+  names: string[],
+  strengths: number[],
+  reserved: string[] = [],
+): { names: string[]; strengths: number[]; reservedStrength: Map<string, number> } {
+  const reservedKeys = new Set(reserved.map(loraFileKey))
+  const seen = new Map<string, number>()
+  const out = { names: [] as string[], strengths: [] as number[], reservedStrength: new Map<string, number>() }
+  names.forEach((name, i) => {
+    const key = loraFileKey(name)
+    if (reservedKeys.has(key)) {
+      if (!out.reservedStrength.has(key)) out.reservedStrength.set(key, strengths[i])
+      return
+    }
+    const at = seen.get(key)
+    if (at !== undefined) {
+      out.strengths[at] += strengths[i]
+      return
+    }
+    seen.set(key, out.names.length)
+    out.names.push(name)
+    out.strengths.push(strengths[i])
+  })
+  return out
+}
+
 /** Resolve requested LoRA names against ComfyUI's installed LoraLoader enum.
  *  Per name: exact → normalized (case/extension/path-separator insensitive)
  *  → basename → unique substring. A miss throws an actionable error listing
@@ -668,7 +718,7 @@ export async function buildDynamicWorkflow(
     throw new WorkflowUnavailableError(`${params.model} starts from one image and cannot also take an end image. ${LOCAL_END_FRAME_MODELS}`, 'unavailable')
   }
   if (isVideo && (gp.referenceImages?.length ?? 0) > 0 && localAnimateReferenceSlots(params.model) === 0) {
-    throw new WorkflowUnavailableError(`${params.model} reads one picture. Several references work with MiniMax H3 Reference (ref2va).`, 'unavailable')
+    throw new WorkflowUnavailableError(`${params.model} reads one picture and cannot take further references.`, 'unavailable')
   }
   if (refFamily && (videoParams.inputImage || refFamily === 'vace')) {
     const refusal = ref2vRefusal(params.model)
@@ -768,6 +818,9 @@ export async function buildDynamicWorkflow(
   }
   if (strategy === 'unet_ltx' && isVideo && isLtx2Model(params.model)) {
     return await buildLtx2Workflow(params as VideoParams, seed, nodes, allNodes, models)
+  }
+  if (strategy === 'minimaxh3image') {
+    return wrapper(() => buildMiniMaxH3ImageWorkflow(gp, seed, allNodes))
   }
 
   // ─── Standard Strategies (UNET/Checkpoint → CLIP → Latent → KSampler → VAEDecode) ───
@@ -1062,11 +1115,24 @@ export async function buildDynamicWorkflow(
   const stackStrengths = normalizeLoraStrengths(params.loraStrength, stackNames.length)
   const keepInStack = stackNames.map((l) => !(fastWan && isWanSpeedLoraName(l)))
   const loraNames = stackNames.filter((_, i) => keepInStack[i])
+  // A45: a Krea 2 run with reference images loads the style reference LoRA
+  // itself (B45, after this chain). Picked in the stack as well, it went in
+  // twice and the picture came out as noise. The graph's own node stays and
+  // takes the strength set in the stack.
+  const krea2StyleRefAhead = strategy === 'unet_krea2' && !isVideo && !gp.inputImage
+    && (gp.referenceImages?.length ?? 0) > 0 && createReferenceSupport(type, params.model).slots > 0
+  let krea2StyleStrength = 1
   if (loraNames.length > 0) {
     const installed: string[] =
       readComboOptions(allNodes?.LoraLoader?.input?.required?.lora_name) ?? []
-    const resolved = resolveLoraNames(loraNames, installed)
-    const strengths = stackStrengths.filter((_, i) => keepInStack[i])
+    const stack = dedupeLoraStack(
+      resolveLoraNames(loraNames, installed),
+      stackStrengths.filter((_, i) => keepInStack[i]),
+      krea2StyleRefAhead ? [KREA2_STYLE_LORA.filename] : [],
+    )
+    krea2StyleStrength = stack.reservedStrength.get(KREA2_STYLE_LORA.filename) ?? 1
+    const resolved = stack.names
+    const strengths = stack.strengths
     resolved.forEach((loraName, i) => {
       const loraId = String(n++)
       workflow[loraId] = {
@@ -1294,27 +1360,13 @@ export async function buildDynamicWorkflow(
       for (const [i, image] of images.entries()) {
         const loadId = String(n++)
         workflow[loadId] = { class_type: 'LoadImage', inputs: { image } }
-        let imageRef: [string, number] = [loadId, 0]
-        if (i === 0 && gp.editShape === 'canvas') {
-          // C75 (Discord feature-requests 11.11.2026): an edit in a shape of
-          // its own. The node's latent follows the first image and has to
-          // (any other latent size shifts the edit), so the source itself is
-          // brought to the shape first: scaled to cover width x height and
-          // cropped from its centre. The pixel budget below stays the size.
-          const scaleId = String(n++)
-          workflow[scaleId] = {
-            class_type: 'ImageScale',
-            inputs: {
-              image: [loadId, 0],
-              upscale_method: resizeMethod(allNodes, 'ImageScale', false),
-              width: params.width,
-              height: params.height,
-              crop: 'center',
-            },
-            _meta: { title: 'Edit shape' },
-          }
-          imageRef = [scaleId, 0]
-        }
+        const imageRef: [string, number] = [loadId, 0]
+        // C75 "Custom size": the source goes in WHOLE. Until 3.1.3 it was
+        // scaled to cover width x height and cropped from its centre first,
+        // which cut the head off a full-length picture in a square or wide
+        // shape, and the red frame drawn around it with it: the model saw
+        // neither and invented a new face (Discord bug-reports 19.11.2026).
+        // The shape now comes from the canvas latent below.
         qwenInputs[`images.image_${i + 1}`] = imageRef
       }
       qwenInputs.vae = [vaeSourceId, vaeOutputSlot]
@@ -1504,7 +1556,8 @@ export async function buildDynamicWorkflow(
     // to the model's format before sampling, so the canvas comes out at the
     // size that was asked for. On the edit path this node is dropped again
     // further down: there the latent comes from TextEncodeQwenImage21, so
-    // the result follows the reference image.
+    // the result follows the reference image. An edit in "Custom size"
+    // keeps it, the canvas of the fields.
     workflow[latentId] = {
       class_type: 'EmptyLatentImage',
       inputs: { width: params.width, height: params.height, batch_size: params.batchSize },
@@ -1550,13 +1603,17 @@ export async function buildDynamicWorkflow(
   if (strategy === 'unet_qwenimage') {
     // One encode node, both conditionings (slots 0 and 1).
     negativeRef = [posId, 1]
-    if (isQwenEdit) {
+    if (isQwenEdit && gp.editShape !== 'canvas') {
       // ...and, with a reference image attached, the latent too (slot 2): an
       // empty latent on the reference's own size, which the node's tooltip
       // calls out as required, because any other size shifts the edit.
       latentRef = [posId, 2]
       delete workflow[latentId]
     }
+    // "Custom size": the empty latent at the fields' size stays (the
+    // generate path's node above). The whole source is the reference, the
+    // picture is laid out anew in that shape, so the subject and anything
+    // drawn on the picture are still there to follow.
   }
 
   if (isQwen1Edit && qwen1EditImageRef) {
@@ -1773,8 +1830,8 @@ export async function buildDynamicWorkflow(
   if (krea2StyleRef && krea2StyleLora) {
     const loraId = String(n++)
     const shiftId = String(n++)
-    workflow[loraId] = { class_type: 'LoraLoaderModelOnly', inputs: { model: [samplerModelId, 0], lora_name: krea2StyleLora, strength_model: 1 }, _meta: { title: 'Krea 2 style reference' } }
-    workflow[shiftId] = { class_type: 'ModelSamplingFlux', inputs: { model: [loraId, 0], max_shift: 1.15, base_shift: 0.5, width: params.width, height: params.height } }
+    workflow[loraId] = { class_type: 'LoraLoaderModelOnly', inputs: { model: [samplerModelId, 0], lora_name: krea2StyleLora, strength_model: krea2StyleStrength }, _meta: { title: 'Krea 2 style reference' } }
+    workflow[shiftId] = { class_type: 'ModelSamplingFlux', inputs: { model: [loraId, 0], max_shift: 1.15, base_shift: 0.5, ...krea2ShiftCanvas(params.width, params.height) } }
     samplerModelId = shiftId
   }
 
@@ -2538,9 +2595,12 @@ async function buildWan22Workflow(params: VideoParams, seed: number, nodes: Cate
   // patch the UNET with LoraLoaderModelOnly (no clip side) before the sampling
   // shift. Guarded on params.lora, a plain Wan 2.2 gen stays byte-identical.
   let wanModelSrc = unetId
-  const wanLoras = normalizeLoraList(params.lora)
+  const wanList = normalizeLoraList(params.lora)
+  // A45: one file once, whatever spelling the stack has for it.
+  const wanStack = dedupeLoraStack(wanList, normalizeLoraStrengths(params.loraStrength, wanList.length))
+  const wanLoras = wanStack.names
   if (wanLoras.length > 0) {
-    const wanStrengths = normalizeLoraStrengths(params.loraStrength, wanLoras.length)
+    const wanStrengths = wanStack.strengths
     wanLoras.forEach((loraName, i) => {
       const loraId = String(n++)
       workflow[loraId] = {
@@ -2881,7 +2941,7 @@ async function buildMiniMaxH3Workflow(params: VideoParams, seed: number, allNode
     // False and the block runs the model's normal dense attention, so the graph
     // is valid on every machine and only loses the speed gain. No platform gate.
     if (params.inputImage) {
-      throw new WorkflowUnavailableError('FastH3 makes video from a prompt only. Pick MiniMax H3 to start from an image.', 'minimaxh3')
+      throw new WorkflowUnavailableError('FastH3 makes video from a prompt only. Pick a model that takes a start image.', 'minimaxh3')
     }
   }
 
@@ -2909,8 +2969,11 @@ async function buildMiniMaxH3Workflow(params: VideoParams, seed: number, allNode
 
   // Video LoRAs (the turbo ones included) patch the model only.
   let modelSrc = unetId
-  const stack = normalizeLoraList(params.lora)
-  const stackStrengths = normalizeLoraStrengths(params.loraStrength, stack.length)
+  const stackList = normalizeLoraList(params.lora)
+  // A45: one file once, whatever spelling the stack has for it.
+  const deduped = dedupeLoraStack(stackList, normalizeLoraStrengths(params.loraStrength, stackList.length))
+  const stack = deduped.names
+  const stackStrengths = deduped.strengths
   // FastH3 is already the 8 step distillation. A step LoRA (the H3 turbo one)
   // on top of it distils twice, so on FastH3 it is left out; every other LoRA
   // in the stack still patches the model.
@@ -3013,6 +3076,161 @@ async function buildMiniMaxH3Workflow(params: VideoParams, seed: number, allNode
   workflow[decodeAudioId] = { class_type: 'VAEDecodeAudio', inputs: { samples: [sampleId, 0], vae: [audioVaeId, 0] } }
 
   addVideoWithAudioOutput(workflow, n, decodeId, params.fps || 24, [decodeAudioId, 0], allNodes, params.prompt)
+  return workflow
+}
+
+/** ImageScaleToTotalPixels counts a megapixel as 1024 x 1024 pixels and takes
+ *  0.01 to 16 of them (comfy_extras/nodes_post_processing.py). */
+export function h3ImageMegapixels(width: number, height: number): number {
+  return Math.min(16, Math.max(0.01, Math.round((width * height) / (1024 * 1024) * 100) / 100))
+}
+
+/** The most pictures one MiniMax H3 Image run makes in one batch, LU's local
+ *  batch limit (api/edit-batch). */
+const H3_IMAGE_BATCH_MAX = 8
+
+/**
+ * MiniMax H3 Image (3.1.3, Discord 17./18.11.2026: two users got noise from
+ * the imported official template, which ignored the batch, the size and the
+ * reference picture). Built after the official Comfy-Org templates
+ * image_minimax_h3_image_t2i and image_minimax_h3_image_edit (read
+ * 19.11.2026) and the node MiniMaxH3ImageConditioning (ComfyUI 0.45.0,
+ * comfy_extras/nodes_minimax_h3.py):
+ *
+ *   UNETLoader → LoRAs (model only) ────────────────────────────┐
+ *   CLIPLoader(minimax) + VAELoader → MiniMaxH3ImageConditioning → KSampler → VAEDecode → SaveImage
+ *        prompt, width, height, images.image_1..N   positive ──┤
+ *                                       ConditioningZeroOut ───┘ (negative)
+ *
+ * - The node makes the conditioning AND the empty latent (batch 1); the batch
+ *   is that latent repeated (RepeatLatentBatch), each copy with its own noise.
+ * - Size: the fields, on the node's 32 px grid. In Edit the source keeps its
+ *   shape at the fields' pixel count (as the edit template scales it to 4 MP
+ *   first); in "Custom size" (editShape) the whole source is the reference
+ *   and the canvas has the fields' size.
+ * - Pictures: in Edit the source is image_1, the picture to edit, and the
+ *   references follow; in Create the reference images are image_1 and up.
+ *   The prompt names them <Picture 1>, <Picture 2> (lib/image-ref-names).
+ * - KSampler 6 steps, CFG 1, euler / simple are the template's and the
+ *   defaults here; the negative is the zeroed positive as in the template.
+ *   The template's optional prompt enhancer (Qwen3.5 9B, off in its text to
+ *   image graph) is not part of this graph.
+ */
+async function buildMiniMaxH3ImageWorkflow(params: GenerateParams, seed: number, allNodes: NodePresence): Promise<ComfyApiGraph> {
+  requireRelease(allNodes, ['MiniMaxH3ImageConditioning'], MINIMAX_H3_IMAGE_NEEDS_UPDATE, 'minimaxh3image')
+  requireNodes(allNodes, ['KSampler', 'ConditioningZeroOut', 'VAEDecode', 'SaveImage'], 'MiniMax H3 Image')
+
+  const [clipName, vaeName] = await Promise.all([
+    findMatchingCLIP('minimaxh3image', params.model),
+    findMatchingVAE('minimaxh3image'),
+  ])
+
+  const workflow: ComfyApiGraph = {}
+  let n = 1
+  const id = () => String(n++)
+  const snap32 = (v: number | undefined, def: number) => Math.max(32, Math.round(((v && v > 0) ? v : def) / 32) * 32)
+  const width = snap32(params.width, 2048)
+  const height = snap32(params.height, 2048)
+
+  const unetId = id()
+  const clipId = id()
+  const vaeId = id()
+  addUnetLoader(workflow, unetId, params.model, allNodes)
+  workflow[clipId] = { class_type: 'CLIPLoader', inputs: { clip_name: clipName, type: 'minimax', device: 'default' } }
+  workflow[vaeId] = { class_type: 'VAELoader', inputs: { vae_name: vaeName } }
+
+  // LoRAs patch the model, as on H3 video; one file once (A45).
+  let modelSrc: [string, number] = [unetId, 0]
+  const names = normalizeLoraList(params.lora)
+  if (names.length > 0) {
+    const installed = [...new Set([
+      ...nodeComboOptions(allNodes, 'LoraLoaderModelOnly', 'lora_name'),
+      ...nodeComboOptions(allNodes, 'LoraLoader', 'lora_name'),
+    ])]
+    const stack = dedupeLoraStack(resolveLoraNames(names, installed), normalizeLoraStrengths(params.loraStrength, names.length))
+    stack.names.forEach((lora, i) => {
+      const loraId = id()
+      workflow[loraId] = { class_type: 'LoraLoaderModelOnly', inputs: { model: modelSrc, lora_name: lora, strength_model: stack.strengths[i] } }
+      modelSrc = [loraId, 0]
+    })
+  }
+
+  // The pictures, in the order the prompt numbers them.
+  const edit = !!params.inputImage
+  const pictures = edit
+    ? [params.inputImage!, ...(params.referenceImages ?? []).slice(0, extraReferenceSlots('minimaxh3image', params.model))]
+    : (params.referenceImages ?? []).slice(0, createReferenceSupport('minimaxh3image', params.model).slots)
+  const condInputs: ComfyNodeInputs = {
+    clip: [clipId, 0],
+    vae: [vaeId, 0],
+    prompt: canonicalImageRefs(params.prompt, pictures.length, 'minimaxH3'),
+    width,
+    height,
+  }
+  for (const [i, image] of pictures.entries()) {
+    const loadId = id()
+    workflow[loadId] = { class_type: 'LoadImage', inputs: { image } }
+    let picture: [string, number] = [loadId, 0]
+    // "Custom size": the source goes in WHOLE, as every reference does. The
+    // node scales a picture by its short edge in its own shape and lays the
+    // canvas out at width x height on its own. Until 3.1.3 the source was
+    // cropped to the fields' shape from its centre first, which cut the head
+    // off a full-length picture (as on Qwen-Image 2.1, Discord 19.11.2026).
+    if (edit && i === 0) {
+      if (params.editShape !== 'canvas') {
+        // "Like the picture": the fields' pixels in the source's shape, read
+        // off the scaled source the way the edit template does (scale to the
+        // pixel count, on the 32 px grid, then GetImageSize).
+        requireNodes(allNodes, ['ImageScaleToTotalPixels', 'GetImageSize'], 'MiniMax H3 Image edit')
+        const scaleId = id()
+        const sizeId = id()
+        workflow[scaleId] = {
+          class_type: 'ImageScaleToTotalPixels',
+          inputs: { image: picture, upscale_method: 'lanczos', megapixels: h3ImageMegapixels(width, height), resolution_steps: 32 },
+          _meta: { title: 'Edit size (source shape)' },
+        }
+        workflow[sizeId] = { class_type: 'GetImageSize', inputs: { image: [scaleId, 0] } }
+        picture = [scaleId, 0]
+        condInputs.width = [sizeId, 0]
+        condInputs.height = [sizeId, 1]
+      }
+    }
+    condInputs[`images.image_${i + 1}`] = picture
+  }
+  const condId = id()
+  workflow[condId] = { class_type: 'MiniMaxH3ImageConditioning', inputs: condInputs }
+  const negId = id()
+  workflow[negId] = { class_type: 'ConditioningZeroOut', inputs: { conditioning: [condId, 0] } }
+
+  // The node's latent is one picture; the batch is that latent repeated.
+  let latent: [string, number] = [condId, 1]
+  const batch = Math.max(1, Math.min(H3_IMAGE_BATCH_MAX, Math.floor(params.batchSize) || 1))
+  if (batch > 1) {
+    requireNodes(allNodes, ['RepeatLatentBatch'], 'MiniMax H3 Image batch')
+    const repeatId = id()
+    workflow[repeatId] = { class_type: 'RepeatLatentBatch', inputs: { samples: latent, amount: batch } }
+    latent = [repeatId, 0]
+  }
+
+  const samplerId = id()
+  workflow[samplerId] = {
+    class_type: 'KSampler',
+    inputs: {
+      model: modelSrc,
+      positive: [condId, 0],
+      negative: [negId, 0],
+      latent_image: latent,
+      seed,
+      steps: params.steps > 0 ? params.steps : 6,
+      cfg: Number.isFinite(params.cfgScale) ? params.cfgScale : 1,
+      sampler_name: params.sampler || 'euler',
+      scheduler: params.scheduler || 'simple',
+      denoise: 1,
+    },
+  }
+  const decodeId = id()
+  workflow[decodeId] = { class_type: 'VAEDecode', inputs: { samples: [samplerId, 0], vae: [vaeId, 0] } }
+  workflow[id()] = { class_type: 'SaveImage', inputs: { images: [decodeId, 0], filename_prefix: promptFilenamePrefix(params.prompt, false) } }
   return workflow
 }
 
@@ -3189,7 +3407,7 @@ async function buildLtx25Workflow(params: VideoParams, seed: number, allNodes: N
 // predates the family — REJECT-AND-REPORT, never a broken graph.
 
 export interface LocalOpParams {
-  op: 'music' | 'lipsync' | 'motion'
+  op: 'music' | 'lipsync' | 'motion' | 'swap' | 'scene'
   model: string
   prompt: string
   negativePrompt?: string
@@ -3208,8 +3426,11 @@ export interface LocalOpParams {
   /** lipsync: speech audio staged in ComfyUI's input dir + the portrait. */
   audioFile?: string
   refImage?: string
-  /** motion: driving video staged in ComfyUI's input dir. */
+  /** motion: driving video staged in ComfyUI's input dir. scene: the scene
+   *  video (Scene to Video, 3.1.3). */
   drivingVideo?: string
+  /** scene: the customer's own first frame, staged in ComfyUI's input dir. */
+  firstFrame?: string
 }
 
 const UPDATE_COMFY_HINT =
@@ -3302,7 +3523,9 @@ function addVideoWithAudioOutput(
   workflow: ComfyApiGraph,
   n: number,
   decodeId: string,
-  fps: number,
+  /** A number, or the rate output of GetVideoComponents (Scene to Video
+   *  without VideoHelperSuite keeps the clip's own rate). */
+  fps: number | [string, number],
   audioSrc: [string, number] | null,
   allNodes: NodePresence,
   prompt?: string,
@@ -3595,13 +3818,29 @@ export async function buildMotionWorkflow(params: LocalOpParams, seed: number, a
 
   const videoId = String(n++)
   workflow[videoId] = { class_type: 'LoadVideo', inputs: { file: params.drivingVideo } }
-  const componentsId = String(n++)
-  workflow[componentsId] = { class_type: 'GetVideoComponents', inputs: { video: [videoId, 0] } }
+  const fps = params.fps || 16
+  let drivingFrames: [string, number]
+  let drivingAudio: [string, number]
+  let outFps: number | [string, number] = fps
+  let runLength: number | [string, number] = length
+  if (hasTimedClipNodes(allNodes)) {
+    const clip = addTimedClip(workflow, n, videoId, length, fps, allNodes)
+    n = clip.n
+    drivingFrames = clip.frames
+    drivingAudio = clip.audio
+    outFps = clip.fps
+    runLength = clip.length
+  } else {
+    const componentsId = String(n++)
+    workflow[componentsId] = { class_type: 'GetVideoComponents', inputs: { video: [videoId, 0] } }
+    drivingFrames = [componentsId, 0]
+    drivingAudio = [componentsId, 1]
+  }
   const poseId = String(n++)
   workflow[poseId] = {
     class_type: 'DWPreprocessor',
     inputs: {
-      image: [componentsId, 0], detect_hand: 'enable', detect_body: 'enable', detect_face: 'enable',
+      image: drivingFrames, detect_hand: 'enable', detect_body: 'enable', detect_face: 'enable',
       resolution: Math.min(width, height),
       bbox_detector: 'yolox_l.onnx', pose_estimator: 'dw-ll_ucoco_384.onnx',
     },
@@ -3618,7 +3857,7 @@ export async function buildMotionWorkflow(params: LocalOpParams, seed: number, a
       class_type: 'WanVaceToVideo',
       inputs: {
         positive: [posId, 0], negative: [negId, 0], vae: [vaeId, 0],
-        width, height, length, batch_size: 1, strength: 1.0,
+        width, height, length: runLength, batch_size: 1, strength: 1.0,
         control_video: [poseId, 0], reference_image: [scaleId, 0],
       },
     }
@@ -3627,7 +3866,7 @@ export async function buildMotionWorkflow(params: LocalOpParams, seed: number, a
       class_type: 'WanAnimateToVideo',
       inputs: {
         positive: [posId, 0], negative: [negId, 0], vae: [vaeId, 0],
-        width, height, length, batch_size: 1,
+        width, height, length: runLength, batch_size: 1,
         reference_image: [scaleId, 0], pose_video: [poseId, 0],
         continue_motion_max_frames: 5, video_frame_offset: 0,
       },
@@ -3651,8 +3890,449 @@ export async function buildMotionWorkflow(params: LocalOpParams, seed: number, a
   const decodeId = String(n++)
   workflow[decodeId] = videoDecodeNode([trimId, 0], [vaeId, 0], 'VAEDecodeTiled' in allNodes)
 
-  addVideoWithAudioOutput(workflow, n, decodeId, params.fps || 16, [componentsId, 1], allNodes, params.prompt)
+  addVideoWithAudioOutput(workflow, n, decodeId, outFps, drivingAudio, allNodes, params.prompt)
   return workflow
+}
+
+/** The depth model Scene to Video draws its depth video with: Depth
+ *  Anything V2 Small, Apache-2.0 (the Base and Large weights are CC-BY-NC,
+ *  not for a product). comfyui_controlnet_aux fetches it on the first run. */
+export const SCENE_DEPTH_CKPT = 'depth_anything_v2_vits.pth'
+
+/**
+ * Scene to Video on the local lane (3.1.3). A grey blockout video keeps its
+ * camera, layout and timing, the prompt gives it its look:
+ *
+ *   scene video -> 16 fps frames -> Depth Anything V2 -> WanVaceToVideo
+ *   (control_video) -> sampler -> decode -> mp4
+ *
+ * VACE was trained with depth maps from Depth Anything, so this is the
+ * control it reads best; the grey render itself would be read as the look.
+ * VHS_LoadVideo resamples the clip to 16 fps (VACE's rate) and stops at the
+ * run's length. Without the VideoHelperSuite pack the core nodes do the same
+ * (addTimedClip). Only a ComfyUI too old for them takes the first frames at
+ * the clip's own rate, which keeps the speed but makes a shorter result.
+ *
+ * An own first frame opens the control video in place of the first depth
+ * frame, with a mask of 0 there (keep) and 1 everywhere else (paint): VACE's
+ * first frame task combined with depth, from core nodes only.
+ */
+export async function buildSceneWorkflow(params: LocalOpParams, seed: number, allNodes: NodePresence): Promise<ComfyApiGraph> {
+  const workflow: ComfyApiGraph = {}
+  let n = 1
+  if (!allNodes['DepthAnythingV2Preprocessor']) {
+    throw new WorkflowUnavailableError(
+      'Scene to Video needs the depth extractor (Depth Anything) from the controlnet_aux node pack. Install it from the card above, then generate again.',
+      'unavailable',
+      { pack: 'comfyui_controlnet_aux', url: 'https://github.com/Fannovel16/comfyui_controlnet_aux' },
+    )
+  }
+  if (!params.drivingVideo) throw new Error('Add your scene video first.')
+  if (classifyModel(params.model) !== 'wanvace') {
+    throw new Error('Scene to Video runs on Wan 2.1 VACE. Install it with Download & install above, or pick it in the model list.')
+  }
+  const vhs = !!allNodes['VHS_LoadVideo']
+  requireNodes(allNodes, ['WanVaceToVideo', 'TrimVideoLatent', ...(vhs ? [] : ['LoadVideo', 'GetVideoComponents', 'ImageFromBatch'])], 'Scene to Video')
+  if (params.firstFrame) requireNodes(allNodes, ['LoadImage', 'ImageScale', 'ImageFromBatch', 'ImageBatch', 'EmptyImage', 'ImageToMask'], 'Scene to Video')
+
+  const snap16 = (v: number, def: number) => Math.max(16, Math.round(((v && v > 0) ? v : def) / 16) * 16)
+  const width = snap16(params.width, 832)
+  const height = snap16(params.height, 480)
+  const length = snapWanLength(params.frames || 81)
+  const fps = params.fps || 16
+
+  const [wanClip, wanVae] = await Promise.all([
+    findMatchingCLIP('wan', params.model),
+    findMatchingVAE('wan'),
+  ])
+
+  const unetId = String(n++)
+  addUnetLoader(workflow, unetId, params.model, allNodes)
+  const clipId = String(n++)
+  workflow[clipId] = { class_type: 'CLIPLoader', inputs: { clip_name: wanClip, type: 'wan', device: 'default' } }
+  const vaeId = String(n++)
+  workflow[vaeId] = { class_type: 'VAELoader', inputs: { vae_name: wanVae } }
+  const posId = String(n++)
+  workflow[posId] = { class_type: 'CLIPTextEncode', inputs: { text: params.prompt, clip: [clipId, 0] } }
+  const negId = String(n++)
+  workflow[negId] = { class_type: 'CLIPTextEncode', inputs: { text: params.negativePrompt || '', clip: [clipId, 0] } }
+
+  // The frames of the scene, at most `length` of them.
+  let frames: [string, number]
+  let outFps: number | [string, number] = fps
+  let runLength: number | [string, number] = length
+  if (vhs) {
+    const loadId = String(n++)
+    workflow[loadId] = {
+      class_type: 'VHS_LoadVideo',
+      inputs: {
+        video: params.drivingVideo, force_rate: fps, custom_width: 0, custom_height: 0,
+        frame_load_cap: length, skip_first_frames: 0, select_every_nth: 1,
+      },
+    }
+    frames = [loadId, 0]
+  } else if (hasTimedClipNodes(allNodes)) {
+    const videoId = String(n++)
+    workflow[videoId] = { class_type: 'LoadVideo', inputs: { file: params.drivingVideo } }
+    const clip = addTimedClip(workflow, n, videoId, length, fps, allNodes)
+    n = clip.n
+    frames = clip.frames
+    outFps = clip.fps
+    runLength = clip.length
+  } else {
+    const videoId = String(n++)
+    workflow[videoId] = { class_type: 'LoadVideo', inputs: { file: params.drivingVideo } }
+    const componentsId = String(n++)
+    workflow[componentsId] = { class_type: 'GetVideoComponents', inputs: { video: [videoId, 0] } }
+    const capId = String(n++)
+    workflow[capId] = { class_type: 'ImageFromBatch', inputs: { image: [componentsId, 0], batch_index: 0, length } }
+    frames = [capId, 0]
+    outFps = [componentsId, 2]
+  }
+
+  const depthId = String(n++)
+  workflow[depthId] = {
+    class_type: 'DepthAnythingV2Preprocessor',
+    inputs: { image: frames, ckpt_name: SCENE_DEPTH_CKPT, resolution: snap16(Math.min(width, height), 480) },
+  }
+  let control: [string, number] = [depthId, 0]
+  let masks: [string, number] | null = null
+  if (params.firstFrame) {
+    // Everything after the first frame, as a number or from the math node.
+    let restLength: number | [string, number] = length - 1
+    if (Array.isArray(runLength)) {
+      const restCountId = String(n++)
+      workflow[restCountId] = {
+        class_type: 'ComfyMathExpression',
+        inputs: { expression: 'a - 1', 'values.a': [runLength[0], 0] },
+      }
+      restLength = [restCountId, 1]
+    }
+    const imageId = String(n++)
+    workflow[imageId] = { class_type: 'LoadImage', inputs: { image: params.firstFrame } }
+    const firstId = String(n++)
+    workflow[firstId] = { class_type: 'ImageScale', inputs: { image: [imageId, 0], upscale_method: 'lanczos', width, height, crop: 'center' } }
+    const depthSizedId = String(n++)
+    workflow[depthSizedId] = { class_type: 'ImageScale', inputs: { image: [depthId, 0], upscale_method: 'bilinear', width, height, crop: 'disabled' } }
+    const restId = String(n++)
+    workflow[restId] = { class_type: 'ImageFromBatch', inputs: { image: [depthSizedId, 0], batch_index: 1, length: restLength } }
+    const batchId = String(n++)
+    workflow[batchId] = { class_type: 'ImageBatch', inputs: { image1: [firstId, 0], image2: [restId, 0] } }
+    control = [batchId, 0]
+    // 0 = keep (the frame), 1 = paint (after the depth), one per frame.
+    const keepId = String(n++)
+    workflow[keepId] = { class_type: 'EmptyImage', inputs: { width, height, batch_size: 1, color: 0 } }
+    const paintId = String(n++)
+    workflow[paintId] = { class_type: 'EmptyImage', inputs: { width, height, batch_size: restLength, color: 0xffffff } }
+    const maskImagesId = String(n++)
+    workflow[maskImagesId] = { class_type: 'ImageBatch', inputs: { image1: [keepId, 0], image2: [paintId, 0] } }
+    const maskId = String(n++)
+    workflow[maskId] = { class_type: 'ImageToMask', inputs: { image: [maskImagesId, 0], channel: 'red' } }
+    masks = [maskId, 0]
+  }
+
+  const condId = String(n++)
+  workflow[condId] = {
+    class_type: 'WanVaceToVideo',
+    inputs: {
+      positive: [posId, 0], negative: [negId, 0], vae: [vaeId, 0],
+      width, height, length: runLength, batch_size: 1, strength: 1.0,
+      control_video: control,
+      ...(masks ? { control_masks: masks } : {}),
+    },
+  }
+
+  const shiftId = String(n++)
+  workflow[shiftId] = { class_type: 'ModelSamplingSD3', inputs: { model: [unetId, 0], shift: 8.0 } }
+  const samplerId = String(n++)
+  workflow[samplerId] = {
+    class_type: 'KSampler',
+    inputs: {
+      model: [shiftId, 0], positive: [condId, 0], negative: [condId, 1], latent_image: [condId, 2],
+      seed, steps: params.steps, cfg: params.cfgScale, sampler_name: params.sampler, scheduler: params.scheduler, denoise: 1.0,
+    },
+  }
+  // No reference image, so the trim takes nothing out; it stays so the graph
+  // has the same tail as the Motion lane's VACE path.
+  const trimId = String(n++)
+  workflow[trimId] = { class_type: 'TrimVideoLatent', inputs: { samples: [samplerId, 0], trim_amount: [condId, 3] } }
+  const decodeId = String(n++)
+  workflow[decodeId] = videoDecodeNode([trimId, 0], [vaeId, 0], 'VAEDecodeTiled' in allNodes)
+
+  addVideoWithAudioOutput(workflow, n, decodeId, outFps, null, allNodes, params.prompt)
+  return workflow
+}
+
+/**
+ * Swap Character on this computer (3.1.3, David 19.11.2026): the person in a
+ * real video becomes the character, the scene, the camera, the timing and
+ * the sound stay. Wan 2.2 Animate in its replace mode, as the official
+ * ComfyUI template "Wan2.2 Animate" (mix): WanAnimateToVideo gets the video
+ * as background_video, with the person painted out, and a character_mask
+ * that says where the new person goes, plus the pose of every frame.
+ *
+ * The template draws the mask with SAM2 and a points editor (two node packs
+ * more). LU draws it from the DWPose skeleton it already makes for Motion:
+ * the skeleton's pixels, grown wide enough to cover body, head and hair,
+ * with ComfyUI's core mask nodes only. No new pack, no new download. The
+ * price: every body the pose finds is masked, so it is one person
+ * (people-rule.ts, SWAP_CAN local: 1).
+ *
+ * The video is read at the run's frame rate (VHS_LoadVideo force_rate when
+ * VideoHelperSuite is there, which LU installs for video output), so motion
+ * and sound keep their speed. Without it the core nodes do the same: the clip
+ * is cut to the run's length and that stretch sampled evenly, whatever rate
+ * the video has. Only a ComfyUI too old for those nodes reads the first frames
+ * at the video's own rate.
+ */
+export async function buildSwapWorkflow(params: LocalOpParams, seed: number, allNodes: NodePresence): Promise<ComfyApiGraph> {
+  const workflow: ComfyApiGraph = {}
+  let n = 1
+  if (!allNodes['DWPreprocessor']) {
+    throw new WorkflowUnavailableError(
+      'Swap on this computer needs the pose extractor (DWPose) from the controlnet_aux node pack. Install it from the card above, then generate again.',
+      'unavailable',
+      { pack: 'comfyui_controlnet_aux', url: 'https://github.com/Fannovel16/comfyui_controlnet_aux' },
+    )
+  }
+  if (!params.drivingVideo) throw new Error('Add the original video first.')
+  if (!params.refImage) throw new Error('Pick a character or a photo for the person you replace.')
+  if (classifyModel(params.model) !== 'wananimate') {
+    throw new Error('Swap on this computer runs on Wan 2.2 Animate. Pick it in the model list, or download it in the Model Manager.')
+  }
+  requireNodes(allNodes, [
+    'WanAnimateToVideo', 'TrimVideoLatent', 'ImageToMask', 'MaskComposite', 'ThresholdMask', 'GrowMask',
+    'EmptyImage', 'ImageCompositeMasked', 'ImageScale',
+  ], 'Swap on this computer')
+
+  const snap16 = (v: number, def: number) => Math.max(16, Math.round(((v && v > 0) ? v : def) / 16) * 16)
+  const width = snap16(params.width, 832)
+  const height = snap16(params.height, 480)
+  const length = snapWanLength(params.frames || 77)
+  const fps = params.fps || 16
+  const vhs = !!allNodes['VHS_LoadVideo']
+  if (!vhs) requireNodes(allNodes, ['LoadVideo', 'GetVideoComponents'], 'Swap on this computer')
+
+  const [wanClip, wanVae] = await Promise.all([
+    findMatchingCLIP('wan', params.model),
+    findMatchingVAE('wan'),
+  ])
+
+  const unetId = String(n++)
+  addUnetLoader(workflow, unetId, params.model, allNodes)
+  const clipId = String(n++)
+  workflow[clipId] = { class_type: 'CLIPLoader', inputs: { clip_name: wanClip, type: 'wan', device: 'default' } }
+  const vaeId = String(n++)
+  workflow[vaeId] = { class_type: 'VAELoader', inputs: { vae_name: wanVae } }
+  const posId = String(n++)
+  workflow[posId] = { class_type: 'CLIPTextEncode', inputs: { text: params.prompt || 'the person moving naturally in the same scene, high quality', clip: [clipId, 0] } }
+  const negId = String(n++)
+  workflow[negId] = { class_type: 'CLIPTextEncode', inputs: { text: params.negativePrompt || '', clip: [clipId, 0] } }
+
+  // The video: frames and sound, at the run's frame rate where possible.
+  const videoId = String(n++)
+  let frames: [string, number]
+  let audio: [string, number]
+  let outFps: number | [string, number] = fps
+  let runLength: number | [string, number] = length
+  if (vhs) {
+    workflow[videoId] = {
+      class_type: 'VHS_LoadVideo',
+      inputs: {
+        video: params.drivingVideo, force_rate: fps, custom_width: 0, custom_height: 0,
+        frame_load_cap: length, skip_first_frames: 0, select_every_nth: 1, format: 'AnimateDiff',
+      },
+    }
+    frames = [videoId, 0]
+    audio = [videoId, 2]
+  } else if (hasTimedClipNodes(allNodes)) {
+    workflow[videoId] = { class_type: 'LoadVideo', inputs: { file: params.drivingVideo } }
+    const clip = addTimedClip(workflow, n, videoId, length, fps, allNodes)
+    n = clip.n
+    frames = clip.frames
+    audio = clip.audio
+    outFps = clip.fps
+    runLength = clip.length
+  } else {
+    workflow[videoId] = { class_type: 'LoadVideo', inputs: { file: params.drivingVideo } }
+    const componentsId = String(n++)
+    workflow[componentsId] = { class_type: 'GetVideoComponents', inputs: { video: [videoId, 0] } }
+    frames = [componentsId, 0]
+    audio = [componentsId, 1]
+    outFps = [componentsId, 2]
+  }
+  // One size for everything that follows: the background, the pose, the mask.
+  const framesId = String(n++)
+  workflow[framesId] = { class_type: 'ImageScale', inputs: { image: frames, upscale_method: 'lanczos', width, height, crop: 'center' } }
+
+  const poseRawId = String(n++)
+  workflow[poseRawId] = {
+    class_type: 'DWPreprocessor',
+    inputs: {
+      image: [framesId, 0], detect_hand: 'enable', detect_body: 'enable', detect_face: 'enable',
+      resolution: Math.min(width, height),
+      bbox_detector: 'yolox_l.onnx', pose_estimator: 'dw-ll_ucoco_384.onnx',
+    },
+  }
+  const poseId = String(n++)
+  workflow[poseId] = { class_type: 'ImageScale', inputs: { image: [poseRawId, 0], upscale_method: 'nearest-exact', width, height, crop: 'center' } }
+
+  // The mask: every coloured pixel of the skeleton (the limbs are drawn in
+  // pure colours, so one of the three channels is always high), then grown
+  // to the body. About a tenth of the short side covers shoulders, head and
+  // hair at 480p.
+  const channel = (c: 'red' | 'green' | 'blue') => {
+    const id = String(n++)
+    workflow[id] = { class_type: 'ImageToMask', inputs: { image: [poseId, 0], channel: c } }
+    return id
+  }
+  const r = channel('red'), g = channel('green'), b = channel('blue')
+  const rgId = String(n++)
+  workflow[rgId] = { class_type: 'MaskComposite', inputs: { destination: [r, 0], source: [g, 0], x: 0, y: 0, operation: 'add' } }
+  const rgbId = String(n++)
+  workflow[rgbId] = { class_type: 'MaskComposite', inputs: { destination: [rgId, 0], source: [b, 0], x: 0, y: 0, operation: 'add' } }
+  const threshId = String(n++)
+  workflow[threshId] = { class_type: 'ThresholdMask', inputs: { mask: [rgbId, 0], value: 0.1 } }
+  const maskId = String(n++)
+  workflow[maskId] = { class_type: 'GrowMask', inputs: { mask: [threshId, 0], expand: swapMaskGrow(width, height), tapered_corners: true } }
+
+  // The background: the video with the person painted out, as the
+  // template's DrawMaskOnImage does.
+  const blackId = String(n++)
+  workflow[blackId] = { class_type: 'EmptyImage', inputs: { width, height, batch_size: 1, color: 0 } }
+  const bgId = String(n++)
+  workflow[bgId] = {
+    class_type: 'ImageCompositeMasked',
+    inputs: { destination: [framesId, 0], source: [blackId, 0], x: 0, y: 0, resize_source: false, mask: [maskId, 0] },
+  }
+
+  const imageId = String(n++)
+  workflow[imageId] = { class_type: 'LoadImage', inputs: { image: params.refImage } }
+  const scaleId = String(n++)
+  workflow[scaleId] = { class_type: 'ImageScale', inputs: { image: [imageId, 0], upscale_method: 'lanczos', width, height, crop: 'center' } }
+
+  const condId = String(n++)
+  workflow[condId] = {
+    class_type: 'WanAnimateToVideo',
+    inputs: {
+      positive: [posId, 0], negative: [negId, 0], vae: [vaeId, 0],
+      width, height, length: runLength, batch_size: 1,
+      reference_image: [scaleId, 0], pose_video: [poseId, 0],
+      background_video: [bgId, 0], character_mask: [maskId, 0],
+      continue_motion_max_frames: 5, video_frame_offset: 0,
+    },
+  }
+
+  const shiftId = String(n++)
+  workflow[shiftId] = { class_type: 'ModelSamplingSD3', inputs: { model: [unetId, 0], shift: 8.0 } }
+  const samplerId = String(n++)
+  workflow[samplerId] = {
+    class_type: 'KSampler',
+    inputs: {
+      model: [shiftId, 0], positive: [condId, 0], negative: [condId, 1], latent_image: [condId, 2],
+      seed, steps: params.steps, cfg: params.cfgScale, sampler_name: params.sampler, scheduler: params.scheduler, denoise: 1.0,
+    },
+  }
+  const trimId = String(n++)
+  workflow[trimId] = { class_type: 'TrimVideoLatent', inputs: { samples: [samplerId, 0], trim_amount: [condId, 3] } }
+  const decodeId = String(n++)
+  workflow[decodeId] = videoDecodeNode([trimId, 0], [vaeId, 0], 'VAEDecodeTiled' in allNodes)
+
+  addVideoWithAudioOutput(workflow, n, decodeId, outFps, audio, allNodes, params.prompt || 'swap')
+  return workflow
+}
+
+/** The core nodes that read a video at the run's rate without VideoHelperSuite. */
+function hasTimedClipNodes(allNodes: NodePresence): boolean {
+  return !!allNodes['Video Slice'] && !!allNodes['VideoFrameSample']
+}
+
+/**
+ * The first `length / fps` seconds of a video as `length` evenly spaced frames,
+ * so a run at 16 fps moves in real time whatever rate the video has. The sound
+ * is that same stretch. With the math node a video slower than the run keeps
+ * its own rate and the run makes only the frames it really has, nothing is
+ * invented; without it the run's length and rate stand as asked.
+ */
+function addTimedClip(
+  workflow: ComfyApiGraph,
+  start: number,
+  videoId: string,
+  length: number,
+  fps: number,
+  allNodes: NodePresence,
+): {
+  n: number
+  frames: [string, number]
+  audio: [string, number]
+  fps: number | [string, number]
+  length: number | [string, number]
+} {
+  let n = start
+  let cutSeconds: number | [string, number] = length / fps
+  let runLength: number | [string, number] = length
+  let outFps: number | [string, number] = fps
+  if (allNodes['ComfyMathExpression']) {
+    // The rate is read from a quarter second, so nothing big is decoded.
+    const probeId = String(n++)
+    workflow[probeId] = {
+      class_type: 'Video Slice',
+      inputs: { video: [videoId, 0], start_time: 0, duration: 0.25, strict_duration: false },
+    }
+    const probedId = String(n++)
+    workflow[probedId] = { class_type: 'GetVideoComponents', inputs: { video: [probeId, 0] } }
+    const rateId = String(n++)
+    workflow[rateId] = {
+      class_type: 'ComfyMathExpression',
+      inputs: { expression: clipRateExpression(fps), 'values.a': [probedId, 2] },
+    }
+    const countId = String(n++)
+    workflow[countId] = {
+      class_type: 'ComfyMathExpression',
+      inputs: { expression: clipFramesExpression(length, fps), 'values.a': [rateId, 0] },
+    }
+    const secondsId = String(n++)
+    workflow[secondsId] = {
+      class_type: 'ComfyMathExpression',
+      inputs: { expression: 'a / b', 'values.a': [countId, 0], 'values.b': [rateId, 0] },
+    }
+    runLength = [countId, 1]
+    cutSeconds = [secondsId, 0]
+    outFps = [rateId, 0]
+  }
+  const sliceId = String(n++)
+  workflow[sliceId] = {
+    class_type: 'Video Slice',
+    inputs: { video: [videoId, 0], start_time: 0, duration: cutSeconds, strict_duration: false },
+  }
+  const sampleId = String(n++)
+  workflow[sampleId] = {
+    class_type: 'VideoFrameSample',
+    inputs: { video: [sliceId, 0], num_frames: runLength, strategy: 'uniform', seed: 0 },
+  }
+  const sampledId = String(n++)
+  workflow[sampledId] = { class_type: 'GetVideoComponents', inputs: { video: [sampleId, 0] } }
+  // The sampled video has no sound, the cut one has exactly this stretch.
+  const soundId = String(n++)
+  workflow[soundId] = { class_type: 'GetVideoComponents', inputs: { video: [sliceId, 0] } }
+  return { n, frames: [sampledId, 0], audio: [soundId, 1], fps: outFps, length: runLength }
+}
+
+/** The rate a timed clip plays at, for ComfyMathExpression (a: the video's). */
+export function clipRateExpression(fps: number): string {
+  return `min(a, ${fps})`
+}
+
+/** The frames of a timed clip on Wan's 4n + 1 grid, never more than the video
+ *  has in the run's stretch (a: the rate from clipRateExpression). */
+export function clipFramesExpression(length: number, fps: number): string {
+  return `max(1, floor((min(${length}, floor(${length / fps} * a)) - 1) / 4)) * 4 + 1`
+}
+
+/** How far the skeleton is grown into a body mask: a tenth of the short side,
+ *  at least 24 px. */
+export function swapMaskGrow(width: number, height: number): number {
+  return Math.max(24, Math.round(Math.min(width, height) / 10))
 }
 
 /**
@@ -3734,6 +4414,8 @@ export async function buildLocalOpWorkflow(params: LocalOpParams): Promise<Comfy
     case 'music': return buildMusicWorkflow(params, seed, allNodes)
     case 'lipsync': return await buildS2VWorkflow(params, seed, allNodes)
     case 'motion': return await buildMotionWorkflow(params, seed, allNodes)
+    case 'swap': return await buildSwapWorkflow(params, seed, allNodes)
+    case 'scene': return await buildSceneWorkflow(params, seed, allNodes)
   }
 }
 

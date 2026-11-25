@@ -42,6 +42,9 @@ export interface TrainingRunStatus {
    *  `logs` ends in whatever the child printed last, which is pip chatter for
    *  minutes at a time, so the progress line reads this instead. */
   phase?: string
+  /** A41: set when the run switched itself from Normal to Low VRAM because
+   *  the card is too small for Normal. Empty or missing otherwise. */
+  notice?: string
   logs: string[]
   step: number
   totalSteps: number
@@ -184,6 +187,30 @@ export function baseDownloadPercent(
 
 export async function installCharacterTrainer(installPath?: string): Promise<{ status: string }> {
   return backendCall('install_character_trainer', { installPath: installPath ?? null })
+}
+
+/** What Set up trainer would fetch on this machine. Downloads nothing. */
+export interface TrainerSetupPlan {
+  items: { label: string; bytes: number }[]
+  downloadBytes: number
+  /** Free space the setup asks for, pip's cache included. */
+  diskGib: number
+  /** A PyTorch that is there gets replaced (wrong build, or a stopped setup). */
+  replacesTorch: boolean
+  /** The last setup was stopped halfway. */
+  interrupted: boolean
+}
+
+export async function trainerSetupPlan(): Promise<TrainerSetupPlan> {
+  return backendCall('trainer_setup_plan')
+}
+
+/** The line before the start. null when the setup has nothing to load. */
+export function trainerPlanLine(plan: TrainerSetupPlan): string | null {
+  if (!plan?.items?.length) return null
+  const what = plan.items.map((i) => i.label).join(', ')
+  const lead = plan.interrupted ? 'The last setup was stopped. Loads again' : 'Loads'
+  return `${lead} ${aboutSize(plan.downloadBytes)}: ${what}. Needs ${plan.diskGib} GB free.`
 }
 
 export async function characterTrainerStatus(): Promise<TrainerStatus> {

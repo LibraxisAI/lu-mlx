@@ -359,6 +359,9 @@ pub struct AppState {
     /// flips the install_status to "cancelled".
     pub comfyui_install_cancel: Arc<AtomicBool>,
     pub ollama_install: Arc<Mutex<InstallState>>,
+    /// "Install Git" (3.1.3): MinGit on Windows, the Command Line Tools on a
+    /// Mac, the package command on Linux (`install::git_portable`).
+    pub git_install: Arc<Mutex<InstallState>>,
     pub lmstudio_install: Arc<Mutex<InstallState>>,
     pub python_install: Arc<Mutex<InstallState>>,
     /// §24.9 — progress/log state for the in-app faster-whisper installer
@@ -385,7 +388,7 @@ pub struct AppState {
     /// the disk check speaks again, and a training run that fails the same
     /// way sets it right back. Cleared the moment a provision succeeds.
     pub trainer_env_broken: Arc<AtomicBool>,
-    pub searxng_install: Mutex<InstallState>,
+    pub searxng_install: Arc<Mutex<InstallState>>,
     pub searxng_available: AtomicBool,
     /// Resolved Python binary path. Empty string means "no real Python on
     /// this box" — callers must treat `""` as the missing-Python sentinel
@@ -535,6 +538,7 @@ impl AppState {
             install_status: Arc::new(Mutex::new(InstallState::default())),
             comfyui_install_cancel: Arc::new(AtomicBool::new(false)),
             ollama_install: Arc::new(Mutex::new(InstallState::default())),
+            git_install: Arc::new(Mutex::new(InstallState::default())),
             lmstudio_install: Arc::new(Mutex::new(InstallState::default())),
             python_install: Arc::new(Mutex::new(InstallState::default())),
             whisper_install: Arc::new(Mutex::new(InstallState::default())),
@@ -544,7 +548,7 @@ impl AppState {
             trainer_cancel: Arc::new(AtomicBool::new(false)),
             trainer_process: Arc::new(Mutex::new(None)),
             trainer_env_broken: Arc::new(AtomicBool::new(false)),
-            searxng_install: Mutex::new(InstallState::default()),
+            searxng_install: Arc::new(Mutex::new(InstallState::default())),
             searxng_available: AtomicBool::new(false),
             python_bin: Arc::new(Mutex::new(python_bin)),
             // Claude Code

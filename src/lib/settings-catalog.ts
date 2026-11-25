@@ -286,6 +286,7 @@ export const CATALOG: readonly CatalogEntry[] = [
   e('agentMaxToolCalls', 'Agent tool call limit', 'agent', 'Most tool calls per message. Applies from the next message.', int(0, 10_000, '', 'unlimited')),
   e('agentMaxIterations', 'Agent step limit', 'agent', 'Most steps per message. Applies from the next message.', int(0, 10_000, '', 'unlimited')),
   e('agentCompactAuto', 'Short tool list for local models', 'agent', 'Local models up to about 35B see the core tools and find the rest with tool_search.', bool()),
+  e('shareClockWithModel', 'Share date and time with the model', 'agent', 'The agent is told the date and time when a run starts. Off: no date or time goes to the model.', bool()),
   e('agentLoopGuard', 'Loop guard', 'agent', 'Stops an agent run that repeats the same steps. Off: the run goes on until its step limit or Stop.', bool()),
   e('subAgentMaxToolCalls', 'Sub-agent tool call limit', 'agent', 'Most tool calls of one sub-agent.', int(0, SUB_AGENT_LIMIT_MAX, '', 'default')),
   e('subAgentMaxIterations', 'Sub-agent step limit', 'agent', 'Most steps of one sub-agent.', int(0, SUB_AGENT_LIMIT_MAX, '', 'default')),
@@ -405,7 +406,9 @@ export const CATALOG: readonly CatalogEntry[] = [
   e('memory.autoExtractEnabled', 'Remember facts automatically', 'agent', 'Save memories from chats by itself. Costs one extra model call per answer.', bool(), { store: 'memory', area: 'memory' }),
   e('memory.autoExtractInAllModes', 'Remember outside Agent', 'agent', 'Also save memories from plain chats.', bool(), { store: 'memory', area: 'memory' }),
   e('memory.maxMemoriesOverride', 'Memories per prompt', 'agent', 'How many memories go into a prompt; 0 = fits the model.', int(0, 100, '', 'auto'), { store: 'memory', area: 'memory' }),
-  e('memory.maxMemoryChars', 'Memory length', 'agent', 'Most characters of one memory.', int(200, 20_000, 'chars'), { store: 'memory', area: 'memory' }),
+  e('memory.maxMemoryChars', 'Memory length', 'agent', 'Most characters of one memory in a prompt; a longer one is cut at a sentence and marked.', int(200, 20_000, 'chars'), { store: 'memory', area: 'memory' }),
+  e('memory.memoryTokenBudget', 'Memory tokens per request', 'agent', 'Tokens all memories may take in one request, up to half the window; 0 = auto.', int(0, 200_000, 'tokens', 'auto'), { store: 'memory', area: 'memory', applies: 'next-message', lockOverride: 'A number of tokens, not a token.' }),
+  e('memory.injectEnabled', 'Send memories', 'agent', 'Send memories to the model at all. Extraction has its own switches.', bool(), { store: 'memory', area: 'memory', applies: 'next-message' }),
 
   // GPU per task (Card per task, 3.0.8 A2). The card list comes from the
   // hardware detection; settings-stores.ts loads it before the parse.
@@ -481,8 +484,8 @@ export const LOCK_RULES: readonly LockRule[] = [
   },
   {
     // CA (14.11.2026): an agent must never raise its own spending limit.
-    category: 'spending', what: 'Credit limits of agent runs', where: 'Settings → Agent',
-    names: ['agentRunCreditLimit', 'agentHourCreditLimit', 'creditLimit', 'spendingLimit'],
+    category: 'spending', what: 'Credit and token limits of agent runs', where: 'Settings → Agent',
+    names: ['agentRunCreditLimit', 'agentHourCreditLimit', 'agentRunHaltTokens', 'creditLimit', 'spendingLimit'],
     pattern: /credit(limit)?|spending|costbrake/,
   },
 ]

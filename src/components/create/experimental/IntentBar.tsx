@@ -70,6 +70,8 @@ export function IntentBar() {
   const setCloudTeaser = useUIStore((s) => s.setCloudTeaser)
   const { intents, lockedOf } = useIntentLanes()
 
+  // Image with a photo character is an Edit run inside the Character area.
+  const hubPhotoImage = useCreateStore((st) => !!st.hubPhotoImage)
   return (
     <div
       role="radiogroup"
@@ -97,7 +99,7 @@ export function IntentBar() {
         const locked = hub
           ? intents.filter((m) => HUB_INTENTS.includes(m.id)).every((m) => lockedOf(m))
           : lockedOf(meta)
-        const selected = !locked && (hub ? isHubIntent(intent) : intent === meta.id)
+        const selected = !locked && (hub ? isHubIntent(intent) || hubPhotoImage : intent === meta.id && !hubPhotoImage)
         const Icon = meta.icon
         return (
           <button
@@ -133,12 +135,12 @@ export function IntentBar() {
                 aria-hidden
               />
             )}
-            <span className={cn('whitespace-nowrap t-control pl-[3px]', hub ? 'pr-[5px]' : 'pr-[10.5px]')}>
+            <span className={cn('whitespace-nowrap t-control pl-[3px]', hub || meta.isNew ? 'pr-[5px]' : 'pr-[10.5px]')}>
               {meta.short}
             </span>
-            {hub && (
-              // The area is new in 3.1.0: one quiet mark, accent text on a
-              // faint accent ground, as in the sketches.
+            {(hub || meta.isNew) && (
+              // The area is new in 3.1.0, Scene to Video in 3.1.3: one quiet
+              // mark, accent text on a faint accent ground, as in the sketches.
               <span className="mr-[5px] rounded-full bg-lu-accent/15 px-[5px] py-px lu-new-mark text-lu-accent" aria-hidden>
                 NEW
               </span>
@@ -161,9 +163,8 @@ export function useIntentLanes(): { intents: IntentMeta[]; lockedOf: (meta: Inte
   // (lipsync / music / extend / motion) are REAL local tabs, plain selectable
   // pills with NO cloud glyph (2026-07-19: the top row only carries a
   // cloud badge for the genuinely hosted-only tools). Enhance Image runs on
-  // local ComfyUI since 3.0.7. Only eraser (cloudOnly, no local backend)
-  // renders as a locked, cloud-tagged pill in local mode; a tap opens the
-  // teaser sheet / plans gate.
+  // local ComfyUI since 3.0.7. Erase is a cloud tab and is not in the local
+  // bar at all (3.1.3): locally an object goes through a mask in Edit.
   //
   // On an MLX Mac (no ComfyUI at all) those lanes have no local implementation
   // either, so they lock there too. Both rules live in intents.ts so they stay

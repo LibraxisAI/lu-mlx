@@ -631,6 +631,7 @@ fn existing_ancestor(p: &Path) -> PathBuf {
 #[tauri::command]
 pub async fn abliterate_plan(app: tauri::AppHandle, path: String, repo: Option<String>) -> Result<Value, String> {
     let _ = &app;
+    crate::commands::gguf::refuse_weight_tools(&path)?;
     tokio::task::spawn_blocking(move || plan_blocking(&path, repo))
         .await
         .map_err(|e| format!("plan task: {e}"))?
@@ -817,6 +818,7 @@ fn start_blocking(app: &tauri::AppHandle, args: StartArgs) -> Result<Value, Stri
 
 #[tauri::command]
 pub async fn abliterate_start(app: tauri::AppHandle, args: StartArgs) -> Result<Value, String> {
+    crate::commands::gguf::refuse_weight_tools(&args.path)?;
     tokio::task::spawn_blocking(move || start_blocking(&app, args)).await.map_err(|e| format!("start task: {e}"))?
 }
 
@@ -839,14 +841,19 @@ pub fn abliterate_status() -> Value {
 #[tauri::command]
 pub async fn abliterate_cancel() -> Result<Value, String> {
     tokio::task::spawn_blocking(|| {
-        CANCEL.store(true, Ordering::SeqCst);
-        if let Some(pid) = with_run(|r| r.pid) {
-            crate::commands::shell::kill_tree(pid);
-        }
+        cancel_now();
         status_value()
     })
     .await
     .map_err(|e| format!("cancel task: {e}"))
+}
+
+/// Stop the run and its process tree. Blocks for the kill.
+pub(crate) fn cancel_now() {
+    CANCEL.store(true, Ordering::SeqCst);
+    if let Some(pid) = with_run(|r| r.pid) {
+        crate::commands::shell::kill_tree(pid);
+    }
 }
 
 /// Back to idle after the result or the error has been read.
@@ -1088,7 +1095,7 @@ fn run_job(app: &tauri::AppHandle, job: &Job) -> Result<RunRecord, String> {
     check_cancel()?;
     if let (Some(q), Some(bin)) = (quantize_to, &job.quantize) {
         set_phase("quantize", &format!("Quantizing to {q}"));
-        let mut cmd = Command::new(bin);
+        let mut cmd = crate::process_util::hidden_command(bin);
         cmd.arg(&converted).arg(&partial).arg(q);
         run_python(cmd, "quantize", |_| {})?;
         let _ = std::fs::remove_file(&converted);

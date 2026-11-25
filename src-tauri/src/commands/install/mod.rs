@@ -57,10 +57,12 @@ pub(crate) const CREATE_NO_WINDOW: u32 = 0x08000000;
 mod children;
 mod base_python;
 pub(crate) mod pip;
+pub(crate) mod pip_scratch;
 mod torch;
 mod venv;
 mod download;
 pub(crate) mod git;
+mod git_portable;
 mod comfy_job;
 mod comfy_install;
 mod comfy_pin;
@@ -71,6 +73,7 @@ mod lmstudio;
 mod lmstudio_install;
 mod python;
 mod voice;
+pub(crate) mod piper_env;
 mod custom_nodes;
 mod custom_node_packs;
 mod lu_node_packs;
@@ -81,6 +84,7 @@ pub(crate) use self::{
     torch::*,
     venv::*,
     git::*,
+    git_portable::*,
     comfy_job::*,
     comfy_install::*,
     comfy_repair::*,
@@ -115,11 +119,14 @@ mod tests {
         ("download.rs", include_str!("download.rs")),
         ("env_check.rs", include_str!("env_check.rs")),
         ("git.rs", include_str!("git.rs")),
+        ("git_portable.rs", include_str!("git_portable.rs")),
         ("lmstudio.rs", include_str!("lmstudio.rs")),
         ("lu_node_packs.rs", include_str!("lu_node_packs.rs")),
         ("lmstudio_install.rs", include_str!("lmstudio_install.rs")),
         ("ollama.rs", include_str!("ollama.rs")),
         ("pip.rs", include_str!("pip.rs")),
+        ("pip_scratch.rs", include_str!("pip_scratch.rs")),
+        ("piper_env.rs", include_str!("piper_env.rs")),
         ("python.rs", include_str!("python.rs")),
         ("torch.rs", include_str!("torch.rs")),
         ("venv.rs", include_str!("venv.rs")),

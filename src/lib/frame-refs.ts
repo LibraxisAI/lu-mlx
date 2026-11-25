@@ -36,7 +36,7 @@ export function localEndFrame(model: string | null | undefined): boolean {
 }
 
 /** The line Animate shows where a local model takes the start image only. */
-export const LOCAL_END_FRAME_MODELS = 'An end image works with Wan 2.2 14B i2v, Wan 2.1 FLF2V and MiniMax H3.'
+export const LOCAL_END_FRAME_MODELS = 'An end image works with Wan 2.2 14B i2v and Wan 2.1 FLF2V.'
 
 /** A long clip is made in sections (B18), and only one clip can end on the
  *  end image. */
@@ -66,6 +66,12 @@ export interface CreateReferenceSupport {
 export const FLUX2_MAX_REFERENCES = 4
 /** TextEncodeQwenImageEditPlus has image1 to image3. */
 export const KREA2_MAX_REFERENCES = 3
+/** The pictures LU hands MiniMax H3 Image in one run (3.1.3). Its node takes
+ *  up to 100 (MiniMaxH3ImageConditioning images.image_N); each one is read by
+ *  the 32B encoder at a 1024 px short edge and anchored by the VAE, so four
+ *  is what a 12 GB card carries next to a 4 MP picture. In Edit the source is
+ *  the first of them. */
+export const MINIMAX_H3_IMAGE_MAX_PICTURES = 4
 
 /** Reference images for Create (text to image) on the local lane. */
 export function createReferenceSupport(type: ModelType | null | undefined, model: string | null | undefined): CreateReferenceSupport {
@@ -73,6 +79,7 @@ export function createReferenceSupport(type: ModelType | null | undefined, model
   if (t === 'krea2') return { slots: KREA2_MAX_REFERENCES, kind: 'style' }
   if (t === 'qwenimage') return { slots: MAX_EXTRA_REFERENCES + 1, kind: 'content' }
   if (t === 'flux2') return { slots: FLUX2_MAX_REFERENCES, kind: 'content' }
+  if (t === 'minimaxh3image') return { slots: MINIMAX_H3_IMAGE_MAX_PICTURES, kind: 'content' }
   return { slots: 0 }
 }
 
@@ -99,6 +106,26 @@ export const KREA2_STYLE_LORA = {
   sizeBytes: 457111760,
   sha256: 'f50df5a9e62e4be8aa926a63dd5bb1a64770c4004f763c1208007ae13daa82b8',
 } as const
+
+/** Largest canvas the Krea 2 style reference shift is computed for. */
+const KREA2_SHIFT_MAX_PIXELS = 2560 * 1440
+
+/**
+ * The size ModelSamplingFlux is told for a Krea 2 run with references. The
+ * node raises its shift linearly with the pixels and ComfyUI applies it as
+ * e^shift: 18 at 2560x1440, 380 at 3840x2160, where all but the last sampling
+ * step stay above 98 % noise and the picture comes out destroyed (Discord
+ * bug-reports 21.11.2026). The canvas itself keeps its full size, only the
+ * shift stops growing at the largest size known to work.
+ */
+export function krea2ShiftCanvas(width: number, height: number): { width: number; height: number } {
+  const pixels = width * height
+  if (pixels <= KREA2_SHIFT_MAX_PIXELS) return { width, height }
+  const scale = Math.sqrt(KREA2_SHIFT_MAX_PIXELS / pixels)
+  // Rounded down to the node's step of 8, so the cap is never passed.
+  const down = (side: number) => Math.max(16, Math.floor((side * scale) / 8) * 8)
+  return { width: down(width), height: down(height) }
+}
 
 /** The video model a local run of `intent` actually uses: the stored pick
  *  where the lane can run it, else the first one it can (useCreate does the

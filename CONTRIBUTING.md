@@ -7,7 +7,7 @@ Thanks for your interest in contributing! This project thrives on community inpu
 ### Prerequisites
 
 - **Node.js** 18+ ([download](https://nodejs.org/))
-- **Rust stable** ([install](https://rustup.rs/)) — required by the Tauri desktop app
+- **Rust** 1.95 or newer ([rustup](https://rustup.rs/), then `rustup update stable`). Older compilers stop with "rustc … is not supported": sysinfo 0.39 needs 1.95.
 - **Ollama** ([download](https://ollama.com/)) — for text model testing
 - **ComfyUI** (optional) — needed for image/video testing outside the Apple Silicon local lanes
 - **Git** (obviously)
@@ -85,6 +85,19 @@ build stops, because `externalBin` must exist. Two ways to get it:
    on Windows and Linux, the companion libraries to
    `src-tauri/resources/llama/<triple>/`.
    CI's release build pins the Vulkan SDK version in `release.yml`.
+
+   **Linux on ARM64** (GitHub #185): there is no release for it yet, but it
+   builds from source. `scripts/build-llama.sh` builds
+   `aarch64-unknown-linux-gnu` without Vulkan (`LLAMA_VULKAN=ON` adds it), and
+   the overlay `tauri.linux-aarch64.conf.json` takes the place of the x86_64
+   library folder in the bundle. It needs GCC 14 or newer (the armv9.2 CPU
+   variants; GCC 13, Ubuntu 24.04's default, refuses them), so on Ubuntu
+   24.04 install `gcc-14 g++-14` and pass `CC=gcc-14 CXX=g++-14`:
+
+   ```bash
+   scripts/build-llama.sh
+   npm run tauri build -- --config src-tauri/tauri.linux-aarch64.conf.json --bundles deb
+   ```
 
 2. **Take it from the latest release**
    ([Releases](https://github.com/PurpleDoubleD/locally-uncensored/releases)):
