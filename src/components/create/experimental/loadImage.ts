@@ -91,3 +91,5 @@ export async function ensureLocalFilename(ref: ImageRef, name: string): Promise<
   const filename = await stageLocally(new File([blob], name, { type: blob.type || 'image/png' }))
   return { ...ref, filename }
 }
+
+export { ensureComfyInputFilename, isLocalStagedPath } from '../../../api/comfyui'

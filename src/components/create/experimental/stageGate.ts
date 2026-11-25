@@ -104,9 +104,9 @@ export function stageSetupAnswer(i: StageGateInput): StageAnswer {
         : i.requiresModels === 'motion' ? i.modelsLoaded && i.laneModelCount === 0
           : false)
   if (macMissing) return 'setup'
-  if (mlxOnly) {
+  if (i.mlxMissing !== null && !i.comfyRunning) {
     // A Mac with neither image nor video never sets modelsLoaded.
-    const listed = i.modelsLoaded || (i.mlxMissing!.image && i.mlxMissing!.video)
+    const listed = i.modelsLoaded || (i.mlxMissing.image && i.mlxMissing.video)
     return !listed && (i.requiresModels === 'video' || i.requiresModels === 'motion') ? 'unknown' : 'ready'
   }
   if (i.connected === null) return 'unknown'

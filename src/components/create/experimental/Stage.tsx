@@ -1184,6 +1184,7 @@ export function useStageSetupCard(comfyStarting?: boolean | null): boolean {
   const motion = useCreateStore((s) => s.motionModelList)
   const upscale = useCreateStore((s) => s.upscaleModelList)
   const { connected, modelsLoaded, modelLoadError, capsPending, mlxMissing } = useCreateExp()
+  const comfyRunning = useCreateStore((s) => s.comfyRunning)
   const installRun = useSyncExternalStore(subscribeInstallRuns, () => (meta.requiresModels ? getInstallRun(meta.requiresModels).running : false))
   const capReady = !meta.capability || backend === 'cloud' || !!caps[meta.capability] || isMlxImageHost()
   const live = laneFace(stageSetupAnswer({
@@ -1191,7 +1192,7 @@ export function useStageSetupCard(comfyStarting?: boolean | null): boolean {
     mlxHost: isMlxImageHost(),
     modelsFailed: !!modelLoadError?.startsWith('Failed to load models'),
     requiresModels: meta.requiresModels,
-    mlxMissing, connected, comfyStarting, modelsLoaded,
+    mlxMissing, connected, comfyStarting, modelsLoaded, comfyRunning,
     laneModelCount: laneModelCount(intent, meta.requiresModels, { image, video, audio, lipsync, motion, upscale }),
   }), capabilityAnswer({
     needed: !!meta.capability && backend !== 'cloud' && !isMlxImageHost(),

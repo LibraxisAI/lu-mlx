@@ -23,6 +23,7 @@ import { isQwenEnhancerFile } from '../lib/render/qwen-enhancer'
 import { pickQwenEncoder, qwenEncoderFile, type QwenEncoderChoice } from '../lib/render/qwen-text-encoder'
 import { COMPONENT_REGISTRY, type ComponentSpec } from './component-registry'
 import { RETIRED_MODEL_LINE, isRetiredModelName } from '../lib/retired-models'
+import type { ImageRef } from '../lib/image-ref'
 
 // ─── Control-plane fetch timeouts ───
 //
@@ -2743,6 +2744,24 @@ export function ensureImageFilename(name: string | undefined, mime: string | und
   const stem = (base ? base.replace(/\.[^.]*$/, '') : 'lu_input') || 'lu_input'
   const safeStem = stem.replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 64) || 'lu_input'
   return `${safeStem}.${ext}`
+}
+
+/** True when `filename` is a host filesystem path staged on disk for MLX
+ *  (`stageStartImage`) rather than a relative filename inside ComfyUI's input dir. */
+export function isLocalStagedPath(filename: string | undefined): boolean {
+  if (!filename) return false
+  return filename.startsWith('/') || /^[A-Za-z]:[\\/]/.test(filename)
+}
+
+/** Resolve an `ImageRef` to a filename inside ComfyUI's input folder.
+ *  Relative names already returned by `/upload/image` are kept as-is; empty
+ *  handles (cloud-picked refs) or local filesystem paths staged on macOS for MLX
+ *  are uploaded via `/upload/image` before ComfyUI LoadImage runs. */
+export async function ensureComfyInputFilename(ref: ImageRef | null | undefined, fallbackName: string): Promise<string | undefined> {
+  if (!ref) return undefined
+  if (ref.filename && !isLocalStagedPath(ref.filename)) return ref.filename
+  const blob = await blobFromUrl(ref.url)
+  return uploadImage(new File([blob], ref.name || fallbackName, { type: blob.type || 'image/png' }))
 }
 
 /** Upload a NON-image media file (speech audio, driving video) into ComfyUI's

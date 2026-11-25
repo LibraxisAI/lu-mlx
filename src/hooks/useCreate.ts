@@ -24,6 +24,7 @@ import {
   resolveLocalOpPick,
   sceneLaneModels,
   uploadMediaFile,
+  ensureComfyInputFilename,
   getSamplers,
   getSchedulers,
   detectVideoBackend,
@@ -941,7 +942,7 @@ export function useCreate() {
         return
       }
     }
-    const maskFilename = stagedMask
+    const stagedMaskFilename = stagedMask
     const isRemoveBg = mode === 'image' && removebg
     // Enhance Image on local ComfyUI (3.0.7): core upscale nodes, its own
     // model from models/upscale_models, no prompt and no picker model. A Mac
@@ -1779,19 +1780,8 @@ export function useCreate() {
     // for a model that reads them (lib/frame-refs). The Stage marks the ones
     // a model does not read as not sent, so nothing is dropped unseen.
     const animateSlots = intent === 'animate' ? localAnimateReferenceSlots(activeModel) : 0
-    const animateExtras = intent === 'animate'
-      ? {
-        ...(state.endImage?.filename && localEndFrame(activeModel) ? { endImage: state.endImage.filename } : {}),
-        ...(animateSlots > 0 && references.some((r) => r.filename)
-          ? { referenceImages: references.map((r) => r.filename).filter(Boolean).slice(0, animateSlots) }
-          : {}),
-      }
-      : {}
     // B45: reference images for text to image, as many as the model reads.
     const createRefSlots = intent === 'image' && !isI2I ? createReferenceSupport(imageModelType, activeModel).slots : 0
-    const createRefNames = createRefSlots > 0
-      ? state.imageReferences.map((r) => r.filename).filter(Boolean).slice(0, createRefSlots)
-      : []
 
     // Background removal is prompt-free and model-independent (RMBG node);
     // lipsync/motion drive off their media inputs (the builder supplies a
@@ -1977,6 +1967,41 @@ export function useCreate() {
     setProgress(0, 'Preparing workflow...')
 
     try {
+      // On macOS with a connected ComfyUI, stageLocally wrote input images to
+      // LU's local disk folder (`.../start-images/...`) for MLX. Ensure every
+      // image reaching ComfyUI LoadImage is uploaded via `/upload/image` and
+      // referenced by its relative ComfyUI input filename.
+      const comfyInputImage = source
+        ? (await ensureComfyInputFilename(source, 'source.png')) ?? effInputImage
+        : effInputImage
+      const comfyI2vImage = source
+        ? (await ensureComfyInputFilename(source, 'source.png')) ?? effI2vImage
+        : effI2vImage
+      const maskFilename = mask && !isRemoveBg
+        ? (await ensureComfyInputFilename(mask, 'mask.png')) ?? stagedMaskFilename
+        : stagedMaskFilename
+      const comfyRefNames = (isI2I && !isRemoveBg && comfyInputImage && references.length > 0)
+        || (qwenEnhancer?.mode === 'i2i' && comfyInputImage && references.length > 0)
+        || (intent === 'animate' && animateSlots > 0 && references.length > 0)
+        ? (await Promise.all(references.map((r, i) => ensureComfyInputFilename(r, `reference-${i + 2}.png`))))
+          .filter((name): name is string => !!name)
+        : []
+      const comfyEndImage = intent === 'animate' && state.endImage && localEndFrame(activeModel)
+        ? await ensureComfyInputFilename(state.endImage, 'end.png')
+        : undefined
+      const animateExtras = intent === 'animate'
+        ? {
+          ...(comfyEndImage ? { endImage: comfyEndImage } : {}),
+          ...(animateSlots > 0 && comfyRefNames.length > 0
+            ? { referenceImages: comfyRefNames.slice(0, animateSlots) }
+            : {}),
+        }
+        : {}
+      const createRefNames = createRefSlots > 0 && state.imageReferences.length > 0
+        ? (await Promise.all(state.imageReferences.slice(0, createRefSlots).map((r, i) => ensureComfyInputFilename(r, `reference-${i + 1}.png`))))
+          .filter((name): name is string => !!name)
+        : []
+
       // The Qwen prompt enhancer writes now: the chat model has left the card,
       // and the enhancer leaves it again before the picture's models load
       // (runQwenEnhancer unloads it). An edit shows it the same pictures, in
@@ -1985,8 +2010,8 @@ export function useCreate() {
       if (qwenEnhancer) {
         setProgress(3, IMPROVING_PROMPT)
         const signal = abortRef.current?.signal
-        const images = qwenEnhancer.mode === 'i2i' && effInputImage
-          ? [effInputImage, ...references.map((r) => r.filename).filter(Boolean).slice(0, extraReferenceSlots(imageModelType, activeModel))]
+        const images = qwenEnhancer.mode === 'i2i' && comfyInputImage
+          ? [comfyInputImage, ...comfyRefNames.slice(0, extraReferenceSlots(imageModelType, activeModel))]
           : []
         const enhancerGraph = await buildWithFixups(
           () => buildQwenEnhancerWorkflow({ file: qwenEnhancer.file, mode: qwenEnhancer.mode, prompt: scenePrompt, images, seed: runSeed }),
@@ -2035,22 +2060,22 @@ export function useCreate() {
       const baseParams = {
         prompt, negativePrompt: removeRun && !negativePrompt.trim() ? REMOVE_NEGATIVE_COMFY : negativePrompt,
         ...(transparentRequested ? { transparent: true } : {}), model: activeModel, sampler, scheduler, steps, cfgScale, width, height, seed: runSeed, batchSize,
-        ...(isRemoveBg && effInputImage ? { removebg: true, inputImage: effInputImage } : {}),
+        ...(isRemoveBg && comfyInputImage ? { removebg: true, inputImage: comfyInputImage } : {}),
         // Discord 2026-09-25 (a user: "a house becomes a tennis court"): at
         // strength 1.00 the builder read denoise >= 1 as "no img2img" and
         // dropped the source without a word. Edit always keeps the source;
         // 0.95 is the most it repaints (the slider tops out there too).
-        ...(isI2I && !isRemoveBg && effInputImage ? { inputImage: effInputImage, denoise: removeRun ? 1 : Math.min(denoise, EDIT_MAX_DENOISE) } : {}),
+        ...(isI2I && !isRemoveBg && comfyInputImage ? { inputImage: comfyInputImage, denoise: removeRun ? 1 : Math.min(denoise, EDIT_MAX_DENOISE) } : {}),
         // B46: a Qwen edit reads its own Edit strength (1 = as before); the
         // builder ignores it on every other family.
-        ...(isI2I && !isRemoveBg && effInputImage && state.editStrength < 1 ? { editStrength: state.editStrength } : {}),
+        ...(isI2I && !isRemoveBg && comfyInputImage && state.editStrength < 1 ? { editStrength: state.editStrength } : {}),
         // C75: a Qwen-Image 2.1 edit in the shape of the size fields. Only
         // the edit graph of that model reads it (dynamic-workflow.ts).
-        ...(isI2I && !isRemoveBg && effInputImage && (imageModelType === 'qwenimage' || imageModelType === 'minimaxh3image') && state.qwenEditShape === 'canvas' ? { editShape: 'canvas' as const } : {}),
+        ...(isI2I && !isRemoveBg && comfyInputImage && (imageModelType === 'qwenimage' || imageModelType === 'minimaxh3image') && state.qwenEditShape === 'canvas' ? { editShape: 'canvas' as const } : {}),
         // GH #144: further references ride along; the builder keeps only as
         // many as the model's family takes (lib/edit-references).
-        ...(isI2I && !isRemoveBg && effInputImage && references.some((r) => r.filename)
-          ? { referenceImages: references.map((r) => r.filename).filter(Boolean) }
+        ...(isI2I && !isRemoveBg && comfyInputImage && comfyRefNames.length > 0
+          ? { referenceImages: comfyRefNames }
           : {}),
         ...(createRefNames.length > 0 ? { referenceImages: createRefNames } : {}),
         ...(!isRemoveBg && maskFilename ? { maskImage: maskFilename, growMaskBy } : {}),
@@ -2077,12 +2102,12 @@ export function useCreate() {
       // legacy fallback here — REJECT-AND-REPORT via WorkflowUnavailableError
       // is the whole point (an "Update ComfyUI" message instead of a broken
       // graph). ──
-      if (isUpscale && upscaleModel && effInputImage) {
+      if (isUpscale && upscaleModel && comfyInputImage) {
         setProgress(5, 'Building workflow...')
         const size = { width: source?.width || width, height: source?.height || height }
         workflow = await buildWithFixups(
           () => buildLocalUpscaleWorkflow({
-            image: effInputImage, model: upscaleModel, factor: upscaleFactor,
+            image: comfyInputImage, model: upscaleModel, factor: upscaleFactor,
             sourceWidth: size.width, sourceHeight: size.height,
           }),
           renderFixupDeps((line) => setProgress(5, line), abortRef.current?.signal),
@@ -2125,7 +2150,7 @@ export function useCreate() {
           setProgress(3, 'Uploading your video...')
           drivingVideo = await uploadMediaFile(state.videoInput.blob, state.videoInput.name)
           const person = state.swapFigures[0]
-          if (person?.image) swapRef = (await ensureLocalFilename(person.image, person.character ?? 'character')).filename
+          if (person?.image) swapRef = await ensureComfyInputFilename(person.image, person.character ?? 'character.png')
           // Portrait video, portrait run: the lane's size turned to the frame.
           swapSize = swapLocalSize(width, height, state.swapFrame)
         }
@@ -2184,7 +2209,7 @@ export function useCreate() {
           seconds: state.musicDuration,
           lyrics: state.musicLyrics,
           audioFile,
-          refImage: localOp === 'swap' ? swapRef : source?.filename || undefined,
+          refImage: localOp === 'swap' ? swapRef : comfyInputImage || undefined,
           drivingVideo,
           firstFrame,
         }
@@ -2199,7 +2224,7 @@ export function useCreate() {
           setProgress(5, `Using workflow: ${laneWf.name}...`)
           workflow = injectLaneParameters(laneWf.workflow, laneWf.parameterMap, {
             model: activeModel, seed: runSeed,
-            refImage: source?.filename || undefined, drivingVideo,
+            refImage: comfyInputImage || undefined, drivingVideo,
           }, useWorkflowStore.getState().paramOverrides[laneWf.id])
           builderUsed = 'custom'
         } else {
@@ -2232,7 +2257,7 @@ export function useCreate() {
       if (customWf) {
         builderUsed = 'custom'
         setProgress(5, `Using workflow: ${customWf.name}...`)
-        const params = mode === 'video' ? { ...baseParams, frames, fps, ...(effI2vImage ? { inputImage: effI2vImage } : {}), ...animateExtras } : baseParams
+        const params = mode === 'video' ? { ...baseParams, frames, fps, ...(comfyI2vImage ? { inputImage: comfyI2vImage } : {}), ...animateExtras } : baseParams
         // The values changed under "Workflow parameters" go in last (GitHub wish #8).
         const overrides = useWorkflowStore.getState().paramOverrides[customWf.id]
         workflow = await injectParameters(customWf.workflow, customWf.parameterMap, params, imageModelType, overrides)
@@ -2240,7 +2265,7 @@ export function useCreate() {
         // Dynamic workflow builder — auto-detects nodes and builds the right pipeline
         setProgress(5, 'Building workflow...')
         try {
-          const genParams = mode === 'video' ? { ...baseParams, frames, fps, ...(effI2vImage ? { inputImage: effI2vImage } : {}), ...animateExtras, ...longVideoParams(opts) } : baseParams
+          const genParams = mode === 'video' ? { ...baseParams, frames, fps, ...(comfyI2vImage ? { inputImage: comfyI2vImage } : {}), ...animateExtras, ...longVideoParams(opts) } : baseParams
           // A missing text encoder / VAE or a too-old ComfyUI is fixed in
           // place after one question, then the build runs again.
           workflow = await buildWithFixups(
@@ -2331,7 +2356,7 @@ export function useCreate() {
                     return
                   }
                   // Re-build the workflow now that the new node is available
-                  const genParams = { ...baseParams, frames, fps, ...(effI2vImage ? { inputImage: effI2vImage } : {}), ...animateExtras, ...longVideoParams(opts) }
+                  const genParams = { ...baseParams, frames, fps, ...(comfyI2vImage ? { inputImage: comfyI2vImage } : {}), ...animateExtras, ...longVideoParams(opts) }
                   workflow = await buildDynamicWorkflow(genParams, imageModelType)
                   setProgress(10, 'VHS installed, generating MP4...')
                 } catch (instErr) {
@@ -2350,7 +2375,7 @@ export function useCreate() {
 
       // B35: an edit starts from a latent of one; the batch size repeats it,
       // so an edit run makes as many pictures as a Generate run (api/edit-batch).
-      if (intent === 'edit' && isI2I && !isRemoveBg && effInputImage) {
+      if (intent === 'edit' && isI2I && !isRemoveBg && comfyInputImage) {
         workflow = applyEditBatch(workflow, batchSize)
       }
 
@@ -2362,7 +2387,7 @@ export function useCreate() {
       // the EDIT"): the same pass after the edit. Its canvas follows the
       // source (lib/edit-hires), and a masked edit is refused with a line
       // (api/hires-fix).
-      const hiresEdit = intent === 'edit' && isI2I && !isRemoveBg && !!effInputImage
+      const hiresEdit = intent === 'edit' && isI2I && !isRemoveBg && !!comfyInputImage
       // MiniMax H3 Image takes no HiRes pass (its latent has a time axis);
       // Create hides the switch for it, and a switch left on is not applied.
       if (hiresFixEnabled && (intent === 'image' || hiresEdit) && imageModelType !== 'minimaxh3image') {
