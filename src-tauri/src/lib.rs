@@ -1103,6 +1103,8 @@ pub fn run() {
             #[cfg(desktop)]
             commands::media_cmds::mlx_cutout,
             #[cfg(desktop)]
+            commands::media_cmds::mlx_erase,
+            #[cfg(desktop)]
             commands::media_cmds::mlx_image_models,
             // Not desktop-only like their neighbours: a model download on a
             // phone sends the Hugging Face token too.

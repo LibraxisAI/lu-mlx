@@ -181,6 +181,13 @@ pub async fn mlx_cutout(app: AppHandle, args: Value) -> Result<Value, String> {
     off_main(app, args, crate::commands::mlx_cutout::mlx_cutout).await
 }
 
+// Fast local Erase on a Mac, through LaMa (`commands::mlx_erase`).
+
+#[tauri::command]
+pub async fn mlx_erase(app: AppHandle, args: Value) -> Result<Value, String> {
+    off_main(app, args, crate::commands::mlx_erase::mlx_erase).await
+}
+
 #[tauri::command]
 pub async fn mlx_image_models(app: AppHandle, args: Value) -> Result<Value, String> {
     off_main(app, args, crate::commands::mlx::mlx_image_models).await
@@ -793,7 +800,7 @@ mod off_main_tests {
         for polled in ["video_status", "video_list_models", "mlx_image_models", "mlx_image_install_status",
             "install_mlx_diffusion_status", "video_install_mlx_status", "video_install_model_status", "video_progress",
             "mlx_generate_progress", "mlx_image_cancel_install", "video_cancel_model_install",
-            "mlx_loras", "mlx_loras_open_folder", "mlx_lora_delete", "mlx_output_trash", "mlx_cutout"] {
+            "mlx_loras", "mlx_loras_open_folder", "mlx_lora_delete", "mlx_output_trash", "mlx_cutout", "mlx_erase"] {
             assert!(
                 production.contains(&format!("pub async fn {polled}(app: AppHandle, args: Value) -> Result<Value, String> {{\n    off_main(app, args, ")),
                 "{polled} no longer goes through off_main"

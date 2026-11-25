@@ -77,6 +77,7 @@ pub mod mesh3d;
 pub mod mesh3d_sf3d;
 pub mod mlx;
 pub mod mlx_cutout;
+pub mod mlx_erase;
 pub mod mlx_loras;
 // Moves a render of the Mac engines to the system Trash. No such engine on a
 // phone, and the `trash` crate does not compile there.
