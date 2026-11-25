@@ -2761,7 +2761,11 @@ export async function ensureComfyInputFilename(ref: ImageRef | null | undefined,
   if (!ref) return undefined
   if (ref.filename && !isLocalStagedPath(ref.filename)) return ref.filename
   const blob = await blobFromUrl(ref.url)
-  return uploadImage(new File([blob], ref.name || fallbackName, { type: blob.type || 'image/png' }))
+  const stagedBase = isLocalStagedPath(ref.filename)
+    ? ref.filename!.replace(/^.*[\\/]/, '').trim()
+    : ''
+  const uploadName = stagedBase || ref.name || fallbackName
+  return uploadImage(new File([blob], uploadName, { type: blob.type || 'image/png' }))
 }
 
 /** Upload a NON-image media file (speech audio, driving video) into ComfyUI's

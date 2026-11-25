@@ -49,8 +49,36 @@ describe('ComfyUI input image staging on macOS', () => {
     expect(String(fetchSpy.mock.calls[0][0])).toContain('/upload/image')
     const form = fetchSpy.mock.calls[0][1]?.body as FormData
     const file = form.get('image') as File
-    expect(file.name).toBe('frame.png')
+    expect(file.name).toBe('3611.png')
     expect(file.size).toBe(atob(PNG_B64).length)
+  })
+
+  it('uses distinct hashed basenames for multiple staged images sharing display name under overwrite=true', async () => {
+    fetchSpy.mockImplementation(async (_url: string, init?: RequestInit) => {
+      const form = init?.body as FormData
+      const file = form.get('image') as File
+      return {
+        ok: true,
+        json: async () => ({ name: file.name, subfolder: '', type: 'input' }),
+      }
+    })
+    const first = await ensureComfyInputFilename({
+      filename: '/Users/tester/Library/Application Support/lu-labs/videos/start-images/bdea7b1ecf860c2b96254d57235d3e9b.png',
+      url: PNG_URL,
+      width: 1,
+      height: 1,
+      name: 'image.png',
+    }, 'source.png')
+    const second = await ensureComfyInputFilename({
+      filename: '/Users/tester/Library/Application Support/lu-labs/videos/start-images/f5a8380ad51c3191acd52c3f42ecfc26.png',
+      url: PNG_URL,
+      width: 1,
+      height: 1,
+      name: 'image.png',
+    }, 'reference-2.png')
+    expect(first).toBe('bdea7b1ecf860c2b96254d57235d3e9b.png')
+    expect(second).toBe('f5a8380ad51c3191acd52c3f42ecfc26.png')
+    expect(first).not.toBe(second)
   })
 
   it('keeps an existing relative ComfyUI input filename without re-uploading', async () => {
