@@ -99,7 +99,7 @@ export const INTENTS: IntentMeta[] = [
     id: 'eraser', label: 'Erase Object', short: 'Erase', icon: Eraser,
     placeholder: '',
     needsSource: true, needsPrompt: false, allowsMask: true, isVideo: false,
-    cloudOnly: true,
+    cloudOnly: true, localLaneMacOnly: true,
     examples: [],
   },
   {
@@ -278,7 +278,7 @@ export function intentTakesOptionalPrompt(intent: CreateIntent, backend: CreateB
 // runs it in ComfyUI.
 // 3D (3.1.0) is a local tab on every Mac: without the engine the Stage shows
 // its one-time setup card (commands/mesh3d.rs, TripoSR).
-const MLX_LOCAL_INTENTS: ReadonlySet<CreateIntent> = new Set<CreateIntent>(['image', 'video', 'removebg', 'character', '3d'])
+const MLX_LOCAL_INTENTS: ReadonlySet<CreateIntent> = new Set<CreateIntent>(['image', 'video', 'removebg', 'eraser', 'character', '3d'])
 
 /**
  * True when this Apple Silicon Mac has no ComfyUI connected, so local Create
@@ -325,7 +325,7 @@ function runsOnMlx(id: CreateIntent, mlxAnimate: boolean, mlxEdit: boolean, mlxU
  */
 export function visibleIntents(backend: CreateBackend, mlxHost: boolean, cloudFeatures: boolean, mlxAnimate = false, mlxEdit = false, mlxUpscale = false, mlxMusic = false, mlxMotion = false, mlxTalk = false, macHost = false): IntentMeta[] {
   if (backend === 'cloud') return INTENTS
-  const local = INTENTS.filter((m) => m.id !== 'eraser')
+  const local = (macHost || mlxHost) ? INTENTS : INTENTS.filter((m) => m.id !== 'eraser')
   const shown = mlxHost ? local.filter((m) => runsOnMlx(m.id, mlxAnimate, mlxEdit, mlxUpscale, mlxMusic, mlxMotion, mlxTalk) || m.cloudOnly === true) : local
   return cloudFeatures ? shown : shown.filter((m) => !isIntentLocked(m, backend, mlxHost, mlxAnimate, mlxEdit, mlxUpscale, mlxMusic, mlxMotion, mlxTalk, macHost))
 }
@@ -341,7 +341,7 @@ export function visibleIntents(backend: CreateBackend, mlxHost: boolean, cloudFe
 export function isIntentLocked(meta: IntentMeta, backend: CreateBackend, mlxHost: boolean, mlxAnimate = false, mlxEdit = false, mlxUpscale = false, mlxMusic = false, mlxMotion = false, mlxTalk = false, macHost = false): boolean {
   if (backend === 'cloud') return false
   if (mlxHost) return !runsOnMlx(meta.id, mlxAnimate, mlxEdit, mlxUpscale, mlxMusic, mlxMotion, mlxTalk)
-  if (meta.localLaneMacOnly && !macHost) return meta.cloudOnly === true
+  if (meta.localLaneMacOnly) return !macHost && meta.cloudOnly === true
   return meta.cloudOnly === true && !meta.hasLocalLane
 }
 

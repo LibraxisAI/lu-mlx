@@ -660,6 +660,7 @@ export async function backendCall<T = unknown>(
     // output folder from the Rust process; desktop-only answer in the browser.
     scan_comfy_output: { path: "/local-api/scan-comfy-output" },
     mlx_cutout: { path: "/local-api/mlx-cutout", method: "POST" },
+    mlx_erase: { path: "/local-api/mlx-erase", method: "POST" },
     mlx_image_models: { path: "/local-api/mlx-image-models" },
     mlx_image_install_model: { path: "/local-api/mlx-image-install-model", method: "POST" },
     mlx_image_install_status: { path: "/local-api/mlx-image-install-status" },

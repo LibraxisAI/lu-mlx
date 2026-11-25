@@ -1555,11 +1555,11 @@ export const useCreateStore = create<CreateState>()(
       // Studio-Optionen weg (withOwnStudioOptions): ein Feld wie `resolution` hat
       // je Endpunkt eine andere Auswahl.
       setIntent: (asked) => {
-        // Local mode has no Erase (3.1.3). A way in from anywhere lands in
-        // Edit, which keeps the source and the mask; on a Mac without a model
-        // that edits there is no Edit either, and it lands on Image.
-        const intent: CreateIntent = asked === 'eraser' && get().backend === 'local'
-          ? (isMlxImageHost() && !mlxTakesEditImage(get().imageModelList) ? 'image' : 'edit')
+        // Local mode has no Erase on Windows/Linux (3.1.3): a way in from
+        // anywhere lands in Edit. On macOS, Erase runs locally via LaMa
+        // (commands/mlx_erase.rs), so macOS keeps `'eraser'`.
+        const intent: CreateIntent = asked === 'eraser' && get().backend === 'local' && !isMlxImageHost()
+          ? 'edit'
           : asked
         const changed = get().intent() !== intent
         // Any tab picked by name leaves Image with a photo character.
@@ -1962,7 +1962,7 @@ export const useCreateStore = create<CreateState>()(
           // Mac without an upscaler.
           const mac = isMlxImageHost()
           const toolStays = mac
-            ? s.utilityOp === 'upscale' && (s.mlxUpscale || s.comfyRunning)
+            ? s.utilityOp === 'eraser' || (s.utilityOp === 'upscale' && (s.mlxUpscale || s.comfyRunning))
             : !!s.utilityOp && LOCAL_UTILITY_OPS.has(s.utilityOp)
           if (s.utilityOp && !toolStays) Object.assign(patch, { utilityOp: null, error: null, ...(s.utilityOp === 'eraser' ? {} : { mask: null }) })
           // music/lipsync/extend/motion (2.5.8) and character (2.6.0, local
@@ -2400,9 +2400,9 @@ export const useCreateStore = create<CreateState>()(
           safe.mode = 'image'
           safe.imageSubMode = 'img2img'
         }
-        // 3.1.3: local mode has no Erase. An older or foreign blob that holds
-        // it opens on Edit. The cloud track (a phone) keeps its tab.
-        if (safe.utilityOp === 'eraser' && current.backend === 'local') {
+        // 3.1.3: local mode has no Erase on Windows/Linux. An older or foreign
+        // blob that holds it opens on Edit there; macOS keeps local LaMa Erase.
+        if (safe.utilityOp === 'eraser' && current.backend === 'local' && !isMlxImageHost()) {
           safe.utilityOp = null
           safe.mode = 'image'
           safe.imageSubMode = 'img2img'

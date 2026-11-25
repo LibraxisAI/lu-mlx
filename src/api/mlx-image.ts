@@ -325,6 +325,25 @@ export async function cutOutOnMac(imagePath: string): Promise<MlxImage> {
   }
 }
 
+/** The name the gallery gives the local object-removal tool on a Mac. */
+export const MAC_ERASE_TOOL = 'LaMa'
+
+/** Erase Object on a Mac: LaMa removes the masked area of the staged image
+ *  at `imagePath` using the staged mask at `maskPath` (commands/mlx_erase.rs). */
+export async function eraseOnMac(imagePath: string, maskPath: string, featherPx?: number): Promise<MlxImage> {
+  const made = await invokeMedia<MlxGenerateResult>('mlx_erase', {
+    image: imagePath,
+    mask: maskPath,
+    ...(featherPx != null ? { featherPx } : {}),
+  })
+  return {
+    dataUrl: `data:image/png;base64,${made.image_base64}`,
+    width: made.width,
+    height: made.height,
+    localPath: made.output,
+  }
+}
+
 /** Whether Enhance Image has a local lane on this Mac: an upscaler of the
  *  catalogue is installed (commands/mlx.rs `upscaler`). */
 export function mlxUpscalerInstalled(catalog: readonly Pick<MlxImageModel, 'upscaler' | 'installed'>[]): boolean {

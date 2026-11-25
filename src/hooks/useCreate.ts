@@ -125,7 +125,8 @@ import { editHiresBase } from '../lib/edit-hires'
 import { lorasForRun, skippedLorasLine } from '../lib/lora-stack'
 import { macNoLocalLaneLine, macNoModelLine } from '../lib/mac-create-wording'
 import {
-  cutOutOnMac, generateMlxImageDataUrl, isMlxImageHost, isMlxImageModel, MAC_CUTOUT_TOOL,
+  cutOutOnMac, eraseOnMac, generateMlxImageDataUrl, isMlxImageHost, isMlxImageModel,
+  MAC_CUTOUT_TOOL, MAC_ERASE_TOOL,
   mlxStatus, listMlxImageModels, buildMlxImageModels, mergeImageModels, mlxModelIdFor,
   mlxUpscalerInstalled, upscaleOnMac, MAC_UPSCALE_TOOL,
 } from '../api/mlx-image'
@@ -1121,6 +1122,54 @@ export function useCreate() {
       } catch (e) {
         if (!own.signal.aborted) {
           useCreateStore.getState().setError(`Remove Background failed: ${e instanceof Error ? e.message : String(e)}`)
+        }
+      } finally {
+        if (abortRef.current === own) {
+          abortRef.current = null
+          useCreateStore.getState().setIsGenerating(false)
+          useCreateStore.getState().setProgress(0)
+        }
+      }
+      return
+    }
+
+    // ── Erase Object on a Mac: fast local LaMa (`commands/mlx_erase.rs`) on
+    // Metal/MPS. Handles both the restored macOS Erase tab and promptless
+    // masked Edit (`removeRun`), staging source + mask on disk when needed. ──
+    if ((intent === 'eraser' || removeRun) && isMlxImageHost()) {
+      setError(null)
+      if (!source) { setError('Please add an image to erase from.'); return }
+      if (!mask) { setError('Paint over the object or area you want to erase.'); return }
+      const own = new AbortController()
+      abortRef.current = own
+      setIsGenerating(true)
+      state.setProgressPhase('sampling')
+      setProgress(30, 'Erasing masked area with LaMa...')
+      try {
+        const startTime = Date.now()
+        const isStagedAbs = (p?: string) => !!p && p.startsWith('/')
+        const stagedImage = isStagedAbs(source.filename)
+          ? source.filename!
+          : await stageStartImage(await blobFromUrl(source.url))
+        const stagedMaskPath = isStagedAbs(mask.filename)
+          ? mask.filename!
+          : await stageStartImage(await blobFromUrl(mask.url))
+        const made = await eraseOnMac(stagedImage, stagedMaskPath, growMaskBy)
+        if (own.signal.aborted) return
+        state.setLastGenTime(`${Math.round((Date.now() - startTime) / 1000)}s`)
+        addToGallery({
+          id: uuid(), type: 'image', filename: `erase-${Date.now()}.png`, subfolder: '',
+          dataUrl: made.dataUrl, localPath: made.localPath, prompt: '', negativePrompt: '',
+          model: MAC_ERASE_TOOL, modelType: 'unknown', toolModel: MAC_ERASE_TOOL,
+          seed: 0, steps: 0, cfgScale: 0, sampler, scheduler,
+          width: made.width, height: made.height, batchSize: 1,
+          createdAt: Date.now(), builderUsed: 'dynamic', intent,
+        })
+        state.setProgressPhase('complete')
+        setProgress(100, 'Complete!')
+      } catch (e) {
+        if (!own.signal.aborted) {
+          useCreateStore.getState().setError(`Erase failed: ${e instanceof Error ? e.message : String(e)}`)
         }
       } finally {
         if (abortRef.current === own) {
